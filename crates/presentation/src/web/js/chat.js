@@ -1749,6 +1749,18 @@ async function uploadOne(file,surface){const fd=new FormData();fd.append("file",
 function pickFiles(surface,input){handleFiles(surface,[...input.files]);input.value="";}
 function dropFiles(surface,ev){ev.preventDefault();ev.currentTarget.classList.remove("dropping");
   handleFiles(surface,[...(ev.dataTransfer.files||[])]);}
+// Ctrl+V into a composer is a third input into the same attachment pipeline as
+// the attach button and drag-drop. A clipboard with no file item (plain text,
+// IME composition, @mentions) returns WITHOUT preventDefault so native
+// insertion is untouched; files win over text when both are present (same rule
+// as drop). Nameless clipboard screenshots are renamed pre-upload: the media
+// server derives the serving Content-Type from the stored filename's extension
+// (mime_of), so an empty name would come back as octet-stream and never render.
+function pasteFiles(surface,ev){const files=(ev.clipboardData&&ev.clipboardData.files)||[];
+  if(!files.length)return;
+  ev.preventDefault();
+  handleFiles(surface,[...files].map(f=>f.name?f:
+    new File([f],"pasted-image."+((f.type.split("/")[1]||"bin").split("+")[0]),{type:f.type})));}
 async function handleFiles(surface,files){
   for(const f of files){
     if(f.size>25*1024*1024){toasty(f.name+" too large (max 25MB)","err");continue;}
@@ -1841,13 +1853,44 @@ function renderEngineAlert(s){
     </div>`;
   }).join("");
 }
-function depChips(ids){
+function depChips(ids,live){
   if(!ids||!ids.length)return '<span style="color:var(--dim)">—</span>';
   return ids.map(id=>{const dt=(STATE.tickets||[]).find(x=>x.id===id);
-    const done=dt&&(dt.status==="done"||dt.status==="documented");
-    const col=done?"var(--green)":(dt?"var(--amber)":"var(--dim)");
-    return `<span onclick="showTicket('${id}')" title="${dt?esc(dt.title)+' · '+esc(dt.status):'unknown'}" style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:3px 8px;border-radius:7px;background:${col}22;color:${col};margin-right:5px">
-      <i class="ti ti-${done?'check':'circle'}" style="font-size:11px"></i>${esc(id)}</span>`;}).join("");}
+    // `live` carries the radar's authoritative statuses from the detail
+    // payload (CXA-F237 AC1); the 1 Hz snapshot is only the fallback.
+    const st=(live&&live[id])||(dt&&dt.status)||"";
+    const done=st==="done"||st==="documented"||st==="verified";
+    const col=done?"var(--green)":(st?"var(--amber)":"var(--dim)");
+    const liveTag=st&&!done?` <span style="opacity:.85">· ${esc(st)}</span>`:"";
+    return `<span onclick="showTicket('${id}')" title="${dt?esc(dt.title)+' · '+esc(dt.status):'unknown dependency — no such ticket in this project'}" style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:3px 8px;border-radius:7px;background:${col}22;color:${col};margin-right:5px">
+      <i class="ti ti-${done?'check':'circle'}" style="font-size:11px"></i>${esc(id)}${liveTag}</span>`;}).join("");}
+// Live statuses of this ticket's blockers, from the detail payload's radar
+// field — the server derived them against the state the detail was served
+// from, so they are the statuses the surface must show.
+function blockedStatuses(t){const m={};(t.blocked_by||[]).forEach(b=>{m[b.ticket]=b.status;});return m;}
+// Mermaid source for the ticket's dependency closure (CXA-F237): prerequisites
+// point left, cycle members carry a textual marker (never color alone), and a
+// depends_on id absent from the project state renders as an unknown node.
+function dependencyMermaid(t,g){
+  const meta={};(g.nodes||[]).forEach(n=>{meta[n.id]=n;});
+  const out={};(g.edges||[]).forEach(e=>{(out[e.dependent]=out[e.dependent]||[]).push(e.prerequisite);});
+  // Closure walk over the ticket's dependency edges, visited-set guarded so a
+  // declared cycle terminates instead of looping forever (AC2).
+  const want=new Set([t.id]),q=[t.id];
+  while(q.length){const id=q.shift();for(const d of(out[id]||[])){if(!want.has(d)){want.add(d);if(meta[d])q.push(d);}}}
+  // Sequential node keys: punctuation-heavy ids must never collide into one
+  // mermaid node, and labels drop quote characters so a hand-edited id cannot
+  // corrupt the diagram source (it degrades to a plain label instead).
+  const keys={},keyFor=id=>keys[id]||(keys[id]="n"+Object.keys(keys).length);
+  const safe=id=>String(id).replace(/["\\]/g,"");
+  const label=id=>{const n=meta[id];if(!n)return safe(id)+" · unknown";
+    return (n.cycle?"⟳ ":"")+safe(id)+" · "+n.status+(n.cycle?" (cycle)":"");};
+  const lines=["graph RL"];let any=false;
+  (g.edges||[]).forEach(e=>{if(!want.has(e.dependent))return;any=true;
+    lines.push(`  ${keyFor(e.dependent)}["${label(e.dependent)}"] --> ${keyFor(e.prerequisite)}["${label(e.prerequisite)}"]`);});
+  if(!any)lines.push(`  ${keyFor(t.id)}["${label(t.id)}"]`);
+  return lines.join("\n");
+}
 async function holdTicket(id,hold){
   let reason="";
   if(hold){
@@ -1860,6 +1903,67 @@ async function holdTicket(id,hold){
     toasty(hold?`${id} on hold — sprints skip it until resumed`:`${id} resumed`);
     close_('ov-ticket');await refreshDisc();
   }catch(e){toasty("Network error","err");}
+}
+
+// ── Verdict-trajectory churn view (CXA-F251) ────────────────────────────────
+// Per-criterion history at the verify decision surface. The domain persists
+// an append-only `test_cases[].history` (crates/domain/src/test_case.rs);
+// here it renders as the criterion's ordered pass/fail trajectory across
+// send-back cycles. Cycle boundaries are the verify send-backs already in
+// the detail payload (`gates`, the CXA-F241 spine). Pure presentation over
+// that payload: a round the criterion was not re-judged in renders an
+// explicit GAP — never an implied pass — and evidence refreshes (a
+// screenshot arriving) are never read as verdict transitions.
+function tcVerdicts(tc){
+  return (tc.history||[]).filter(r=>r&&r.kind!=="evidence_refresh");
+}
+function tcTrajHtml(t,tc){
+  const bounds=(t.gates||[]).filter(g=>g&&g.gate_id==="verify"&&g.status_to==="open")
+    .map(g=>g.decided_at_ms).filter(Number.isFinite).sort((a,b)=>a-b);
+  // Strict verdicts: only known pass/fail statuses become chips. Anything
+  // else drops out — rendering an unknown state as FAIL would fabricate a
+  // verdict, and its round then reads as the gap it honestly is.
+  const vs=tcVerdicts(tc)
+    .map(r=>({ok:r.status==="passed"?true:r.status==="failed"?false:null,at:r.at,ms:Date.parse(r.at)}))
+    .filter(v=>v.ok!==null);
+  // No verdict records: a first-cycle ticket labels the round honestly
+  // instead of fabricating an empty history; a sent-back ticket with no
+  // tracked history (pre-CXA-F251 data) renders nothing rather than
+  // inventing gaps for rounds nobody recorded.
+  if(!vs.length)return bounds.length?""
+    :`<div class="tctraj"><span class="tctraj-cy" title="No send-back yet — this criterion's first verify round">first cycle</span></div>`;
+  // Round windows: [-∞,b0) [b0,b1) … [bₙ₋₁,∞). An unreadable stamp stays in
+  // the current round — placed at no made-up earlier time.
+  const round=v=>!Number.isFinite(v.ms)?bounds.length
+    :bounds.reduce((c,b)=>c+(b<=v.ms?1:0),0);
+  const n=bounds.length+1;
+  // Gaps render only from the first tracked verdict onward: rounds before
+  // the criterion was ever recorded are an unknown era, not known-empty.
+  const r0=Math.min(...vs.map(round));
+  const parts=[];const seq=[];
+  for(let i=0;i<n;i++){
+    const inRound=vs.filter(v=>round(v)===i);
+    if(i<r0)continue;
+    if(!inRound.length){
+      parts.push(`<span class="tctraj-gap" title="No verdict was recorded for this criterion in round ${i+1} — a gap, not a pass">no verdict</span>`);
+      continue;
+    }
+    parts.push(`<span class="tctraj-cy" title="${i===0?"Before the first send-back":`After send-back #${i}`}">R${i+1}</span>`);
+    for(const v of inRound){
+      seq.push(v.ok);
+      parts.push(`<span class="tctraj-v ${v.ok?"pass":"fail"}" title="${esc(v.at)}">${v.ok?"PASS":"FAIL"}</span>`);
+    }
+  }
+  // Oscillation (AC2): any FAIL after a PASS. Amber warning with the flip
+  // count — a single fail among passes reads here too, and none of this
+  // blocks the human decision; the verdict stays the reviewer's.
+  const firstPass=seq.indexOf(true);
+  const churn=firstPass>=0&&seq.slice(firstPass+1).includes(false);
+  let flips=0;
+  for(let i=1;i<seq.length;i++){if(seq[i]!==seq[i-1])flips++;}
+  const traj=seq.map(s=>s?"PASS":"FAIL").join("->");
+  if(churn)parts.push(`<span class="tctraj-churn" title="Verdict trajectory ${esc(traj)} — ${flips} verdict flip${flips===1?"":"s"}; the criterion is oscillating across verify rounds"><i class="ti ti-repeat"></i>${flips} flip${flips===1?"":"s"}</span>`);
+  return `<div class="tctraj" title="Verdict trajectory ${esc(traj)}">${parts.join("")}</div>`;
 }
 
 async function showTicket(id){
@@ -1882,11 +1986,25 @@ async function showTicket(id){
     }catch(e){}
     body.innerHTML='<span class="x" onclick="close_(\'ov-ticket\')"><i class="ti ti-x"></i></span><div class="empty">ticket not found in any project</div>';return;}
   const d=t.design||{},tech=d.technical,ux=d.ux,ac=t.acceptance_criteria||[];
+  // Dependency graph (CXA-F237): the ticket's transitive closure rendered from
+  // the project's derived graph. Only fetched when the ticket DECLARES deps,
+  // and only rendered when the ticket belongs to THIS project's graph — the
+  // graph is enrichment, so a failed fetch degrades to no section while the
+  // detail itself stays usable.
+  let depGraphSection="";
+  if((t.depends_on||[]).length){
+    try{
+      const g=await(await fetch(api("/dependencies"))).json();
+      const src=(g.nodes||[]).some(n=>n.id===t.id)?dependencyMermaid(t,g):"";
+      if(src)depGraphSection=`<div class="mrow" style="display:block"><span class="lbl">Dependency graph</span><pre class="mermaid" style="margin-top:7px">${esc(src)}</pre></div>`;
+    }catch(e){}
+  }
   let h=`<span class="x" onclick="close_('ov-ticket')"><i class="ti ti-x"></i></span><h3>${esc(t.title)}</h3>
     <div class="msub">${esc(t.id)} · ${esc(t.type)}</div>
     <div class="tk-tabs" role="tablist">
       <button class="tk-tab on" data-tk-tab="details" onclick="tkTab('details')"><i class="ti ti-list-details"></i> Details</button>
       <button class="tk-tab" data-tk-tab="coverage" onclick="tkTab('coverage')"><i class="ti ti-shield-check"></i> Test Coverage</button>
+      <button class="tk-tab" data-tk-tab="forensics" onclick="tkTab('forensics')"><i class="ti ti-history"></i> Forensics</button>
     </div>
     <div class="tk-pane" id="tk-pane-details">
     <div class="mrow"><span class="lbl">Status</span><b>${t.status==="on_hold"?'<span style="color:var(--amber)">on hold</span>':esc(t.status)}</b>${t.status==="on_hold"&&(STATE.hold_reasons||{})[t.id]?`<span style="font-size:11.5px;color:var(--dim);margin-left:8px">· ${esc(STATE.hold_reasons[t.id])}</span>`:""}${(typeof canManage==="function"&&canManage())?(["pending","ready","open"].includes(t.status)?` <button class="tk-btn" style="margin-left:10px" onclick="holdTicket('${t.id}',true)" title="Park it — sprints and agents skip it until resumed"><i class="ti ti-player-pause"></i> Hold</button>`:(t.status==="on_hold"?` <button class="tk-btn go" style="margin-left:10px" onclick="holdTicket('${t.id}',false)"><i class="ti ti-player-play"></i> Resume</button>`:"")):""}</div>
@@ -1902,8 +2020,10 @@ async function showTicket(id){
           <select id="tk-assign-sel" style="background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:7px;padding:4px 8px;font-size:12px"><option value="">choose person…</option></select>
           <button class="tk-btn" style="padding:4px 10px;font-size:11px" onclick="assignTicket('${t.id}',document.getElementById('tk-assign-sel').value)"><i class="ti ti-user-plus"></i> Assign</button>`}
       </div></div>
-    <div class="mrow"><span class="lbl">Blocked by</span>${depChips(t.depends_on)}</div>
+    <div class="mrow"><span class="lbl">Blocked by</span>${depChips(t.depends_on,blockedStatuses(t))}</div>
     <div class="mrow"><span class="lbl">Blocks</span>${depChips((STATE.tickets||[]).filter(x=>(x.depends_on||[]).includes(t.id)).map(x=>x.id))}</div>
+    ${(t.unknown_dependencies||[]).length?`<div class="mrow"><span class="lbl">Unknown dependencies</span>${t.unknown_dependencies.map(id=>`<span title="no such ticket in this project — the scheduler treats it as NOT satisfied" style="display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:3px 8px;border-radius:7px;background:color-mix(in srgb,var(--red) 14%,transparent);color:var(--red);margin-right:5px"><i class="ti ti-alert-triangle" style="font-size:11px"></i>${esc(id)} · unknown</span>`).join("")}</div>`:''}
+    ${depGraphSection}
     <div class="mrow" style="display:block"><span class="lbl">Description</span><div class="doc-body md" style="margin-top:7px;color:var(--muted);line-height:1.6;font-size:13px">${t.description?mdRender(t.description):'—'}</div></div>
     <div class="mrow" style="display:block"><span class="lbl">Acceptance criteria</span>${ac.length?`<div class="aclist">${ac.map(c=>`<div class="acitem"><i class="ti ti-square-check"></i> ${esc(c)}</div>`).join("")}</div>`:'<div style="margin-top:6px;color:var(--dim);font-size:12px">— none defined yet</div>'}</div>`
     +(function(){const tcs=t.test_cases||[];if(!tcs.length)return '';
@@ -1912,11 +2032,14 @@ async function showTicket(id){
         const badge={passed:['var(--green)','ti-circle-check','Passed'],failed:['var(--red)','ti-circle-x','Failed'],pending:['var(--dim)','ti-clock','Pending']}[st]||['var(--dim)','ti-clock','Pending'];
         const img=tc.evidence&&tc.evidence.image?`<div class="tcimg"><img src="${esc(tc.evidence.image)}" alt="case screenshot" onclick="window.open('${esc(tc.evidence.image)}','_blank')" loading="lazy"></div>`:'';
         const note=tc.evidence&&tc.evidence.note?`<div class="tcnote">${esc(tc.evidence.note)}</div>`:'';
+        // CXA-F251: the criterion's verdict trajectory across send-back
+        // cycles — churn the raw per-cycle badge above cannot show.
+        const traj=tcTrajHtml(t,tc);
         // CXA-F248: the criterion's resolved live-reproduction URL (recorded by
         // the TEST verdict flow). Rendered ONLY when present — a case with no
         // resolved route gets no link, never a guessed href.
         const rep=tc.evidence&&tc.evidence.repro?`<a class="tcrepro" href="${esc(tc.evidence.repro)}" target="_blank" rel="noopener" title="Open the live page that demonstrates this criterion"><i class="ti ti-external-link"></i> Live repro</a>`:'';
-        return `<div class="tcitem"><div class="tcrow"><i class="ti ${badge[1]}" style="color:${badge[0]}"></i><span style="color:${badge[0]};font-weight:700;font-size:11px;text-transform:uppercase">${badge[2]}</span><div class="tcdesc">${esc(tc.description)}</div></div>${img}${note}${rep}</div>`;
+        return `<div class="tcitem"><div class="tcrow"><i class="ti ${badge[1]}" style="color:${badge[0]}"></i><span style="color:${badge[0]};font-weight:700;font-size:11px;text-transform:uppercase">${badge[2]}</span><div class="tcdesc">${esc(tc.description)}</div></div>${traj}${img}${note}${rep}</div>`;
       }).join("")}</div></div>`;})()
   if(tech)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">Technical spec</span><pre>${esc(tech.approach)}\nfiles: ${esc((tech.files||[]).join(", "))}\napi: ${esc(tech.api_contract)}\ntest: ${esc(tech.test_plan)}</pre></div>`;
   if(ux)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">UI/UX spec</span><pre>${esc(ux.user_flow)}\nscreens: ${esc((ux.screens||[]).join(", "))}</pre></div>`;
@@ -1938,14 +2061,18 @@ async function showTicket(id){
      <div class="att-grid" id="att-grid">${grid||'<div style="color:var(--dim);font-size:12px;margin-top:6px">— none yet (PD attaches mockups here)</div>'}</div>
      <input type="file" id="att-file" style="display:none" onchange="uploadAttachment('${t.id}',this)">
      <button class="tk-btn" style="margin-top:8px" onclick="document.getElementById('att-file').click()"><i class="ti ti-paperclip"></i> Attach file</button></div>`;}
-  h+=`</div>`+covPane(t);
+  h+=`</div>`+covPane(t)+fgPane(t);
   const canWork=["pending","ready","open"].includes(t.status);
   if(t.cost_hold!=null&&!t.cost_approved)h+=`<div class="mrow" style="display:block;border:1px solid var(--amber);border-radius:9px;padding:10px 12px;background:color-mix(in srgb,var(--amber) 9%,transparent)"><span style="color:var(--amber);font-weight:700"><i class="ti ti-currency-dollar"></i> Held for cost approval</span><div style="font-size:12.5px;color:var(--muted);margin-top:4px">Estimated ~$${(+t.cost_hold).toFixed(2)}/run exceeds the approval gate. Agents will skip this ticket until you approve it.</div><button class="pri" style="margin-top:8px" onclick="approveCost('${t.id}')"><i class="ti ti-check"></i> Approve run</button></div>`;
+  // Same live link as the inbox verify card (CXA-F242-C): the server injects
+  // the field only while the ticket awaits a human verdict, so its presence
+  // is the whole show/hide axis — no resolved deploy, no dead button.
   h+=`<div class="tk-actions">
     <button class="tk-btn" onclick="editTicket('${t.id}')"><i class="ti ti-edit"></i> Edit</button>
     ${canWork?`<button class="tk-btn go" onclick="workNext('${t.id}')"><i class="ti ti-player-play-filled"></i> Work on this next</button>`:''}
     ${(t.status==="pending"&&tech)?`<button class="tk-btn go" onclick="humanGate('${t.id}','ready')"><i class="ti ti-checks"></i> Approve → Ready</button>`:''}
-    ${t.status==="fixed"?`<button class="tk-btn" onclick="inboxSendBack('${t.id}')"><i class="ti ti-arrow-back-up"></i> Send back</button>`:''}
+    ${t.status==="fixed"?`<button class="tk-btn" onclick="inboxSendBack('${t.id}','${escAttr(t.reproduce_url||"")}')"><i class="ti ti-arrow-back-up"></i> Send back</button>`:''}
+    ${t.reproduce_url?`<button class="tk-btn" title="Open live instance" onclick="window.open('${esc(t.reproduce_url)}','_blank')"><i class="ti ti-external-link"></i> Open live instance</button>`:''}
     ${t.status==="fixed"?`<button class="tk-btn go" onclick="humanGate('${t.id}','verify')"><i class="ti ti-shield-check"></i> Mark Verified</button>`:''}
     ${(t.status==="pending"||t.status==="open")?`<button class="tk-btn danger" onclick="rejectTicket('${t.id}')"><i class="ti ti-ban"></i> Reject</button>`:''}
   </div>`;
@@ -1960,7 +2087,7 @@ async function showTicket(id){
 // toggle — both panes render once, switching never refetches.
 function tkTab(name){
   document.querySelectorAll("#ov-ticket .tk-tab").forEach(b=>b.classList.toggle("on",b.dataset.tkTab===name));
-  for(const p of["details","coverage"]){const el=document.getElementById("tk-pane-"+p);if(el)el.hidden=p!==name;}
+  for(const p of["details","coverage","forensics"]){const el=document.getElementById("tk-pane-"+p);if(el)el.hidden=p!==name;}
 }
 // The Test Coverage pane (CXA-F024): one row per acceptance criterion with its
 // coverage status and the evidence addressing it — test files, or an API
@@ -1980,6 +2107,106 @@ function covPane(t){
     return `<div class="cov-row"><div class="cov-badge" style="color:${m[0]}"><i class="ti ${m[1]}"></i>${m[2]}</div><div class="cov-body"><div class="cov-ac">${esc(e.criterion)}</div>${srcs?`<div class="cov-srcs">${srcs}</div>`:""}</div></div>`;
   }).join("");
   return `<div class="tk-pane" id="tk-pane-coverage" hidden><div class="covlist">${rows}</div></div>`;
+}
+// ── Evidence forensics pane (CXA-F241) ─────────────────────────────────────
+// Per-gate proof inspection for the verification reviewer: which DoD gate
+// decision each piece of evidence supported, who attached it, and the full
+// captured payload behind a green check. Grouping mirrors the server-side
+// forensics::group_by_gate rule (crates/application/src/forensics.rs): an
+// item belongs to the LATEST decision of its linked gate at or before its
+// capture time — or that gate's first decision when it predates all of them.
+// Items with no recorded link stay unlinked ("provenance unknown"), never
+// assigned a gate by guess. Same gate visited more than once (a send-back
+// cycle) renders its visits side by side, before and after.
+function fgAttribution(gates,item){
+  const at=Date.parse(item.at),links=item.source_gates||[];
+  if(!Number.isFinite(at)||!links.length)return -1;
+  const cands=gates.filter(g=>links.includes(g.gate_id));
+  if(!cands.length)return -1;
+  let pick=cands[0];
+  for(const g of cands){if(g.decided_at_ms<=at)pick=g;}
+  return gates.indexOf(pick);
+}
+function fgKind(e){
+  return {screenshot:["var(--blue)","ti-photo","SCREENSHOT"],
+          api:["var(--accent2)","ti-api","API"],
+          test:["var(--green)","ti-test-pipe","TEST"],
+          waived:["var(--amber)","ti-gavel","WAIVER"]}[e.kind]
+         ||["var(--dim)","ti-file",(e.kind||"?").toUpperCase()];
+}
+function fgWhen(at){const ms=Date.parse(at);return Number.isFinite(ms)?new Date(ms).toLocaleString():at;}
+function fgMs(ms){const d=new Date(ms);return Number.isFinite(d.getTime())?d.toLocaleString():"?";}
+function fgItem(e){
+  const[kc,ic,klabel]=fgKind(e);
+  const who=e.actor?`by @${esc(e.actor)}`:"by an unattributed actor";
+  const prov=`${who} · ${(e.source_gates||[]).length?`gate ${esc(e.source_gates.join(", "))} · `:""}provenance unknown`;
+  const inline=(e.kind==="api"||e.kind==="test")&&e.detail;
+  let body="";
+  if(e.kind==="screenshot"){
+    // The hidden twin handles the rare race where the server saw the
+    // artifact but storage lost it before the image rendered: the <img>
+    // error reveals the explicit 'missing artifact' state, never a
+    // silently broken image.
+    const miss=`<div class="fg-missing"><i class="ti ti-alert-triangle"></i> missing artifact — the recorded screenshot is no longer on disk <span class="fg-path">${esc(e.detail)}</span></div>`;
+    body=e.artifact==="ok"
+      ?`<img class="fg-shot" src="${esc(e.detail)}" alt="${esc(e.label)}" loading="lazy" onerror="this.nextElementSibling.hidden=false;this.remove()">`
+         +miss.replace('<div class="fg-missing">','<div class="fg-missing" hidden>')
+      :miss;
+  }else if(e.kind==="waived"){
+    body=`<div class="fg-waiver"><i class="ti ti-gavel"></i> <b>Waiver</b> — granted ${who}: ${esc(e.detail)}</div>`;
+  }
+  return `<div class="fg-item${inline?" expandable":""}"${inline?` onclick="this.classList.toggle('open')"`:""} title="${inline?"click to inspect the full captured text":""}">`
+    +`<div class="fg-row"><i class="ti ${ic}" style="color:${kc}"></i>`
+    +`<span class="fg-kind" style="color:${kc}">${klabel}</span>`
+    +`<span class="fg-label">${esc(e.label)}</span>`
+    +`<span class="fg-when" title="${esc(e.at)}">${esc(fgWhen(e.at))}</span>`
+    +(inline?`<i class="ti ti-chevron-right fg-chev"></i>`:"")
+    +`</div>`
+    +`<div class="fg-prov">${prov}</div>`
+    +(inline?`<pre class="fg-pre">${esc(e.detail)}</pre>`:body)
+    +`</div>`;
+}
+function fgGateSection(g,visit,of){
+  const pair=of>1?` · <span class="fg-visit">visit ${visit}/${of}</span>`:"";
+  return `<div class="fg-gate"><div class="fg-gate-h"><span class="fg-gate-id">${esc((g.gate.gate_id||"?").toUpperCase())}</span>`
+    +`<span class="fg-gate-sub">${esc(g.gate.status_from)} → ${esc(g.gate.status_to)} · decided ${esc(fgMs(g.gate.decided_at_ms))} · by ${esc(g.gate.actor_role||"?")} role${pair}</span></div>`
+    +(g.items.length?g.items.map(fgItem).join("")
+      :`<div class="fg-none">no evidence attached to this decision</div>`)
+    +`</div>`;
+}
+function fgPane(t){
+  const gates=t.gates||[],evs=t.evidence||[];
+  const hidden=`<div class="tk-pane" id="tk-pane-forensics" hidden>`;
+  if(!gates.length&&!evs.length){
+    // Absence is explicit: no evidence AND no gate decision ever recorded —
+    // distinguishable from an omission on a gated ticket.
+    return hidden+`<div class="cov-empty"><i class="ti ti-history"></i><div class="cov-empty-t">No DoD evidence captured for this ticket</div><div class="cov-empty-s">Evidence appears here when a gate decision captures proof; nothing is guessed.</div></div></div>`;
+  }
+  const groups=gates.map(g=>({gate:g,items:[]}));
+  const unlinked=[];
+  for(const e of evs){
+    const i=fgAttribution(gates,e);
+    if(i>=0)groups[i].items.push(e);else unlinked.push(e);
+  }
+  let h=hidden+`<div class="fglist">`;
+  let i=0;
+  while(i<groups.length){
+    let j=i;
+    while(j<groups.length&&groups[j].gate.gate_id===groups[i].gate.gate_id)j++;
+    const run=groups.slice(i,j);
+    // The same gate decided more than once = send-back cycles: the runs'
+    // visits sit side by side so the reviewer compares before/after.
+    h+=run.length>=2
+      ?`<div class="fg-pair">${run.map((g,n)=>fgGateSection(g,n+1,run.length)).join("")}</div>`
+      :run.map(g=>fgGateSection(g,1,1)).join("");
+    i=j;
+  }
+  if(unlinked.length){
+    h+=`<div class="fg-gate"><div class="fg-gate-h"><span class="fg-gate-id">UNLINKED</span>`
+      +`<span class="fg-gate-sub">no matching gate decision on this ticket — no link is guessed</span></div>`
+      +unlinked.map(fgItem).join("")+`</div>`;
+  }
+  return h+`</div></div>`;
 }
 // In-app attachment viewer: full-screen overlay, same session. Gallery-aware:
 // ‹ › buttons and ←/→ keys walk ATT_GALLERY; Esc or backdrop click closes.
@@ -2221,7 +2448,7 @@ async function loadSettings(){
           <select id="eng-autofb"><option value="true" ${(cfg.engine&&cfg.engine.auto_fallback!==false)?'selected':''}>on</option><option value="false" ${(cfg.engine&&cfg.engine.auto_fallback===false)?'selected':''}>off</option></select>
           <span class="hint">on (default): auto-use every installed CLI + a cheaper tier as fallback — no manual list needed</span></div>
         <div class="fr" style="align-items:flex-start"><span class="lbl">Extra fallbacks</span>
-          <textarea id="eng-fallbacks" rows="2" style="flex:2 1 280px;min-width:220px;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:8px 11px;font-size:12.5px;font-family:ui-monospace,Menlo,monospace" placeholder="one per line: &lt;engine&gt; &lt;model&gt;\ne.g.  opencode gpt-4o\n      gemini gemini-2.0-flash">${(cfg.engine&&cfg.engine.fallbacks||[]).map(f=>`${f.engine} ${f.model}`).join("\n")}</textarea>
+          <textarea id="eng-fallbacks" rows="3" style="flex:2 1 280px;min-width:220px;resize:vertical;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:8px 11px;font-size:12.5px;font-family:ui-monospace,Menlo,monospace" placeholder="one per line: &lt;engine&gt; &lt;model&gt;\ne.g.  opencode gpt-4o\n      gemini gemini-2.0-flash">${(cfg.engine&&cfg.engine.fallbacks||[]).map(f=>`${f.engine} ${f.model}`).join("\n")}</textarea>
           <span class="hint" style="flex:1 1 160px;min-width:0">tried in order when the primary hits a quota/rate-limit wall or stalls (timeout). Same CLI, cheaper model works too, e.g. <code>claude haiku</code></span></div>
         <button type="button" class="set-expand ${anyOverride?'open':''}" onclick="toggleRoleOverrides(this)"><i class="ti ti-chevron-right"></i> Per-agent model overrides <span style="color:var(--dim);font-weight:400">· optional — give any agent a different model</span></button>
         <div class="role-overrides" ${anyOverride?'':'hidden'}>${roleRows}</div>

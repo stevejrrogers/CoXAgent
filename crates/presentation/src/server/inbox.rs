@@ -97,9 +97,20 @@ pub(super) async fn inbox_ep(
             && t.status() == coxagent_domain::Status::Fixed
             && state.ticket_evidence.contains_key(&id)
         {
+            // Live reproduction link (CXA-F244): where this project's fix runs
+            // right now, from the one resolvability source the F242 design
+            // pins (deploy.host_port — the base qa_evidence captures against).
+            // Null when no port is configured; additive to the card.
+            // `repro_url` (CXA-F246) is the per-ticket link the evidence
+            // funnel recorded at collection time — the exact base that
+            // ticket's evidence was captured against, null when none.
             items.push(serde_json::json!({
                 "kind": "verify", "ticket": id, "title": t.title(),
                 "role": "QA", "can_act": my_role.can_verify(),
+                "reproduce_url": coxagent_application::repro_url::compute_live_repro_url(
+                    cfg.deploy.host_port,
+                ),
+                "repro_url": state.repro_urls.get(&id),
             }));
             continue;
         }
@@ -652,7 +663,11 @@ async fn human_transition(
     // record, so this path writes the same provenance the agent TEST path has
     // written since F022.
     if to == coxagent_domain::Status::Verified {
-        coxagent_application::use_cases::run_test::record_human_verify_evidence(&mut state, id);
+        coxagent_application::use_cases::run_test::record_human_verify_evidence(
+            &mut state,
+            id,
+            &me,
+        );
         // Goal-line outcome ledger (CXA-F228): a human verdict is a delivered
         // outcome like the agent path's.
         state.record_verified_outcome(id);

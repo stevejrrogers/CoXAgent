@@ -11,6 +11,9 @@ use std::collections::HashMap;
 // anchor and build manifest it belongs to; it is re-exported here so every
 // Config section type is reachable as `config::<Section>Config`.
 pub use crate::artifacts::ArtifactsConfig;
+// Same convention: the per-operator working-hours declaration types live with
+// their decision logic in [`crate::working_hours`].
+pub use crate::working_hours::OperatorWorkingHours;
 
 /// Known agent engine CLIs. `as_binary` gives the executable name to look for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -384,6 +387,17 @@ pub struct HumanConfig {
     /// (the behaviour this feature must not change).
     #[serde(default)]
     pub focus_windows: std::collections::BTreeMap<String, FocusWindow>,
+    /// Per-operator working hours (CXA-F234), keyed by bare username: the ONE
+    /// declaration ("Mon–Fri 09:00–17:30 at a fixed UTC offset", weekends off)
+    /// that decides whether a UTC instant is actionable for that operator —
+    /// the question every human-facing delivery decision consults. Absent
+    /// entry = the operator declared nothing and delivery behaves exactly as
+    /// before. Values are validated fail-closed at save
+    /// ([`crate::config_parse::parse_config`] names the offending field), so
+    /// an impossible tz or a malformed range can never load as "no hours".
+    /// Decisions live in [`crate::working_hours`].
+    #[serde(default)]
+    pub working_hours: std::collections::BTreeMap<String, OperatorWorkingHours>,
 }
 
 /// One person's focus-window ("quiet hours") settings (CXA-F176). Every
@@ -588,6 +602,7 @@ impl Default for PolicyConfig {
 /// projects deploying with `docker compose` on one host do not fight over the
 /// same published port — agents are told which port to bind.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // config flags, not a state machine
 pub struct DeployConfig {
     /// The host port this project's app should publish (None = agent's choice).
     /// Must be a port a client can connect to: `0` is the kernel's "any free
@@ -618,6 +633,23 @@ pub struct DeployConfig {
     /// until an operator turns this on.
     #[serde(default)]
     pub auto_rollback: bool,
+    /// Auto-redeploy the last known-good version when the Ops monitor finds
+    /// the ALREADY-LIVE deployment unhealthy (CXA-F240) — the post-merge
+    /// counterpart of `auto_rollback`, which only covers a deploy/tests
+    /// failure detected in the same cycle that shipped it. This closes the
+    /// gap where CI smoke passed and the deploy looked green, but the stack
+    /// went dead afterwards and sat broken until a human reverted by hand.
+    /// Opt-in (default off) — an existing project's behavior never changes
+    /// until an operator turns this on.
+    #[serde(default)]
+    pub live_health_auto_rollback: bool,
+    /// How many consecutive unhealthy Ops-monitor probes (one per cycle) the
+    /// live app must serve before a `live_health_auto_rollback` fires —
+    /// N consecutive checks, not one flaky probe. The revert itself is still
+    /// bounded by `max_rollback_age_secs` (the allowed window) and the
+    /// migration safety check.
+    #[serde(default = "default_live_health_fail_checks")]
+    pub live_health_fail_checks: u32,
     /// A known-good deploy older than this is considered too stale to roll
     /// back to (the environment may have drifted too far) — rollback is
     /// skipped, not attempted, and the failure just files its bug as before.
@@ -639,12 +671,34 @@ fn default_max_rollback_age_secs() -> u64 {
     3600
 }
 
+/// Three consecutive unhealthy probes (three leader cycles) before a
+/// live-health revert — one dead probe is often a transient network blip,
+/// not a broken stack.
+fn default_live_health_fail_checks() -> u32 {
+    3
+}
+
 fn default_health_check_timeout_secs() -> u64 {
     60
 }
 
 fn default_migration_detection_paths() -> Vec<String> {
     vec!["migrations".to_owned()]
+}
+
+impl DeployConfig {
+    /// The live reproduction base URL for this project's deployed app
+    /// (CXA-F246): the same `http://127.0.0.1:{host_port}/` base the
+    /// evidence-capture funnel shoots against, derived purely from this
+    /// config — no IO, so any verification surface can resolve it. `None`
+    /// when no `host_port` is configured: an unresolvable link is absent,
+    /// never fabricated. Delegates to
+    /// [`crate::repro_url::compute_live_repro_url`] so the URL format has
+    /// exactly one definition.
+    #[must_use]
+    pub fn live_repro_url(&self) -> Option<String> {
+        crate::repro_url::compute_live_repro_url(self.host_port)
+    }
 }
 
 impl Default for DeployConfig {
@@ -654,6 +708,8 @@ impl Default for DeployConfig {
             enabled: true,
             self_upgrade: false,
             auto_rollback: false,
+            live_health_auto_rollback: false,
+            live_health_fail_checks: default_live_health_fail_checks(),
             max_rollback_age_secs: default_max_rollback_age_secs(),
             migration_detection_paths: default_migration_detection_paths(),
             health_check_timeout_secs: default_health_check_timeout_secs(),
@@ -1129,5 +1185,32 @@ mod tests {
         )
         .expect("floor config");
         assert_eq!(cfg.workflow.bug_burn_floor, Some(Priority::Low));
+    }
+
+    /// CXA-F246 AC1: the live reproduction URL derives purely from the deploy
+    /// config — `Some(http://127.0.0.1:{host_port}/)` when the port is set
+    /// (the exact base qa_evidence captures against), `None` when absent.
+    #[test]
+    fn live_repro_url_resolves_the_capture_base_when_host_port_is_set() {
+        let deploy = DeployConfig {
+            host_port: Some(8101),
+            ..DeployConfig::default()
+        };
+        assert_eq!(
+            deploy.live_repro_url().as_deref(),
+            Some("http://127.0.0.1:8101/"),
+            "a set deploy.host_port resolves the capture-base URL"
+        );
+    }
+
+    /// CXA-F246 AC1: no configured `host_port` means nothing resolvable — the
+    /// gate is off, and the URL is absent rather than fabricated.
+    #[test]
+    fn live_repro_url_is_none_without_a_host_port() {
+        assert_eq!(
+            DeployConfig::default().live_repro_url(),
+            None,
+            "an absent deploy.host_port resolves nothing"
+        );
     }
 }

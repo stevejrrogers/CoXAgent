@@ -66,6 +66,21 @@ pub(crate) fn apply_shim_path(cmd: &mut tokio::process::Command) {
             cmd.env("PATH", format!("{shim}:{path}"));
         }
     }
+    // Agents never talk to the hub's infrastructure directly — state flows
+    // through the hub. Inheriting the live DSNs let an agent's cleanroom
+    // tests write `qab` project rows straight into the production Postgres
+    // (and handed every agent the hub's credentials). Strip them at the one
+    // choke point every engine spawn passes through.
+    for var in [
+        "COXAGENT_DB_DSN",
+        "COXAGENT_AUTH_DSN",
+        "COXAGENT_REDIS_URL",
+        "COXAGENT_REMOTE_STORE_URL",
+        "COXAGENT_ADMIN_USER",
+        "COXAGENT_ADMIN_PASSWORD",
+    ] {
+        cmd.env_remove(var);
+    }
 }
 
 /// Resolve an agent-CLI binary (`opencode`, `claude`, `hermes`, ...) to an

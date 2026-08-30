@@ -42,7 +42,13 @@ function renderRiverShell(){
       </select>
     </div>
     <div class="panel" id="river-strip"><div class="empty">connecting…</div></div>
-    <div class="panel" id="river-feed"><div class="empty">connecting…</div></div>`;
+    <div class="panel" id="river-feed"><div class="empty">connecting…</div></div>
+    <div class="panel" style="display:flex;gap:10px;align-items:center;margin-top:12px;font-size:12px">
+      <i class="ti ti-microscope" style="color:var(--dim)"></i>
+      <span style="color:var(--muted)">Deep-dive on the current project:</span>
+      <button class="tk-btn" onclick="nav('activity')"><i class="ti ti-file-text"></i> Transcripts &amp; alerts</button>
+      <a onclick="window.open(api('/audit'))" class="tk-btn" style="text-decoration:none;cursor:pointer"><i class="ti ti-download"></i> Export audit</a>
+    </div>`;
 }
 function handleRiverEvent(d){
   if(d.type==="hello"){

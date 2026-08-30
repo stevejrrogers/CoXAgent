@@ -53,6 +53,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let Some(port) = self.config.deploy.host_port else {
             return; // nothing deployed to prove against — gate is off
         };
+        // INVARIANT for the collectors below: `port` IS
+        // `config.deploy.host_port`, so the link they record via
+        // `live_repro_url()` is the same base every capture here runs
+        // against. A future caller passing a different port must resolve the
+        // recorded link from that port instead.
         let key = ticket.to_string();
         let (has_ui, already) = match self.store.load().await {
             Ok(s) => (
@@ -73,6 +78,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     }
     pub(super) async fn collect_ui_evidence(&self, ticket: &TicketId, port: u16) {
         let key = ticket.to_string();
+        // The resolved live link (CXA-F246), derived from the deploy config —
+        // recorded with the evidence below whatever the capture answers.
+        let repro = self.config.deploy.live_repro_url();
         let shot = match &self.shot {
             Some(shot) => shot.capture(&format!("http://127.0.0.1:{port}/")).await,
             None => None,
@@ -95,9 +103,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             _ => None,
         };
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+            // Per-ticket live link (CXA-F246): state.repro_urls[ticket]
+            // records the exact base the capture ran against; `None` records
+            // nothing — an unresolvable link is absent, never fabricated.
+            if let Some(url) = repro.as_deref() {
+                s.repro_urls.insert(key.clone(), url.to_owned());
+            }
             match &uploaded {
                 Some((url, size)) => {
-                    s.add_evidence(&key, "screenshot", "deployed UI screenshot", url);
+                    s.add_evidence_for(
+                        &key,
+                        "screenshot",
+                        "deployed UI screenshot",
+                        url,
+                        &["verify"],
+                        "TEST",
+                    );
                     s.post_comment_att(
                         "TEST",
                         &format!("📸 DoD evidence for {key}: screenshot of the deployed UI."),
@@ -111,11 +132,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     );
                 }
                 None => {
-                    s.add_evidence(
+                    s.add_evidence_for(
                         &key,
                         "waived",
                         "screenshot unavailable",
                         "no headless browser/storage on this host, or the app did not render",
+                        &["verify"],
+                        "TEST",
                     );
                 }
             }
@@ -125,13 +148,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     }
     pub(super) async fn collect_api_evidence(&self, ticket: &TicketId, port: u16) {
         let key = ticket.to_string();
+        // Same per-ticket ledger write as the UI collector (CXA-F246): the
+        // resolved link is recorded whatever the probe answers.
+        let repro = self.config.deploy.live_repro_url();
         let Some(probe) = &self.probe else {
             let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
-                s.add_evidence(
+                if let Some(url) = repro.as_deref() {
+                    s.repro_urls.insert(key.clone(), url.to_owned());
+                }
+                s.add_evidence_for(
                     &key,
                     "waived",
                     "probe unavailable",
                     "no HTTP probe on this host",
+                    &["verify"],
+                    "TEST",
                 );
                 Ok(())
             })
@@ -148,10 +179,20 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
         }
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+            if let Some(url) = repro.as_deref() {
+                s.repro_urls.insert(key.clone(), url.to_owned());
+            }
             match &proof {
                 Some((url, p)) => {
                     let detail = format!("GET {url}\nHTTP {}\n{}", p.status, p.body_snippet.trim());
-                    s.add_evidence(&key, "api", "live request/response", &detail);
+                    s.add_evidence_for(
+                        &key,
+                        "api",
+                        "live request/response",
+                        &detail,
+                        &["verify"],
+                        "TEST",
+                    );
                     s.post_comment(
                         "TEST",
                         &format!("🧾 DoD evidence for {key} — live API proof:\n```\n{detail}\n```"),
@@ -159,11 +200,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     );
                 }
                 None => {
-                    s.add_evidence(
+                    s.add_evidence_for(
                         &key,
                         "waived",
                         "app did not answer",
                         "probe got no response on health or root",
+                        &["verify"],
+                        "TEST",
                     );
                 }
             }
@@ -198,6 +241,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// have PD review the ACTUAL pixels against the design system, and file
     /// at most 2 concrete UI bugs. Every step best-effort — no browser, no
     /// port, or an unparseable review just skips the pass.
+    // Same scoped waiver as `test_has_work` below: the pass is one best-effort
+    // pipeline (capture → attach → review → file bugs) whose steps share
+    // locals; splitting it would scatter that state for no second reader.
+    #[allow(clippy::too_many_lines)]
     pub(super) async fn visual_qa(&self, ticket: &TicketId, report: &mut CycleReport) {
         let (Some(shot), Some(port)) = (&self.shot, self.config.deploy.host_port) else {
             return;
@@ -224,6 +271,26 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if !files.write_bytes(&out, &bytes).await {
             return;
         }
+        // The eye a TEXT model can actually use: the rendered DOM as text.
+        // "Open the PNG with your file tools" asked a text engine to read
+        // pixels — it hallucinated. What is ON the screen, as text, it can
+        // genuinely judge (empty views, error strings, placeholder junk).
+        let dom_extract = match shot
+            .capture_dom(&format!("http://127.0.0.1:{port}/"))
+            .await
+        {
+            Some(html) => {
+                let text = html_to_text(&html);
+                let extract: String = text.chars().take(2500).collect();
+                format!(
+                    "\n\nRendered page text (what the screen actually shows, extracted \
+                     from the live DOM — judge THIS, it is ground truth):\n---\n{extract}\n---"
+                )
+            }
+            None => String::new(),
+        };
+        // The human Verify gate should see the same picture the PD reviewed.
+        self.attach_shot_to_ticket(ticket, &bytes).await;
         self.report("PD", "visual QA on the deployed UI");
         let request = crate::ports::outbound::AgentRequest {
             role: coxagent_domain::Role::Pd,
@@ -235,7 +302,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                  design system and basic UI craft (alignment, contrast, spacing, \
                  broken layout, placeholder junk). Output ONLY a JSON array of at \
                  most 2 CONCRETE, visible defects: \
-                 [{{\"title\": string, \"description\": string}}] — or [] if it looks right.",
+                 [{{\"title\": string, \"description\": string}}] — or [] if it looks right.{dom_extract}",
             ),
             work_dir: self.work_dir.clone(),
             timeout: std::time::Duration::from_secs(600),
@@ -248,11 +315,50 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if !o.succeeded() {
             return;
         }
-        let raw = &o.stdout;
-        let (Some(a), Some(b)) = (raw.find('['), raw.rfind(']')) else {
+        self.file_reviewed_defects(ticket, &o.stdout, report).await;
+    }
+
+    /// The screenshot the PD reviewed must reach the human Verify gate too:
+    /// attach it to the ticket instead of leaving it a loose workdir file only
+    /// agents see. Best-effort — no storage, or a failed upload, skips it.
+    async fn attach_shot_to_ticket(&self, ticket: &TicketId, bytes: &[u8]) {
+        let Some(storage) = &self.storage else {
             return;
         };
-        let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(&raw[a..=b]) else {
+        let key = format!("visual-qa/{ticket}-{}.png", crate::state::now_rfc3339());
+        if storage.put(&key, bytes, "image/png").await.is_err() {
+            return;
+        }
+        let rec = crate::state::TicketAttachment {
+            name: format!("visual-qa-{ticket}.png"),
+            key,
+            content_type: "image/png".to_owned(),
+            by: "PD".to_owned(),
+            at: crate::state::now_rfc3339(),
+        };
+        let tid = ticket.to_string();
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |st| {
+            st.ticket_attachments
+                .entry(tid.clone())
+                .or_default()
+                .push(rec.clone());
+            Ok(())
+        })
+        .await;
+    }
+
+    /// File at most 2 concrete UI bugs out of the PD review's JSON array —
+    /// best-effort: unparseable or empty output files nothing.
+    async fn file_reviewed_defects(
+        &self,
+        ticket: &TicketId,
+        stdout: &str,
+        report: &mut CycleReport,
+    ) {
+        let (Some(a), Some(b)) = (stdout.find('['), stdout.rfind(']')) else {
+            return;
+        };
+        let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(&stdout[a..=b]) else {
             return;
         };
         for item in parsed.iter().take(2) {
@@ -378,5 +484,77 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 let _ = self.store.save(&st).await;
             }
         }
+    }
+}
+
+/// Crude but dependency-free HTML → visible-text: drops script/style bodies,
+/// strips tags, collapses whitespace. Fidelity is "what words are on the
+/// screen", which is exactly what a text-only reviewer can judge.
+fn html_to_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len() / 8);
+    let mut chars = html.char_indices().peekable();
+    let lower = html.to_ascii_lowercase();
+    let mut skip_until: Option<&str> = None;
+    let mut in_tag = false;
+    while let Some((i, c)) = chars.next() {
+        if let Some(end) = skip_until {
+            if lower[i..].starts_with(end) {
+                skip_until = None;
+            }
+            continue;
+        }
+        if c == '<' {
+            if lower[i..].starts_with("<script") {
+                skip_until = Some("</script>");
+                continue;
+            }
+            if lower[i..].starts_with("<style") {
+                skip_until = Some("</style>");
+                continue;
+            }
+            in_tag = true;
+            continue;
+        }
+        if c == '>' {
+            if in_tag {
+                in_tag = false;
+                out.push(' ');
+            }
+            continue;
+        }
+        if !in_tag {
+            out.push(c);
+        }
+        let _ = chars.peek();
+    }
+    let mut collapsed = String::with_capacity(out.len());
+    let mut last_ws = true;
+    for c in out.chars() {
+        if c.is_whitespace() {
+            if !last_ws {
+                collapsed.push(' ');
+            }
+            last_ws = true;
+        } else {
+            collapsed.push(c);
+            last_ws = false;
+        }
+    }
+    collapsed
+}
+
+#[cfg(test)]
+mod html_text_tests {
+    use super::html_to_text;
+
+    #[test]
+    fn strips_tags_scripts_and_collapses_whitespace() {
+        let html = "<html><head><style>.a{color:red}</style><script>var x=1;</script></head>\
+                    <body><div class=\"view\">Sprint   #600</div><span>3 tickets</span></body></html>";
+        let t = html_to_text(html);
+        assert!(t.contains("Sprint #600"), "{t}");
+        assert!(t.contains("3 tickets"), "{t}");
+        assert!(!t.contains("color:red"), "{t}");
+        assert!(!t.contains("var x"), "{t}");
     }
 }

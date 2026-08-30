@@ -133,6 +133,8 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/attachment", &["get"]),
     route("/api/projects/:pid/audit", &["get"]),
     route("/api/projects/:pid/ba-analyze", &["post"]),
+    route("/api/projects/:pid/brakes", &["get"]),
+    route("/api/projects/:pid/brakes/:brake/hold", &["delete", "post"]),
     route("/api/projects/:pid/burn-mode", &["post"]),
     route("/api/projects/:pid/channels", &["get", "post"]),
     route("/api/projects/:pid/channels/:cid/invite", &["post"]),
@@ -153,6 +155,8 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/config", &["get", "put"]),
     route("/api/projects/:pid/context", &["get", "post"]),
     route("/api/projects/:pid/control/:action", &["post"]),
+    route("/api/projects/:pid/dependencies", &["get"]),
+    route("/api/projects/:pid/deps/scan", &["post"]),
     route("/api/projects/:pid/digest", &["post"]),
     route("/api/projects/:pid/discuss", &["post"]),
     route("/api/projects/:pid/doc-folders", &["get", "post"]),
@@ -181,8 +185,14 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/metrics/burndown", &["get"]),
     route("/api/projects/:pid/metrics/summary", &["get"]),
     route("/api/projects/:pid/metrics/trends", &["get"]),
+    route("/api/projects/:pid/milestones/projection", &["get"]),
     route("/api/projects/:pid/operators/:operator/:action", &["post"]),
     route("/api/projects/:pid/pr/:number/human", &["post"]),
+    route("/api/projects/:pid/preflight", &["get"]),
+    // Summary override (SUMMARY_OVERRIDES — this table must stay plain
+    // route(...) items for the CXA-B051 drift gate's parser): the go-live
+    // preflight answers in one object with per-item status for the config
+    // model allowlist, host_port, auth mode, docker+compose, publish-port.
     route("/api/projects/:pid/prs", &["get"]),
     route("/api/projects/:pid/prs/:num/:action", &["post"]),
     route("/api/projects/:pid/prs/:num/diff", &["get"]),
@@ -213,6 +223,7 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/ticket/:id/priority", &["post"]),
     route("/api/projects/:pid/ticket/:id/ready", &["post"]),
     route("/api/projects/:pid/ticket/:id/reject", &["post"]),
+    route("/api/projects/:pid/ticket/:id/reproduction-url", &["get"]),
     route("/api/projects/:pid/ticket/:id/send-back", &["post"]),
     route("/api/projects/:pid/ticket/:id/undo-approval", &["post"]),
     route("/api/projects/:pid/ticket/:id/unpark", &["post"]),
@@ -280,11 +291,60 @@ fn build_document() -> serde_json::Value {
     })
 }
 
+/// Summaries for paths whose intent the path alone cannot express (CXA-B047 /
+/// CXA-B051) — consulted by [`operation`] before falling back to
+/// [`autosummary`]. Kept apart from [`ROUTES`] so every entry stays a plain
+/// `route(...)` item: the CXA-B051 drift guard parses the table by that shape,
+/// and a multi-line struct literal would be invisible to it.
+const SUMMARY_OVERRIDES: &[(&str, &str)] = &[
+    (
+        "/api/projects/:pid/inbox",
+        // Verify cards carry the optional reproduce_url (CXA-F244): the live
+        // app URL for a fixed ticket awaiting a verdict, null when the
+        // project's deploy.host_port is not configured. repro_url (CXA-F246)
+        // is the per-ticket link recorded when that ticket's evidence was
+        // collected, null when none was.
+        "The caller's waiting-for-me queue: gate approvals, verify verdicts, cost holds, \
+         on-hold and exception tickets, questions. Verify items add an optional \
+         reproduce_url field — the live app URL for the fixed ticket, null when no \
+         deploy host_port is configured — and an optional repro_url field, the \
+         per-ticket link recorded at evidence-collection time",
+    ),
+    (
+        "/api/projects/:pid/preflight",
+        // The five go-live line items, named (CXA-F239).
+        "Go-live readiness preflight: engine/model allowlist per role, host_port assignment \
+         & collision state, auth mode (open vs provisioned), docker + compose availability, \
+         publish-port availability",
+    ),
+    (
+        "/api/projects/:pid/ticket/:id",
+        // The optional reproduce_url (CXA-F244) rides alongside the injected
+        // evidence: present on a fixed ticket awaiting verification, null
+        // when the project's deploy.host_port is not configured. repro_url
+        // (CXA-F246) is the per-ticket link recorded when that ticket's
+        // evidence was collected, null when none was.
+        "Full detail for one ticket: design specs, coverage matrix, DoD evidence, cost \
+         hold, attachments, blockers. A fixed ticket awaiting verification adds an \
+         optional reproduce_url field — the live app URL, null when no deploy \
+         host_port is configured — and an optional repro_url field, the per-ticket \
+         link recorded at evidence-collection time",
+    ),
+];
+
+fn summary_override(path: &str) -> Option<&'static str> {
+    SUMMARY_OVERRIDES
+        .iter()
+        .find(|(p, _)| *p == path)
+        .map(|(_, s)| *s)
+}
+
 /// Build one OpenAPI Operation object from a [`RouteSpec`] + HTTP verb.
 fn operation(spec: &RouteSpec, method: &str) -> serde_json::Value {
     let tag = spec.tag.map_or_else(|| autotag(spec.path), str::to_string);
     let summary = spec
         .summary
+        .or_else(|| summary_override(spec.path))
         .map_or_else(|| autosummary(spec.path), str::to_string);
     let security = security_for(spec.path);
     serde_json::json!({

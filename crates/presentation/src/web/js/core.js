@@ -70,7 +70,7 @@ const fmtK=n=>{n=Number(n)||0;return n>=1e9?(n/1e9).toFixed(1)+"B":n>=1e6?(n/1e6
 const AC={BA:"--blue","DEV-FEATURE":"--green","DEV-BUG":"--red",SA:"--purple",TEST:"--teal",DOCS:"--blue",PO:"--amber",SM:"--teal",PD:"--purple",USER:"--accent"};
 // Stable nicknames so each role reads as one consistent person, not a label.
 const AGENT_NICK={BA:"Bella",PO:"Pola",SM:"Sam",SA:"Aria","DEV-FEATURE":"Finn","DEV-BUG":"Bex",TEST:"Quinn",DOCS:"Dana",PD:"Piper"};
-const TITLES={"mg-spaces":["Spaces","every team space in the hub"],"mg-space":["Space","deep dive"],"mg-users":["Users","everyone across the hub"],"mg-usage":["Usage","who burns what"],"mg-audit":["Audit","every action across the hub"],home:["Home","your company · projects · your agents"],river:["Fleet river","every agent, every project — one live stream"],overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],inbox:["Inbox","everything waiting on YOU — approve · verify · answer"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Scrum","standups, sprint events & team threads"],docs:["Wiki","product & technical knowledge base"],codemap:["Code map","files · symbols · dependencies the agents navigate"],calendar:["Calendar","meetings · schedule"],terminal:["Terminal","real shell in the project codebase — admin only"],chat:["Chat","talk with your teammates"],review:["Review","open pull requests — approve & merge"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
+const TITLES={"mg-spaces":["Spaces","every team space in the hub"],"mg-space":["Space","deep dive"],"mg-users":["Users","everyone across the hub"],"mg-usage":["Usage","who burns what"],"mg-audit":["Audit","every action across the hub"],home:["Home","your company · projects · your agents"],river:["Fleet river","every agent, every project — one live stream"],overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],inbox:["Inbox","everything waiting on YOU — approve · verify · answer"],activity:["Transcripts & alerts","per-run transcripts · outbound alerts · audit export — this project"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Scrum","standups, sprint events & team threads"],docs:["Wiki","product & technical knowledge base"],codemap:["Code map","files · symbols · dependencies the agents navigate"],calendar:["Calendar","meetings · schedule"],terminal:["Terminal","real shell in the project codebase — admin only"],chat:["Chat","talk with your teammates"],review:["Review","open pull requests — approve & merge"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 const cvar=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||"#888";
 let STATE={}, CUR="overview", BF="all", SF="all", INIT_ACT=false, WORKTAB="board";
@@ -545,6 +545,7 @@ function renderSidebar(s){
   document.title="CoXAgent · "+(document.getElementById("proj-name").textContent||"");}
 function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overview")return;
   if(CUR==="overview"){
+    renderDriftAlerts(s);
     if(!(s.tickets||[]).length&&!(s.activity||[]).length){
       document.getElementById("kpis").innerHTML=`<div class="panel" style="grid-column:1/-1;text-align:center;padding:40px 20px">
         <i class="ti ti-rocket" style="font-size:34px;color:var(--accent2)"></i>
@@ -653,7 +654,10 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
     renderCycleScores(s);
     renderTeamsOnline();
     renderSessions();
-    if(ME&&ME.role==="admin")renderTeamPeople();
+    // Populate whenever the card is VISIBLE — applyRole shows .admin-only for
+    // admins AND open/local mode (no auth). Gating on role==="admin" alone left
+    // the card stuck on "loading…" forever in open mode.
+    if(!ME||!ME.auth||ME.role==="admin")renderTeamPeople();
   }else if(CUR==="board"){
     let feats=(s.tickets||[]).filter(t=>t.type!=="bug"),bugs=(s.tickets||[]).filter(t=>t.type==="bug");
     if(BF!=="all"){feats=feats.filter(t=>t.priority===BF);bugs=bugs.filter(t=>t.priority===BF);}

@@ -6,7 +6,7 @@
 <title>CoXAgent</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-<link href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.24.0/dist/tabler-icons.min.css" rel="stylesheet">
+<link href="/assets/tabler-icons.min.css" rel="stylesheet">
 <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body>
@@ -94,14 +94,13 @@
     </div>
     <nav class="nav" id="ws-nav">
       <a data-v="home" id="nav-home" onclick="nav('home')"><i class="ti ti-home"></i> Home</a>
-      <a data-v="river" onclick="nav('river')"><i class="ti ti-waves"></i> Fleet river</a>
+      <a data-v="river" onclick="nav('river')"><i class="ti ti-ripple"></i> Fleet river</a>
       <a data-v="overview" class="on" onclick="nav('overview')"><i class="ti ti-layout-dashboard"></i> Overview</a>
       <a data-v="team" onclick="nav('team')"><i class="ti ti-robot"></i> Agents</a>
       <a data-v="inbox" onclick="nav('inbox')"><i class="ti ti-inbox"></i> Inbox <span id="inbox-badge" style="display:none;margin-left:auto;background:var(--red);color:#fff;border-radius:9px;font-size:10px;font-weight:700;padding:1px 6px;line-height:14px">0</span></a>
       <a data-v="board" onclick="nav('board')"><i class="ti ti-columns"></i> Work</a>
       <a data-v="roadmap" onclick="nav('roadmap')"><i class="ti ti-timeline"></i> Roadmap</a>
       <a data-v="review" onclick="nav('review')"><i class="ti ti-git-pull-request"></i> Review</a>
-      <a data-v="activity" onclick="nav('activity')"><i class="ti ti-activity"></i> Activity</a>
       <a data-v="discuss" onclick="nav('discuss')"><i class="ti ti-messages"></i> Scrum</a>
       <a data-v="docs" onclick="nav('docs')"><i class="ti ti-book-2"></i> Wiki</a>
       <a data-v="codemap" onclick="nav('codemap')"><i class="ti ti-sitemap"></i> Code map</a>
@@ -197,6 +196,8 @@
       <div class="view on" id="view-overview">
         <div id="ov-drain"></div>
         <div id="ov-alerts"></div>
+        <div id="ov-drift"></div>
+        <div id="ov-preflight"></div>
         <div id="ov-goal"></div>
         <div class="kpis" id="kpis"></div>
         <div id="ov-health"></div>
@@ -407,7 +408,7 @@
             <div class="chatcompose">
               <input type="file" id="disc-file" multiple style="display:none" onchange="pickFiles('disc',this)">
               <button class="att-btn" onclick="document.getElementById('disc-file').click()" title="Attach files"><i class="ti ti-paperclip"></i></button>
-              <span id="disc-toolbar"></span><input id="disc-input" placeholder="Message the team…  (type / for commands · Enter to send)" oninput="slashMenu()" onkeydown="if(!imeEnter(event)&&event.key==='Enter')sendComment()">
+              <span id="disc-toolbar"></span><input id="disc-input" placeholder="Message the team…  (type / for commands · Enter to send)" oninput="slashMenu()" onkeydown="if(!imeEnter(event)&&event.key==='Enter')sendComment()" onpaste="pasteFiles('disc',event)">
               <button class="pri" onclick="sendComment()"><i class="ti ti-send"></i></button>
             </div>
           </div>
@@ -473,7 +474,7 @@
               <button class="att-btn" onmousedown="event.preventDefault()" onclick="chatWrap('**')" title="Bold (**text**)"><i class="ti ti-bold"></i></button>
               <button class="att-btn" onmousedown="event.preventDefault()" onclick="chatWrap('*')" title="Italic (*text*)"><i class="ti ti-italic"></i></button>
               <button class="att-btn" onmousedown="event.preventDefault()" onclick="chatWrap('\`')" title="Code (\`code\`)"><i class="ti ti-code"></i></button>
-              <input id="chat-input" placeholder="Message your team…  (Enter to send · @ to mention · **bold** *italic* \`code\`)" autocomplete="off" oninput="mentionOnInput(this);startTyping()" onkeydown="chatInputKey(event)" onblur="setTimeout(closeMention,150)">
+              <input id="chat-input" placeholder="Message your team…  (Enter to send · @ to mention · **bold** *italic* \`code\`)" autocomplete="off" oninput="mentionOnInput(this);startTyping()" onkeydown="chatInputKey(event)" onblur="setTimeout(closeMention,150)" onpaste="pasteFiles('chat',event)">
               <button class="pri" onclick="sendChat()"><i class="ti ti-send"></i></button>
             </div>
           </div>
@@ -787,7 +788,9 @@
 <script src="/assets/js/mcp.js"></script>
 <script src="/assets/js/docs.js"></script>
 <script src="/assets/js/inbox.js"></script>
+<script src="/assets/js/drift.js"></script>
 <script src="/assets/js/alerts.js"></script>
+<script src="/assets/js/river.js"></script>
 <script src="/assets/js/shell.js"></script>
 </body>
 </html>

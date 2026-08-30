@@ -55,7 +55,15 @@
       },
       "parent_id": null,
       "depends_on": [],
-      "acceptance_criteria": []
+      "acceptance_criteria": [
+        "Child channels nest under their parent"
+      ],
+      "test_cases": [
+        {
+          "description": "Child channels nest under their parent",
+          "status": "pending"
+        }
+      ]
     },
     {
       "id": "F248",
@@ -104,6 +112,67 @@
           "description": "Autosave survives a slow network",
           "status": "pending",
           "sources": []
+        }
+      ]
+    },
+    {
+      "id": "B002",
+      "type": "bug",
+      "title": "Search drops the final query while typing fast",
+      "description": "Debounced search loses the last keystroke, so freshly typed terms return stale results.",
+      "priority": "high",
+      "complexity": "medium",
+      "status": "fixed",
+      "has_ui": true,
+      "design": {
+        "technical": null,
+        "ux": null
+      },
+      "parent_id": null,
+      "depends_on": [],
+      "acceptance_criteria": [
+        "Search returns results for the full typed term",
+        "Rapid typing never drops the final query",
+        "Clearing the box resets the result list"
+      ],
+      "test_cases": [
+        {
+          "description": "Search returns results for the full typed term",
+          "status": "passed",
+          "evidence": {
+            "note": "typed the full term, results match",
+            "at": "2026-08-22T10:05:00Z"
+          },
+          "history": [
+            { "kind": "verdict", "status": "passed", "note": "round 1 pass", "at": "2026-08-20T10:00:00Z" },
+            { "kind": "verdict", "status": "passed", "note": "round 2 pass", "at": "2026-08-21T10:00:00Z" },
+            { "kind": "verdict", "status": "passed", "note": "typed the full term, results match", "at": "2026-08-22T10:05:00Z" },
+            { "kind": "evidence_refresh", "status": "passed", "note": "screenshot attached, verdict unchanged", "at": "2026-08-22T10:07:00Z" }
+          ]
+        },
+        {
+          "description": "Rapid typing never drops the final query",
+          "status": "passed",
+          "evidence": {
+            "note": "stable after the debounce fix",
+            "at": "2026-08-22T10:06:00Z"
+          },
+          "history": [
+            { "kind": "verdict", "status": "passed", "note": "round 1 pass", "at": "2026-08-20T10:00:00Z" },
+            { "kind": "verdict", "status": "failed", "note": "final keystroke lost at speed", "at": "2026-08-21T10:01:00Z" },
+            { "kind": "verdict", "status": "passed", "note": "stable after the debounce fix", "at": "2026-08-22T10:06:00Z" }
+          ]
+        },
+        {
+          "description": "Clearing the box resets the result list",
+          "status": "failed",
+          "evidence": {
+            "note": "stale rows stayed visible",
+            "at": "2026-08-20T10:02:00Z"
+          },
+          "history": [
+            { "kind": "verdict", "status": "failed", "note": "stale rows stayed visible", "at": "2026-08-20T10:02:00Z" }
+          ]
         }
       ]
     }
@@ -199,5 +268,21 @@
   "budget_warned_lifetime": false,
   "budget_warned_daily": false,
   "deploy_index": 0,
-  "in_rollback": false
+  "in_rollback": false,
+  "governance_interventions": [
+    {
+      "kind": "verify_send_back",
+      "ticket": "B002",
+      "area": "bug",
+      "by": "reviewer",
+      "at": "2026-08-20T18:00:00Z"
+    },
+    {
+      "kind": "verify_send_back",
+      "ticket": "B002",
+      "area": "bug",
+      "by": "reviewer",
+      "at": "2026-08-21T18:00:00Z"
+    }
+  ]
 }

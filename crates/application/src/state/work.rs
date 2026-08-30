@@ -314,6 +314,17 @@ pub struct Evidence {
     /// Screenshot: repo-relative path. API: capped request/response text.
     pub detail: String,
     pub at: String,
+    /// Which DoD gate decision(s) this item supported (`"ready"` | `"verify"`,
+    /// CXA-F241). Empty on records written before gate attribution existed —
+    /// the forensics view renders those as provenance unknown, never guesses
+    /// a link. serde-defaulted so every persisted record loads unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_gates: Vec<String>,
+    /// Who attached the item (the authenticated principal, or the agent role
+    /// label — `"TEST"`). Empty = unattributed, shown as such. serde-defaulted
+    /// for the same reason as `source_gates`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub actor: String,
 }
 
 /// Orchestrator self-tuning state, derived from the evals each day.
@@ -352,6 +363,73 @@ impl Tuning {
             && self.burn_until_bugs_le.is_none()
             && self.last_eval_day.is_empty()
     }
+}
+
+/// A bounded operator freeze/override riding on one self-tuning brake
+/// (CXA-F238). Keyed by brake field name (`bugs_first` / `skip_ba`) in
+/// [`ProjectState::tuning_overrides`]; one hold per brake — setting a hold
+/// replaces the previous one.
+///
+/// Unlike `Tuning::burn_mode` (a global, unbounded human decision), a hold is
+/// per-brake, always carries an expiry bound, and never touches
+/// `decide_tuning`'s hysteresis math: it composes AFTER the autonomous
+/// decision each pass, so expiry hands control straight back to the loop.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrakeHold {
+    /// `Some(v)` pins the brake to `v` (override); `None` freezes it at the
+    /// value it had when the hold was set (hold) — autonomous recomputation
+    /// suspended, not reversed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_value: Option<bool>,
+    /// Why the operator intervened — the human-readable half of the audit.
+    #[serde(default)]
+    pub reason: String,
+    /// Who set it (username, or `operator` in open mode).
+    #[serde(default)]
+    pub actor: String,
+    /// RFC3339 moment the hold was set.
+    #[serde(default)]
+    pub at: String,
+    /// RFC3339 bound past which the hold no longer applies. Always present:
+    /// an unparseable/absent bound is treated as expired (fail closed toward
+    /// autonomy), so governance can never be stranded by a corrupt field.
+    #[serde(default)]
+    pub expires_at: String,
+}
+
+/// One append-only brake-cockpit audit entry (CXA-F238): a single brake
+/// field's value change with who caused it and why. `from`/`to` are the
+/// field-wise values, so the trail reads as a direction (`false→true`) rather
+/// than prose. Bounded — see [`ProjectState::record_tuning_change`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TuningAuditEntry {
+    /// RFC3339 moment the change landed.
+    #[serde(default)]
+    pub at: String,
+    /// Who caused it: `"SM"` for the autonomous pass, the username for an
+    /// operator action.
+    #[serde(default)]
+    pub actor: String,
+    /// Which pass wrote it: `self_tune` (daily autonomous), `hold` (operator
+    /// set a hold), `clear` (operator released one), `expiry` (bound elapsed).
+    #[serde(default)]
+    pub source: String,
+    /// Brake field name (`bugs_first` / `skip_ba`).
+    #[serde(default)]
+    pub brake: String,
+    /// Value before the change.
+    #[serde(default)]
+    pub from: bool,
+    /// Value after the change.
+    #[serde(default)]
+    pub to: bool,
+    /// Why — the same wording the SM announcement uses for autonomous flips,
+    /// the operator's own reason for holds.
+    #[serde(default)]
+    pub reason: String,
+    /// The hold's expiry window, when this entry concerns a hold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
 }
 
 #[cfg(test)]

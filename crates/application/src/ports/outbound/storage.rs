@@ -20,4 +20,12 @@ pub trait StoragePort: Send + Sync {
     /// # Errors
     /// [`PortError`] when the object is missing or the read fails.
     async fn get(&self, key: &str) -> Result<Vec<u8>, PortError>;
+
+    /// Whether the blob exists under `key` — the evidence forensics view's
+    /// missing-artifact check (CXA-F241). Default probes via [`Self::get`]
+    /// and discards the bytes; adapters with a cheap existence check
+    /// override it.
+    async fn exists(&self, key: &str) -> bool {
+        self.get(key).await.is_ok()
+    }
 }

@@ -221,13 +221,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
                     // Record that fact as QA provenance so burn-down tickets can
                     // prove each cleared bug shipped with a passing regression
                     // test fixed at source (CXA-F022 AC#2/#3) — never just masked
-                    // by symptom/workaround probes.
-                    state.add_evidence(
+                    // by symptom/workaround probes. Linked to the verify gate it
+                    // supported, attributed to the TEST role (CXA-F241).
+                    state.add_evidence_for(
                         &id.to_string(),
                         "test",
                         "REGRESSION TEST",
                         "PASS on current master; regression test fails on pre-fix \
                          code and reproduces cleanly; root cause fixed at source.",
+                        &["verify"],
+                        "TEST",
                     );
                     // Goal-line outcome ledger (CXA-F228): this verification is
                     // a delivered outcome — freeze the provenance now.
@@ -281,14 +284,22 @@ pub fn shipped_block(state: &crate::state::ProjectState) -> String {
 /// agent TEST path's record in [`RunTestUseCase`]. Reaching `Verified` means a
 /// clean reproduction was confirmed and the root cause fixed at source; the
 /// burn-down (CXA-F032 AC#2) may only count bugs that carry their own record,
-/// so EVERY path that renders the verdict must write one.
-pub fn record_human_verify_evidence(state: &mut crate::state::ProjectState, ticket: &str) {
-    state.add_evidence(
+/// so EVERY path that renders the verdict must write one. `actor` is the
+/// principal who rendered the verdict, so the forensics view names who
+/// decided (CXA-F241); the record links to the verify gate it supported.
+pub fn record_human_verify_evidence(
+    state: &mut crate::state::ProjectState,
+    ticket: &str,
+    actor: &str,
+) {
+    state.add_evidence_for(
         ticket,
         "test",
         "REGRESSION TEST",
         "PASS on current master, verdict rendered by human QA; regression test \
          fails on pre-fix code and reproduces cleanly; root cause fixed at source.",
+        &["verify"],
+        actor,
     );
 }
 
@@ -382,7 +393,7 @@ mod tests {
         // marker plus clean reproduction and root cause — so a person-verified
         // bug counts as burned down exactly like an agent-verified one.
         let mut s = ProjectState::default();
-        super::record_human_verify_evidence(&mut s, "BUG-2281");
+        super::record_human_verify_evidence(&mut s, "BUG-2281", "rev");
         let evs = s.ticket_evidence.get("BUG-2281").expect("recorded");
         let e = evs
             .iter()

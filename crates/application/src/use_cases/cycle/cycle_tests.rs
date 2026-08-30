@@ -10,8 +10,8 @@ use coxagent_domain::Status;
 use std::sync::Mutex;
 
 #[derive(Default)]
-struct MemStore {
-    state: Mutex<ProjectState>,
+pub(super) struct MemStore {
+    pub(super) state: Mutex<ProjectState>,
 }
 #[async_trait::async_trait]
 impl StateStorePort for MemStore {
@@ -27,7 +27,7 @@ impl StateStorePort for MemStore {
 
 /// Engine that answers each role by its system prompt: BA proposes one
 /// feature, TEST reports no bugs, DEV succeeds silently.
-struct RoleAwareEngine;
+pub(super) struct RoleAwareEngine;
 #[async_trait::async_trait]
 impl AgentEnginePort for RoleAwareEngine {
     fn id(&self) -> &'static str {
@@ -724,6 +724,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// of silently blending in.
 struct ScriptedDeploy {
     script: Mutex<VecDeque<Result<crate::ports::outbound::DeployReport, PortError>>>,
+    /// Answers served by `health()` probes, one per probe — empty means
+    /// healthy, the trait default this double always reported.
+    health_script: Mutex<VecDeque<bool>>,
     deploy_calls: AtomicUsize,
 }
 impl ScriptedDeploy {
@@ -736,11 +739,18 @@ impl ScriptedDeploy {
     fn scripted(script: Vec<Result<crate::ports::outbound::DeployReport, PortError>>) -> Self {
         Self {
             script: Mutex::new(script.into_iter().collect()),
+            health_script: Mutex::new(VecDeque::new()),
             deploy_calls: AtomicUsize::new(0),
         }
     }
     fn calls(&self) -> usize {
         self.deploy_calls.load(Ordering::SeqCst)
+    }
+    /// Script the answers `health()` probes serve (one per probe, in order);
+    /// probes past the script report healthy, like the unscripted double.
+    fn with_health_script(mut self, answers: Vec<bool>) -> Self {
+        self.health_script = Mutex::new(answers.into_iter().collect());
+        self
     }
 }
 #[async_trait::async_trait]
@@ -766,6 +776,10 @@ impl crate::ports::outbound::DeployPort for ScriptedDeploy {
             deployed: true,
             summary: "tests ok".to_owned(),
         })
+    }
+    async fn health(&self, _port: u16) -> Result<bool, PortError> {
+        let next = self.health_script.lock().expect("lock").pop_front();
+        Ok(next.unwrap_or(true))
     }
 }
 
@@ -1329,6 +1343,376 @@ async fn a_deploy_spawn_error_rolls_back_to_the_last_known_good_deploy() {
             .any(|e| e.kind.to_lowercase().contains("rollback")
                 || e.message.to_lowercase().contains("rollback")),
         "a rollback notification must be sent for an errored deploy too: {events:?}"
+    );
+}
+
+// --- CXA-F240: live-health auto-rollback after merge -------------------
+//
+// The deploy that shipped the code passed CI and its own post-deploy health
+// gate, but the RUNNING stack later goes unhealthy. The ops monitor already
+// files a bug; when the operator opts in (`deploy.live_health_auto_rollback`)
+// it must also revert to last-known-good — after N consecutive unhealthy
+// probes, never on one flaky check — and record old/new digests + reason.
+
+/// The precondition for every live-health scenario: a deploy is LIVE
+/// (history + a recorded healthy deploy carrying its sha) and a known-good
+/// rollback target exists from a prior deploy+tests pass. Drives
+/// `ops_monitor` directly — the unit under test — rather than a full cycle,
+/// whose dev phases are covered by the rollback tests above.
+fn live_health_uc(
+    cfg: Config,
+    migration_paths: Vec<String>,
+    deploy: &Arc<ScriptedDeploy>,
+    notifier: &Arc<SpyNotifier>,
+) -> (
+    Arc<MemStore>,
+    Arc<FakeGit>,
+    RunCycleUseCase<MemStore, RoleAwareEngine>,
+) {
+    let mut initial = ProjectState::default();
+    initial.history.push(crate::state::DeployRecord {
+        version: coxagent_domain::SemVer::new(1, 0, 0),
+        ticket: coxagent_domain::TicketId::new("CXA-1").expect("valid ticket id"),
+        title: "first ship".to_owned(),
+        at: crate::state::now_rfc3339(),
+    });
+    initial.deploy_index = 1;
+    initial.deploy = Some(crate::state::DeployStatus {
+        at: crate::state::now_rfc3339(),
+        ok: true,
+        summary: "live deploy".to_owned(),
+        commit_sha: Some(HEAD_SHA.to_owned()),
+        health_check: None,
+    });
+    initial.last_good_deploy = Some(crate::state::KnownGoodDeploy {
+        sha: GOOD_SHA.to_owned(),
+        at: crate::state::now_rfc3339(),
+        deploy_index: 1,
+        summary: "prior deploy + tests passed".to_owned(),
+    });
+    let store = Arc::new(MemStore {
+        state: Mutex::new(initial),
+    });
+    let git = Arc::new(FakeGit {
+        migration_paths,
+        ..FakeGit::default()
+    });
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(RoleAwareEngine),
+        cfg,
+        PathBuf::from("/tmp/proj"),
+        "goal".to_owned(),
+    )
+    .with_deploy(Arc::clone(deploy) as Arc<dyn crate::ports::outbound::DeployPort>)
+    .with_git(Arc::clone(&git) as Arc<dyn GitPort>)
+    .with_notifier(Arc::clone(notifier) as Arc<dyn crate::ports::outbound::NotifierPort>);
+    (store, git, uc)
+}
+
+fn live_health_cfg(fail_checks: u32, live_rollback: bool) -> Config {
+    let mut cfg = Config::default();
+    cfg.deploy.host_port = Some(8101);
+    cfg.deploy.live_health_auto_rollback = live_rollback;
+    cfg.deploy.live_health_fail_checks = fail_checks;
+    cfg
+}
+
+fn ops_down_tickets(state: &ProjectState) -> usize {
+    state
+        .tickets
+        .iter()
+        .filter(|t| t.title().starts_with("App is DOWN"))
+        .count()
+}
+
+/// AC1 (CXA-F240): the live deployment stops answering on its published
+/// port; after N=2 consecutive unhealthy probes (inside the rollback window)
+/// the stack is automatically reverted to last-known-good, and the streak
+/// resets once the port answers again. One dead probe is not enough.
+#[tokio::test]
+async fn live_app_down_for_n_consecutive_checks_rolls_back_to_last_known_good() {
+    let deploy = Arc::new(
+        ScriptedDeploy::new(vec![crate::ports::outbound::DeployReport {
+            success: true,
+            deployed: true,
+            summary: "rollback redeploy ok".to_owned(),
+        }])
+        .with_health_script(vec![false, false]),
+    );
+    let notifier = Arc::new(SpyNotifier::default());
+    let (store, git, uc) = live_health_uc(live_health_cfg(2, true), Vec::new(), &deploy, &notifier);
+
+    // Probe 1: down, but one strike — the bug is filed, the revert is not.
+    uc.ops_monitor(&mut CycleReport::default()).await;
+    let state = store.load().await.expect("load");
+    assert!(state.ops_down && state.ops_down_streak == 1);
+    assert_eq!(
+        ops_down_tickets(&state),
+        1,
+        "the outage still files its high-priority bug on the first dead probe"
+    );
+    assert!(
+        git.worktree_adds.lock().expect("lock").is_empty(),
+        "one unhealthy probe is not N consecutive checks — no revert yet"
+    );
+    assert!(
+        state.last_rollback.is_none(),
+        "no revert recorded after a single failed probe: {:?}",
+        state.last_rollback
+    );
+
+    // Probe 2: N consecutive checks inside the window → revert fires.
+    uc.ops_monitor(&mut CycleReport::default()).await;
+    let state = store.load().await.expect("load");
+    {
+        let adds = git.worktree_adds.lock().expect("lock");
+        assert_eq!(
+            adds.len(),
+            1,
+            "exactly one revert, into the dedicated rollback worktree: {adds:?}"
+        );
+        assert_ne!(
+            adds[0].0,
+            PathBuf::from("/tmp/proj"),
+            "the revert must never touch the live work_dir (never during active work)"
+        );
+        assert_eq!(
+            adds[0].1, GOOD_SHA,
+            "the revert checks out the known-good sha"
+        );
+    }
+    assert_eq!(
+        deploy.calls(),
+        1,
+        "the revert redeploys the known-good version exactly once"
+    );
+    let rb = state.last_rollback.as_ref().expect("rollback recorded");
+    assert_eq!(rb.reason, "live health failed", "trigger reason recorded");
+    assert_eq!(rb.to_sha, GOOD_SHA);
+    assert!(rb.ok, "the revert succeeded: {rb:?}");
+
+    // Audit (CXA-F240): old vs new image digests + trigger reason, durably.
+    let incident = state
+        .incidents
+        .iter()
+        .find(|i| i.reason == "live health failed")
+        .expect("audit incident entry recorded");
+    assert_eq!(incident.failed_sha, HEAD_SHA, "old digest recorded");
+    assert_eq!(incident.to_sha, GOOD_SHA, "new digest recorded");
+    assert!(
+        state.activity.iter().any(|a| a.agent == "ROLLBACK"),
+        "the revert writes its activity-log audit entry: {:?}",
+        state.activity
+    );
+
+    // Probe 3: the revert redeploy bound the port — recovery, no re-revert.
+    uc.ops_monitor(&mut CycleReport::default()).await;
+    let state = store.load().await.expect("load");
+    assert!(
+        !state.ops_down && state.ops_down_streak == 0,
+        "a healthy probe resets the outage state: ops_down={}, streak={}",
+        state.ops_down,
+        state.ops_down_streak
+    );
+    assert_eq!(
+        deploy.calls(),
+        1,
+        "a recovered monitor must not revert again"
+    );
+    let events = notifier.events.lock().expect("lock");
+    assert!(
+        events.iter().any(|e| e.kind == "rollback_ok"),
+        "the revert is announced distinctly: {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| e.kind == "ops_up"),
+        "the later recovery is announced too: {events:?}"
+    );
+}
+
+/// Edge case (CXA-F240): live-health rollback is opt-in — with the flag off
+/// (the default) a dead live stack still gets its bug and alert, but the
+/// monitor never touches the running images. An existing project's behavior
+/// never changes until an operator turns this on.
+#[tokio::test]
+async fn live_health_rollback_never_fires_without_the_opt_in() {
+    let deploy =
+        Arc::new(ScriptedDeploy::new(Vec::new()).with_health_script(vec![false, false, false]));
+    let notifier = Arc::new(SpyNotifier::default());
+    let (store, git, uc) =
+        live_health_uc(live_health_cfg(3, false), Vec::new(), &deploy, &notifier);
+
+    for _ in 0..3 {
+        uc.ops_monitor(&mut CycleReport::default()).await;
+    }
+
+    let state = store.load().await.expect("load");
+    assert!(state.ops_down && state.ops_down_streak == 3);
+    assert_eq!(
+        ops_down_tickets(&state),
+        1,
+        "the outage still becomes tracked work exactly once (deduped)"
+    );
+    assert_eq!(
+        deploy.calls(),
+        0,
+        "no automatic revert without the opt-in flag"
+    );
+    assert!(state.last_rollback.is_none());
+    assert!(git.worktree_adds.lock().expect("lock").is_empty());
+}
+
+/// Edge case (CXA-F240): when a migration shipped since the known-good
+/// capture, rolling the app code back alone would run it against a schema
+/// ahead of it — no automatic revert fires; the monitor records a blocked
+/// rollback and surfaces an operator-facing request instead.
+#[tokio::test]
+async fn a_migration_since_capture_blocks_the_live_health_revert_and_asks_the_operator() {
+    let deploy = Arc::new(ScriptedDeploy::new(Vec::new()).with_health_script(vec![false]));
+    let notifier = Arc::new(SpyNotifier::default());
+    let (store, _git, uc) = live_health_uc(
+        live_health_cfg(1, true),
+        vec!["migrations".to_owned()],
+        &deploy,
+        &notifier,
+    );
+
+    uc.ops_monitor(&mut CycleReport::default()).await;
+
+    let state = store.load().await.expect("load");
+    assert_eq!(
+        deploy.calls(),
+        0,
+        "no automatic revert when it would be unsafe"
+    );
+    let rb = state
+        .last_rollback
+        .as_ref()
+        .expect("blocked rollback recorded");
+    assert!(rb.migration_blocked && !rb.ok, "{rb:?}");
+    assert_eq!(rb.reason, "live health failed");
+    let events = notifier.events.lock().expect("lock");
+    assert!(
+        events.iter().any(|e| e.kind == "rollback_blocked"),
+        "the operator-facing request for explicit handling: {events:?}"
+    );
+}
+
+/// The two rollback opt-ins are independent (CXA-F240): turning on the
+/// live-health trigger must not silently enable the deploy-failure trigger —
+/// each fires only through its own config flag.
+#[tokio::test]
+async fn the_live_health_opt_in_does_not_enable_the_deploy_failure_rollback() {
+    let deploy = Arc::new(ScriptedDeploy::new(vec![
+        crate::ports::outbound::DeployReport {
+            success: true,
+            deployed: true,
+            summary: "rollback redeploy ok".to_owned(),
+        },
+    ]));
+    let notifier = Arc::new(SpyNotifier::default());
+    let (store, git, uc) = live_health_uc(live_health_cfg(1, true), Vec::new(), &deploy, &notifier);
+
+    // Deploy-failure entry: its own flag (`auto_rollback`) is OFF — inert,
+    // even though the live-health flag is on.
+    uc.attempt_rollback(
+        "deploy failed",
+        Some(HEAD_SHA.to_owned()),
+        &mut CycleReport::default(),
+    )
+    .await;
+    assert_eq!(
+        deploy.calls(),
+        0,
+        "auto_rollback off → the deploy-failure entry must not revert"
+    );
+    assert!(git.worktree_adds.lock().expect("lock").is_empty());
+    assert!(
+        store.load().await.expect("load").last_rollback.is_none(),
+        "no rollback recorded through the disabled entry"
+    );
+
+    // Live-health entry: its flag is ON — the same state reverts.
+    uc.attempt_live_health_rollback(Some(HEAD_SHA.to_owned()), &mut CycleReport::default())
+        .await;
+    assert_eq!(
+        deploy.calls(),
+        1,
+        "live_health_auto_rollback on → the revert fires"
+    );
+    let state = store.load().await.expect("load");
+    assert!(
+        state
+            .last_rollback
+            .as_ref()
+            .is_some_and(|r| r.ok && r.reason == "live health failed"),
+        "{:?}",
+        state.last_rollback
+    );
+}
+
+/// The live-health revert respects the allowed window (CXA-F240): a
+/// known-good target older than `max_rollback_age_secs` is too stale — the
+/// revert is skipped and recorded as blocked, never attempted blind.
+#[tokio::test]
+async fn a_live_health_revert_never_targets_a_stale_known_good() {
+    let deploy = Arc::new(ScriptedDeploy::new(Vec::new()).with_health_script(vec![false]));
+    let notifier = Arc::new(SpyNotifier::default());
+    let (store, git, uc) = live_health_uc(live_health_cfg(1, true), Vec::new(), &deploy, &notifier);
+    // Age the known-good capture far past `max_rollback_age_secs`.
+    store.state.lock().expect("lock").last_good_deploy = Some(crate::state::KnownGoodDeploy {
+        sha: GOOD_SHA.to_owned(),
+        at: "2020-01-01T00:00:00Z".to_owned(),
+        deploy_index: 1,
+        summary: "ancient but recorded".to_owned(),
+    });
+
+    uc.ops_monitor(&mut CycleReport::default()).await;
+
+    let state = store.load().await.expect("load");
+    assert_eq!(
+        deploy.calls(),
+        0,
+        "a stale target must never be reverted to"
+    );
+    assert!(git.worktree_adds.lock().expect("lock").is_empty());
+    let rb = state
+        .last_rollback
+        .as_ref()
+        .expect("skipped rollback recorded");
+    assert!(rb.stale && !rb.ok, "{rb:?}");
+    assert_eq!(rb.reason, "live health failed");
+}
+
+/// AC2 (CXA-F240): the known-good capture runs with every successful
+/// post-deploy published-port health check — a deploy that answers on its
+/// port and passes tests becomes the rollback candidate with no manual
+/// action, so a later live-health outage always has something to revert to.
+#[tokio::test]
+async fn every_healthy_deploy_becomes_the_known_good_rollback_target() {
+    let deploy = Arc::new(ScriptedDeploy::new(vec![
+        crate::ports::outbound::DeployReport {
+            success: true,
+            deployed: true,
+            summary: "docker compose up -d --build succeeded".to_owned(),
+        },
+    ]));
+    let notifier = Arc::new(SpyNotifier::default());
+    // No prior good seeded: this cycle's healthy deploy must create it.
+    let (store, _git, uc) = rollback_uc(false, &deploy, &notifier);
+
+    Box::pin(uc.run_cycle(1)).await;
+
+    let state = store.load().await.expect("load");
+    assert!(
+        state
+            .last_good_deploy
+            .as_ref()
+            .is_some_and(|g| g.sha == HEAD_SHA),
+        "a deploy that answered on its published port and passed tests must be \
+         captured as the rollback candidate: {:?}",
+        state.last_good_deploy
     );
 }
 

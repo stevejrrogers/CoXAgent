@@ -64,11 +64,16 @@ async function renderInbox(){
   const all=data.items||[];
   // Held-for-digest questions (CXA-F176) wait on me, but deliberately do not
   // count as fresh interrupts — they surface in one batch at the window end.
-  const mineN=all.filter(i=>i.can_act&&!i.deferred).length;
+  // On-hold tickets render as ONE collapsed card, so they must COUNT as one:
+  // a badge saying 191 over an inbox showing 6 cards reads as a bug (and was
+  // reported as one). Parked work is a single standing decision, not N.
+  const held=all.filter(i=>i.kind==="on_hold");
+  const rest=all.filter(i=>i.kind!=="on_hold");
+  const mineN=rest.filter(i=>i.can_act&&!i.deferred).length+(held.some(i=>i.can_act)?1:0);
   inboxBadge(mineN);
   const flt=inboxFilter();
   const chip=(v,lbl,n)=>`<button class="ibx-chip${flt===v?' on':''}" onclick="setInboxFilter('${v}')">${lbl}${n!=null?` <span class="ibx-n">${n}</span>`:""}</button>`;
-  const bar=`<div class="ibx-filters">${chip("","All",all.length)}${chip("mine","Assigned to me",mineN)}</div>`;
+  const bar=`<div class="ibx-filters">${chip("","All",rest.length+(held.length?1:0))}${chip("mine","Assigned to me",mineN)}</div>`;
   const items=flt==="mine"?all.filter(i=>i.can_act):all;
   if(!all.length){
     el.innerHTML='<div class="empty" style="padding:48px 20px;text-align:center">🎉 Nothing waits on you — the team is fully unblocked.</div>';
@@ -82,10 +87,10 @@ async function renderInbox(){
   // hundred exhausted tickets at once, and a card per ticket buries the items
   // that actually need a decision today. The board's status filter is the
   // right place to browse them.
-  const held=items.filter(i=>i.kind==="on_hold");
-  if(held.length){
-    const sample=held.slice(0,3).map(h=>esc(h.ticket)).join(", ");
-    html+=inboxCard("on_hold",`${held.length} ticket${held.length===1?"":"s"} parked · e.g. ${sample}`,
+  const heldCards=items.filter(i=>i.kind==="on_hold");
+  if(heldCards.length){
+    const sample=heldCards.slice(0,3).map(h=>esc(h.ticket)).join(", ");
+    html+=inboxCard("on_hold",`${heldCards.length} ticket${heldCards.length===1?"":"s"} parked · e.g. ${sample}`,
       "Blocked on the outside world — resume each from its ticket when unblocked",
       ibtn("View on board",`SF='on_hold';nav('board');setWorkTab('board')`,1));
   }
@@ -111,10 +116,21 @@ async function renderInbox(){
            ibtn("Approve spend",`inboxAct('${esc(it.ticket)}','approve-cost')`,1)
           :noRight(it.role)),it.ticket);
     }else if(it.kind==="verify"){
+      // Static evidence says the fix worked; the live instance (CXA-F242-C)
+      // lets the reviewer actually SEE it run. The card carries the URL only
+      // when the project's deploy port resolves — otherwise no control at all,
+      // never a dead button. The control is a real anchor (CXA-F247): the
+      // open-in-new-tab contract lives on the element (target/rel), and the
+      // href only ever receives an https?:// URL — the whitelist runs BEFORE
+      // any markup, so a javascript:/data: scheme or a protocol-relative
+      // //host can never ride the click. Send back cites the same URL so the
+      // refusal reason can reference what was actually seen.
+      const liveUrl=(it.reproduce_url&&/^https?:\/\//i.test(it.reproduce_url))?it.reproduce_url:"";
       html+=inboxCard("verify",esc(it.ticket),esc(it.title),
+        (liveUrl?`<a class="tk-btn ibx-btn" href="${escAttr(liveUrl)}" target="_blank" rel="noopener noreferrer">Open live preview</a>`:"")+
         ibtn("Evidence",`showTicket('${esc(it.ticket)}')`)+
         (act
-          ?ibtn("Send back",`inboxSendBack('${esc(it.ticket)}')`)+
+          ?ibtn("Send back",`inboxSendBack('${esc(it.ticket)}','${escAttr(liveUrl)}')`)+
            ibtn("Verified",`inboxAct('${esc(it.ticket)}','verify')`,1)
           :noRight(it.role)),it.ticket);
     }else if(it.kind==="on_hold"){
@@ -184,10 +200,13 @@ async function inboxAct(id,action){
 }
 
 // The verify gate's other answer: the fix is not demonstrated. The reason
-// goes on the ticket, which is what steers the next attempt.
-async function inboxSendBack(id){
+// goes on the ticket, which is what steers the next attempt. `url` is the
+// live instance the reviewer was shown (CXA-F247) — cited in the dialog so
+// the refusal reason can reference what was actually seen.
+async function inboxSendBack(id,url){
   const reason=await coxModal({title:"Send back "+id,
-    message:"Why can't this be accepted yet? (the reason goes on the ticket — the agent reads it and redoes the work accordingly)",
+    message:"Why can't this be accepted yet? (the reason goes on the ticket — the agent reads it and redoes the work accordingly)"+
+      (url?" Live instance reviewed: "+url:""),
     input:{placeholder:"e.g. no evidence for acceptance criteria #2"},confirmText:"Send back"});
   if(reason===null||reason===undefined)return;
   try{
