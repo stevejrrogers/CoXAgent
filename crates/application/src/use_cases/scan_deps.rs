@@ -254,6 +254,14 @@ mod tests {
             t.description().contains("Cargo.lock"),
             "affected lockfile carried on the ticket"
         );
+        // CXA-B116: a filing pass brings its umbrella with it — the epic the
+        // remediation links to must be a real ticket, not a dangling id.
+        assert!(
+            s.tickets
+                .iter()
+                .any(|t| t.id().as_str() == crate::deps_scan::MASTER_EPIC_ID),
+            "filing pass must create the master epic in state"
+        );
     }
 
     #[tokio::test]
@@ -316,6 +324,16 @@ mod tests {
         );
         assert!(out.findings.is_empty(), "nothing flagged without a registry");
         assert!(out.filed.is_empty());
+
+        // CXA-B116: `filed:[]` must mean nothing was written — the zero-finding
+        // pass used to sneak the DEP-AUDIT-001 master epic into persisted state.
+        let s = store.load().await.expect("load");
+        assert!(
+            !s.tickets
+                .iter()
+                .any(|t| t.id().as_str() == crate::deps_scan::MASTER_EPIC_ID),
+            "empty scan must not file the master epic"
+        );
     }
 
     #[tokio::test]

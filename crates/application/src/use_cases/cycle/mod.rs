@@ -23,9 +23,9 @@ mod backlog;
 mod ceremonies;
 mod debt_sweep;
 mod escalation;
+mod pr_truth;
 mod preflight;
 mod scrum;
-mod pr_truth;
 mod ship_truth;
 mod sm_watch;
 mod wiring;
@@ -828,8 +828,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // work is merging — creative roles are paused below.
             recovery = self.run_queue_recovery(self.open_pr_count().await).await;
 
-            // Ops/SRE: ping the deployed app; file a bug + alert on an outage.
-            self.ops_monitor().await;
+            // Ops/SRE: ping the deployed app; file a bug + alert on an outage,
+            // and (CXA-F240, opt-in) revert to last-known-good when the LIVE
+            // deployment stays unhealthy — not only when the deploy that
+            // shipped it fails in the same cycle.
+            self.ops_monitor(&mut report).await;
 
             // Daily standup: every few cycles the SM runs the room — but only when
             // the team actually did something since last time. A standup with no

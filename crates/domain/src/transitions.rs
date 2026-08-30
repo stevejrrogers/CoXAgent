@@ -12,7 +12,6 @@ pub fn transition_allowed(ticket_type: TicketType, from: Status, to: Status) -> 
     use Status::{
         Documented, Done, Fixed, InProgress, OnHold, Open, Pending, Ready, Rejected, Verified,
     };
-
     // A no-op "transition" grants nothing and must be idempotent: DOCS
     // re-marking a ticket Documented after a retried run is bookkeeping, not
     // corruption, and rejecting it wedged the ticket (Documented -> Documented
@@ -79,7 +78,6 @@ pub fn can_transition(actor: Role, from: Status, to: Status) -> bool {
     if from == to {
         return true;
     }
-
     if actor == Role::System {
         return true;
     }
@@ -145,7 +143,11 @@ mod tests {
         // A retried DOCS run re-marking Documented (or any repeated write of
         // the current status) is bookkeeping, not corruption.
         for t in [TicketType::Feature, TicketType::Bug, TicketType::Chore] {
-            assert!(transition_allowed(t, Status::Documented, Status::Documented));
+            assert!(transition_allowed(
+                t,
+                Status::Documented,
+                Status::Documented
+            ));
             assert!(transition_allowed(t, Status::Open, Status::Open));
         }
         assert!(can_transition(

@@ -513,10 +513,18 @@ fn propose_one(state: &mut ProjectState, finding: &ScanFinding) -> Option<Ticket
     Some(created_id)
 }
 
-/// Run one full remediation pass over findings: ensure the master epic exists once,
-/// then file each unique proposal under it (idempotent — duplicates are skipped).
+/// Run one full remediation pass over findings: with at least one finding,
+/// ensure the master epic exists once, then file each unique proposal under it
+/// (idempotent — duplicates are skipped).
+///
+/// An empty pass writes nothing (CXA-B116): the umbrella epic must not
+/// materialise just because a scan ran — the endpoint reports `filed:[]` and
+/// the persisted state has to agree with that contract.
 #[must_use]
 pub fn apply_findings(state: &mut ProjectState, findings: &[ScanFinding]) -> Vec<TicketId> {
+    if findings.is_empty() {
+        return Vec::new();
+    }
     ensure_master_epic(state);
     findings
         .iter()
@@ -626,6 +634,47 @@ version = \"0.9.0\"
         assert_eq!(apply_findings(&mut state, &findings).len(), 1);
         // A second pass must not duplicate an already-filed proposal.
         assert!(apply_findings(&mut state, &findings).is_empty());
+    }
+
+    #[test]
+    fn an_empty_pass_writes_nothing_including_no_master_epic() {
+        // Regression for CXA-B116: a zero-finding scan used to sneak the
+        // DEP-AUDIT-001 umbrella Chore into state while the endpoint reported
+        // filed:[]. The epic exists only once there is something to file.
+        let mut state = ProjectState::default();
+        assert!(apply_findings(&mut state, &[]).is_empty());
+        assert!(
+            state.tickets.is_empty(),
+            "empty pass must not create the master epic: {:?}",
+            state
+                .tickets
+                .iter()
+                .map(|t| t.id().as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_filed_finding_creates_the_master_epic_in_state() {
+        // The other branch of the CXA-B116 conditional: with a finding, the
+        // umbrella is not just linked via depends_on — the epic ticket itself
+        // must exist in state, or every remediation dangles off a ghost id.
+        let locks = vec![("Cargo.lock".to_string(), CARGO_SAMPLE.to_string())];
+        let mut registry = BTreeMap::new();
+        registry.insert("alpha".to_string(), "2.0.0".to_string());
+        let findings = scan_locks(&locks, &registry, &BTreeMap::new());
+        assert!(!findings.is_empty());
+
+        let mut state = ProjectState::default();
+        assert_eq!(apply_findings(&mut state, &findings).len(), 1);
+
+        let epic_id = TicketId::new(MASTER_EPIC_ID.to_string()).expect("epic id");
+        let epic = state.ticket(&epic_id).expect("master epic created");
+        assert_eq!(epic.ticket_type(), TicketType::Chore);
+        // Idempotent: a re-run must not duplicate the umbrella either.
+        let tickets_before = state.tickets.len();
+        assert!(apply_findings(&mut state, &findings).is_empty());
+        assert_eq!(state.tickets.len(), tickets_before);
     }
 
     #[test]

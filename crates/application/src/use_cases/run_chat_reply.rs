@@ -203,8 +203,8 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
              ACTION: test: <ticket-id>          — QA tests the deployed ticket, files bugs\n\
              ACTION: standup                    — run a standup\n\
              ACTION: discuss: <topic>           — kick off a team discussion (PO+SA weigh in, SM decides)\n\
-             ACTION: feature: <title> :: <desc> :: <low|medium|high> — add a feature to the backlog at that priority\n\
-             ACTION: bug: <title> :: <desc> :: <low|medium|high>     — file a bug at that priority\n\
+             ACTION: feature: <title> :: <desc> :: <low|medium|high> [:: sprint] — add a feature (append `:: sprint` to also commit it into the RUNNING sprint)\n\
+             ACTION: bug: <title> :: <desc> :: <low|medium|high> [:: sprint]     — file a bug (`:: sprint` commits it into the running sprint)\n\
              ACTION: priority: <ticket-id> :: <low|medium|high>      — reprioritise an existing ticket\n\
              ACTION: implement: <ticket-id>    — code the ticket NOW (DEV runs, writes code, tests)\n\
              ACTION: deploy                     — build & run the app now (docker compose up)\n\
@@ -224,7 +224,11 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
              A short affirmative anywhere in the thread — \"ok\", \"uhm\", \"ừ\", \"đi\", \"làm đi\", \
              \"ưu tiên fix\", \"yes\", \"go\" — IS the confirmation of whatever you last proposed. \
              Act on it. Asking the same question again after the human already said yes is the \
-             worst thing you can do here: they answered, and the work still has not started.{}",
+             worst thing you can do here: they answered, and the work still has not started.\n\
+             The ACTION line is your ONLY hand on the board. Nothing you merely SAY happens: if \
+             you claim you filed, created, or queued something and this reply does not end with \
+             the matching ACTION line, you have lied to the team. \"tạo ticket\", \"thêm vào \
+             sprint\", \"file it\" in ANY language means: end THIS reply with the ACTION line.{}",
             self.lang.reply_directive()
         );
         let Some(raw) = self.run(persona, &task).await else {
@@ -409,7 +413,10 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             // TEST PASS record, so the human verdict writes the same provenance
             // the agent TEST path has written since F022.
             if to == coxagent_domain::Status::Verified {
-                super::run_test::record_human_verify_evidence(s, &tid.to_string());
+                // The chat path knows the verdict's authority (Role::User) but
+                // no username — "USER" is the identity this path records
+                // everywhere else (the activity feed), never an invented name.
+                super::run_test::record_human_verify_evidence(s, &tid.to_string(), "USER");
                 // Goal-line outcome ledger (CXA-F228): a human verdict is a
                 // delivered outcome like the agent path's.
                 s.record_verified_outcome(&tid.to_string());
@@ -922,14 +929,11 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
     /// the channel, so a chat request turns into tracked, actionable work.
     async fn file_ticket(&self, kind: coxagent_domain::TicketType, payload: &str, author: &str) {
         use coxagent_domain::ticket::{Complexity, Priority};
-        // `title :: desc :: priority` — desc and priority optional.
-        let mut parts = payload.splitn(3, "::").map(str::trim);
-        let title = parts.next().unwrap_or("").trim();
-        let desc = parts.next().unwrap_or("");
-        let prio = parts.next().and_then(parse_priority);
+        let (title, desc, prio, to_sprint) = parse_ticket_payload(payload);
         if title.is_empty() {
             return;
         }
+        let (title, desc) = (title.as_str(), desc.as_str());
         let priority = prio.unwrap_or(if kind == coxagent_domain::TicketType::Bug {
             Priority::High
         } else {
@@ -991,13 +995,30 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             })
             .await
         {
+            let committed = if to_sprint {
+                crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                    crate::sprint::commit_ticket(s, &id);
+                    s.log_activity("SM", "committed into the running sprint", Some(id.to_string()));
+                    Ok(())
+                })
+                .await
+                .is_ok()
+            } else {
+                false
+            };
             let kind_str = if kind == coxagent_domain::TicketType::Bug {
                 "bug"
             } else {
                 "tính năng"
             };
             let msg = if self.lang.is_vi() {
-                format!("🎫 Đã tạo {id} ({kind_str}): {title}. Team sẽ đưa vào quy trình.")
+                if committed {
+                    format!("🎫 Đã tạo {id} ({kind_str}): {title} — và đã đưa vào sprint đang chạy.")
+                } else {
+                    format!("🎫 Đã tạo {id} ({kind_str}): {title}. Team sẽ đưa vào quy trình.")
+                }
+            } else if committed {
+                format!("🎫 Filed {id}: {title} — committed into the running sprint.")
             } else {
                 format!("🎫 Filed {id}: {title}. The team will pick it up.")
             };
@@ -1143,7 +1164,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             return Ok(());
         }
         let synth = format!(
-            "{context}\nA human teammate wrote in the team channel:\n\"{msg}\"\n\nThree teammates              answered from different angles:\n{takes}\nYou are the SM. Write ONE team reply for the              human: open with the team's recommendation in one sentence, then the strongest points              from each teammate WITH attribution (\"PO thinks… SA warns… \"), keep real              disagreements visible instead of averaging them away, and close with the next concrete              step. Under 220 words.\n\nYou may also append EXACTLY ONE final line with an action,              same rules as always:\nACTION: feature: <title> :: <desc> :: <low|medium|high>\n             ACTION: bug: <title> :: <desc> :: <low|medium|high>\nACTION: discuss: <topic>\n             ACTION: none{}",
+            "{context}\nA human teammate wrote in the team channel:\n\"{msg}\"\n\nThree teammates              answered from different angles:\n{takes}\nYou are the SM. Write ONE team reply for the              human: open with the team's recommendation in one sentence, then the strongest points              from each teammate WITH attribution (\"PO thinks… SA warns… \"), keep real              disagreements visible instead of averaging them away, and close with the next concrete              step. Under 220 words.\n\nYou may also append EXACTLY ONE final line with an action,              same rules as always:\nACTION: feature: <title> :: <desc> :: <low|medium|high> [:: sprint]\n             ACTION: bug: <title> :: <desc> :: <low|medium|high> [:: sprint]\nACTION: discuss: <topic>\n             ACTION: none\nThe ACTION line is your ONLY hand on the board — claiming you filed              something without it is a lie. A request to create/queue work in ANY language              (\"tạo ticket\", \"thêm vào sprint\") means: end with the ACTION line; append              `:: sprint` when they want it in the running sprint.{}",
             self.lang.reply_directive()
         );
         let Some(raw) = self.run("TEAM", &synth).await else {
@@ -1440,6 +1461,31 @@ fn strip_kw<'a>(a: &'a str, kw: &str) -> Option<&'a str> {
 }
 
 /// Split a trailing `ACTION: <directive>` line off the reply body.
+/// Parse a `feature:`/`bug:` action payload: `title :: desc :: priority
+/// [:: sprint]` — everything after the title optional. A trailing `sprint`
+/// token means "commit the new ticket into the RUNNING sprint"; without it
+/// the ticket waits in the backlog for rollover.
+fn parse_ticket_payload(
+    payload: &str,
+) -> (String, String, Option<coxagent_domain::ticket::Priority>, bool) {
+    let mut parts = payload.splitn(4, "::").map(str::trim);
+    let title = parts.next().unwrap_or("").trim();
+    let desc = parts.next().unwrap_or("");
+    let mut prio_tok = parts.next().unwrap_or("");
+    let mut tail = parts.next().unwrap_or("");
+    if tail.is_empty() && prio_tok.eq_ignore_ascii_case("sprint") {
+        // `title :: desc :: sprint` — priority omitted entirely.
+        tail = prio_tok;
+        prio_tok = "";
+    }
+    (
+        title.to_owned(),
+        desc.to_owned(),
+        parse_priority(prio_tok),
+        tail.eq_ignore_ascii_case("sprint"),
+    )
+}
+
 fn split_action(raw: &str) -> (String, String) {
     for (i, line) in raw.lines().enumerate() {
         let t = line.trim();
@@ -1471,6 +1517,17 @@ mod panel_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ticket_payload_parses_the_sprint_suffix_in_every_position() {
+        use coxagent_domain::ticket::Priority;
+        let (t, d, p, sp) = parse_ticket_payload("Paste images :: add listener :: high :: sprint");
+        assert_eq!((t.as_str(), d.as_str(), p, sp), ("Paste images", "add listener", Some(Priority::High), true));
+        let (_, _, p, sp) = parse_ticket_payload("Paste images :: add listener :: sprint");
+        assert_eq!((p, sp), (None, true));
+        let (_, _, p, sp) = parse_ticket_payload("Paste images :: add listener :: low");
+        assert_eq!((p, sp), (Some(Priority::Low), false));
+    }
     use crate::ports::outbound::{AgentOutcome, AgentRequest, DeployReport};
     use crate::state::ProjectState;
     use crate::PortError;

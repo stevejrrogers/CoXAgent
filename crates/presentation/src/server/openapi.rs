@@ -222,6 +222,7 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/ticket/:id/priority", &["post"]),
     route("/api/projects/:pid/ticket/:id/ready", &["post"]),
     route("/api/projects/:pid/ticket/:id/reject", &["post"]),
+    route("/api/projects/:pid/ticket/:id/reproduction-url", &["get"]),
     route("/api/projects/:pid/ticket/:id/send-back", &["post"]),
     route("/api/projects/:pid/ticket/:id/undo-approval", &["post"]),
     route("/api/projects/:pid/ticket/:id/unpark", &["post"]),
@@ -294,13 +295,35 @@ fn build_document() -> serde_json::Value {
 /// [`autosummary`]. Kept apart from [`ROUTES`] so every entry stays a plain
 /// `route(...)` item: the CXA-B051 drift guard parses the table by that shape,
 /// and a multi-line struct literal would be invisible to it.
-const SUMMARY_OVERRIDES: &[(&str, &str)] = &[(
-    "/api/projects/:pid/preflight",
-    // The five go-live line items, named (CXA-F239).
-    "Go-live readiness preflight: engine/model allowlist per role, host_port assignment \
-     & collision state, auth mode (open vs provisioned), docker + compose availability, \
-     publish-port availability",
-)];
+const SUMMARY_OVERRIDES: &[(&str, &str)] = &[
+    (
+        "/api/projects/:pid/inbox",
+        // Verify cards carry the optional reproduce_url (CXA-F244): the live
+        // app URL for a fixed ticket awaiting a verdict, null when the
+        // project's deploy.host_port is not configured.
+        "The caller's waiting-for-me queue: gate approvals, verify verdicts, cost holds, \
+         on-hold and exception tickets, questions. Verify items add an optional \
+         reproduce_url field — the live app URL for the fixed ticket, null when no \
+         deploy host_port is configured",
+    ),
+    (
+        "/api/projects/:pid/preflight",
+        // The five go-live line items, named (CXA-F239).
+        "Go-live readiness preflight: engine/model allowlist per role, host_port assignment \
+         & collision state, auth mode (open vs provisioned), docker + compose availability, \
+         publish-port availability",
+    ),
+    (
+        "/api/projects/:pid/ticket/:id",
+        // The optional reproduce_url (CXA-F244) rides alongside the injected
+        // evidence: present on a fixed ticket awaiting verification, null
+        // when the project's deploy.host_port is not configured.
+        "Full detail for one ticket: design specs, coverage matrix, DoD evidence, cost \
+         hold, attachments, blockers. A fixed ticket awaiting verification adds an \
+         optional reproduce_url field — the live app URL, null when no deploy \
+         host_port is configured",
+    ),
+];
 
 fn summary_override(path: &str) -> Option<&'static str> {
     SUMMARY_OVERRIDES
