@@ -16,7 +16,7 @@
 
 use super::RunCycleUseCase;
 use crate::ports::outbound::{AgentEnginePort, StateStorePort};
-use coxagent_domain::{Priority, Status};
+use coxagent_domain::{Priority, SemVer, Status};
 
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Leader-only, date-gated (`daily_jobs["po_daily"]`). Best-effort: any
@@ -30,11 +30,31 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return;
         }
         // ---- 1. Roadmap reconciliation (pure summary; revising targets
-        // stays a PO/human decision, this surfaces the drift). ----
+        // stays a PO/human decision, this surfaces the drift). A milestone
+        // whose target version the product has already passed while still
+        // "in progress" is exactly the drift the user kept spotting by hand
+        // (targets v2.23/v2.26 open at v2.29) — call it out explicitly.
+        let released = match &self.files {
+            Some(files) => files
+                .read(&self.work_dir.join("Cargo.toml"))
+                .await
+                .as_deref()
+                .and_then(super::parse_cargo_version),
+            None => None,
+        };
+        let passed = |target: &str| -> bool {
+            match (&released, SemVer::parse(target)) {
+                (Some(rel), Ok(t)) => SemVer::parse(rel)
+                    .is_ok_and(|r| r >= t),
+                _ => false,
+            }
+        };
         let mut lines: Vec<String> = Vec::new();
         for m in &state.milestones {
             let status = if m.goal_complete {
                 "✅ complete"
+            } else if passed(&m.target_version) {
+                "⚠️ target version already shipped — mark complete or move the target"
             } else {
                 "🚧 in progress"
             };
