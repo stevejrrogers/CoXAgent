@@ -49,7 +49,8 @@ struct Finding {
 /// Parse NUL-separated `git ls-files -s -z` records of the shape
 /// `<mode> <object> <stage>\t<path>`. A record git could not have produced is
 /// skipped rather than guessed at; the real-tree test fails loudly on an empty
-/// parse, so wholesale format drift cannot read as a clean index.
+/// parse, and the sentinel check below guards the listing's completeness, so
+/// wholesale format drift cannot read as a clean index.
 fn parse_entries(raw: &str) -> Vec<Entry> {
     raw.split('\0')
         .filter(|record| !record.is_empty())
@@ -244,7 +245,6 @@ fn parse_skips_empty_and_garbage_records() {
 }
 
 // ---------------------------------------------------------------------------
-// The guard, run against the bug it was written for — proves it fails when it
 // should, and does not fire on the shapes the repo legitimately tracks.
 // ---------------------------------------------------------------------------
 
@@ -301,7 +301,8 @@ fn ordinary_files_are_left_alone() {
 }
 
 /// `path =` keys under any submodule section all map. Flat matching is
-/// deliberately loose: under-reporting a declared submodule fails the gate
+/// deliberately loose: a stray `path =` key outside a submodule section would
+/// still map its path, and under-reporting a declared submodule fails the gate
 /// closed on a legitimate entry — it can never silently pass a gitlink.
 #[test]
 fn gitmodules_parsing_reads_every_declared_path() {
