@@ -1749,6 +1749,18 @@ async function uploadOne(file,surface){const fd=new FormData();fd.append("file",
 function pickFiles(surface,input){handleFiles(surface,[...input.files]);input.value="";}
 function dropFiles(surface,ev){ev.preventDefault();ev.currentTarget.classList.remove("dropping");
   handleFiles(surface,[...(ev.dataTransfer.files||[])]);}
+// Ctrl+V into a composer is a third input into the same attachment pipeline as
+// the attach button and drag-drop. A clipboard with no file item (plain text,
+// IME composition, @mentions) returns WITHOUT preventDefault so native
+// insertion is untouched; files win over text when both are present (same rule
+// as drop). Nameless clipboard screenshots are renamed pre-upload: the media
+// server derives the serving Content-Type from the stored filename's extension
+// (mime_of), so an empty name would come back as octet-stream and never render.
+function pasteFiles(surface,ev){const files=(ev.clipboardData&&ev.clipboardData.files)||[];
+  if(!files.length)return;
+  ev.preventDefault();
+  handleFiles(surface,[...files].map(f=>f.name?f:
+    new File([f],"pasted-image."+((f.type.split("/")[1]||"bin").split("+")[0]),{type:f.type})));}
 async function handleFiles(surface,files){
   for(const f of files){
     if(f.size>25*1024*1024){toasty(f.name+" too large (max 25MB)","err");continue;}
