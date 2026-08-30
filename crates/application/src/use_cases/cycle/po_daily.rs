@@ -79,7 +79,23 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             })
             .map(|t| t.id().to_string())
             .collect();
-        let msg = po_daily_message(&lines, &stuck_high);
+        // Stale backlog: pending/open a week or more (only tickets that carry
+        // a filing timestamp — pre-field tickets have unknown age and are
+        // never guessed at). Report-only; demotion stays a PO/human call.
+        let week_ago = crate::state::now_rfc3339();
+        let week_ago = week_ago.get(..10).unwrap_or("").to_owned();
+        let stale_ids: Vec<String> = state
+            .tickets
+            .iter()
+            .filter(|t| {
+                matches!(t.status(), Status::Pending | Status::Open)
+                    && t.created_at().is_some_and(|c| {
+                        days_between(c.get(..10).unwrap_or(""), &week_ago) >= 7
+                    })
+            })
+            .map(|t| t.id().to_string())
+            .collect();
+        let msg = po_daily_message(&lines, &stuck_high, &stale_ids);
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
             s.daily_jobs.insert("po_daily".to_owned(), today.clone());
             s.post_comment("PO", &msg, None);
@@ -90,7 +106,29 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
 }
 
 /// The Scrum post. Pure so the wording is testable.
-fn po_daily_message(milestones: &[String], stuck_high: &[String]) -> String {
+/// Whole days from `a` to `b` (`YYYY-MM-DD` each); 0 when either fails to
+/// parse. Civil-day arithmetic keeps the cycle free of a datetime crate.
+fn days_between(a: &str, b: &str) -> i64 {
+    fn civil(s: &str) -> Option<i64> {
+        let mut it = s.splitn(3, '-');
+        let (y, m, d): (i64, i64, i64) = (
+            it.next()?.parse().ok()?,
+            it.next()?.parse().ok()?,
+            it.next()?.parse().ok()?,
+        );
+        let y2 = if m <= 2 { y - 1 } else { y };
+        let era = if y2 >= 0 { y2 } else { y2 - 399 } / 400;
+        let yoe = y2 - era * 400;
+        let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+        Some(era * 146_097 + (yoe * 365 + yoe / 4 - yoe / 100 + doy) - 719_468)
+    }
+    match (civil(a), civil(b)) {
+        (Some(x), Some(y)) => y - x,
+        _ => 0,
+    }
+}
+
+fn po_daily_message(milestones: &[String], stuck_high: &[String], stale: &[String]) -> String {
     let mut msg = String::from("📋 PO daily — roadmap & backlog:\n");
     if milestones.is_empty() {
         msg.push_str("Roadmap: no milestones defined yet.\n");
@@ -109,7 +147,15 @@ fn po_daily_message(milestones: &[String], stuck_high: &[String]) -> String {
             stuck_high.join(", ")
         );
     }
-    if stuck_high.is_empty() {
+    if !stale.is_empty() {
+        use std::fmt::Write as _;
+        let _ = writeln!(
+            msg,
+            "🕰 In the backlog for 7+ days: {} — still worth building?",
+            stale.join(", ")
+        );
+    }
+    if stuck_high.is_empty() && stale.is_empty() {
         msg.push_str("Backlog: clean — nothing stale, no stranded High tickets.\n");
     }
     msg
@@ -124,10 +170,20 @@ mod tests {
         let msg = po_daily_message(
             &["• M1 (target v1.0) — 🚧 in progress".into()],
             &["CXA-F002".into()],
+            &["CXA-F003".into()],
         );
         assert!(msg.contains("CXA-F002"));
+        assert!(msg.contains("CXA-F003"));
         assert!(msg.contains("M1"));
-        let clean = po_daily_message(&[], &[]);
+        let clean = po_daily_message(&[], &[], &[]);
         assert!(clean.contains("clean"));
+    }
+
+    #[test]
+    fn days_between_handles_month_and_year_edges() {
+        use super::days_between;
+        assert_eq!(days_between("2026-08-24", "2026-08-31"), 7);
+        assert_eq!(days_between("2025-12-26", "2026-01-02"), 7);
+        assert_eq!(days_between("bogus", "2026-01-02"), 0);
     }
 }
