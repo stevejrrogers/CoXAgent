@@ -97,29 +97,10 @@ pub(super) async fn ticket_detail_ep(
                             obj.insert("cost_hold".into(), serde_json::json!(est));
                         }
                         if let Some(ev) = state.ticket_evidence.get(&id) {
-                            // Evidence forensics (CXA-F241): each item travels with
-                            // its gate link + actor (serialized on the record), and
-                            // screenshots carry the adapter's artifact-existence
-                            // verdict so the view can show 'missing artifact'
-                            // instead of a broken image or invented content.
-                            let mut items = Vec::with_capacity(ev.len());
-                            for e in ev {
-                                let mut v = serde_json::to_value(e).unwrap_or_default();
-                                if e.kind == "screenshot" {
-                                    let present =
-                                        artifacts.get(&e.detail).copied().unwrap_or(false);
-                                    if let Some(o) = v.as_object_mut() {
-                                        o.insert(
-                                            "artifact".into(),
-                                            serde_json::json!(if present { "ok" } else {
-                                                "missing"
-                                            }),
-                                        );
-                                    }
-                                }
-                                items.push(v);
-                            }
-                            obj.insert("evidence".into(), items.into());
+                            obj.insert(
+                                "evidence".into(),
+                                evidence_items_with_artifacts(ev, &artifacts).into(),
+                            );
                         }
                         // Live reproduction link (CXA-F244): offered exactly when
                         // the ticket awaits a human verdict (see
@@ -197,6 +178,32 @@ pub(super) async fn ticket_detail_ep(
         }
         Err(e) => internal_error(&e.to_string()),
     }
+}
+
+/// Evidence forensics (CXA-F241): each item travels with its gate link +
+/// actor (serialized on the record), and screenshots carry the adapter's
+/// artifact-existence verdict so the view can show 'missing artifact'
+/// instead of a broken image or invented content. Pure over the pre-resolved
+/// artifact verdicts — the storage IO happened in `screenshot_artifacts`.
+fn evidence_items_with_artifacts(
+    evidence: &[coxagent_application::state::Evidence],
+    artifacts: &std::collections::BTreeMap<String, bool>,
+) -> Vec<serde_json::Value> {
+    let mut items = Vec::with_capacity(evidence.len());
+    for e in evidence {
+        let mut v = serde_json::to_value(e).unwrap_or_default();
+        if e.kind == "screenshot" {
+            let present = artifacts.get(&e.detail).copied().unwrap_or(false);
+            if let Some(o) = v.as_object_mut() {
+                o.insert(
+                    "artifact".into(),
+                    serde_json::json!(if present { "ok" } else { "missing" }),
+                );
+            }
+        }
+        items.push(v);
+    }
+    items
 }
 
 /// Existence verdicts for a ticket's screenshot artifacts, keyed by the

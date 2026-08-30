@@ -197,6 +197,10 @@ fn screenshot_evidence() -> Evidence {
         label: "fixed login flow renders".to_owned(),
         detail: "evidence/login-fixed.png".to_owned(),
         at: NOW.to_owned(),
+        // CXA-F241 provenance fields: this fixture models a pre-attribution
+        // record — empty serializes identically on the wire (serde-skipped).
+        source_gates: Vec::new(),
+        actor: String::new(),
     }
 }
 
