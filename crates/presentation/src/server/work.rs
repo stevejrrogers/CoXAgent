@@ -92,6 +92,32 @@ pub(super) async fn ticket_detail_ep(
                             serde_json::to_value(atts).unwrap_or_default(),
                         );
                     }
+                    // Dependency radar (CXA-F237): why this ticket is not
+                    // running — direct blockers with their LIVE statuses
+                    // (AC1), and every depends_on id absent from the project
+                    // state surfaced as unknown, never treated as satisfied
+                    // (AC3). Pure derivation over the same loaded snapshot.
+                    obj.insert(
+                        "blocked_by".into(),
+                        serde_json::to_value(coxagent_application::dependency_radar::blocked_by(
+                            &state,
+                            t.id(),
+                        ))
+                        .unwrap_or_default(),
+                    );
+                    let unknown_pairs =
+                        coxagent_application::dependency_radar::unknown_dependencies(&state);
+                    let unknown: Vec<&coxagent_domain::TicketId> = unknown_pairs
+                        .iter()
+                        .filter(|(dep, _)| dep == t.id())
+                        .map(|(_, missing)| missing)
+                        .collect();
+                    if !unknown.is_empty() {
+                        obj.insert(
+                            "unknown_dependencies".into(),
+                            serde_json::to_value(unknown).unwrap_or_default(),
+                        );
+                    }
                 }
                 Json(v).into_response()
             }),

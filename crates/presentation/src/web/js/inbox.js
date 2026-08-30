@@ -64,11 +64,16 @@ async function renderInbox(){
   const all=data.items||[];
   // Held-for-digest questions (CXA-F176) wait on me, but deliberately do not
   // count as fresh interrupts — they surface in one batch at the window end.
-  const mineN=all.filter(i=>i.can_act&&!i.deferred).length;
+  // On-hold tickets render as ONE collapsed card, so they must COUNT as one:
+  // a badge saying 191 over an inbox showing 6 cards reads as a bug (and was
+  // reported as one). Parked work is a single standing decision, not N.
+  const held=all.filter(i=>i.kind==="on_hold");
+  const rest=all.filter(i=>i.kind!=="on_hold");
+  const mineN=rest.filter(i=>i.can_act&&!i.deferred).length+(held.some(i=>i.can_act)?1:0);
   inboxBadge(mineN);
   const flt=inboxFilter();
   const chip=(v,lbl,n)=>`<button class="ibx-chip${flt===v?' on':''}" onclick="setInboxFilter('${v}')">${lbl}${n!=null?` <span class="ibx-n">${n}</span>`:""}</button>`;
-  const bar=`<div class="ibx-filters">${chip("","All",all.length)}${chip("mine","Assigned to me",mineN)}</div>`;
+  const bar=`<div class="ibx-filters">${chip("","All",rest.length+(held.length?1:0))}${chip("mine","Assigned to me",mineN)}</div>`;
   const items=flt==="mine"?all.filter(i=>i.can_act):all;
   if(!all.length){
     el.innerHTML='<div class="empty" style="padding:48px 20px;text-align:center">🎉 Nothing waits on you — the team is fully unblocked.</div>';
@@ -82,10 +87,10 @@ async function renderInbox(){
   // hundred exhausted tickets at once, and a card per ticket buries the items
   // that actually need a decision today. The board's status filter is the
   // right place to browse them.
-  const held=items.filter(i=>i.kind==="on_hold");
-  if(held.length){
-    const sample=held.slice(0,3).map(h=>esc(h.ticket)).join(", ");
-    html+=inboxCard("on_hold",`${held.length} ticket${held.length===1?"":"s"} parked · e.g. ${sample}`,
+  const heldCards=items.filter(i=>i.kind==="on_hold");
+  if(heldCards.length){
+    const sample=heldCards.slice(0,3).map(h=>esc(h.ticket)).join(", ");
+    html+=inboxCard("on_hold",`${heldCards.length} ticket${heldCards.length===1?"":"s"} parked · e.g. ${sample}`,
       "Blocked on the outside world — resume each from its ticket when unblocked",
       ibtn("View on board",`SF='on_hold';nav('board');setWorkTab('board')`,1));
   }

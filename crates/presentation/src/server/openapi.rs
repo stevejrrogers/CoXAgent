@@ -133,6 +133,8 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/attachment", &["get"]),
     route("/api/projects/:pid/audit", &["get"]),
     route("/api/projects/:pid/ba-analyze", &["post"]),
+    route("/api/projects/:pid/brakes", &["get"]),
+    route("/api/projects/:pid/brakes/:brake/hold", &["delete", "post"]),
     route("/api/projects/:pid/burn-mode", &["post"]),
     route("/api/projects/:pid/channels", &["get", "post"]),
     route("/api/projects/:pid/channels/:cid/invite", &["post"]),
@@ -153,6 +155,8 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/config", &["get", "put"]),
     route("/api/projects/:pid/context", &["get", "post"]),
     route("/api/projects/:pid/control/:action", &["post"]),
+    route("/api/projects/:pid/dependencies", &["get"]),
+    route("/api/projects/:pid/deps/scan", &["post"]),
     route("/api/projects/:pid/digest", &["post"]),
     route("/api/projects/:pid/discuss", &["post"]),
     route("/api/projects/:pid/doc-folders", &["get", "post"]),
@@ -183,6 +187,11 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/metrics/trends", &["get"]),
     route("/api/projects/:pid/operators/:operator/:action", &["post"]),
     route("/api/projects/:pid/pr/:number/human", &["post"]),
+    route("/api/projects/:pid/preflight", &["get"]),
+    // Summary override (SUMMARY_OVERRIDES — this table must stay plain
+    // route(...) items for the CXA-B051 drift gate's parser): the go-live
+    // preflight answers in one object with per-item status for the config
+    // model allowlist, host_port, auth mode, docker+compose, publish-port.
     route("/api/projects/:pid/prs", &["get"]),
     route("/api/projects/:pid/prs/:num/:action", &["post"]),
     route("/api/projects/:pid/prs/:num/diff", &["get"]),
@@ -280,11 +289,32 @@ fn build_document() -> serde_json::Value {
     })
 }
 
+/// Summaries for paths whose intent the path alone cannot express (CXA-B047 /
+/// CXA-B051) — consulted by [`operation`] before falling back to
+/// [`autosummary`]. Kept apart from [`ROUTES`] so every entry stays a plain
+/// `route(...)` item: the CXA-B051 drift guard parses the table by that shape,
+/// and a multi-line struct literal would be invisible to it.
+const SUMMARY_OVERRIDES: &[(&str, &str)] = &[(
+    "/api/projects/:pid/preflight",
+    // The five go-live line items, named (CXA-F239).
+    "Go-live readiness preflight: engine/model allowlist per role, host_port assignment \
+     & collision state, auth mode (open vs provisioned), docker + compose availability, \
+     publish-port availability",
+)];
+
+fn summary_override(path: &str) -> Option<&'static str> {
+    SUMMARY_OVERRIDES
+        .iter()
+        .find(|(p, _)| *p == path)
+        .map(|(_, s)| *s)
+}
+
 /// Build one OpenAPI Operation object from a [`RouteSpec`] + HTTP verb.
 fn operation(spec: &RouteSpec, method: &str) -> serde_json::Value {
     let tag = spec.tag.map_or_else(|| autotag(spec.path), str::to_string);
     let summary = spec
         .summary
+        .or_else(|| summary_override(spec.path))
         .map_or_else(|| autosummary(spec.path), str::to_string);
     let security = security_for(spec.path);
     serde_json::json!({

@@ -362,6 +362,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 }
             }
             if self.store.claim_ticket(&cand, &worker, &now).await? {
+                // Announce the START in the activity feed: it only ever logged
+                // completions, so two DEVs grinding in parallel were invisible
+                // in Fleet river until the first one finished — an operator
+                // watching the live stream saw an idle team doing work.
+                let role_label = self.role_name().to_owned();
+                let cid = cand.to_string();
+                let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                    s.log_activity(&role_label, "started implementing", Some(cid.clone()));
+                    Ok(())
+                })
+                .await;
                 chosen = Some(cand);
                 break;
             }

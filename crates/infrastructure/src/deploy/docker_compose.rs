@@ -3,6 +3,7 @@
 //! compose file, so non-dockerised projects don't error the cycle.
 
 use async_trait::async_trait;
+use coxagent_application::ports::outbound::deploy::COMPOSE_FILES;
 use coxagent_application::ports::outbound::{DeployPort, DeployReport};
 use coxagent_application::PortError;
 use std::path::Path;
@@ -13,12 +14,6 @@ use tokio::process::Command;
 // that shared policy for why port-eviction must never touch the live hub.
 use super::reclaimable::{reclaimable_compose_project, reclaimable_raw_container};
 
-const COMPOSE_FILES: &[&str] = &[
-    "docker-compose.yml",
-    "docker-compose.yaml",
-    "compose.yml",
-    "compose.yaml",
-];
 const DEPLOY_TIMEOUT: Duration = Duration::from_secs(900);
 
 /// Keys every secret-bearing compose file this adapter can meet requires via
@@ -823,6 +818,19 @@ fn linux_c_toolchain_present() -> bool {
 
 #[async_trait]
 impl DeployPort for DockerComposeDeploy {
+    /// The one honest check that `docker compose` (CLI + plugin) can run:
+    /// asking it for its version, exactly like `daemon_up` asks the daemon.
+    async fn compose_available(&self) -> bool {
+        Command::new("docker")
+            .args(["compose", "version"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .is_ok_and(|s| s.success())
+    }
+
     async fn lint(&self, work_dir: &Path) -> Result<Option<u64>, PortError> {
         // Rust-only for now: clippy's error count is the lint currency the
         // DoD gate compares against the project baseline.
@@ -1029,6 +1037,81 @@ impl DeployPort for DockerComposeDeploy {
         };
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         self.run_test_command(work_dir, &cmd, &refs).await
+    }
+
+    async fn run_e2e(
+        &self,
+        work_dir: &Path,
+        seed_modules: Option<&std::path::Path>,
+    ) -> Result<DeployReport, PortError> {
+        let e2e = work_dir.join("e2e");
+        if !e2e.join("playwright.config.ts").exists() {
+            return Ok(DeployReport {
+                success: true,
+                deployed: false,
+                summary: "no e2e suite".to_owned(),
+            });
+        }
+        // The browser gate is OPTIONAL tooling: a user's machine without
+        // Node/Playwright must DEGRADE (skip with a visible warning), never
+        // hold every UI PR red for a missing dev tool.
+        let npx_ok = std::process::Command::new("npx")
+            .args(["playwright", "--version"])
+            .current_dir(&e2e)
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !npx_ok {
+            tracing::warn!(
+                "browser e2e gate skipped: Node/Playwright not available — \
+                 install Node and `cd e2e && npm ci && npx playwright install` to enable it"
+            );
+            return Ok(DeployReport {
+                success: true,
+                deployed: false,
+                summary: "e2e runner unavailable (Node/Playwright not installed) — gate skipped"
+                    .to_owned(),
+            });
+        }
+        // A fresh verification worktree has no node_modules; borrow the main
+        // checkout's via symlink instead of a per-PR npm install.
+        let nm = e2e.join("node_modules");
+        if !nm.exists() {
+            if let Some(seed) = seed_modules.filter(|s| s.exists()) {
+                let _ = std::os::unix::fs::symlink(seed, &nm);
+            }
+        }
+        if !nm.exists() {
+            let ok = std::process::Command::new("npm")
+                .arg("ci")
+                .arg("--silent")
+                .current_dir(&e2e)
+                .status()
+                .is_ok_and(|s| s.success());
+            if !ok {
+                return Ok(DeployReport {
+                    success: false,
+                    deployed: true,
+                    summary: "e2e: npm ci failed".to_owned(),
+                });
+            }
+        }
+        let report = self
+            .run_test_command(&e2e, "npx", &["playwright", "test", "--reporter=line"])
+            .await?;
+        // Browsers not downloaded yet is the same class as no Node: optional
+        // tooling missing, not a red suite.
+        if !report.success && report.summary.contains("Executable doesn't exist") {
+            tracing::warn!(
+                "browser e2e gate skipped: Playwright browsers not installed — \
+                 run `cd e2e && npx playwright install`"
+            );
+            return Ok(DeployReport {
+                success: true,
+                deployed: false,
+                summary: "e2e browsers not installed — gate skipped".to_owned(),
+            });
+        }
+        Ok(report)
     }
 
     async fn run_tests(&self, work_dir: &Path) -> Result<DeployReport, PortError> {
