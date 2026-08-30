@@ -253,8 +253,7 @@ impl StoragePort for S3Storage {
             &url,
         )
         .await
-        .map(|resp| resp.status().is_success())
-        .unwrap_or(false)
+        .is_ok_and(|resp| resp.status().is_success())
     }
 }
 

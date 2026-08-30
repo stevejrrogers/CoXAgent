@@ -97,9 +97,16 @@ pub(super) async fn inbox_ep(
             && t.status() == coxagent_domain::Status::Fixed
             && state.ticket_evidence.contains_key(&id)
         {
+            // Live reproduction link (CXA-F244): where this project's fix runs
+            // right now, from the one resolvability source the F242 design
+            // pins (deploy.host_port — the base qa_evidence captures against).
+            // Null when no port is configured; additive to the card.
             items.push(serde_json::json!({
                 "kind": "verify", "ticket": id, "title": t.title(),
                 "role": "QA", "can_act": my_role.can_verify(),
+                "reproduce_url": coxagent_application::repro_url::compute_live_repro_url(
+                    cfg.deploy.host_port,
+                ),
             }));
             continue;
         }

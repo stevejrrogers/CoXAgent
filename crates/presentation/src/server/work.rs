@@ -44,6 +44,14 @@ pub(super) async fn analyze_goal_ep(
     }
 }
 
+/// Whether the detail payload carries the live reproduction link (CXA-F244):
+/// a fixed ticket awaiting a human verdict — the same Fixed-plus-evidence
+/// signal the inbox's verify card keys on — is exactly where a person needs
+/// to open the app the fix shipped to.
+fn detail_awaits_verification(status: coxagent_domain::Status, evidence_attached: bool) -> bool {
+    status == coxagent_domain::Status::Fixed && evidence_attached
+}
+
 /// Full detail for one ticket — including the `design` specs stripped from list
 /// payloads — loaded only when the user opens it.
 pub(super) async fn ticket_detail_ep(
@@ -53,6 +61,13 @@ pub(super) async fn ticket_detail_ep(
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
+    // The live reproduction link (CXA-F244) needs the project's deploy config;
+    // read it the same way inbox_ep does — a corrupt config degrades to the
+    // default and the link degrades to null, never fails the detail payload.
+    let cfg = std::fs::read_to_string(&p.config_path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
+        .unwrap_or_default();
     match p.store.load().await {
         Ok(state) => {
             // Artifact existence is storage IO, resolved up front so the
@@ -82,29 +97,29 @@ pub(super) async fn ticket_detail_ep(
                             obj.insert("cost_hold".into(), serde_json::json!(est));
                         }
                         if let Some(ev) = state.ticket_evidence.get(&id) {
-                            // Evidence forensics (CXA-F241): each item travels with
-                            // its gate link + actor (serialized on the record), and
-                            // screenshots carry the adapter's artifact-existence
-                            // verdict so the view can show 'missing artifact'
-                            // instead of a broken image or invented content.
-                            let mut items = Vec::with_capacity(ev.len());
-                            for e in ev {
-                                let mut v = serde_json::to_value(e).unwrap_or_default();
-                                if e.kind == "screenshot" {
-                                    let present =
-                                        artifacts.get(&e.detail).copied().unwrap_or(false);
-                                    if let Some(o) = v.as_object_mut() {
-                                        o.insert(
-                                            "artifact".into(),
-                                            serde_json::json!(if present { "ok" } else {
-                                                "missing"
-                                            }),
-                                        );
-                                    }
-                                }
-                                items.push(v);
-                            }
-                            obj.insert("evidence".into(), items.into());
+                            obj.insert(
+                                "evidence".into(),
+                                evidence_items_with_artifacts(ev, &artifacts).into(),
+                            );
+                        }
+                        // Live reproduction link (CXA-F244): offered exactly when
+                        // the ticket awaits a human verdict (see
+                        // `detail_awaits_verification`), from the one
+                        // resolvability source the F242 design pins
+                        // (deploy.host_port). Null when no port is configured;
+                        // additive to the payload.
+                        if detail_awaits_verification(
+                            t.status(),
+                            state.ticket_evidence.contains_key(&id),
+                        ) {
+                            obj.insert(
+                                "reproduce_url".into(),
+                                serde_json::json!(
+                                    coxagent_application::repro_url::compute_live_repro_url(
+                                        cfg.deploy.host_port
+                                    )
+                                ),
+                            );
                         }
                         // The gate spine (CXA-F241): every DoD gate decision the
                         // governance ledger holds for this ticket, chronological —
@@ -163,6 +178,32 @@ pub(super) async fn ticket_detail_ep(
         }
         Err(e) => internal_error(&e.to_string()),
     }
+}
+
+/// Evidence forensics (CXA-F241): each item travels with its gate link +
+/// actor (serialized on the record), and screenshots carry the adapter's
+/// artifact-existence verdict so the view can show 'missing artifact'
+/// instead of a broken image or invented content. Pure over the pre-resolved
+/// artifact verdicts — the storage IO happened in `screenshot_artifacts`.
+fn evidence_items_with_artifacts(
+    evidence: &[coxagent_application::state::Evidence],
+    artifacts: &std::collections::BTreeMap<String, bool>,
+) -> Vec<serde_json::Value> {
+    let mut items = Vec::with_capacity(evidence.len());
+    for e in evidence {
+        let mut v = serde_json::to_value(e).unwrap_or_default();
+        if e.kind == "screenshot" {
+            let present = artifacts.get(&e.detail).copied().unwrap_or(false);
+            if let Some(o) = v.as_object_mut() {
+                o.insert(
+                    "artifact".into(),
+                    serde_json::json!(if present { "ok" } else { "missing" }),
+                );
+            }
+        }
+        items.push(v);
+    }
+    items
 }
 
 /// Existence verdicts for a ticket's screenshot artifacts, keyed by the
@@ -1220,4 +1261,45 @@ pub(super) async fn sprint_close_ep(
 pub(super) struct RejectReq {
     #[serde(default)]
     pub(super) reason: String,
+}
+
+/// The reproduce-link gate (CXA-F244) is a business rule, not a formatting
+/// detail — pinned here as behaviour over the real domain type, the same way
+/// `server/openapi.rs` tests its document builder in-crate.
+#[cfg(test)]
+mod repro_link_gate_tests {
+    use super::detail_awaits_verification;
+    use coxagent_domain::Status;
+
+    #[test]
+    fn fixed_with_attached_evidence_awaits_a_verdict() {
+        assert!(detail_awaits_verification(Status::Fixed, true));
+    }
+
+    #[test]
+    fn fixed_without_evidence_is_not_yet_awaiting_a_verdict() {
+        // The inbox's verify card requires DoD evidence too — until the fix is
+        // proven, no live link is offered.
+        assert!(!detail_awaits_verification(Status::Fixed, false));
+    }
+
+    #[test]
+    fn no_other_status_offers_the_link() {
+        for s in [
+            Status::Pending,
+            Status::Ready,
+            Status::InProgress,
+            Status::Done,
+            Status::Documented,
+            Status::Rejected,
+            Status::OnHold,
+            Status::Open,
+            Status::Verified,
+        ] {
+            assert!(
+                !detail_awaits_verification(s, true),
+                "{s:?} must not carry reproduce_url"
+            );
+        }
+    }
 }
