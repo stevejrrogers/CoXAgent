@@ -394,6 +394,12 @@ pub struct ProjectState {
     /// tracked so it files exactly one bug per outage and can announce recovery.
     #[serde(default)]
     pub ops_down: bool,
+    /// Consecutive unhealthy Ops-monitor probes (one per leader cycle) for the
+    /// current outage — CXA-F240's "N consecutive checks" trigger: the
+    /// live-health auto-rollback fires when this reaches
+    /// `deploy.live_health_fail_checks`. Reset to 0 on the first healthy probe.
+    #[serde(default)]
+    pub ops_down_streak: u32,
     /// Spend accumulated on the current calendar day (UTC), for the daily budget
     /// policy. Resets when the day rolls over.
     #[serde(default)]
@@ -564,6 +570,7 @@ impl Default for ProjectState {
             engine_incidents: Vec::new(),
             daily_jobs: std::collections::BTreeMap::new(),
             ops_down: false,
+            ops_down_streak: 0,
             spend_today_usd: 0.0,
             spend_day: String::new(),
             budget_warned_lifetime: false,

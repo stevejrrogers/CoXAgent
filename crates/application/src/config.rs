@@ -588,6 +588,7 @@ impl Default for PolicyConfig {
 /// projects deploying with `docker compose` on one host do not fight over the
 /// same published port — agents are told which port to bind.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // config flags, not a state machine
 pub struct DeployConfig {
     /// The host port this project's app should publish (None = agent's choice).
     /// Must be a port a client can connect to: `0` is the kernel's "any free
@@ -618,6 +619,23 @@ pub struct DeployConfig {
     /// until an operator turns this on.
     #[serde(default)]
     pub auto_rollback: bool,
+    /// Auto-redeploy the last known-good version when the Ops monitor finds
+    /// the ALREADY-LIVE deployment unhealthy (CXA-F240) — the post-merge
+    /// counterpart of `auto_rollback`, which only covers a deploy/tests
+    /// failure detected in the same cycle that shipped it. This closes the
+    /// gap where CI smoke passed and the deploy looked green, but the stack
+    /// went dead afterwards and sat broken until a human reverted by hand.
+    /// Opt-in (default off) — an existing project's behavior never changes
+    /// until an operator turns this on.
+    #[serde(default)]
+    pub live_health_auto_rollback: bool,
+    /// How many consecutive unhealthy Ops-monitor probes (one per cycle) the
+    /// live app must serve before a `live_health_auto_rollback` fires —
+    /// N consecutive checks, not one flaky probe. The revert itself is still
+    /// bounded by `max_rollback_age_secs` (the allowed window) and the
+    /// migration safety check.
+    #[serde(default = "default_live_health_fail_checks")]
+    pub live_health_fail_checks: u32,
     /// A known-good deploy older than this is considered too stale to roll
     /// back to (the environment may have drifted too far) — rollback is
     /// skipped, not attempted, and the failure just files its bug as before.
@@ -639,6 +657,13 @@ fn default_max_rollback_age_secs() -> u64 {
     3600
 }
 
+/// Three consecutive unhealthy probes (three leader cycles) before a
+/// live-health revert — one dead probe is often a transient network blip,
+/// not a broken stack.
+fn default_live_health_fail_checks() -> u32 {
+    3
+}
+
 fn default_health_check_timeout_secs() -> u64 {
     60
 }
@@ -654,6 +679,8 @@ impl Default for DeployConfig {
             enabled: true,
             self_upgrade: false,
             auto_rollback: false,
+            live_health_auto_rollback: false,
+            live_health_fail_checks: default_live_health_fail_checks(),
             max_rollback_age_secs: default_max_rollback_age_secs(),
             migration_detection_paths: default_migration_detection_paths(),
             health_check_timeout_secs: default_health_check_timeout_secs(),
