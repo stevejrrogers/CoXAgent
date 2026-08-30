@@ -22,6 +22,7 @@ pub mod metrics_gate;
 pub mod metrics_governance;
 pub mod metrics_health;
 pub mod metrics_registry;
+pub mod milestone_projection;
 pub mod parsing;
 pub mod policy;
 pub mod ports;
