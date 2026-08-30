@@ -139,8 +139,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
                 surface.join("\n")
             )
         };
-        // A BA who doesn't know what the product already does proposes what it
-        // already has.
         let knowledge = prompts::knowledge_block(
             self.files.as_deref(),
             &existing.docs,
