@@ -715,6 +715,8 @@
       <div id="nt-desc" class="rt-edit" contenteditable="true" data-empty="A rough note is enough — click ✨ and the team will refine it." style="min-height:96px;border-radius:0 0 8px 8px;border-top:none"></div>
     </div>
     <button id="nt-analyze" class="pri" onclick="teamAnalyze()" style="width:100%;justify-content:center"><i class="ti ti-sparkles"></i> <span id="nt-analyze-label">Let the team analyze &amp; refine</span></button>
+    <button id="nt-feas-btn" class="gc-btn" onclick="checkFeasibility()" style="width:100%;justify-content:center;margin-top:8px"><i class="ti ti-gauge"></i> <span id="nt-feas-label">Check feasibility</span></button>
+    <div id="nt-feas" class="tk-notes" style="display:none;margin-top:8px"></div>
     <div id="nt-notes" class="tk-notes" style="display:none"></div>
     <div class="mrow" style="gap:8px;flex-wrap:wrap">
       <div style="flex:1;min-width:90px;display:flex;flex-direction:column;gap:5px"><span class="lbl">Type</span><select id="nt-type" class="sel"><option value="feature">feature</option><option value="bug">bug</option><option value="chore">chore</option></select></div>
