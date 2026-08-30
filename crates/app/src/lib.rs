@@ -1543,6 +1543,34 @@ pub(crate) fn spawn_worktree_janitor(work_dir: std::path::PathBuf) {
 }
 
 /// One sweep; returns roughly how many bytes were deleted.
+/// Cap-or-trim one cargo `target` dir: delete it outright when `force` (an
+/// idle tree) or when it exceeds the size cap, otherwise trim 7-day-stale
+/// files — but never while a build holds a fresh `.cargo-lock`.
+fn sweep_target_dir(target: &std::path::Path, now: std::time::SystemTime, force: bool) -> u64 {
+    const TARGET_CAP_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+    if !target.is_dir() {
+        return 0;
+    }
+    let building_recently = ["debug", "release"].iter().any(|prof| {
+        let lock = target.join(prof).join(".cargo-lock");
+        lock.metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|d| d.as_secs() < 600)
+    });
+    if building_recently {
+        return 0;
+    }
+    if force || dir_size(target) > TARGET_CAP_BYTES {
+        let n = dir_size(target);
+        let _ = std::fs::remove_dir_all(target);
+        n
+    } else {
+        trim_stale_files(target, now, 7 * 24 * 3600)
+    }
+}
+
 fn worktree_janitor_sweep(work_dir: &std::path::Path) -> u64 {
     let root = match work_dir.parent() {
         Some(p) => p.join(".coxagent-worktrees"),
@@ -1603,41 +1631,21 @@ fn worktree_janitor_sweep(work_dir: &std::path::Path) -> u64 {
                 continue;
             }
         }
-        let target = path.join("target");
-        if target.is_dir() {
-            // Idle trees lose their target outright; a tree that never idles
-            // (the review worktree wakes every 90 s) still gets capped by
-            // SIZE — its artifacts accumulate forever otherwise (65 GB seen).
-            // `.cargo-lock` is touched by every cargo invocation, so a stale
-            // lock means no build is running right now.
-            const TARGET_CAP_BYTES: u64 = 20 * 1024 * 1024 * 1024;
-            let building_recently = ["debug", "release"].iter().any(|prof| {
-                let lock = target.join(prof).join(".cargo-lock");
-                lock.metadata()
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| now.duration_since(t).ok())
-                    .is_some_and(|d| d.as_secs() < 600)
-            });
-            let oversized = dir_size(&target) > TARGET_CAP_BYTES;
-            if (idle >= 6 || oversized) && !building_recently {
-                reclaimed += dir_size(&target);
-                let _ = std::fs::remove_dir_all(&target);
-            } else if !building_recently {
-                // The live-cache case: cargo never garbage-collects, so every
-                // dependency bump leaves its old artifacts behind forever —
-                // most of a 65 GB target is corpses the current build never
-                // reads. Trim files untouched for 7 days; the hot incremental
-                // cache stays, so the next run is still fast.
-                reclaimed += trim_stale_files(&target, now, 7 * 24 * 3600);
-            }
-        }
+        // Idle trees lose their target outright; a busy tree is size-capped
+        // or stale-trimmed (cargo never garbage-collects; 65 GB seen).
+        reclaimed += sweep_target_dir(&path.join("target"), now, idle >= 6);
     }
     let _ = std::process::Command::new("git")
         .arg("-C")
         .arg(work_dir)
         .args(["worktree", "prune"])
         .status();
+    // The WORK DIR's own target gets the same treatment: the review/hygiene
+    // machinery builds in the main checkout, whose artifacts nothing swept —
+    // it grew to 137 GB once, and regrew 17 GB within hours of a manual
+    // clean. Same rules as a worktree that never idles: size-capped when no
+    // build is running, stale-trimmed otherwise.
+    reclaimed += sweep_target_dir(&work_dir.join("target"), now, false);
     reclaimed
 }
 
