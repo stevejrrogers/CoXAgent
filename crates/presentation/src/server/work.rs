@@ -120,6 +120,14 @@ pub(super) async fn ticket_detail_ep(
                                     )
                                 ),
                             );
+                            // Per-ticket resolved link (CXA-F246): recorded by
+                            // the capture funnel at evidence-collection time,
+                            // so the panel renders the exact link the evidence
+                            // was captured against — null when none recorded.
+                            obj.insert(
+                                "repro_url".into(),
+                                serde_json::json!(state.repro_urls.get(&id)),
+                            );
                         }
                         // The gate spine (CXA-F241): every DoD gate decision the
                         // governance ledger holds for this ticket, chronological —

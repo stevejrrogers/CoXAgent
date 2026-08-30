@@ -1,9 +1,11 @@
-// CXA-F245 (CXA-F242-C): the verify gate's live reproduction link.
+// CXA-F245 (CXA-F242-C) + CXA-F247: the verify gate's live reproduction link.
 //
-// The inbox verify card and the reviewer's ticket modal must render an
-// "Open live instance" control exactly when the payload carries a
-// reproduce_url (CXA-F244 ships the field; null/absent ⇒ no control at all),
-// and the card's control must open the instance in a NEW TAB.
+// The inbox verify card renders the "Open live preview" anchor (CXA-F247:
+// target=_blank rel=noopener on the element, https?-whitelisted href) and the
+// reviewer's ticket modal the "Open live instance" control (F245), exactly
+// when the payload carries a reproduce_url (CXA-F244 ships the field;
+// null/absent ⇒ no control at all). The card's anchor opens the instance in a
+// NEW TAB, and the send-back dialog cites the URL that was shown.
 //
 // The frozen fixture seeds no verify-gate state, so these tests serve the
 // verify payloads through route mocks (helpers.mjs keeps the rest of the app
@@ -55,7 +57,9 @@ test('the verify card links its live instance in a new tab and hides the link wi
       }),
     }),
   );
-  await page.route(`${LIVE_URL}**`, (route) =>
+  // Context-level route: the anchor's rel="noopener" popup is its own page,
+  // which page.route does not cover — the mock must sit above both.
+  await page.context().route(`${LIVE_URL}**`, (route) =>
     route.fulfill({ status: 200, contentType: 'text/html', body: '<html><body>live app</body></html>' }),
   );
   await openApp(page);
@@ -65,19 +69,66 @@ test('the verify card links its live instance in a new tab and hides the link wi
 
   // Show axis: only the card carrying reproduce_url gets the control.
   const linked = page.locator('#inbox-body .panel', { hasText: 'CXC-V001' });
-  await expect(linked.getByRole('button', { name: 'Open live instance' })).toHaveCount(1);
+  const link = linked.getByRole('link', { name: 'Open live preview' });
+  await expect(link).toHaveCount(1);
   const unlinked = page.locator('#inbox-body .panel', { hasText: 'CXC-V002' });
-  await expect(unlinked.getByRole('button', { name: 'Open live instance' })).toHaveCount(0);
+  await expect(unlinked.getByRole('link', { name: 'Open live preview' })).toHaveCount(0);
 
-  // New tab: the control opens the instance itself, not the dashboard.
+  // CXA-F247: the control is a real anchor — the open-in-new-tab contract
+  // lives on the element itself, with the opener severed.
+  await expect(link).toHaveAttribute('target', '_blank');
+  await expect(link).toHaveAttribute('rel', /(^|\s)noopener/);
+  await expect(link).toHaveAttribute('href', LIVE_URL);
+
+  // New tab: the anchor opens the instance itself, not the dashboard.
   const popupPromise = page.waitForEvent('popup');
-  await linked.getByRole('button', { name: 'Open live instance' }).click();
+  await link.click();
   const popup = await popupPromise;
   expect(popup.url()).toBe(LIVE_URL);
   await popup.close();
 
+  // Send back (CXA-F247 plan step 2): the refusal dialog cites the instance
+  // that was shown, so the reason can reference what was seen. Cancelled —
+  // nothing is sent.
+  await linked.getByRole('button', { name: 'Send back' }).click();
+  await expect(page.locator('#cm-msg')).toContainText(LIVE_URL);
+  await page.locator('#cm-cancel').click();
+
   await assertNoConsoleErrors(errors);
   await expect(page).toHaveScreenshot('inbox-verify-live-link.png');
+});
+
+test('a hostile reproduction url never renders the anchor nor a send-back citation', async ({ page }) => {
+  const errors: string[] = [];
+  armConsoleGate(page, errors);
+  // CXA-F247 AC2: only an https?:// URL may become the anchor's href — a
+  // javascript: scheme or a protocol-relative //host inheriting the
+  // dashboard's origin must render no link at all, and the send-back dialog
+  // must cite nothing for it.
+  await page.route('**/api/projects/*/inbox', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        items: [
+          verifyCard('CXC-V005', 'Script scheme — no link', 'javascript:alert(1)'),
+          verifyCard('CXC-V006', 'Protocol-relative — no link', '//evil.example'),
+        ],
+      }),
+    }),
+  );
+  await openApp(page);
+
+  await page.locator('a[data-v="inbox"]').click();
+  for (const ticket of ['CXC-V005', 'CXC-V006']) {
+    const card = page.locator('#inbox-body .panel', { hasText: ticket });
+    await expect(card.getByRole('link', { name: 'Open live preview' })).toHaveCount(0);
+    await card.getByRole('button', { name: 'Send back' }).click();
+    await expect(page.locator('#cm-msg')).not.toContainText('Live instance reviewed');
+    await page.locator('#cm-cancel').click();
+  }
+
+  await assertNoConsoleErrors(errors);
 });
 
 test('the ticket modal shows the same live link driven by reproduce_url presence', async ({ page }) => {

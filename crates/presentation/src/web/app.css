@@ -882,7 +882,7 @@
   .agpick:hover{color:var(--text)}
   /* ticket modal actions + inline edit */
   .tk-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}
-  .tk-btn{display:inline-flex;align-items:center;gap:6px;background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:9px;padding:8px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit}
+  .tk-btn{display:inline-flex;align-items:center;gap:6px;background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:9px;padding:8px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;text-decoration:none}
   .tk-btn:hover{border-color:var(--border2)}
   .tk-btn.go{background:var(--accent2);color:#04121a;border-color:var(--accent2)}
   .tk-btn.danger{background:transparent;color:var(--red);border-color:color-mix(in srgb,var(--red) 55%,var(--border))}
@@ -1112,6 +1112,18 @@
   .tcnote{margin-left:23px;font-size:12px;color:var(--muted);line-height:1.5;white-space:pre-wrap}
   .tcimg{margin-left:23px;max-width:300px;border-radius:8px;overflow:hidden;border:1px solid var(--border);cursor:zoom-in}
   .tcimg img{display:block;width:100%;max-height:220px;object-fit:cover}
+  /* Verdict-trajectory churn view (CXA-F251): the criterion's ordered
+     pass/fail history at the verify surface. Every chip carries its verdict
+     as TEXT, so no state rides on color alone; a gap is dashed and dim —
+     distinct from both PASS and FAIL by construction. */
+  .tctraj{margin-left:23px;display:flex;flex-wrap:wrap;gap:5px;align-items:center}
+  .tctraj-cy{font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--dim);background:var(--bg);border:1px solid var(--border);border-radius:20px;padding:2px 8px}
+  .tctraj-v{font-size:10px;font-weight:700;letter-spacing:.4px;border-radius:20px;padding:2px 8px}
+  .tctraj-v.pass{color:var(--green);background:color-mix(in srgb,var(--green) 12%,transparent)}
+  .tctraj-v.fail{color:var(--red);background:color-mix(in srgb,var(--red) 12%,transparent)}
+  .tctraj-gap{font-size:10px;font-weight:600;color:var(--dim);border:1px dashed var(--border);border-radius:20px;padding:2px 8px}
+  .tctraj-churn{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--amber);background:color-mix(in srgb,var(--amber) 12%,transparent);border:1px solid color-mix(in srgb,var(--amber) 40%,transparent);border-radius:20px;padding:2px 8px}
+  .tctraj-churn i{font-size:12px}
   .agstats{display:flex;gap:12px;margin:6px 0 2px;font-size:11.5px;color:var(--muted)}
   .agstats span{display:inline-flex;align-items:center;gap:4px}
   .agstats i{font-size:13px;color:var(--accent2)}
