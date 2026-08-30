@@ -656,7 +656,10 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
             engine: coxagent_application::config::EngineMapping {
                 default: coxagent_application::config::EngineChoice {
                     engine: coxagent_application::config::EngineKind::Opencode,
-                    model: "bizbrain/DeepSeek-V4-Pro".to_owned(),
+                    // V4-Pro was removed from the provider catalog (every
+                    // run failed with an opaque server error and the boot
+                    // catalog check flagged it against this hardcoded value).
+                    model: "bizbrain/DeepSeek-V4-Flash".to_owned(),
                 },
                 per_role: std::collections::HashMap::new(),
                 fallbacks: Vec::new(),
