@@ -404,7 +404,12 @@ mod tests {
         assert_eq!(m.step_provenance.len(), 1, "one run, one step record");
         let step = &m.step_provenance[0];
         assert_eq!(step.ticket.as_deref(), Some("CXA-F257"));
-        let engines: Vec<&str> = step.step.attempts.iter().map(|a| a.engine.as_str()).collect();
+        let engines: Vec<&str> = step
+            .step
+            .attempts
+            .iter()
+            .map(|a| a.engine.as_str())
+            .collect();
         assert_eq!(engines, vec!["claude", "opencode"], "the whole trail rides");
     }
 

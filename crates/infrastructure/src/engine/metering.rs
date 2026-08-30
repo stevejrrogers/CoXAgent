@@ -43,6 +43,7 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
         // provenance record needs the ticket label and the dashboard role.
         let label = request.label.clone();
         let dash_role = role_label(&request.role);
+        let escalation = request.escalation_level;
         // Measure the prompt we SEND per role (chars ≈ tokens/3.5): prompt
         // trimming without this number is guesswork — it names which role's
         // briefing blocks are actually fat before anyone cuts one.
@@ -63,8 +64,18 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
         // CXA-F257: capture per-step engine/model provenance — what ACTUALLY
         // executed this run, post-failover and post-escalation. Rides the same
         // meter → drain_meter fold as the spend counters, so use cases stay
-        // engine-agnostic and this capture adds zero new IO.
-        self.record_provenance(label, dash_role, "agent run", &outcome);
+        // engine-agnostic and this capture adds zero new IO. The action names
+        // what the decorator itself knows — a retry on the escalation ladder
+        // and a failed final outcome are distinguishable to the reviewer, not
+        // a pile of identical "agent run" rows.
+        let mut action = String::from("agent run");
+        if escalation > 0 {
+            action = format!("{action} (escalation {escalation})");
+        }
+        if !outcome.succeeded() {
+            action.push_str(" — failed");
+        }
+        self.record_provenance(label, dash_role, &action, &outcome);
         if let Some(u) = outcome.usage {
             if let Ok(mut m) = self.meter.lock() {
                 m.total_cost_usd += u.cost_usd;
@@ -94,7 +105,12 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
             .await?;
         // A session resume has no ticket label — recorded with `ticket: None`
         // and dropped from per-ticket provenance by the drain fold (CXA-F257).
-        self.record_provenance(None, role_label(&role), "agent run (session resume)", &outcome);
+        self.record_provenance(
+            None,
+            role_label(&role),
+            "agent run (session resume)",
+            &outcome,
+        );
         if let Some(u) = outcome.usage {
             if let Ok(mut m) = self.meter.lock() {
                 m.total_cost_usd += u.cost_usd;
@@ -307,7 +323,10 @@ mod tests {
         assert_eq!(m.step_provenance.len(), 1);
         let ms = &m.step_provenance[0];
         assert_eq!(ms.ticket.as_deref(), Some("CXA-F257"));
-        assert_eq!(ms.step.role, "DEV-BUG", "the dashboard label, not the serde key");
+        assert_eq!(
+            ms.step.role, "DEV-BUG",
+            "the dashboard label, not the serde key"
+        );
         assert!(!ms.step.at.is_empty(), "the run is timestamped");
         assert_eq!(ms.step.attempts.len(), 1);
         assert_eq!(ms.step.attempts[0].engine, "priced");
@@ -371,5 +390,24 @@ mod tests {
         assert_eq!(m.step_provenance.len(), 1);
         assert_eq!(m.step_provenance[0].ticket, None);
         assert_eq!(m.step_provenance[0].step.role, "DOCS");
+    }
+
+    /// The action line names what the decorator actually knows: a retry on
+    /// the escalation ladder and a failed final outcome are distinguishable
+    /// to the reviewer, not a pile of identical "agent run" rows.
+    /// `Sandboxed(NotRequested)` exits 71 — a failed final outcome.
+    #[tokio::test]
+    async fn action_names_escalation_and_failure() {
+        let meter: Meter = Arc::new(Mutex::new(Spend::default()));
+        let eng = MeteringEngine::new(Sandboxed(SandboxStatus::NotRequested), Arc::clone(&meter));
+        let mut r = req(Role::DevFeature);
+        r.label = Some("CXA-F259".to_owned());
+        r.escalation_level = 2;
+        eng.run(r).await.unwrap();
+
+        let m = meter.lock().unwrap();
+        let action = &m.step_provenance[0].step.action;
+        assert!(action.contains("escalation 2"), "{action}");
+        assert!(action.contains("failed"), "{action}");
     }
 }

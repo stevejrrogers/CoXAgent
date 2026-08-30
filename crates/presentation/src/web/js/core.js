@@ -76,7 +76,7 @@ const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]
 // render it — JS mirror of application::engine_provenance::attempt_label, so
 // an engine that cannot report a model id shows the explicit "model unknown"
 // marker instead of a blank field, identically on card and detail.
-const provLabel=a=>`${a.engine||"engine"} · ${a.model&&a.model.trim()?a.model:"model unknown"}`;
+const provLabel=a=>`${a.engine} · ${a.model&&a.model.trim()?a.model:"model unknown"}`;
 const provChip=p=>`<span style="font-family:ui-monospace,Menlo,monospace;font-size:11.5px;font-weight:600;background:var(--card);border:1px solid var(--border2);border-radius:20px;padding:2px 8px;color:${p.model&&p.model.trim()?"var(--muted)":"var(--amber)"};white-space:nowrap">${esc(provLabel(p))}</span>`;
 const cvar=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||"#888";
 let STATE={}, CUR="overview", BF="all", SF="all", INIT_ACT=false, WORKTAB="board";

@@ -97,8 +97,9 @@ pub struct AgentOutcome {
     /// Every engine/model attempt that produced this outcome, in run order —
     /// primary first, then any failover — stamped by [`FailoverEngine`], the
     /// only component that knows the sequence (CXA-F257 AC2: a failed-over
-    /// step must show each attempt, not only the last). Empty for a
-    /// single-engine run, where `engine` + `model` are the whole story.
+    /// step must show each attempt, not only the last). Empty when the
+    /// outcome did not pass through one (a bare adapter or test double),
+    /// where `engine` + `model` are the whole story.
     pub attempts: Vec<crate::state::EngineAttempt>,
 }
 

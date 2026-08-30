@@ -2217,7 +2217,7 @@ function fgPane(t){
         +`<span style="font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--dim)">${esc(s.role)}</span>`
         +`<span style="font-size:12.5px;color:var(--text)">${esc(s.action)}</span>`
         +`<span style="display:flex;gap:6px;flex-wrap:wrap">${(s.attempts||[]).map(provChip).join("")}</span>`
-        +`<span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;color:var(--dim);margin-left:auto">${esc(s.at)}</span></div>`).join("")
+        +`<span style="font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:var(--dim);margin-left:auto">${esc(s.at)}</span></div>`).join("")
       +`</div>`;
   }
   return h+`</div></div>`;

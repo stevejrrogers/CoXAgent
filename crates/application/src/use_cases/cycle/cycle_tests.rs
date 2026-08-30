@@ -2384,6 +2384,56 @@ async fn no_budget_warning_when_no_cap_is_configured() {
     );
 }
 
+/// CXA-F257: the cycle's meter fold lands each labeled run's provenance on
+/// its ticket's bounded log and drops unlabeled runs (ceremonies, session
+/// resumes) — provenance is per-ticket work, never ambient noise.
+#[tokio::test]
+async fn provenance_folds_per_ticket_and_drops_unlabeled_runs() {
+    use crate::state::{MeteredStep, StepProvenance};
+    let store = Arc::new(MemStore::default());
+    let meter = Arc::new(Mutex::new(Spend::default()));
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(RoleAwareEngine),
+        Config::default(),
+        PathBuf::from("/tmp/proj-provenance-fold"),
+        "goal".to_owned(),
+    )
+    .with_meter(Arc::clone(&meter));
+
+    let step = |role: &str, engine: &str| StepProvenance {
+        at: "2026-08-30T10:00:00Z".to_owned(),
+        role: role.to_owned(),
+        action: "agent run".to_owned(),
+        attempts: vec![crate::state::EngineAttempt {
+            engine: engine.to_owned(),
+            model: Some("opus".to_owned()),
+        }],
+    };
+    meter.lock().expect("lock").step_provenance = vec![
+        MeteredStep {
+            ticket: Some("CXC-F001".to_owned()),
+            step: step("DEV-FEATURE", "claude"),
+        },
+        MeteredStep {
+            ticket: None, // a ceremony/resume run — no ticket to attribute
+            step: step("SM", "opencode"),
+        },
+    ];
+
+    Box::pin(uc.run_cycle(1)).await;
+
+    let s = store.load().await.expect("load");
+    let logged = s.step_provenance("CXC-F001");
+    assert_eq!(logged.len(), 1, "the labeled run lands on its ticket");
+    assert_eq!(logged[0].role, "DEV-FEATURE");
+    assert_eq!(logged[0].attempts[0].engine, "claude");
+    assert!(
+        meter.lock().expect("lock").step_provenance.is_empty(),
+        "the fold drains the meter's provenance delta like every other counter"
+    );
+}
+
 /// AC: only crossing 100% still triggers the existing hard stop — spend
 /// jumping straight past 80% to (or over) the cap in one cycle must still
 /// raise the 80% warning (before the pause) AND pause the loop.

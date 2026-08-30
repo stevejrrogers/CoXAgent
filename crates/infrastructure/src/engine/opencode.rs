@@ -352,7 +352,8 @@ impl AgentEnginePort for OpencodeEngine {
             cmd.env("OPENCODE_CONFIG", work_dir.join(COX_OPENCODE_CONFIG));
         }
         crate::engine::apply_shim_path(&mut cmd);
-        self.exec(cmd, live, timeout, sandbox, self.model.clone()).await
+        self.exec(cmd, live, timeout, sandbox, self.model.clone())
+            .await
     }
 }
 

@@ -383,18 +383,16 @@ fn ac3_an_engine_without_a_model_id_shows_the_engine_with_an_explicit_model_unkn
 fn ac4_steps_reexecuted_after_crash_recovery_keep_provenance_for_both_executions() {
     const ID: &str = "CXA-B259";
     let mut s = ProjectState {
-        tickets: vec![
-            Ticket::new(
-                tid(ID),
-                TicketType::Bug,
-                format!("bug {ID}"),
-                "fixture",
-                Priority::High,
-                Complexity::Medium,
-                false,
-            )
-            .expect("ticket"),
-        ],
+        tickets: vec![Ticket::new(
+            tid(ID),
+            TicketType::Bug,
+            format!("bug {ID}"),
+            "fixture",
+            Priority::High,
+            Complexity::Medium,
+            false,
+        )
+        .expect("ticket")],
         ..ProjectState::default()
     };
 
