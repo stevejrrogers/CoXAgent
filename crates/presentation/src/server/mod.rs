@@ -265,10 +265,10 @@ struct AppState {
     docs_editors: Arc<std::sync::Mutex<HashMap<String, HashMap<String, usize>>>>,
     order: Arc<RwLock<Vec<String>>>,
     /// Registered projects that could not be loaded, kept so the listing can
-    /// name them and their reason (COX-B043). Fixed at boot: a config repaired
-    /// while the hub runs is picked up by restarting it, which is what loading
-    /// a project takes anyway.
-    broken: Arc<Vec<BrokenProject>>,
+    /// name them and their reason (COX-B043). Live, not frozen at boot: the
+    /// composition root retries failed loads (CXA-B114) and admits a
+    /// recovered project, whose entry is cleared here the moment it lands.
+    broken: Arc<RwLock<Vec<BrokenProject>>>,
     factory: Option<ProjectFactory>,
     auth: Option<Arc<dyn AuthPort>>,
     audit: Arc<dyn AuditPort>,
@@ -555,6 +555,11 @@ pub struct HubExtras {
     /// `coxagent.json`), so the dashboard can show why one is missing instead
     /// of silently omitting it — COX-B043.
     pub broken: Vec<BrokenProject>,
+    /// Inbox for projects the composition root recovered after boot
+    /// (CXA-B114): a failed store connect is retried in the background, and
+    /// when it succeeds the live handle arrives here to join the registry
+    /// without a restart.
+    pub recoveries: Option<tokio::sync::mpsc::Receiver<ProjectHandle>>,
 }
 
 /// Warn threshold for a space's budget, matching the dashboard's own amber one
@@ -583,14 +588,24 @@ pub async fn serve_full(
     projects: Vec<ProjectHandle>,
     port: u16,
     audit: Arc<dyn AuditPort>,
-    extras: HubExtras,
+    mut extras: HubExtras,
 ) -> std::io::Result<()> {
     let backup_dir = extras
         .hub_dir
         .clone()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("backups");
+    // Taken out before build_state (which consumes the rest of `extras`): a
+    // mpsc Receiver cannot live inside the Clone-able AppState — it is
+    // drained by exactly one background task instead.
+    let recoveries = extras.recoveries.take();
     let state = build_state(projects, audit, extras).await;
+    // CXA-B114: a project that failed to load at boot (e.g. the DB was still
+    // starting) is rebuilt by the composition root; when it recovers, the
+    // handle arrives here and joins the live registry — no restart.
+    if let Some(recoveries) = recoveries {
+        tokio::spawn(admit_recovered_projects(state.clone(), recoveries));
+    }
     tracing::info!("hub role: {:?}", hub_role());
     // Batch/watchdog loops belong to the knowledge role (and the all-in-one).
     if matches!(hub_role(), HubRole::All | HubRole::Knowledge) {
