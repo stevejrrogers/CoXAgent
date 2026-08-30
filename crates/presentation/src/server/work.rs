@@ -44,6 +44,14 @@ pub(super) async fn analyze_goal_ep(
     }
 }
 
+/// Whether the detail payload carries the live reproduction link (CXA-F244):
+/// a fixed ticket awaiting a human verdict — the same Fixed-plus-evidence
+/// signal the inbox's verify card keys on — is exactly where a person needs
+/// to open the app the fix shipped to.
+fn detail_awaits_verification(status: coxagent_domain::Status, evidence_attached: bool) -> bool {
+    status == coxagent_domain::Status::Fixed && evidence_attached
+}
+
 /// Full detail for one ticket — including the `design` specs stripped from list
 /// payloads — loaded only when the user opens it.
 pub(super) async fn ticket_detail_ep(
@@ -86,15 +94,16 @@ pub(super) async fn ticket_detail_ep(
                             serde_json::to_value(ev).unwrap_or_default(),
                         );
                     }
-                    // Live reproduction link (CXA-F244): a fixed ticket
-                    // awaiting a human verdict — the same Fixed-plus-evidence
-                    // signal the inbox's verify card keys on — carries where
-                    // the fix runs right now, from the one resolvability
-                    // source the F242 design pins (deploy.host_port). Null
-                    // when no port is configured; additive to the payload.
-                    if t.status() == coxagent_domain::Status::Fixed
-                        && state.ticket_evidence.contains_key(&id)
-                    {
+                    // Live reproduction link (CXA-F244): offered exactly when
+                    // the ticket awaits a human verdict (see
+                    // `detail_awaits_verification`), from the one
+                    // resolvability source the F242 design pins
+                    // (deploy.host_port). Null when no port is configured;
+                    // additive to the payload.
+                    if detail_awaits_verification(
+                        t.status(),
+                        state.ticket_evidence.contains_key(&id),
+                    ) {
                         obj.insert(
                             "reproduce_url".into(),
                             serde_json::json!(
@@ -1179,4 +1188,45 @@ pub(super) async fn sprint_close_ep(
 pub(super) struct RejectReq {
     #[serde(default)]
     pub(super) reason: String,
+}
+
+/// The reproduce-link gate (CXA-F244) is a business rule, not a formatting
+/// detail — pinned here as behaviour over the real domain type, the same way
+/// `server/openapi.rs` tests its document builder in-crate.
+#[cfg(test)]
+mod repro_link_gate_tests {
+    use super::detail_awaits_verification;
+    use coxagent_domain::Status;
+
+    #[test]
+    fn fixed_with_attached_evidence_awaits_a_verdict() {
+        assert!(detail_awaits_verification(Status::Fixed, true));
+    }
+
+    #[test]
+    fn fixed_without_evidence_is_not_yet_awaiting_a_verdict() {
+        // The inbox's verify card requires DoD evidence too — until the fix is
+        // proven, no live link is offered.
+        assert!(!detail_awaits_verification(Status::Fixed, false));
+    }
+
+    #[test]
+    fn no_other_status_offers_the_link() {
+        for s in [
+            Status::Pending,
+            Status::Ready,
+            Status::InProgress,
+            Status::Done,
+            Status::Documented,
+            Status::Rejected,
+            Status::OnHold,
+            Status::Open,
+            Status::Verified,
+        ] {
+            assert!(
+                !detail_awaits_verification(s, true),
+                "{s:?} must not carry reproduce_url"
+            );
+        }
+    }
 }

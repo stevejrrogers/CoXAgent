@@ -1,7 +1,7 @@
 //! The live reproduction URL for a project's fixed work (CXA-F242 / CXA-F244).
 //!
 //! One source of truth for "where does this project's fix run live": the same
-//! `http://127.0.0.1:{host_port}/` base [`crate::use_cases::cycle::qa_evidence`]
+//! `http://127.0.0.1:{host_port}/` base the private `qa_evidence` use case
 //! captures its evidence against, derived purely from `config.deploy.host_port`.
 //! A project with no `host_port` has no resolvable reproduction URL — callers
 //! surface the field as null rather than inventing a link.
