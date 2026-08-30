@@ -409,7 +409,10 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             // TEST PASS record, so the human verdict writes the same provenance
             // the agent TEST path has written since F022.
             if to == coxagent_domain::Status::Verified {
-                super::run_test::record_human_verify_evidence(s, &tid.to_string());
+                // The chat path knows the verdict's authority (Role::User) but
+                // no username — "USER" is the identity this path records
+                // everywhere else (the activity feed), never an invented name.
+                super::run_test::record_human_verify_evidence(s, &tid.to_string(), "USER");
                 // Goal-line outcome ledger (CXA-F228): a human verdict is a
                 // delivered outcome like the agent path's.
                 s.record_verified_outcome(&tid.to_string());

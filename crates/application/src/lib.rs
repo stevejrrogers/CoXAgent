@@ -14,6 +14,7 @@ pub mod dependency_radar;
 pub mod deps_scan;
 pub mod error;
 pub mod faults;
+pub mod forensics;
 pub mod metrics;
 pub mod metrics_brakes;
 pub mod metrics_burndown;

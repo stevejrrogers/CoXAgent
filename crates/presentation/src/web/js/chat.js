@@ -1931,6 +1931,7 @@ async function showTicket(id){
     <div class="tk-tabs" role="tablist">
       <button class="tk-tab on" data-tk-tab="details" onclick="tkTab('details')"><i class="ti ti-list-details"></i> Details</button>
       <button class="tk-tab" data-tk-tab="coverage" onclick="tkTab('coverage')"><i class="ti ti-shield-check"></i> Test Coverage</button>
+      <button class="tk-tab" data-tk-tab="forensics" onclick="tkTab('forensics')"><i class="ti ti-history"></i> Forensics</button>
     </div>
     <div class="tk-pane" id="tk-pane-details">
     <div class="mrow"><span class="lbl">Status</span><b>${t.status==="on_hold"?'<span style="color:var(--amber)">on hold</span>':esc(t.status)}</b>${t.status==="on_hold"&&(STATE.hold_reasons||{})[t.id]?`<span style="font-size:11.5px;color:var(--dim);margin-left:8px">· ${esc(STATE.hold_reasons[t.id])}</span>`:""}${(typeof canManage==="function"&&canManage())?(["pending","ready","open"].includes(t.status)?` <button class="tk-btn" style="margin-left:10px" onclick="holdTicket('${t.id}',true)" title="Park it — sprints and agents skip it until resumed"><i class="ti ti-player-pause"></i> Hold</button>`:(t.status==="on_hold"?` <button class="tk-btn go" style="margin-left:10px" onclick="holdTicket('${t.id}',false)"><i class="ti ti-player-play"></i> Resume</button>`:"")):""}</div>
@@ -1980,7 +1981,7 @@ async function showTicket(id){
      <div class="att-grid" id="att-grid">${grid||'<div style="color:var(--dim);font-size:12px;margin-top:6px">— none yet (PD attaches mockups here)</div>'}</div>
      <input type="file" id="att-file" style="display:none" onchange="uploadAttachment('${t.id}',this)">
      <button class="tk-btn" style="margin-top:8px" onclick="document.getElementById('att-file').click()"><i class="ti ti-paperclip"></i> Attach file</button></div>`;}
-  h+=`</div>`+covPane(t);
+  h+=`</div>`+covPane(t)+fgPane(t);
   const canWork=["pending","ready","open"].includes(t.status);
   if(t.cost_hold!=null&&!t.cost_approved)h+=`<div class="mrow" style="display:block;border:1px solid var(--amber);border-radius:9px;padding:10px 12px;background:color-mix(in srgb,var(--amber) 9%,transparent)"><span style="color:var(--amber);font-weight:700"><i class="ti ti-currency-dollar"></i> Held for cost approval</span><div style="font-size:12.5px;color:var(--muted);margin-top:4px">Estimated ~$${(+t.cost_hold).toFixed(2)}/run exceeds the approval gate. Agents will skip this ticket until you approve it.</div><button class="pri" style="margin-top:8px" onclick="approveCost('${t.id}')"><i class="ti ti-check"></i> Approve run</button></div>`;
   h+=`<div class="tk-actions">
@@ -2002,7 +2003,7 @@ async function showTicket(id){
 // toggle — both panes render once, switching never refetches.
 function tkTab(name){
   document.querySelectorAll("#ov-ticket .tk-tab").forEach(b=>b.classList.toggle("on",b.dataset.tkTab===name));
-  for(const p of["details","coverage"]){const el=document.getElementById("tk-pane-"+p);if(el)el.hidden=p!==name;}
+  for(const p of["details","coverage","forensics"]){const el=document.getElementById("tk-pane-"+p);if(el)el.hidden=p!==name;}
 }
 // The Test Coverage pane (CXA-F024): one row per acceptance criterion with its
 // coverage status and the evidence addressing it — test files, or an API
@@ -2022,6 +2023,106 @@ function covPane(t){
     return `<div class="cov-row"><div class="cov-badge" style="color:${m[0]}"><i class="ti ${m[1]}"></i>${m[2]}</div><div class="cov-body"><div class="cov-ac">${esc(e.criterion)}</div>${srcs?`<div class="cov-srcs">${srcs}</div>`:""}</div></div>`;
   }).join("");
   return `<div class="tk-pane" id="tk-pane-coverage" hidden><div class="covlist">${rows}</div></div>`;
+}
+// ── Evidence forensics pane (CXA-F241) ─────────────────────────────────────
+// Per-gate proof inspection for the verification reviewer: which DoD gate
+// decision each piece of evidence supported, who attached it, and the full
+// captured payload behind a green check. Grouping mirrors the server-side
+// forensics::group_by_gate rule (crates/application/src/forensics.rs): an
+// item belongs to the LATEST decision of its linked gate at or before its
+// capture time — or that gate's first decision when it predates all of them.
+// Items with no recorded link stay unlinked ("provenance unknown"), never
+// assigned a gate by guess. Same gate visited more than once (a send-back
+// cycle) renders its visits side by side, before and after.
+function fgAttribution(gates,item){
+  const at=Date.parse(item.at),links=item.source_gates||[];
+  if(!Number.isFinite(at)||!links.length)return -1;
+  const cands=gates.filter(g=>links.includes(g.gate_id));
+  if(!cands.length)return -1;
+  let pick=cands[0];
+  for(const g of cands){if(g.decided_at_ms<=at)pick=g;}
+  return gates.indexOf(pick);
+}
+function fgKind(e){
+  return {screenshot:["var(--blue)","ti-photo","SCREENSHOT"],
+          api:["var(--accent2)","ti-api","API"],
+          test:["var(--green)","ti-test-pipe","TEST"],
+          waived:["var(--amber)","ti-gavel","WAIVER"]}[e.kind]
+         ||["var(--dim)","ti-file",(e.kind||"?").toUpperCase()];
+}
+function fgWhen(at){const ms=Date.parse(at);return Number.isFinite(ms)?new Date(ms).toLocaleString():at;}
+function fgMs(ms){const d=new Date(ms);return Number.isFinite(d.getTime())?d.toLocaleString():"?";}
+function fgItem(e){
+  const[kc,ic,klabel]=fgKind(e);
+  const who=e.actor?`by @${esc(e.actor)}`:"by an unattributed actor";
+  const prov=`${who} · ${(e.source_gates||[]).length?`gate ${esc(e.source_gates.join(", "))} · `:""}provenance unknown`;
+  const inline=(e.kind==="api"||e.kind==="test")&&e.detail;
+  let body="";
+  if(e.kind==="screenshot"){
+    // The hidden twin handles the rare race where the server saw the
+    // artifact but storage lost it before the image rendered: the <img>
+    // error reveals the explicit 'missing artifact' state, never a
+    // silently broken image.
+    const miss=`<div class="fg-missing"><i class="ti ti-alert-triangle"></i> missing artifact — the recorded screenshot is no longer on disk <span class="fg-path">${esc(e.detail)}</span></div>`;
+    body=e.artifact==="ok"
+      ?`<img class="fg-shot" src="${esc(e.detail)}" alt="${esc(e.label)}" loading="lazy" onerror="this.nextElementSibling.hidden=false;this.remove()">`
+         +miss.replace('<div class="fg-missing">','<div class="fg-missing" hidden>')
+      :miss;
+  }else if(e.kind==="waived"){
+    body=`<div class="fg-waiver"><i class="ti ti-gavel"></i> <b>Waiver</b> — granted ${who}: ${esc(e.detail)}</div>`;
+  }
+  return `<div class="fg-item${inline?" expandable":""}"${inline?` onclick="this.classList.toggle('open')"`:""} title="${inline?"click to inspect the full captured text":""}">`
+    +`<div class="fg-row"><i class="ti ${ic}" style="color:${kc}"></i>`
+    +`<span class="fg-kind" style="color:${kc}">${klabel}</span>`
+    +`<span class="fg-label">${esc(e.label)}</span>`
+    +`<span class="fg-when" title="${esc(e.at)}">${esc(fgWhen(e.at))}</span>`
+    +(inline?`<i class="ti ti-chevron-right fg-chev"></i>`:"")
+    +`</div>`
+    +`<div class="fg-prov">${prov}</div>`
+    +(inline?`<pre class="fg-pre">${esc(e.detail)}</pre>`:body)
+    +`</div>`;
+}
+function fgGateSection(g,visit,of){
+  const pair=of>1?` · <span class="fg-visit">visit ${visit}/${of}</span>`:"";
+  return `<div class="fg-gate"><div class="fg-gate-h"><span class="fg-gate-id">${esc((g.gate.gate_id||"?").toUpperCase())}</span>`
+    +`<span class="fg-gate-sub">${esc(g.gate.status_from)} → ${esc(g.gate.status_to)} · decided ${esc(fgMs(g.gate.decided_at_ms))} · by ${esc(g.gate.actor_role||"?")} role${pair}</span></div>`
+    +(g.items.length?g.items.map(fgItem).join("")
+      :`<div class="fg-none">no evidence attached to this decision</div>`)
+    +`</div>`;
+}
+function fgPane(t){
+  const gates=t.gates||[],evs=t.evidence||[];
+  const hidden=`<div class="tk-pane" id="tk-pane-forensics" hidden>`;
+  if(!gates.length&&!evs.length){
+    // Absence is explicit: no evidence AND no gate decision ever recorded —
+    // distinguishable from an omission on a gated ticket.
+    return hidden+`<div class="cov-empty"><i class="ti ti-history"></i><div class="cov-empty-t">No DoD evidence captured for this ticket</div><div class="cov-empty-s">Evidence appears here when a gate decision captures proof; nothing is guessed.</div></div></div>`;
+  }
+  const groups=gates.map(g=>({gate:g,items:[]}));
+  const unlinked=[];
+  for(const e of evs){
+    const i=fgAttribution(gates,e);
+    if(i>=0)groups[i].items.push(e);else unlinked.push(e);
+  }
+  let h=hidden+`<div class="fglist">`;
+  let i=0;
+  while(i<groups.length){
+    let j=i;
+    while(j<groups.length&&groups[j].gate.gate_id===groups[i].gate.gate_id)j++;
+    const run=groups.slice(i,j);
+    // The same gate decided more than once = send-back cycles: the runs'
+    // visits sit side by side so the reviewer compares before/after.
+    h+=run.length>=2
+      ?`<div class="fg-pair">${run.map((g,n)=>fgGateSection(g,n+1,run.length)).join("")}</div>`
+      :run.map(g=>fgGateSection(g,1,1)).join("");
+    i=j;
+  }
+  if(unlinked.length){
+    h+=`<div class="fg-gate"><div class="fg-gate-h"><span class="fg-gate-id">UNLINKED</span>`
+      +`<span class="fg-gate-sub">no matching gate decision on this ticket — no link is guessed</span></div>`
+      +unlinked.map(fgItem).join("")+`</div>`;
+  }
+  return h+`</div></div>`;
 }
 // In-app attachment viewer: full-screen overlay, same session. Gallery-aware:
 // ‹ › buttons and ←/→ keys walk ATT_GALLERY; Esc or backdrop click closes.

@@ -314,6 +314,17 @@ pub struct Evidence {
     /// Screenshot: repo-relative path. API: capped request/response text.
     pub detail: String,
     pub at: String,
+    /// Which DoD gate decision(s) this item supported (`"ready"` | `"verify"`,
+    /// CXA-F241). Empty on records written before gate attribution existed —
+    /// the forensics view renders those as provenance unknown, never guesses
+    /// a link. serde-defaulted so every persisted record loads unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_gates: Vec<String>,
+    /// Who attached the item (the authenticated principal, or the agent role
+    /// label — `"TEST"`). Empty = unattributed, shown as such. serde-defaulted
+    /// for the same reason as `source_gates`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub actor: String,
 }
 
 /// Orchestrator self-tuning state, derived from the evals each day.

@@ -143,7 +143,11 @@ mod tests {
         // A retried DOCS run re-marking Documented (or any repeated write of
         // the current status) is bookkeeping, not corruption.
         for t in [TicketType::Feature, TicketType::Bug, TicketType::Chore] {
-            assert!(transition_allowed(t, Status::Documented, Status::Documented));
+            assert!(transition_allowed(
+                t,
+                Status::Documented,
+                Status::Documented
+            ));
             assert!(transition_allowed(t, Status::Open, Status::Open));
         }
         assert!(can_transition(
