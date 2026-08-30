@@ -443,8 +443,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let human = self.config.workflow.human.clone();
         let now = crate::use_cases::question_batching::now_minutes_utc();
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
-            for (owner, batch) in
-                crate::use_cases::question_batching::flush_batches(s, &human, now)
+            for (owner, batch) in crate::use_cases::question_batching::flush_batches(s, &human, now)
             {
                 // Re-checked under this write pass: flush_batches filtered
                 // against the just-loaded state, so `batch` is exactly what

@@ -188,6 +188,12 @@ gateway pods. Start with `cox-all`; split only when load asks for it.
   (`cox-<parent>-<dir>`); an hourly hub janitor `down`s fully-stopped `cox-*`
   projects (never `cox-infra`) and prunes dangling images. Manual sweep:
   `./scripts/docker-clean.sh` (`--deep` adds builder cache).
+- Hub shim directories (`$TMPDIR/coxagent-shims-*`) are reclaimed at every hub
+  start (CXA-B117): pid-suffixed dirs whose hub process is no longer running
+  are removed, while the legacy shared `coxagent-shims/` directory (the
+  pre-CXA-B109 format, possibly still advertised by an old hub) is rewritten
+  with fallback-guarded scripts — never removed, so the old hub's agents keep
+  working. No manual sweep needed; a hub restart does it.
 
 ## Standalone CXA backend (`deploy/docker-compose.cxa.yml`)
 
