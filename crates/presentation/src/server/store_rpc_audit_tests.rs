@@ -4,8 +4,10 @@
 //     quarantine ledger, behind the exact auth layering the POST surface has.
 //   * `POST …/store?op=heal` — opt-in self-heal of dangling ticket-keyed map
 //     entries (audit-first-then-fix, through the port's guarded save path).
-//   * Write-back refusal: a mutation whose post-state fails the audit is
-//     refused and its payload quarantined (AC4), visible via the audit.
+//   * Write-back gate: a mutation failing the structural-integrity audit is
+//     gated at the write boundary — the one safely-repairable class (dangling
+//     ticket-keyed entries) heals in place (refusing bricked first deploys,
+//     see `gate_save`); a healed save persists healthy and is not quarantined.
 //
 // Pure in-process verification (harness in `store_rpc_test_support`): requests
 // drive the real handler and the real `auth_mw` layering via
@@ -197,11 +199,17 @@ async fn unauthenticated_post_audit_and_heal_are_refused_before_the_store() {
 }
 
 // ---------------------------------------------------------------------------
-// Write-back refusal + quarantine (AC4)
+// Write-back gate (AC4)
 // ---------------------------------------------------------------------------
 
+/// A payload with dangling ticket-keyed references is no longer REFUSED at
+/// the write boundary: refusing bricked the hub on FIRST deploy (decades of
+/// legacy keys failed every save — see `gate_save` in the quarantine module),
+/// so the one safely-repairable class heals in place and the healed shape is
+/// what persists. The corruption must still never reach disk, and a healed
+/// save is not quarantined.
 #[tokio::test]
-async fn a_save_whose_post_state_fails_the_audit_is_refused_and_quarantined() {
+async fn a_save_with_dangling_references_is_healed_at_the_boundary_and_persists_healthy() {
     let (_dir, store) = store_seeded_with(&healthy_state());
     let app = app_with(None, store).await;
     let router = handler_router(app);
@@ -217,38 +225,32 @@ async fn a_save_whose_post_state_fails_the_audit_is_refused_and_quarantined() {
         None,
     )
     .await;
-    assert_eq!(
-        resp.status(),
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "the audit refusal surfaces through the same error envelope as every store failure"
-    );
+    assert_eq!(resp.status(), StatusCode::OK);
     let doc: serde_json::Value = serde_json::from_str(&body_text(resp).await).expect("json body");
-    assert!(doc["error"]
-        .as_str()
-        .expect("error")
-        .contains("structural integrity audit"));
+    assert_eq!(doc["ok"], serde_json::json!(true));
 
-    // The audit now reports the quarantined payload alongside the (healthy)
-    // persisted state — the corruption is inspectable, not silent.
+    // The persisted state is the healed shape: the orphaned key is gone.
+    let resp = post_store(router.clone(), "load", serde_json::json!({}), None, None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let state: serde_json::Value = serde_json::from_str(&body_text(resp).await).expect("state");
+    assert!(
+        state["ticket_evidence"].get("CXA-F999").is_none(),
+        "the dangling evidence entry must not survive the save"
+    );
+
+    // The audit reads clean against what actually persisted, and the ledger
+    // stays empty — healed saves are not quarantined (see `gate_save`).
     let resp = get_store_at(router, PID, Some("audit"), None, None).await;
     let doc: serde_json::Value = serde_json::from_str(&body_text(resp).await).expect("json body");
     assert_eq!(
         doc["healthy"],
         serde_json::json!(true),
-        "persisted state untouched"
+        "persisted state is the healed shape"
     );
-    let quarantined = doc["quarantined"].as_array().expect("quarantine ledger");
-    assert_eq!(quarantined.len(), 1, "the refused payload was quarantined");
     assert_eq!(
-        quarantined[0]["rule_id"],
-        serde_json::json!("dangling_ticket_reference")
-    );
-    assert!(
-        quarantined[0]["payload"]
-            .as_str()
-            .expect("payload")
-            .contains("ticket_evidence"),
-        "the attempted payload itself is recorded"
+        doc["quarantined"],
+        serde_json::json!([]),
+        "healed saves are not quarantined"
     );
 }
 

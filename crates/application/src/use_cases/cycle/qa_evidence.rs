@@ -244,27 +244,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         };
         // The human Verify gate should see the same picture: attach it to the
         // ticket instead of leaving it as a loose workdir file only agents see.
-        if let Some(storage) = &self.storage {
-            let key = format!("visual-qa/{ticket}-{}.png", crate::state::now_rfc3339());
-            if storage.put(&key, &bytes, "image/png").await.is_ok() {
-                let rec = crate::state::TicketAttachment {
-                    name: format!("visual-qa-{ticket}.png"),
-                    key,
-                    content_type: "image/png".to_owned(),
-                    by: "PD".to_owned(),
-                    at: crate::state::now_rfc3339(),
-                };
-                let tid = ticket.to_string();
-                let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |st| {
-                    st.ticket_attachments
-                        .entry(tid.clone())
-                        .or_default()
-                        .push(rec.clone());
-                    Ok(())
-                })
-                .await;
-            }
-        }
+        self.attach_shot_to_ticket(ticket, &bytes).await;
         self.report("PD", "visual QA on the deployed UI");
         let request = crate::ports::outbound::AgentRequest {
             role: coxagent_domain::Role::Pd,
@@ -289,7 +269,39 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if !o.succeeded() {
             return;
         }
-        let raw = &o.stdout;
+        self.file_ui_bugs(ticket, report, &o.stdout).await;
+    }
+
+    /// Attach the visual-QA screenshot to the ticket through the storage port,
+    /// so the human Verify gate sees the same picture the PD agent judged.
+    async fn attach_shot_to_ticket(&self, ticket: &TicketId, bytes: &[u8]) {
+        let Some(storage) = &self.storage else {
+            return;
+        };
+        let key = format!("visual-qa/{ticket}-{}.png", crate::state::now_rfc3339());
+        if storage.put(&key, bytes, "image/png").await.is_ok() {
+            let rec = crate::state::TicketAttachment {
+                name: format!("visual-qa-{ticket}.png"),
+                key,
+                content_type: "image/png".to_owned(),
+                by: "PD".to_owned(),
+                at: crate::state::now_rfc3339(),
+            };
+            let tid = ticket.to_string();
+            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |st| {
+                st.ticket_attachments
+                    .entry(tid.clone())
+                    .or_default()
+                    .push(rec.clone());
+                Ok(())
+            })
+            .await;
+        }
+    }
+
+    /// File at most 2 concrete UI bugs from the PD review's JSON-array output.
+    /// Best-effort: an unparseable review files nothing.
+    async fn file_ui_bugs(&self, ticket: &TicketId, report: &mut CycleReport, raw: &str) {
         let (Some(a), Some(b)) = (raw.find('['), raw.rfind(']')) else {
             return;
         };

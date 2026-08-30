@@ -32,6 +32,8 @@ use std::time::Duration;
 mod builders;
 mod config_load;
 mod host_port;
+mod recovery;
+mod retry;
 mod shims;
 
 pub use builders::load_coordination;
@@ -41,6 +43,7 @@ use builders::*;
 use config_load::*;
 #[allow(clippy::wildcard_imports)] // one module, many files — see host_port.rs
 use host_port::*;
+use recovery::{build_registry, Entry, ProjectBuilder, RecoveryPolicy};
 pub use shims::shim_script;
 #[allow(clippy::wildcard_imports)] // one module, many files — see shims.rs
 use shims::*;
@@ -547,13 +550,6 @@ pub async fn operator_main(
 /// selected by `COXAGENT_ROLE`. The registry is a JSON array of
 /// `{ "id", "path" }` where `path` contains `state/` and `codebase/`.
 ///
-/// One entry of the hub registry JSON array.
-#[derive(serde::Deserialize)]
-struct Entry {
-    id: String,
-    path: PathBuf,
-}
-
 /// # Errors
 /// Returns an error when the registry can't be read or the port can't bind.
 #[allow(clippy::too_many_lines)] // one linear wiring pass; splitting hurts readability
@@ -608,30 +604,21 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
     // here would silently mint tokens nobody validates against.
     let auth = build_auth(registry.parent().unwrap_or_else(|| Path::new("."))).await?;
 
-    let mut projects = Vec::new();
-    let mut broken = Vec::new();
-    for e in entries {
-        let state_dir = e.path.join("state");
-        let work_dir = e.path.join("codebase");
-        match build_project(&e.id, &state_dir, work_dir, auth.as_ref()).await {
-            Ok(p) => {
-                tracing::info!("hub: registered project '{}'", p.id);
-                projects.push(p);
-            }
-            // Loud, and carried into the dashboard: a project that fails to
-            // load has no handle to serve, so without this record it would
-            // simply be absent from /api/projects and the person looking for
-            // it would have only the hub log to go on (COX-B043).
-            Err(err) => {
-                tracing::error!("hub: skipping '{}': {err}", e.id);
-                broken.push(coxagent_presentation::BrokenProject {
-                    id: e.id.clone(),
-                    config_path: e.path.join("coxagent.json"),
-                    error: err.to_string(),
-                });
-            }
-        }
-    }
+    // CXA-B114: a project whose store cannot connect at boot used to be
+    // parked in the broken list FOREVER — one failed DB connect at boot kept
+    // the project dead until someone restarted the app, even once the
+    // database was healthy again. Boot now retries transiently, and whatever
+    // still fails is rebuilt in the background and admitted live (through the
+    // `recoveries` inbox below) the moment its store recovers.
+    let (admit, recoveries) = tokio::sync::mpsc::channel(4);
+    let build: ProjectBuilder = {
+        let auth = auth.clone();
+        Arc::new(move |id: &str, state_dir: &Path, work_dir: PathBuf| {
+            let auth = auth.clone();
+            Box::pin(async move { build_project(id, state_dir, work_dir, auth.as_ref()).await })
+        })
+    };
+    let (projects, broken) = build_registry(entries, admit, build, RecoveryPolicy::default()).await;
 
     // Factory: onboard a brand-new project from the dashboard. New workspaces
     // land under the registry's directory and are appended to the registry file
@@ -709,6 +696,9 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
         doc_store: build_doc_store().await,
         syschat_store: build_syschat_store(&base).await,
         broken,
+        // CXA-B114: recovered projects arrive here and join the live registry
+        // without a restart.
+        recoveries: Some(recoveries),
     };
     coxagent_presentation::serve_full(projects, port, audit, extras).await?;
     Ok(())

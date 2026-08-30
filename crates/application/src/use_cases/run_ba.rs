@@ -150,6 +150,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
             "",
         )
         .await;
+        // Hoisted out of the task_prompt's format! args (clippy: format in
+        // format args) — same single allocation the inner format! made.
+        let backlog_and_surface = format!("{backlog_block}{surface_block}");
         let request = AgentRequest {
             role: Role::Ba,
             system_prompt: prompts::system_prompt(prompts::BA),
@@ -161,7 +164,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
                  concrete, grounded in what's there, not generic.{}{}{}",
                 self.context,
                 sprint_goal_block(&existing.sprint_goal),
-                format!("{backlog_block}{surface_block}"),
+                backlog_and_surface,
                 prompts::repo_map_block(self.files.as_deref(), &self.work_dir, true).await,
                 knowledge,
                 prompts::team_memory_block(&existing.decisions, &existing.lessons)
