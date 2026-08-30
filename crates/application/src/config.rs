@@ -7,6 +7,11 @@ use coxagent_domain::{Priority, Role};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+// The `artifacts` section type lives in [`crate::artifacts`] with the schema
+// anchor and build manifest it belongs to; it is re-exported here so every
+// Config section type is reachable as `config::<Section>Config`.
+pub use crate::artifacts::ArtifactsConfig;
+
 /// Known agent engine CLIs. `as_binary` gives the executable name to look for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -583,6 +588,7 @@ impl Default for PolicyConfig {
 /// projects deploying with `docker compose` on one host do not fight over the
 /// same published port — agents are told which port to bind.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // config flags, not a state machine
 pub struct DeployConfig {
     /// The host port this project's app should publish (None = agent's choice).
     /// Must be a port a client can connect to: `0` is the kernel's "any free
@@ -613,6 +619,23 @@ pub struct DeployConfig {
     /// until an operator turns this on.
     #[serde(default)]
     pub auto_rollback: bool,
+    /// Auto-redeploy the last known-good version when the Ops monitor finds
+    /// the ALREADY-LIVE deployment unhealthy (CXA-F240) — the post-merge
+    /// counterpart of `auto_rollback`, which only covers a deploy/tests
+    /// failure detected in the same cycle that shipped it. This closes the
+    /// gap where CI smoke passed and the deploy looked green, but the stack
+    /// went dead afterwards and sat broken until a human reverted by hand.
+    /// Opt-in (default off) — an existing project's behavior never changes
+    /// until an operator turns this on.
+    #[serde(default)]
+    pub live_health_auto_rollback: bool,
+    /// How many consecutive unhealthy Ops-monitor probes (one per cycle) the
+    /// live app must serve before a `live_health_auto_rollback` fires —
+    /// N consecutive checks, not one flaky probe. The revert itself is still
+    /// bounded by `max_rollback_age_secs` (the allowed window) and the
+    /// migration safety check.
+    #[serde(default = "default_live_health_fail_checks")]
+    pub live_health_fail_checks: u32,
     /// A known-good deploy older than this is considered too stale to roll
     /// back to (the environment may have drifted too far) — rollback is
     /// skipped, not attempted, and the failure just files its bug as before.
@@ -634,6 +657,13 @@ fn default_max_rollback_age_secs() -> u64 {
     3600
 }
 
+/// Three consecutive unhealthy probes (three leader cycles) before a
+/// live-health revert — one dead probe is often a transient network blip,
+/// not a broken stack.
+fn default_live_health_fail_checks() -> u32 {
+    3
+}
+
 fn default_health_check_timeout_secs() -> u64 {
     60
 }
@@ -649,6 +679,8 @@ impl Default for DeployConfig {
             enabled: true,
             self_upgrade: false,
             auto_rollback: false,
+            live_health_auto_rollback: false,
+            live_health_fail_checks: default_live_health_fail_checks(),
             max_rollback_age_secs: default_max_rollback_age_secs(),
             migration_detection_paths: default_migration_detection_paths(),
             health_check_timeout_secs: default_health_check_timeout_secs(),
@@ -801,7 +833,7 @@ impl Default for GitConfig {
 /// chore. `enabled` is off by default: creating a git tag mutates the managed
 /// codebase's history, so an existing project's release history is never
 /// touched until an operator opts in — the same convention as `GitConfig`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleasesConfig {
     /// Master switch. When false, the cycle never tags or files releases,
     /// no matter how many milestones have been reached.
@@ -813,6 +845,32 @@ pub struct ReleasesConfig {
     /// a release PR that a person lands from the Inbox. The merge tags it.
     #[serde(default)]
     pub cut_every_days: u64,
+    /// CXA-F231: a cut only carries commit subjects whose ticket refs are in
+    /// the verified-complete set (bugs at `Verified`, features/chores at
+    /// `Done`/`Documented`); unverified or unreferenced subjects are excluded
+    /// with an explicit reason on the SM manifest line. Off restores the
+    /// legacy all-subjects cut during migration.
+    #[serde(default = "default_cut_only_verified")]
+    pub cut_only_verified: bool,
+}
+
+fn default_cut_only_verified() -> bool {
+    true
+}
+
+impl Default for ReleasesConfig {
+    /// `enabled`/`cut_every_days` default OFF (tagging mutates git history, so
+    /// an existing project never releases until an operator opts in);
+    /// `cut_only_verified` defaults ON — an RC silently carrying unverified
+    /// work is the failure mode CXA-F231 removes. Defaults are EXPLICIT
+    /// (COX-B043), never derived zero-values.
+    fn default() -> Self {
+        ReleasesConfig {
+            enabled: false,
+            cut_every_days: 0,
+            cut_only_verified: default_cut_only_verified(),
+        }
+    }
 }
 
 /// Version of the persisted `coxagent.json` schema this build understands.
@@ -912,6 +970,11 @@ pub struct Config {
     /// Gap-detection coverage policy (enabled state + threshold).
     #[serde(default)]
     pub coverage: CoverageConfig,
+    /// Per-project artifact-version registry (which build artifacts exist and
+    /// the semver each carries), anchored by
+    /// [`crate::artifacts::ARTIFACT_SCHEMA_VERSION`].
+    #[serde(default)]
+    pub artifacts: ArtifactsConfig,
     /// Dependency-health scan policy (CXA-F009). When enabled, the periodic
     /// self-tuning scan reads lock files, flags outdated/vulnerable packages,
     /// and files remediation tickets against a master 'Dependency Audit' epic.
@@ -922,6 +985,26 @@ pub struct Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cut_only_verified_defaults_on_and_survives_old_documents() {
+        // CXA-F231: an existing coxagent.json without the knob keeps the
+        // honest-by-default gate ON (documents-old = gate-on, never off).
+        let old = r#"{"releases":{"enabled":true,"cut_every_days":7}}"#;
+        let cfg: serde_json::Value = serde_json::from_str(old).expect("old doc parses");
+        let releases: ReleasesConfig =
+            serde_json::from_value(cfg["releases"].clone()).expect("old releases load");
+        assert!(
+            releases.cut_only_verified,
+            "old documents default the gate on"
+        );
+        // And the explicit opt-out is honored verbatim.
+        let off = r#"{"releases":{"enabled":true,"cut_every_days":7,"cut_only_verified":false}}"#;
+        let cfg: serde_json::Value = serde_json::from_str(off).expect("new doc parses");
+        let releases: ReleasesConfig =
+            serde_json::from_value(cfg["releases"].clone()).expect("new releases load");
+        assert!(!releases.cut_only_verified);
+    }
 
     #[test]
     fn quiet_window_handles_wrap_zero_and_garbage() {
@@ -963,6 +1046,24 @@ mod tests {
         let rewritten = serde_json::to_string(&human).expect("serialize");
         let back: HumanConfig = serde_json::from_str(&rewritten).expect("deserialize");
         assert_eq!(back, human);
+    }
+
+    #[test]
+    fn cut_only_verified_defaults_true_for_documents_without_the_knob() {
+        // CXA-F231: a pre-F231 document (no `cut_only_verified`) loads with
+        // the verification gate ON — an RC silently carrying unverified work
+        // is the failure mode being removed, not the default behaviour.
+        let old = r#"{"enabled":true,"cut_every_days":7}"#;
+        let releases: ReleasesConfig = serde_json::from_str(old).expect("pre-F231 doc loads");
+        assert!(releases.enabled);
+        assert_eq!(releases.cut_every_days, 7);
+        assert!(releases.cut_only_verified);
+
+        // The explicit container default stays documented-true (COX-B043):
+        // releases themselves stay opt-in, the verification gate does not.
+        assert!(!ReleasesConfig::default().enabled);
+        assert_eq!(ReleasesConfig::default().cut_every_days, 0);
+        assert!(ReleasesConfig::default().cut_only_verified);
     }
 
     #[test]

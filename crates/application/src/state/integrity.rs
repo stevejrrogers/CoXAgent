@@ -279,37 +279,13 @@ fn audit_ticket_references(state: &ProjectState) -> Vec<IntegrityFinding> {
 /// inconsistent. Same reasoning for the deploy ordinal.
 fn audit_counters(state: &ProjectState) -> Vec<IntegrityFinding> {
     let mut findings = Vec::new();
-    let high_water = state
-        .cycle_scores
-        .iter()
-        .map(|s| s.cycle)
-        .chain(state.sweeps_done.iter().copied())
-        .max();
-    if let Some(recorded) = high_water.filter(|recorded| state.cycle < *recorded) {
-        findings.push(IntegrityFinding::new(
-            CYCLE_COUNTER_REGRESSION,
-            None,
-            format!(
-                "cycle counter {} is behind the recorded high-water mark {recorded} \
-                 (cycle_scores/sweeps_done) — the counter rolled back",
-                state.cycle
-            ),
-        ));
-    }
-    if let Some(sprint) = state
-        .sprint
-        .as_ref()
-        .filter(|s| s.started_cycle > state.cycle)
-    {
-        findings.push(IntegrityFinding::new(
-            CYCLE_COUNTER_REGRESSION,
-            None,
-            format!(
-                "sprint {} started at cycle {} which is ahead of the cycle counter {}",
-                sprint.number, sprint.started_cycle, state.cycle
-            ),
-        ));
-    }
+    // NOTE deliberately NOT audited: `state.cycle` versus the persistent
+    // high-water marks (cycle_scores / sweeps_done / sprint.started_cycle).
+    // The runner's cycle counter is per-PROCESS and resets to 1 on every
+    // restart BY DESIGN (see scrum.rs's dedup note) — comparing it against
+    // persistent marks declared every ordinary restart "corruption" and,
+    // combined with the save gate, refused all write-backs until the counter
+    // caught a four-digit high-water (the 2026-08-29 outage).
     if let Some(good) = state
         .last_good_deploy
         .as_ref()
@@ -583,6 +559,8 @@ mod tests {
                 label: "orphan".to_owned(),
                 detail: "d".to_owned(),
                 at: String::new(),
+                source_gates: Vec::new(),
+                actor: String::new(),
             }],
         );
         let violation = StateIntegrityAuditor::check(&state).unwrap_err();
@@ -595,24 +573,17 @@ mod tests {
     }
 
     #[test]
-    fn a_rolled_back_cycle_counter_is_a_named_violation() {
-        // AC: injecting a rolled-back cycle counter yields the specific named
-        // violation — a counter behind its own recorded high-water mark.
+    fn a_reset_cycle_counter_is_not_corruption() {
+        // The runner's cycle counter is per-PROCESS and resets on every
+        // restart by design (scrum.rs). Auditing it against persistent
+        // high-water marks declared every ordinary restart corrupt and — via
+        // the save gate — refused all write-backs (the 2026-08-29 outage).
         let mut state = seeded();
         state.cycle = 3;
-        let violation = StateIntegrityAuditor::check(&state).unwrap_err();
-        assert!(violation
-            .findings
-            .iter()
-            .any(|f| f.rule_id == CYCLE_COUNTER_REGRESSION));
-        // A sprint opened "in the future" is the same counter-rollback class.
+        assert!(StateIntegrityAuditor::check(&state).is_ok());
         let mut future = seeded();
         future.sprint.as_mut().expect("sprint").started_cycle = 99;
-        assert!(StateIntegrityAuditor::check(&future)
-            .unwrap_err()
-            .findings
-            .iter()
-            .any(|f| f.rule_id == CYCLE_COUNTER_REGRESSION));
+        assert!(StateIntegrityAuditor::check(&future).is_ok());
     }
 
     #[test]
@@ -769,7 +740,6 @@ mod tests {
             .collect();
         assert!(rules.contains(&DUPLICATE_TICKET_ID), "{rules:?}");
         assert!(rules.contains(&DANGLING_TICKET_REFERENCE), "{rules:?}");
-        assert!(rules.contains(&CYCLE_COUNTER_REGRESSION), "{rules:?}");
     }
 
     #[test]

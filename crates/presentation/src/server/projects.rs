@@ -57,7 +57,7 @@ pub(super) async fn list_projects(State(app): State<AppState>) -> impl IntoRespo
             }));
         }
     }
-    out.extend(broken_entries(&app.broken));
+    out.extend(broken_entries(&app.broken.read().await));
     Json(out)
 }
 

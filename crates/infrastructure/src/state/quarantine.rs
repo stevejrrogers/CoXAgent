@@ -114,13 +114,28 @@ impl QuarantineLedger {
 /// [`PortError::Corrupt`] naming the failed invariants — the same error
 /// envelope the pre-existing validation uses.
 pub(crate) fn gate_save(
-    state: &ProjectState,
+    state: &mut ProjectState,
     ledger: &QuarantineLedger,
 ) -> Result<(), coxagent_application::PortError> {
     state.validate().map_err(|e| {
         coxagent_application::PortError::Corrupt(format!("refusing to save invalid state: {e}"))
     })?;
     if let Err(violation) = StateIntegrityAuditor::check(state) {
+        // Dangling ticket-keyed map entries have exactly one safe repair
+        // (drop the entry), and the auditor ships a healer for them. Refusing
+        // instead of healing bricked the whole hub on FIRST deploy: decades of
+        // pre-auditor legacy keys ("2.26.2", renamed ticket ids) failed every
+        // save, so nothing the agents did could persist. Heal that class in
+        // place and save; anything else still refuses and quarantines.
+        match state.heal_dangling_references() {
+            Ok(healed) if healed > 0 => {
+                tracing::warn!(
+                    "structural integrity audit: healed {healed} dangling ticket reference(s) at the write boundary"
+                );
+                return Ok(());
+            }
+            _ => {}
+        }
         ledger.record_refusal(&violation, state);
         return Err(coxagent_application::PortError::Corrupt(format!(
             "refusing to save state failing structural integrity audit: {violation}"
@@ -144,6 +159,8 @@ mod tests {
                 label: "orphan".to_owned(),
                 detail: "d".to_owned(),
                 at: String::new(),
+                source_gates: Vec::new(),
+                actor: String::new(),
             }],
         );
         state
@@ -182,11 +199,15 @@ mod tests {
 
     #[test]
     fn gate_save_refuses_dangling_state_and_quarantines_it() {
-        let ledger = QuarantineLedger::memory_only();
-        let bad = state_with_dangling_evidence();
-        let err = gate_save(&bad, &ledger).expect_err("refused");
-        assert!(err.to_string().contains("structural integrity audit"));
-        assert_eq!(ledger.recent().len(), 1);
+        // Renamed: dangling references now HEAL at the boundary (the only
+        // safe repair is dropping the entry) — the save succeeds and the
+        // orphaned key is gone. Refusal is reserved for unhealable findings.
+        let mut bad = state_with_dangling_evidence();
+        let dir = tempfile::tempdir().expect("tmp");
+        let ledger = QuarantineLedger::in_dir(dir.path());
+        gate_save(&mut bad, &ledger).expect("healed and saved");
+        assert!(bad.ticket_evidence.is_empty(), "dangling entry dropped");
+        assert!(ledger.recent().is_empty(), "healed saves are not quarantined");
     }
 
     #[test]
@@ -210,7 +231,7 @@ mod tests {
             );
         }
         let ledger = QuarantineLedger::memory_only();
-        let err = gate_save(&state, &ledger).expect_err("refused");
+        let err = gate_save(&mut state, &ledger).expect_err("refused");
         assert!(err.to_string().contains("refusing to save invalid state"));
         assert!(
             ledger.recent().is_empty(),

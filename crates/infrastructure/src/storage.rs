@@ -46,6 +46,15 @@ impl StoragePort for LocalStorage {
         let path = self.root.join(safe_key(key)?);
         std::fs::read(&path).map_err(|e| PortError::Backend(e.to_string()))
     }
+
+    async fn exists(&self, key: &str) -> bool {
+        // Metadata probe, not a read: the forensics view checks every
+        // screenshot's artifact and must not fetch the blobs to do it.
+        match safe_key(key) {
+            Ok(k) => std::fs::metadata(self.root.join(k)).is_ok(),
+            Err(_) => false,
+        }
+    }
 }
 
 /// S3-compatible object storage (MinIO), path-style addressing + SigV4.
@@ -226,6 +235,25 @@ impl StoragePort for S3Storage {
             .await
             .map(|b| b.to_vec())
             .map_err(|e| PortError::Backend(e.to_string()))
+    }
+
+    async fn exists(&self, key: &str) -> bool {
+        // HEAD, not GET: same reason as the local adapter — presence must
+        // not download the object. A rejected key was never storable.
+        let Ok(key) = safe_key(key) else {
+            return false;
+        };
+        let uri = format!("/{}/{}", self.bucket, uri_encode(key, false));
+        let url = format!("{}{uri}", self.endpoint);
+        self.signed(
+            reqwest::Method::HEAD,
+            &uri,
+            &[],
+            "application/octet-stream",
+            &url,
+        )
+        .await
+        .is_ok_and(|resp| resp.status().is_success())
     }
 }
 

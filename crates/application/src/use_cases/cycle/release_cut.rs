@@ -14,6 +14,7 @@
 
 use super::RunCycleUseCase;
 use crate::ports::outbound::{AgentEnginePort, StateStorePort};
+use crate::release_candidates::{filter_included, manifest_summary, verified_complete_ids};
 use coxagent_domain::{Bump, SemVer};
 
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
@@ -46,37 +47,27 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 return;
             }
         }
-        let wd = &self.work_dir;
         let base = self.flow_base().to_owned();
-        let _ = git.raw(wd, &["fetch", "origin", &base, "--tags"]).await;
-        // Commits since the last v* tag (or everything, first release).
-        let (has_tag, tag) = git
-            .raw(
-                wd,
-                &[
-                    "describe",
-                    "--tags",
-                    "--abbrev=0",
-                    "--match",
-                    "v*",
-                    &format!("origin/{base}"),
-                ],
-            )
-            .await;
-        let range = if has_tag {
-            format!("{}..origin/{base}", tag.trim())
-        } else {
-            format!("origin/{base}")
-        };
-        let (ok, subjects) = git.raw(wd, &["log", &range, "--pretty=%s"]).await;
-        if !ok {
+        // Commits since the last v* tag (or everything, for a first release).
+        let Some(subjects) = self.subjects_since_last_tag(&git, &base).await else {
             return;
-        }
-        let subjects: Vec<String> = subjects.lines().map(str::to_owned).collect();
+        };
+        // CXA-F231: the pure decision step between "collect raw subjects" and
+        // "bump + changelog". With `cut_only_verified` (default) only subjects
+        // whose ticket refs are Verified-complete enter the RC; everything
+        // else is kept out with an explicit reason, so the RC can never
+        // silently carry unverified work.
+        let (subjects, manifest_line) = if self.config.releases.cut_only_verified {
+            let outcome = filter_included(&subjects, &verified_complete_ids(&state));
+            let line = manifest_summary(&outcome);
+            (outcome.included, Some(line))
+        } else {
+            (subjects, None)
+        };
         let Some(bump) = classify_bump(&subjects) else {
             return; // nothing releasable since the last tag
         };
-        let Some(cargo_text) = files.read(&wd.join("Cargo.toml")).await else {
+        let Some(cargo_text) = files.read(&self.work_dir.join("Cargo.toml")).await else {
             return;
         };
         let Some(cur) = super::parse_cargo_version(&cargo_text)
@@ -100,15 +91,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 let pr = pr.number;
                 let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
                     s.daily_jobs.insert("release_cut".to_owned(), today.clone());
-                    s.post_chat_in(
-                        "SM",
-                        &format!(
-                            "🏷️ Release PR opened: v{cur} → v{next} (#{pr}) — lands from the \
-                             Inbox (Cargo.toml is human-gated); the merge tags v{next}."
-                        ),
-                        crate::state::AGENTS_CHANNEL,
-                        Vec::new(),
+                    // The CXA-F231 audit line: which ticket ids the RC carries,
+                    // and which were kept out with a reason.
+                    let mut chat = format!(
+                        "🏷️ Release PR opened: v{cur} → v{next} (#{pr}) — lands from the \
+                         Inbox (Cargo.toml is human-gated); the merge tags v{next}."
                     );
+                    if let Some(line) = &manifest_line {
+                        chat.push_str("\n📋 ");
+                        chat.push_str(line);
+                    }
+                    s.post_chat_in("SM", &chat, crate::state::AGENTS_CHANNEL, Vec::new());
                     Ok(())
                 })
                 .await;
@@ -117,6 +110,41 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
             Err(e) => tracing::warn!("release cut: open PR failed: {e}"),
         }
+    }
+
+    /// The commit subjects on `origin/<base>` since the last `v*` tag —
+    /// everything on the branch, for a first release. `None` when git could
+    /// not answer: the cut waits rather than guessing a range.
+    async fn subjects_since_last_tag(
+        &self,
+        git: &std::sync::Arc<dyn crate::ports::outbound::GitPort>,
+        base: &str,
+    ) -> Option<Vec<String>> {
+        let wd = &self.work_dir;
+        let _ = git.raw(wd, &["fetch", "origin", base, "--tags"]).await;
+        let (has_tag, tag) = git
+            .raw(
+                wd,
+                &[
+                    "describe",
+                    "--tags",
+                    "--abbrev=0",
+                    "--match",
+                    "v*",
+                    &format!("origin/{base}"),
+                ],
+            )
+            .await;
+        let range = if has_tag {
+            format!("{}..origin/{base}", tag.trim())
+        } else {
+            format!("origin/{base}")
+        };
+        let (ok, subjects) = git.raw(wd, &["log", &range, "--pretty=%s"]).await;
+        if !ok {
+            return None;
+        }
+        Some(subjects.lines().map(str::to_owned).collect())
     }
 
     /// Build and push the release branch in a scratch worktree (the live tree
@@ -340,6 +368,7 @@ pub(super) fn days_between(a: &str, b: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::use_cases::release_assembly::cut_manifest;
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| (*s).to_owned()).collect()
@@ -380,10 +409,117 @@ mod tests {
         assert!(body.contains("### Other\n- chore: c"));
     }
 
+    /// CXA-F231: bump and changelog are computed ONLY over the manifest's
+    /// included set — an unverified or unreferenced subject can shape neither.
+    #[test]
+    fn cut_decides_bump_and_changelog_only_over_verified_included_subjects() {
+        let subjects = v(&[
+            "feat(CXA-F228): outcome ledger",
+            "fix(CXA-F009): scanner",
+            "feat(app): disk discipline",
+            "Merge pull request #394",
+        ]);
+        let verified: std::collections::BTreeSet<String> = ["CXA-F228".to_owned()].into();
+        let outcome = filter_included(&subjects, &verified);
+
+        // The verified feat alone still drives the minor bump …
+        assert_eq!(classify_bump(&outcome.included), Some(Bump::Minor));
+        let body = changelog("2.28.0", &outcome.included);
+        assert!(body.contains("feat(CXA-F228)"));
+        // … and the excluded subjects appear nowhere in the release body.
+        assert!(!body.contains("CXA-F009"));
+        assert!(!body.contains("disk discipline"));
+        assert!(!body.contains("Merge pull request"));
+    }
+
+    /// CXA-F231: a range carrying only unverified/referenced-nowhere work
+    /// yields an empty manifest, so nothing releasable remains and no cut
+    /// happens — unverified work cannot ship by riding a release PR.
+    #[test]
+    fn a_range_with_only_unverified_work_produces_no_cut() {
+        let subjects = v(&["fix(CXA-F009): scanner", "feat(app): disk discipline"]);
+        let verified: std::collections::BTreeSet<String> = ["CXA-F228".to_owned()].into();
+
+        let outcome = filter_included(&subjects, &verified);
+
+        assert!(outcome.included.is_empty());
+        assert_eq!(classify_bump(&outcome.included), None);
+    }
+
     #[test]
     fn day_gate_math() {
         assert_eq!(days_between("2026-08-10", "2026-08-17"), 7);
         assert_eq!(days_between("2026-08-17", "2026-08-17"), 0);
         assert_eq!(days_between("garbage", "2026-08-17"), 0);
+    }
+
+    /// A state with one Verified bug (CXA-B001) and one Fixed bug (CXA-B002),
+    /// each walked along the bug lifecycle's only legal route.
+    fn state_with_verified_and_fixed() -> crate::state::ProjectState {
+        use coxagent_domain::{Complexity, Priority, Role, Status, Ticket, TicketId, TicketType};
+        let bug = |id: &str| {
+            Ticket::new(
+                TicketId::new(id).expect("id"),
+                TicketType::Bug,
+                format!("defect {id}"),
+                "repro",
+                Priority::High,
+                Complexity::Small,
+                false,
+            )
+            .expect("ticket")
+        };
+        let mut fixed = bug("CXA-B002");
+        fixed.claim(Role::DevBug, "dev", "t").expect("claim");
+        fixed
+            .transition_to(Role::DevBug, Status::Fixed)
+            .expect("fix");
+        let mut verified = bug("CXA-B001");
+        verified.claim(Role::DevBug, "dev", "t").expect("claim");
+        verified
+            .transition_to(Role::DevBug, Status::Fixed)
+            .expect("fix");
+        verified
+            .transition_to(Role::Test, Status::Verified)
+            .expect("verify");
+        crate::state::ProjectState {
+            tickets: vec![verified, fixed],
+            ..crate::state::ProjectState::default()
+        }
+    }
+
+    #[test]
+    fn manifest_gate_computes_bump_and_changelog_only_over_included_subjects() {
+        let state = state_with_verified_and_fixed();
+        let subjects = v(&[
+            "feat(cxa): ship the flow #CXA-B001",  // verified → in
+            "fix(cxa): partial support #CXA-B002", // Fixed-only → excluded
+            "chore: no ticket ref",                // ref-less → excluded
+        ]);
+        let m = cut_manifest(&state, &subjects);
+
+        // The bump is computed ONLY over the included set: the excluded fix
+        // cannot sneak a patch in, the included feat still makes a minor.
+        assert_eq!(classify_bump(&m.included), Some(Bump::Minor));
+        // The changelog body corresponds one-to-one to manifest inclusions.
+        let body = changelog("2.27.0", &m.included);
+        assert!(body.contains("#CXA-B001"));
+        assert!(!body.contains("partial support"));
+        assert!(!body.contains("no ticket ref"));
+        // The SM note surfaces bundles plus included/excluded ticket ids.
+        assert!(m.note.contains("included: CXA-B001"), "{}", m.note);
+        assert!(m.note.contains("excluded: CXA-B002"), "{}", m.note);
+        assert!(m.note.contains("Unattributed [CXA-B001]"), "{}", m.note);
+    }
+
+    #[test]
+    fn manifest_gate_yields_no_note_and_no_subjects_from_an_empty_verified_set() {
+        // AC5 at the cut: zero Verified-complete tickets → no included
+        // subjects (so no bump, no PR) and a note with nothing to list.
+        let state = crate::state::ProjectState::default();
+        let m = cut_manifest(&state, &v(&["feat: orphaned work"]));
+        assert!(m.included.is_empty());
+        assert_eq!(m.note, "");
+        assert_eq!(classify_bump(&m.included), None, "no candidate is produced");
     }
 }

@@ -148,7 +148,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Ops/SRE monitor: once the app has been deployed, ping its published port
     /// each leader cycle. On an outage, file exactly one high-priority bug and
     /// alert the chat; on recovery, announce it. State-tracked so it never spams.
-    pub(super) async fn ops_monitor(&self) {
+    ///
+    /// CXA-F240: an outage of the ALREADY-LIVE deployment — CI smoke green,
+    /// the deploy itself long since verified — is also a rollback trigger.
+    /// After `deploy.live_health_fail_checks` consecutive unhealthy probes
+    /// (streak tracked in state, reset by the first healthy probe) the
+    /// monitor reverts to last-known-good via
+    /// [`Self::attempt_live_health_rollback`], so the environment self-heals
+    /// instead of sitting dead until a human reverts images by hand. The
+    /// revert runs in the dedicated rollback worktree, never the live tree,
+    /// so active dev work is never disturbed; the usual safety gates
+    /// (rollback window, migration check) apply unchanged.
+    pub(super) async fn ops_monitor(&self, report: &mut CycleReport) {
         use coxagent_domain::ticket::{Complexity, Priority, TicketType};
         if !self.config.workflow.ops_monitor {
             return;
@@ -167,39 +178,61 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return;
         }
         let was_down = state.ops_down;
+        // The sha of the currently-live deploy — what a live-health revert
+        // would be rolling back FROM.
+        let live_sha = state.deploy.as_ref().and_then(|d| d.commit_sha.clone());
+        let prev_streak = state.ops_down_streak;
         let healthy = deploy.health(port).await.unwrap_or(true);
-        if !healthy && !was_down {
-            let adder = crate::use_cases::AddTicketUseCase::new(Arc::clone(&self.store));
-            let _ = adder
-                .execute(crate::use_cases::AddTicketInput {
-                    ticket_type: TicketType::Bug,
-                    title: format!("App is DOWN — no response on port {port}"),
-                    description: "The Ops monitor found the deployed app not accepting \
-                                  connections. Check the container/logs for a crash and restore \
-                                  service."
-                        .to_owned(),
-                    priority: Priority::High,
-                    complexity: Complexity::Medium,
-                    has_ui: false,
-                    acceptance_criteria: vec![format!("App answers on 127.0.0.1:{port} again")],
-                    goal: None,
-                })
-                .await;
+        if !healthy {
+            // One mutation for the whole outage tick: the flag and its streak
+            // describe the same fact and must never disagree.
             let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
                 s.ops_down = true;
+                s.ops_down_streak = s.ops_down_streak.saturating_add(1);
                 Ok(())
             })
             .await;
-            self.notify(
-                "ops_down",
-                format!(
-                    "App is DOWN — nothing responding on port {port}. Filed a high-priority bug."
-                ),
-            )
-            .await;
-        } else if healthy && was_down {
+            if !was_down {
+                let adder = crate::use_cases::AddTicketUseCase::new(Arc::clone(&self.store));
+                let _ = adder
+                    .execute(crate::use_cases::AddTicketInput {
+                        ticket_type: TicketType::Bug,
+                        title: format!("App is DOWN — no response on port {port}"),
+                        description: "The Ops monitor found the deployed app not accepting \
+                                      connections. Check the container/logs for a crash and restore \
+                                      service."
+                            .to_owned(),
+                        priority: Priority::High,
+                        complexity: Complexity::Medium,
+                        has_ui: false,
+                        acceptance_criteria: vec![format!("App answers on 127.0.0.1:{port} again")],
+                        goal: None,
+                    })
+                    .await;
+                self.notify(
+                    "ops_down",
+                    format!(
+                        "App is DOWN — nothing responding on port {port}. Filed a high-priority bug."
+                    ),
+                )
+                .await;
+            }
+            // N consecutive unhealthy checks (inside the rollback window the
+            // shared machinery enforces) → revert to last-known-good. The
+            // mutation above turned the persisted streak into prev_streak + 1
+            // (ops_monitor is its only writer), so that is the streak the app
+            // has now served. Fired exactly on the threshold crossing, not on
+            // every probe past it: a revert that fails has already escalated
+            // via its own bug+notify path, and re-attempting it every cycle
+            // would just loop.
+            let threshold = self.config.deploy.live_health_fail_checks.max(1);
+            if prev_streak.saturating_add(1) == threshold {
+                self.attempt_live_health_rollback(live_sha, report).await;
+            }
+        } else if was_down {
             let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
                 s.ops_down = false;
+                s.ops_down_streak = 0;
                 Ok(())
             })
             .await;

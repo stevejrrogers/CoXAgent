@@ -581,7 +581,32 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             match deploy.run_tests(&dir).await {
                 // `deployed=false` means no toolchain was recognised: there is
                 // no suite to be red.
-                Ok(r) if r.success || !r.deployed => Ok(()),
+                Ok(r) if r.success || !r.deployed => {
+                    // UI-touching merges also face the browser suite: with
+                    // hosted CI dead (billing), SA prose review was the ONLY
+                    // gate between a broken screen and main. Golden
+                    // screenshots + the console-error gate run here instead.
+                    let (ok_diff, names) = git
+                        .raw(&dir, &["diff", "--name-only", &sha, "HEAD"])
+                        .await;
+                    let touches_ui = ok_diff
+                        && names.lines().any(|l| {
+                            l.starts_with("crates/presentation/src/web/") || l.starts_with("e2e/")
+                        });
+                    if touches_ui {
+                        let seed = self.work_dir.join("e2e").join("node_modules");
+                        match deploy.run_e2e(&dir, Some(seed.as_path())).await {
+                            Ok(r) if r.success || !r.deployed => Ok(()),
+                            Ok(r) => Err(format!(
+                                "browser e2e fails on the merged tree: {}",
+                                r.summary.chars().take(300).collect::<String>()
+                            )),
+                            Err(e) => Err(format!("could not run the e2e suite: {e}")),
+                        }
+                    } else {
+                        Ok(())
+                    }
+                }
                 Ok(r) => Err(format!(
                     "tests fail on the merged tree: {}",
                     r.summary.chars().take(300).collect::<String>()

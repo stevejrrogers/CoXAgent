@@ -470,7 +470,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cox-gateway"
-version = "2.28.0"
+version = "2.29.0"
 dependencies = [
  "coxagent-app",
  "tokio",
@@ -478,7 +478,7 @@ dependencies = [
 
 [[package]]
 name = "cox-knowledge"
-version = "2.28.0"
+version = "2.29.0"
 dependencies = [
  "coxagent-app",
  "tokio",
@@ -486,7 +486,7 @@ dependencies = [
 
 [[package]]
 name = "cox-realtime"
-version = "2.28.0"
+version = "2.29.0"
 dependencies = [
  "coxagent-app",
  "tokio",
@@ -494,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "cox-runner"
-version = "2.28.0"
+version = "2.29.0"
 dependencies = [
  "coxagent-app",
  "tokio",
@@ -502,7 +502,7 @@ dependencies = [
 
 [[package]]
 name = "coxagent-app"
-version = "2.28.0"
+version = "2.29.0"
 dependencies = [
  "async-trait",
  "coxagent-application",
@@ -522,7 +522,7 @@ dependencies = [
 
 [[package]]
 name = "coxagent-application"
-version = "2.28.0"
+version = "2.29.0"
 dependencies = [
  "async-trait",
  "coxagent-domain",
@@ -552,7 +552,7 @@ dependencies = [
 
 [[package]]
 name = "coxagent-contracts"
-version = "2.28.0"
+version = "2.29.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -560,10 +560,11 @@ dependencies = [
 
 [[package]]
 name = "coxagent-domain"
-version = "2.28.0"
+version = "2.29.0"
 dependencies = [
  "semver",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "time",
  "uuid",
@@ -571,7 +572,7 @@ dependencies = [
 
 [[package]]
 name = "coxagent-infrastructure"
-version = "2.28.0"
+version = "2.29.0"
 dependencies = [
  "argon2",
  "async-trait",
@@ -597,7 +598,7 @@ dependencies = [
 
 [[package]]
 name = "coxagent-presentation"
-version = "2.28.0"
+version = "2.29.0"
 dependencies = [
  "async-trait",
  "axum",
