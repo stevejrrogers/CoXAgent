@@ -1749,6 +1749,18 @@ async function uploadOne(file,surface){const fd=new FormData();fd.append("file",
 function pickFiles(surface,input){handleFiles(surface,[...input.files]);input.value="";}
 function dropFiles(surface,ev){ev.preventDefault();ev.currentTarget.classList.remove("dropping");
   handleFiles(surface,[...(ev.dataTransfer.files||[])]);}
+// Ctrl+V into a composer is a third input into the same attachment pipeline as
+// the attach button and drag-drop. A clipboard with no file item (plain text,
+// IME composition, @mentions) returns WITHOUT preventDefault so native
+// insertion is untouched; files win over text when both are present (same rule
+// as drop). Nameless clipboard screenshots are renamed pre-upload: the media
+// server derives the serving Content-Type from the stored filename's extension
+// (mime_of), so an empty name would come back as octet-stream and never render.
+function pasteFiles(surface,ev){const files=(ev.clipboardData&&ev.clipboardData.files)||[];
+  if(!files.length)return;
+  ev.preventDefault();
+  handleFiles(surface,[...files].map(f=>f.name?f:
+    new File([f],"pasted-image."+((f.type.split("/")[1]||"bin").split("+")[0]),{type:f.type})));}
 async function handleFiles(surface,files){
   for(const f of files){
     if(f.size>25*1024*1024){toasty(f.name+" too large (max 25MB)","err");continue;}
@@ -1984,11 +1996,15 @@ async function showTicket(id){
   h+=`</div>`+covPane(t)+fgPane(t);
   const canWork=["pending","ready","open"].includes(t.status);
   if(t.cost_hold!=null&&!t.cost_approved)h+=`<div class="mrow" style="display:block;border:1px solid var(--amber);border-radius:9px;padding:10px 12px;background:color-mix(in srgb,var(--amber) 9%,transparent)"><span style="color:var(--amber);font-weight:700"><i class="ti ti-currency-dollar"></i> Held for cost approval</span><div style="font-size:12.5px;color:var(--muted);margin-top:4px">Estimated ~$${(+t.cost_hold).toFixed(2)}/run exceeds the approval gate. Agents will skip this ticket until you approve it.</div><button class="pri" style="margin-top:8px" onclick="approveCost('${t.id}')"><i class="ti ti-check"></i> Approve run</button></div>`;
+  // Same live link as the inbox verify card (CXA-F242-C): the server injects
+  // the field only while the ticket awaits a human verdict, so its presence
+  // is the whole show/hide axis — no resolved deploy, no dead button.
   h+=`<div class="tk-actions">
     <button class="tk-btn" onclick="editTicket('${t.id}')"><i class="ti ti-edit"></i> Edit</button>
     ${canWork?`<button class="tk-btn go" onclick="workNext('${t.id}')"><i class="ti ti-player-play-filled"></i> Work on this next</button>`:''}
     ${(t.status==="pending"&&tech)?`<button class="tk-btn go" onclick="humanGate('${t.id}','ready')"><i class="ti ti-checks"></i> Approve → Ready</button>`:''}
     ${t.status==="fixed"?`<button class="tk-btn" onclick="inboxSendBack('${t.id}')"><i class="ti ti-arrow-back-up"></i> Send back</button>`:''}
+    ${t.reproduce_url?`<button class="tk-btn" title="Open live instance" onclick="window.open('${esc(t.reproduce_url)}','_blank')"><i class="ti ti-external-link"></i> Open live instance</button>`:''}
     ${t.status==="fixed"?`<button class="tk-btn go" onclick="humanGate('${t.id}','verify')"><i class="ti ti-shield-check"></i> Mark Verified</button>`:''}
     ${(t.status==="pending"||t.status==="open")?`<button class="tk-btn danger" onclick="rejectTicket('${t.id}')"><i class="ti ti-ban"></i> Reject</button>`:''}
   </div>`;

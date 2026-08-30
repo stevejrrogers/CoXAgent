@@ -22,6 +22,7 @@ pub mod metrics_gate;
 pub mod metrics_governance;
 pub mod metrics_health;
 pub mod metrics_registry;
+pub mod milestone_projection;
 pub mod parsing;
 pub mod policy;
 pub mod ports;
@@ -37,6 +38,7 @@ pub mod tokens;
 pub mod ts;
 pub mod use_cases;
 pub mod verify_cache;
+pub mod working_hours;
 
 #[cfg(test)]
 mod release_candidates_tdd_tests;

@@ -347,3 +347,23 @@ pub(super) async fn digest_ep(
         Err(e) => internal_error(&e.to_string()),
     }
 }
+
+/// GET /api/projects/:pid/milestones/projection (CXA-F249): the forward
+/// milestone read model — where each declared milestone stands against the
+/// current version and which open work cannot move. A pure read, recomputed
+/// from the persisted snapshot on every request, so the forecast updates
+/// whenever /state changes; the classification mirrors the release pipeline's
+/// own gates, so it can never contradict the next release.
+pub(super) async fn milestones_projection_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Ok(state) = p.store.load().await else {
+        return internal_error("load failed");
+    };
+    Json(coxagent_application::milestone_projection::projection_report(&state))
+        .into_response()
+}
