@@ -56,6 +56,56 @@
       "parent_id": null,
       "depends_on": [],
       "acceptance_criteria": []
+    },
+    {
+      "id": "F248",
+      "type": "feature",
+      "title": "Settings autosave indicator",
+      "description": "Fixture ticket for CXA-F248: its verified criteria carry per-criterion live-reproduction links on the test-case evidence, rendered in the review panel.",
+      "priority": "medium",
+      "complexity": "small",
+      "status": "fixed",
+      "has_ui": true,
+      "design": {
+        "technical": null,
+        "ux": null
+      },
+      "parent_id": null,
+      "depends_on": [],
+      "acceptance_criteria": [
+        "Toggling autosave shows a saved indicator",
+        "Reloading keeps the toggle state",
+        "Autosave survives a slow network"
+      ],
+      "test_cases": [
+        {
+          "description": "Toggling autosave shows a saved indicator",
+          "status": "passed",
+          "evidence": {
+            "note": "GET /settings 200 {\"autosave\":true}",
+            "repro": "http://127.0.0.1:8101/settings",
+            "at": "2026-08-30T10:00:00Z"
+          },
+          "sources": [
+            "/settings"
+          ]
+        },
+        {
+          "description": "Reloading keeps the toggle state",
+          "status": "passed",
+          "evidence": {
+            "image": "data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20width%3D%27300%27%20height%3D%2780%27%3E%3Crect%20width%3D%27300%27%20height%3D%2780%27%20fill%3D%27%2315151D%27%2F%3E%3Ctext%20x%3D%2720%27%20y%3D%2748%27%20fill%3D%27%234ADE80%27%20font-family%3D%27monospace%27%20font-size%3D%2714%27%3ESaved%20%E2%9C%93%3C%2Ftext%3E%3C%2Fsvg%3E",
+            "repro": "http://127.0.0.1:8101/settings#autosave",
+            "at": "2026-08-30T10:00:00Z"
+          },
+          "sources": []
+        },
+        {
+          "description": "Autosave survives a slow network",
+          "status": "pending",
+          "sources": []
+        }
+      ]
     }
   ],
   "history": [],
