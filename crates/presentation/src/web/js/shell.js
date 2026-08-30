@@ -235,6 +235,10 @@ async function teamAnalyze(){
       if(p.complexity)document.getElementById("nt-cx").value=p.complexity;
       document.getElementById("nt-ui").checked=!!p.has_ui;
       if(p.acceptance_criteria&&p.acceptance_criteria.length)document.getElementById("nt-ac").value=p.acceptance_criteria.join("\n");
+      // The refine replaced the idea — an earlier feasibility verdict no
+      // longer describes what is on screen; drop it rather than leave a
+      // stale estimate contradicting the rewritten fields.
+      const fp=document.getElementById("nt-feas");fp.style.display="none";fp.innerHTML="";
       const nb=document.getElementById("nt-notes");
       if(p.team_notes&&p.team_notes.length){
         nb.style.display="block";
@@ -247,7 +251,7 @@ async function teamAnalyze(){
   }catch(e){err.textContent="Network error.";}
   clearInterval(tick);btn.disabled=false;btn.querySelector("i").className="ti ti-sparkles";lbl.textContent="Re-analyze with the team";
 }
-function openNewTicket(){["nt-title","nt-ac"].forEach(i=>document.getElementById(i).value="");ntDescSet("");document.getElementById("nt-err").textContent="";document.getElementById("nt-ui").checked=false;const nb=document.getElementById("nt-notes");nb.style.display="none";nb.innerHTML="";document.getElementById("nt-analyze-label").textContent="Let the team analyze & refine";document.getElementById("ov-newticket").classList.add("open");setTimeout(()=>document.getElementById("nt-title").focus(),50);}
+function openNewTicket(){["nt-title","nt-ac"].forEach(i=>document.getElementById(i).value="");ntDescSet("");document.getElementById("nt-err").textContent="";document.getElementById("nt-ui").checked=false;const nb=document.getElementById("nt-notes");nb.style.display="none";nb.innerHTML="";const fb=document.getElementById("nt-feas");fb.style.display="none";fb.innerHTML="";document.getElementById("nt-feas-label").textContent="Check feasibility";document.getElementById("nt-analyze-label").textContent="Let the team analyze & refine";document.getElementById("ov-newticket").classList.add("open");setTimeout(()=>document.getElementById("nt-title").focus(),50);}
 async function saveTicket(startFlow){
   const title=document.getElementById("nt-title").value.trim();
   const err=document.getElementById("nt-err");
@@ -270,6 +274,45 @@ async function saveTicket(startFlow){
     const s=await(await fetch(api("/state"))).json();render(s);
     if(startFlow){try{const rn=await(await fetch(api("/runner"))).json();renderRunner(rn);}catch(e){}}
   }catch(e){err.textContent="Network error.";}
+}
+// Filing-time feasibility preview (CXA-F250): a read-only estimate over the
+// refine endpoint's response — no ticket is created, nothing is saved, and
+// every typed value survives success and failure alike. The heavy "let the
+// team analyze" pass stays separate; this is triage before committing design
+// effort.
+async function checkFeasibility(){
+  const idea=(ntDescGet()||document.getElementById("nt-title").value).trim();
+  const err=document.getElementById("nt-err");const panel=document.getElementById("nt-feas");
+  const btn=document.getElementById("nt-feas-btn");const lbl=document.getElementById("nt-feas-label");
+  if(!idea){err.textContent="Write the idea first — feasibility needs something to assess.";return;}
+  err.textContent="";btn.disabled=true;lbl.textContent="Checking…";
+  panel.style.display="block";panel.innerHTML='<div class="tk-notes-h"><i class="ti ti-gauge att-spin"></i> Assessing feasibility…</div>';
+  try{
+    const r=await fetch(api("/ticket-refine"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({description:idea})});
+    if(!r.ok){
+      panel.style.display="none";
+      err.textContent="Feasibility check failed: "+(await r.text()||r.status)+" (needs a configured engine).";
+    }else{
+      const f=(await r.json()).feasibility;
+      if(!f){
+        panel.style.display="none";
+        err.textContent="No feasibility verdict came back (needs a configured engine).";
+      }else{
+        const v=f.score>=70?"Not feasible":(f.lane==="ask"?"Needs clarification":"Feasible");
+        const col=f.score>=70?"var(--red)":(f.lane==="ask"?"var(--amber)":"var(--green)");
+        const ic=f.score>=70?"ti-alert-triangle":(f.lane==="ask"?"ti-help":"ti-circle-check");
+        const prior=f.prior_art>0
+          ?`${f.prior_art} similar ticket${f.prior_art===1?" has":"s have"} already shipped here — the team knows this shape.`
+          :"Nothing of this shape has shipped here yet — filing it opens new ground for the team.";
+        const gaps=(f.gaps&&f.gaps.length)?` Gaps as filed: ${f.gaps.map(g=>esc(g)).join("; ")}.`:"";
+        // Force-show: the dialog may have been closed and reopened while the
+        // request was in flight, which resets the panel to hidden.
+        panel.style.display="block";
+        panel.innerHTML=`<div class="tk-notes-h"><i class="ti ${ic}" style="color:${col}"></i> ${v} <span style="color:var(--dim);font-weight:400">· filing risk ${f.score}/100</span></div><div style="font-size:12.5px;line-height:1.55">${prior}${gaps}</div>`;
+      }
+    }
+  }catch(e){panel.style.display="none";err.textContent="Network error.";}
+  btn.disabled=false;lbl.textContent="Check feasibility";
 }
 let PROJ_MODE="new";
 let IMPORT_SRC="folder";

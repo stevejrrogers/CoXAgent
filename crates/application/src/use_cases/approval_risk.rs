@@ -129,7 +129,9 @@ pub fn assess(ticket: &Ticket, shipped_similar: usize, previously_parked: bool) 
     RiskVerdict { lane, score, why }
 }
 
-fn title_is_testish(t: &str) -> bool {
+/// Shared with the filing-time feasibility preview (CXA-F250), which reads
+/// the same title signals so the two estimates speak one language.
+pub(crate) fn title_is_testish(t: &str) -> bool {
     // Any ticket whose SUBJECT is testing — the earlier phrase list missed
     // "Add compress+content-retrieval integration test", which a human then
     // approved without a second thought.
@@ -153,7 +155,9 @@ fn files_are_all_tests(files: &[&str]) -> bool {
         })
 }
 
-fn title_is_docish(t: &str) -> bool {
+/// Shared with the filing-time feasibility preview (CXA-F250) — see
+/// [`title_is_testish`].
+pub(crate) fn title_is_docish(t: &str) -> bool {
     let t = t.to_lowercase();
     t.contains("document") || t.contains("docs") || t.contains("readme")
 }
