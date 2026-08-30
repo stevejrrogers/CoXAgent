@@ -1905,6 +1905,67 @@ async function holdTicket(id,hold){
   }catch(e){toasty("Network error","err");}
 }
 
+// ── Verdict-trajectory churn view (CXA-F251) ────────────────────────────────
+// Per-criterion history at the verify decision surface. The domain persists
+// an append-only `test_cases[].history` (crates/domain/src/test_case.rs);
+// here it renders as the criterion's ordered pass/fail trajectory across
+// send-back cycles. Cycle boundaries are the verify send-backs already in
+// the detail payload (`gates`, the CXA-F241 spine). Pure presentation over
+// that payload: a round the criterion was not re-judged in renders an
+// explicit GAP — never an implied pass — and evidence refreshes (a
+// screenshot arriving) are never read as verdict transitions.
+function tcVerdicts(tc){
+  return (tc.history||[]).filter(r=>r&&r.kind!=="evidence_refresh");
+}
+function tcTrajHtml(t,tc){
+  const bounds=(t.gates||[]).filter(g=>g&&g.gate_id==="verify"&&g.status_to==="open")
+    .map(g=>g.decided_at_ms).filter(Number.isFinite).sort((a,b)=>a-b);
+  // Strict verdicts: only known pass/fail statuses become chips. Anything
+  // else drops out — rendering an unknown state as FAIL would fabricate a
+  // verdict, and its round then reads as the gap it honestly is.
+  const vs=tcVerdicts(tc)
+    .map(r=>({ok:r.status==="passed"?true:r.status==="failed"?false:null,at:r.at,ms:Date.parse(r.at)}))
+    .filter(v=>v.ok!==null);
+  // No verdict records: a first-cycle ticket labels the round honestly
+  // instead of fabricating an empty history; a sent-back ticket with no
+  // tracked history (pre-CXA-F251 data) renders nothing rather than
+  // inventing gaps for rounds nobody recorded.
+  if(!vs.length)return bounds.length?""
+    :`<div class="tctraj"><span class="tctraj-cy" title="No send-back yet — this criterion's first verify round">first cycle</span></div>`;
+  // Round windows: [-∞,b0) [b0,b1) … [bₙ₋₁,∞). An unreadable stamp stays in
+  // the current round — placed at no made-up earlier time.
+  const round=v=>!Number.isFinite(v.ms)?bounds.length
+    :bounds.reduce((c,b)=>c+(b<=v.ms?1:0),0);
+  const n=bounds.length+1;
+  // Gaps render only from the first tracked verdict onward: rounds before
+  // the criterion was ever recorded are an unknown era, not known-empty.
+  const r0=Math.min(...vs.map(round));
+  const parts=[];const seq=[];
+  for(let i=0;i<n;i++){
+    const inRound=vs.filter(v=>round(v)===i);
+    if(i<r0)continue;
+    if(!inRound.length){
+      parts.push(`<span class="tctraj-gap" title="No verdict was recorded for this criterion in round ${i+1} — a gap, not a pass">no verdict</span>`);
+      continue;
+    }
+    parts.push(`<span class="tctraj-cy" title="${i===0?"Before the first send-back":`After send-back #${i}`}">R${i+1}</span>`);
+    for(const v of inRound){
+      seq.push(v.ok);
+      parts.push(`<span class="tctraj-v ${v.ok?"pass":"fail"}" title="${esc(v.at)}">${v.ok?"PASS":"FAIL"}</span>`);
+    }
+  }
+  // Oscillation (AC2): any FAIL after a PASS. Amber warning with the flip
+  // count — a single fail among passes reads here too, and none of this
+  // blocks the human decision; the verdict stays the reviewer's.
+  const firstPass=seq.indexOf(true);
+  const churn=firstPass>=0&&seq.slice(firstPass+1).includes(false);
+  let flips=0;
+  for(let i=1;i<seq.length;i++){if(seq[i]!==seq[i-1])flips++;}
+  const traj=seq.map(s=>s?"PASS":"FAIL").join("->");
+  if(churn)parts.push(`<span class="tctraj-churn" title="Verdict trajectory ${esc(traj)} — ${flips} verdict flip${flips===1?"":"s"}; the criterion is oscillating across verify rounds"><i class="ti ti-repeat"></i>${flips} flip${flips===1?"":"s"}</span>`);
+  return `<div class="tctraj" title="Verdict trajectory ${esc(traj)}">${parts.join("")}</div>`;
+}
+
 async function showTicket(id){
   // Full detail (incl. design specs stripped from list payloads) loads on demand.
   const body=document.getElementById("ticket-body");
@@ -1971,7 +2032,10 @@ async function showTicket(id){
         const badge={passed:['var(--green)','ti-circle-check','Passed'],failed:['var(--red)','ti-circle-x','Failed'],pending:['var(--dim)','ti-clock','Pending']}[st]||['var(--dim)','ti-clock','Pending'];
         const img=tc.evidence&&tc.evidence.image?`<div class="tcimg"><img src="${esc(tc.evidence.image)}" alt="case screenshot" onclick="window.open('${esc(tc.evidence.image)}','_blank')" loading="lazy"></div>`:'';
         const note=tc.evidence&&tc.evidence.note?`<div class="tcnote">${esc(tc.evidence.note)}</div>`:'';
-        return `<div class="tcitem"><div class="tcrow"><i class="ti ${badge[1]}" style="color:${badge[0]}"></i><span style="color:${badge[0]};font-weight:700;font-size:11px;text-transform:uppercase">${badge[2]}</span><div class="tcdesc">${esc(tc.description)}</div></div>${img}${note}</div>`;
+        // CXA-F251: the criterion's verdict trajectory across send-back
+        // cycles — churn the raw per-cycle badge above cannot show.
+        const traj=tcTrajHtml(t,tc);
+        return `<div class="tcitem"><div class="tcrow"><i class="ti ${badge[1]}" style="color:${badge[0]}"></i><span style="color:${badge[0]};font-weight:700;font-size:11px;text-transform:uppercase">${badge[2]}</span><div class="tcdesc">${esc(tc.description)}</div></div>${traj}${img}${note}</div>`;
       }).join("")}</div></div>`;})()
   if(tech)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">Technical spec</span><pre>${esc(tech.approach)}\nfiles: ${esc((tech.files||[]).join(", "))}\napi: ${esc(tech.api_contract)}\ntest: ${esc(tech.test_plan)}</pre></div>`;
   if(ux)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">UI/UX spec</span><pre>${esc(ux.user_flow)}\nscreens: ${esc((ux.screens||[]).join(", "))}</pre></div>`;
