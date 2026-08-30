@@ -589,7 +589,6 @@ async fn compose_project_on_port(port: &str) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-
 /// Clamp every container of this compose project to a CPU/memory budget via
 /// `docker update`, regardless of what the agent-authored compose file says —
 /// a runaway service (busy loop, leak) can then never take the whole host.

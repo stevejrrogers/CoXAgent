@@ -481,8 +481,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
 
         // File or link a deduped root-cause PREVENTION ticket so the same
         // symptom can't ride forward into the next good deploy unaddressed.
-        let lesson_text =
-            format!("{reason} triggered an auto-rollback to {short_target}; fix shipped as tracked work.");
+        let lesson_text = format!(
+            "{reason} triggered an auto-rollback to {short_target}; fix shipped as tracked work."
+        );
         crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
             s.add_lesson(&lesson_text);
             Ok(())
