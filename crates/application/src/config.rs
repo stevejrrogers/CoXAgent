@@ -397,8 +397,7 @@ pub struct HumanConfig {
     /// an impossible tz or a malformed range can never load as "no hours".
     /// Decisions live in [`crate::working_hours`].
     #[serde(default)]
-    pub working_hours:
-        std::collections::BTreeMap<String, crate::working_hours::OperatorWorkingHours>,
+    pub working_hours: std::collections::BTreeMap<String, OperatorWorkingHours>,
 }
 
 /// One person's focus-window ("quiet hours") settings (CXA-F176). Every

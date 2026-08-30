@@ -91,6 +91,11 @@ impl WorkingWindow {
     /// Whether the local wall clock (`weekday`, minutes since local midnight)
     /// falls inside this window — half-open `[start, end)`, the
     /// [`crate::config::in_quiet_window`] convention.
+    ///
+    /// The save path guarantees `end > start` ([`WindowRangeError`]). The
+    /// fields are plain data (every config section type here is), so a
+    /// hand-built instance could violate that — such a window degrades to
+    /// never covering anything, exactly as an empty range should.
     #[must_use]
     pub fn covers(&self, weekday: Weekday, minutes_of_day: u32) -> bool {
         self.weekday == weekday
@@ -131,8 +136,8 @@ impl TryFrom<WorkingWindowRaw> for WorkingWindow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error(
     "working window end must be after start — a reversed or empty range is not a working \
-     window, and a wrap-midnight range is not supported; declare one within-day HH:MM-HH:MM \
-     range per working weekday"
+     window, and a wrap-midnight range is not supported; declare a within-day HH:MM-HH:MM \
+     range (split shifts: one window per stretch)"
 )]
 pub struct WindowRangeError;
 
@@ -376,7 +381,17 @@ mod tests {
         .expect("a valid declaration loads")
     }
 
-    fn local_minutes(decl: &OperatorWorkingHours, now: OffsetDateTime) -> (Weekday, u32) {
+    fn declaration_with_windows(
+        tz: UtcOffset,
+        windows: Vec<WorkingWindow>,
+    ) -> OperatorWorkingHours {
+        OperatorWorkingHours { tz_offset: tz, windows }
+    }
+
+    fn local_weekday_and_minutes(
+        decl: &OperatorWorkingHours,
+        now: OffsetDateTime,
+    ) -> (Weekday, u32) {
         let local = now.to_offset(decl.tz_offset);
         (local.weekday(), u32::from(local.hour()) * 60 + u32::from(local.minute()))
     }
@@ -389,7 +404,7 @@ mod tests {
         let decl = mira();
         let now = datetime!(2026-08-24 07:30 UTC);
         assert_eq!(
-            local_minutes(&decl, now),
+            local_weekday_and_minutes(&decl, now),
             (Weekday::Monday, 9 * 60 + 30),
             "the fixture is what it claims: a Monday mid-window local instant"
         );
@@ -481,6 +496,29 @@ mod tests {
     }
 
     #[test]
+    fn a_candidate_that_reads_outside_every_window_contributes_nothing() {
+        // The mirror of the boundary contract: only ONE side of the transition
+        // reads inside (02:00 at +01:00 is in 01:30–02:30; 03:00 at +02:00 is
+        // not) — the resolver must still land on exactly that one window.
+        let spring = datetime!(2026-03-29 01:00 UTC);
+        let winter = UtcOffset::from_hms(1, 0, 0).expect("+01:00 is a legal offset");
+        let summer = UtcOffset::from_hms(2, 0, 0).expect("+02:00 is a legal offset");
+        let decl = declaration_with_windows(
+            winter,
+            vec![serde_json::from_value(json!({
+                "weekday": "sunday", "start": "01:30", "end": "02:30"
+            }))
+            .expect("valid window")],
+        );
+        let resolved = resolve_windows(&decl, spring, &[winter, summer]);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            (resolved[0].start.hour(), resolved[0].start.minute()),
+            (1, 30)
+        );
+    }
+
+    #[test]
     fn an_ordinary_instant_resolves_its_one_window_under_the_declared_offset() {
         let decl = mira();
         let now = datetime!(2026-08-24 07:30 UTC); // Monday 09:30 local
@@ -488,17 +526,9 @@ mod tests {
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].weekday, Weekday::Monday);
         // Outside every window: nothing resolves.
-        assert!(resolve_windows(&decl, datetime!(2026-08-24 15:30 UTC), &[decl.tz_offset]).is_empty());
-    }
-
-    fn declaration_with_windows(
-        tz: UtcOffset,
-        windows: Vec<WorkingWindow>,
-    ) -> OperatorWorkingHours {
-        OperatorWorkingHours {
-            tz_offset: tz,
-            windows,
-        }
+        assert!(
+            resolve_windows(&decl, datetime!(2026-08-24 15:30 UTC), &[decl.tz_offset]).is_empty()
+        );
     }
 
     // --- The save seam: fail-closed validation -----------------------------
@@ -515,6 +545,30 @@ mod tests {
                 "{tz} must be refused at save"
             );
         }
+    }
+
+    #[test]
+    fn a_missing_tz_offset_is_refused_not_defaulted_to_utc() {
+        // The offset is the declaration's load-bearing axis — an absent one
+        // must be a save error, never a silent "assume UTC".
+        assert!(
+            serde_json::from_value::<OperatorWorkingHours>(json!({
+                "windows": [{ "weekday": "monday", "start": "09:00", "end": "17:30" }]
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_declaration_without_windows_defaults_to_never_actionable() {
+        // `windows` may be omitted (#[serde(default)]): the operator declared
+        // an offset but no working day — nothing is actionable, exactly as if
+        // every weekday had been left undeclared.
+        let decl: OperatorWorkingHours =
+            serde_json::from_value(json!({ "tz_offset": "+02:00" }))
+                .expect("an offset with no windows is a valid, empty declaration");
+        assert!(decl.windows.is_empty());
+        assert!(!is_actionable(&decl, datetime!(2026-08-24 07:30 UTC)));
     }
 
     #[test]
