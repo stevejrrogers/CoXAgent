@@ -116,7 +116,12 @@ async function renderInbox(){
            ibtn("Approve spend",`inboxAct('${esc(it.ticket)}','approve-cost')`,1)
           :noRight(it.role)),it.ticket);
     }else if(it.kind==="verify"){
+      // Static evidence says the fix worked; the live instance (CXA-F242-C)
+      // lets the reviewer actually SEE it run. The card carries the URL only
+      // when the project's deploy port resolves — otherwise no control at all,
+      // never a dead button.
       html+=inboxCard("verify",esc(it.ticket),esc(it.title),
+        (it.reproduce_url?ibtn("Open live instance",`window.open('${esc(it.reproduce_url)}','_blank')`):"")+
         ibtn("Evidence",`showTicket('${esc(it.ticket)}')`)+
         (act
           ?ibtn("Send back",`inboxSendBack('${esc(it.ticket)}')`)+
