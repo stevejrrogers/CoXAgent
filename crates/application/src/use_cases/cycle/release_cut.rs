@@ -215,6 +215,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 tracing::warn!("release cut: push failed: {pout}");
             }
             p
+        } else if out.contains("nothing to commit") {
+            // The version bump already landed (a retry, or an identical cut):
+            // an empty commit is the EXPECTED idle case, not a failure.
+            tracing::info!("release cut: nothing new to commit for v{next} — skipping");
+            false
         } else {
             tracing::warn!("release cut: commit failed: {out}");
             false
