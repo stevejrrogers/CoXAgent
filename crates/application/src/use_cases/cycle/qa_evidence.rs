@@ -246,29 +246,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
             None => String::new(),
         };
-        // The human Verify gate should see the same picture: attach it to the
-        // ticket instead of leaving it as a loose workdir file only agents see.
-        if let Some(storage) = &self.storage {
-            let key = format!("visual-qa/{ticket}-{}.png", crate::state::now_rfc3339());
-            if storage.put(&key, &bytes, "image/png").await.is_ok() {
-                let rec = crate::state::TicketAttachment {
-                    name: format!("visual-qa-{ticket}.png"),
-                    key,
-                    content_type: "image/png".to_owned(),
-                    by: "PD".to_owned(),
-                    at: crate::state::now_rfc3339(),
-                };
-                let tid = ticket.to_string();
-                let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |st| {
-                    st.ticket_attachments
-                        .entry(tid.clone())
-                        .or_default()
-                        .push(rec.clone());
-                    Ok(())
-                })
-                .await;
-            }
-        }
+        // The human Verify gate should see the same picture the PD reviewed.
+        self.attach_shot_to_ticket(ticket, &bytes).await;
         self.report("PD", "visual QA on the deployed UI");
         let request = crate::ports::outbound::AgentRequest {
             role: coxagent_domain::Role::Pd,
@@ -293,11 +272,50 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if !o.succeeded() {
             return;
         }
-        let raw = &o.stdout;
-        let (Some(a), Some(b)) = (raw.find('['), raw.rfind(']')) else {
+        self.file_reviewed_defects(ticket, &o.stdout, report).await;
+    }
+
+    /// The screenshot the PD reviewed must reach the human Verify gate too:
+    /// attach it to the ticket instead of leaving it a loose workdir file only
+    /// agents see. Best-effort — no storage, or a failed upload, skips it.
+    async fn attach_shot_to_ticket(&self, ticket: &TicketId, bytes: &[u8]) {
+        let Some(storage) = &self.storage else {
             return;
         };
-        let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(&raw[a..=b]) else {
+        let key = format!("visual-qa/{ticket}-{}.png", crate::state::now_rfc3339());
+        if storage.put(&key, bytes, "image/png").await.is_err() {
+            return;
+        }
+        let rec = crate::state::TicketAttachment {
+            name: format!("visual-qa-{ticket}.png"),
+            key,
+            content_type: "image/png".to_owned(),
+            by: "PD".to_owned(),
+            at: crate::state::now_rfc3339(),
+        };
+        let tid = ticket.to_string();
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |st| {
+            st.ticket_attachments
+                .entry(tid.clone())
+                .or_default()
+                .push(rec.clone());
+            Ok(())
+        })
+        .await;
+    }
+
+    /// File at most 2 concrete UI bugs out of the PD review's JSON array —
+    /// best-effort: unparseable or empty output files nothing.
+    async fn file_reviewed_defects(
+        &self,
+        ticket: &TicketId,
+        stdout: &str,
+        report: &mut CycleReport,
+    ) {
+        let (Some(a), Some(b)) = (stdout.find('['), stdout.rfind(']')) else {
+            return;
+        };
+        let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(&stdout[a..=b]) else {
             return;
         };
         for item in parsed.iter().take(2) {

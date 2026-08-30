@@ -27,9 +27,12 @@ use std::time::Duration;
 
 use coxagent_infrastructure::deploy::{reclaimable_compose_project, reclaimable_raw_container};
 
-/// The published host port. Fixed by this project's deploy config — see the
-/// header comment in docker-compose.yml.
-const HOST_PORT: u16 = 8101;
+/// This project's assigned deploy port — fixed so it never collides with a live
+/// hub bound to 4000 on the same docker host (CXA-B069 made every published port
+/// env-driven). The smoke test must probe whatever port *this* invocation of
+/// `docker compose` actually binds, not a constant that drifts from reality when
+/// `APP_PORT` leaks in from the environment (CXA-B077).
+const DEFAULT_HOST_PORT: u16 = 8101;
 
 /// How long the stack gets to build and answer before the test gives up.
 const READY_TIMEOUT: Duration = Duration::from_secs(180);
@@ -42,6 +45,29 @@ fn repo_root() -> PathBuf {
         .unwrap()
 }
 
+/// Pure decision over the environment's APP_PORT value — no IO, so it is
+/// trivially unit-testable below without mutating process globals.
+fn resolve_host_port(app_port: Option<&str>) -> u16 {
+    match app_port {
+        None | Some("") => DEFAULT_HOST_PORT,
+        Some(n) => n
+            .parse()
+            .unwrap_or_else(|why| panic!("APP_PORT=`{n}` is not a valid host port ({why})")),
+    }
+}
+
+/// Resolve a compose host-port field into the number Docker actually binds,
+/// honouring an env override. docker-compose.yml publishes `"${APP_PORT:-8101}:4000"`
+/// — Docker binds `$APP_PORT` when it is set and falls back to `8101` otherwise.
+///
+/// Mirroring the semantics in docs_ports.rs keeps this test reading reality:
+/// when a concurrent worktree holds 8101 and a redeploy passes `APP_PORT=8110`,
+/// this returns 8110 so we probe exactly what *we* orchestrated instead of a
+/// stale/unrelated container squatting on the default (the CXA-B077 fragility).
+fn effective_host_port() -> u16 {
+    resolve_host_port(std::env::var("APP_PORT").ok().as_deref())
+}
+
 fn compose(root: &Path, args: &[&str]) -> std::process::Output {
     Command::new("docker")
         .arg("compose")
@@ -50,20 +76,25 @@ fn compose(root: &Path, args: &[&str]) -> std::process::Output {
         // The documented bring-up command sets both required secrets inline
         // (PG_PASSWORD for Postgres, COXAGENT_ADMIN_PASSWORD for first-run
         // super-admin bootstrap); without either, compose fails interpolation.
+        //
+        // APP_PORT is deliberately *not* forced here: its absence lets us resolve
+        // exactly what this run will bind and prove we probe it. Set it in env only
+        // if you need this worktree on a non-default host port alongside another one.
         .env("PG_PASSWORD", "ci-smoke")
         .env("COXAGENT_ADMIN_PASSWORD", "ci-smoke")
         .output()
         .unwrap_or_else(|e| panic!("`docker compose {}` failed to spawn: {e}", args.join(" ")))
 }
 
-/// What one container squatting HOST_PORT means for this smoke gate — decided as
-/// a pure function of that container's compose-project ownership label and
-/// name so every branch is deterministically testable without invoking docker
-/// (CXA-B082, CXA-B083). Which holders may be reclaimed is decided by the
-/// SHIPPED policy (imported above) — [`reclaimable_compose_project`] for
-/// labelled compose projects, [`reclaimable_raw_container`] for label-less
-/// containers — so this gate exercises the module production uses, never a
-/// private copy that can drift from it.
+/// What one container squatting the effective host port means for this smoke
+/// gate — decided as a pure function of that container's compose-project
+/// ownership label and name so every branch is deterministically testable
+/// without invoking docker (CXA-B082, CXA-B083). Which holders may be reclaimed
+/// is decided by the SHIPPED policy (imported above) —
+/// [`reclaimable_compose_project`] for labelled compose projects,
+/// [`reclaimable_raw_container`] for label-less containers — so this gate
+/// exercises the module production uses, never a private copy that can drift
+/// from it.
 #[derive(Debug, PartialEq)]
 enum HolderDecision {
     /// Belongs to a reclaimable agent-preview compose project — tear that whole
@@ -95,10 +126,11 @@ impl HolderDecision {
     }
 }
 
-/// The container ids of every running container publishing HOST_PORT.
-fn holders_on_host_port() -> Vec<String> {
+/// The container ids of every running container publishing `port` (CXA-B077:
+/// the effective `${APP_PORT:-8101}`, not a constant that can drift).
+fn holders_on_the(port: u16) -> Vec<String> {
     let out = Command::new("docker")
-        .args(["ps", "-q", "--filter", &format!("publish={HOST_PORT}")])
+        .args(["ps", "-q", "--filter", &format!("publish={port}")])
         .output()
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
@@ -170,37 +202,38 @@ fn inspect_ownership_of(id: &str) -> Option<(String, Option<String>)> {
     parse_ownership(&String::from_utf8_lossy(&out.stdout))
 }
 
-/// Whether this smoke gate may bind HOST_PORT and verify this build's stack.
+/// Whether this smoke gate may bind the effective host port and verify this
+/// build's stack.
 #[derive(Debug, PartialEq)]
 enum PortState {
-    /// Every holder on :8101 is evictable — free them and verify normally.
+    /// Every holder on that port is evictable — free them and verify normally.
     Verifiable,
     /// A protected/foreign compose project, or a raw container that cannot
-    /// prove it is ours, holds :8101; we refuse to destroy unrelated user
-    /// infrastructure (CXA-B082, CXA-B083), and because HOST_PORT is fixed we
-    /// cannot bind either. Verification skips with this holder named instead
-    /// of failing red or touching their stack.
+    /// prove it is ours, holds the effective host port; we refuse to destroy
+    /// unrelated user infrastructure (CXA-B082, CXA-B083), and because the
+    /// port is fixed for the run we cannot bind either. Verification skips
+    /// with this holder named instead of failing red or touching their stack.
     BlockedByForeign(String),
 }
 
-/// What this smoke gate plans to do about :8101 — computed PURELY from one
-/// immutable host-port snapshot so every branch is deterministically testable
-/// without invoking docker (CXA-B082, CXA-B083). Each entry is
-/// `(container id, container name, resolved compose-project owner label)` for
-/// one container publishing HOST_PORT.
+/// What this smoke gate plans to do about the effective host port — computed
+/// PURELY from one immutable host-port snapshot so every branch is
+/// deterministically testable without invoking docker (CXA-B082, CXA-B083).
+/// Each entry is `(container id, container name, resolved compose-project
+/// owner label)` for one container publishing that port.
 #[derive(Debug, PartialEq)]
 enum PortPlan {
-    /// Every holder on :8101 may be reclaimed — schedule those teardowns below,
-    /// then verify normally.
+    /// Every holder on the port may be reclaimed — schedule those teardowns
+    /// below, then verify normally.
     EvictThenVerify(Vec<HolderDecision>),
-    /// A protected/foreign holder sits on :8101; refuse to destroy it, touch
-    /// nothing else either (see [`plan_holders`]).
+    /// A protected/foreign holder sits on the effective host port; refuse to
+    /// destroy it, touch nothing else either (see [`plan_holders`]).
     Skip(String),
 }
 
 /// Any single protected/foreign holder wins over every eviction below: even after
 /// stopping raw/reclaimable squatters another address-family duplicate held by a
-/// protected project could keep :8101 bound, so once blocked we never risk a
+/// protected project could keep the port bound, so once blocked we never risk a
 /// half-cleared port or touch their stack — no teardown runs at all.
 fn plan_holders(holders: &[(String, String, Option<String>)]) -> PortPlan {
     let mut blocked: Option<String> = None;
@@ -224,8 +257,8 @@ fn plan_holders(holders: &[(String, String, Option<String>)]) -> PortPlan {
     PortPlan::EvictThenVerify(actions)
 }
 
-fn assess_host_port() -> PortState {
-    let snapshot = holders_on_host_port()
+fn assess_host_port(port: u16) -> PortState {
+    let snapshot = holders_on_the(port)
         .into_iter()
         .filter_map(|id| {
             let (name, owner_label) = inspect_ownership_of(&id)?;
@@ -239,7 +272,7 @@ fn assess_host_port() -> PortState {
             for action in &actions {
                 action.evict();
             }
-            // ...only then signal that verification may bind HOST_PORT fresh.
+            // ...only then signal that verification may bind that port fresh.
             // A half-cleared port after any failed stop still lets this proceed —
             // the probe will simply fail like any binding collision would have.
             PortState::Verifiable
@@ -253,8 +286,9 @@ fn assess_host_port() -> PortState {
 /// Exclusive, ephemeral ownership of the stack for one run: brought up here,
 /// torn down when this value drops, even on panic, so a failing run never
 /// leaves a container holding the host port. Only ever constructed on the
-/// [`PortState::Verifiable`] path — when a protected/foreign project holds :8101
-/// we deliberately construct no stack and touch nothing (CXA-B082).
+/// [`PortState::Verifiable`] path — when a protected/foreign project holds the
+/// effective host port we deliberately construct no stack and touch nothing
+/// (CXA-B082).
 struct Stack {
     root: PathBuf,
 }
@@ -281,9 +315,9 @@ impl Drop for Stack {
 
 /// The HTTP status the hub answers with on the published port, or `None`
 /// while it is not answering yet.
-async fn probe(client: &reqwest::Client) -> Option<u16> {
+async fn probe(client: &reqwest::Client, host_port: u16) -> Option<u16> {
     client
-        .get(format!("http://localhost:{HOST_PORT}/"))
+        .get(format!("http://localhost:{host_port}/"))
         .timeout(Duration::from_secs(5))
         .send()
         .await
@@ -296,20 +330,26 @@ async fn probe(client: &reqwest::Client) -> Option<u16> {
 async fn compose_stack_comes_up_and_answers_on_the_published_port() {
     let root = repo_root();
 
-    // CXA-B082 re-scope: decide what owns :8101 BEFORE binding anything. A
-    // protected or foreign compose project — or a raw container that cannot
-    // prove it is ours (CXA-B083, e.g. someone's plain `docker run ... nginx`)
-    // — is never destroyed, and because HOST_PORT is fixed by our deploy
-    // config we cannot bind over it either; in that case we skip verification
-    // with a clear report instead of failing red or tearing unrelated
-    // infrastructure down. Reclaimable cox-preview squatters and our own
-    // cox-named raw leftovers are still evicted here so normal runs verify in
-    // full — which always happens on ephemeral CI runners where no foreign
+    // Probe whatever this run actually orchestrated — the effective
+    // `${APP_PORT:-8101}` fallback — not a constant that could point at an
+    // unrelated container squatting on the default port (CXA-B077).
+    let host_port = effective_host_port();
+
+    // CXA-B082 re-scope: decide what owns the effective host port BEFORE
+    // binding anything. A protected or foreign compose project — or a raw
+    // container that cannot prove it is ours (CXA-B083, e.g. someone's plain
+    // `docker run ... nginx`) — is never destroyed, and because the port is
+    // fixed for the run we cannot bind over it either; in that case we skip
+    // verification with a clear report instead of failing red or tearing
+    // unrelated infrastructure down. Reclaimable cox-preview squatters and our
+    // own cox-named raw leftovers are still evicted here so normal runs verify
+    // in full — which always happens on ephemeral CI runners where no foreign
     // stack can exist.
-    match assess_host_port() {
+    // stack can exist.
+    match assess_host_port(host_port) {
         PortState::BlockedByForeign(owner) => {
             eprintln!(
-                "deploy-smoke SKIPPED: host port {HOST_PORT} is held by `{owner}` — a foreign \
+                "deploy-smoke SKIPPED: host port {host_port} is held by `{owner}` — a foreign \
                  or protected compose project/container this gate refuses to tear down \
                  (CXA-B082, CXA-B083). Verification could not bind without destroying \
                  unrelated infrastructure."
@@ -335,7 +375,7 @@ async fn compose_stack_comes_up_and_answers_on_the_published_port() {
     let deadline = std::time::Instant::now() + READY_TIMEOUT;
     let mut last = None;
     while std::time::Instant::now() < deadline {
-        last = probe(&client).await;
+        last = probe(&client, host_port).await;
         if last == Some(200) {
             drop(stack);
             return;
@@ -345,9 +385,44 @@ async fn compose_stack_comes_up_and_answers_on_the_published_port() {
 
     let logs = compose(&stack.root, &["logs", "--no-color", "--tail", "50"]);
     panic!(
-        "hub never answered 200 on host port {HOST_PORT} (last status: {last:?})\n{}",
+        "hub never answered 200 on host port {host_port} (last status: {last:?})\n{}",
         String::from_utf8_lossy(&logs.stdout)
     );
+}
+
+// ---------------------------------------------------------------------------
+// The pure resolver, run against synthetic values — proves the probe always
+// tracks what docker compose actually binds, default or override (CXA-B077).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unset_app_port_resolves_to_the_assigned_default() {
+    assert_eq!(resolve_host_port(None), DEFAULT_HOST_PORT);
+}
+
+#[test]
+fn empty_app_port_falls_back_to_the_assigned_default() {
+    // Compose treats an empty VAR like unset for `${VAR:-default}` too.
+    assert_eq!(resolve_host_port(Some("")), DEFAULT_HOST_PORT);
+}
+
+#[test]
+fn an_override_is_probed_as_orchestrated() {
+    assert_eq!(resolve_host_port(Some("8110")), 8110);
+}
+
+#[test]
+fn a_bad_override_panics_rather_than_guessing_a_probe_target() {
+    let caught = std::panic::catch_unwind(|| resolve_host_port(Some("not-a-port")));
+    let msg = match caught {
+        Err(payload) => payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        Ok(_) => panic!("a non-numeric APP_PORT must not silently probe a guessed port"),
+    };
+    assert!(msg.contains("APP_PORT"), "unhelpful panic message: {msg}");
 }
 
 /// The holder-decision and port-state logic is pure over ownership labels and

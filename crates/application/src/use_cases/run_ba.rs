@@ -139,12 +139,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
                 surface.join("\n")
             )
         };
-        // A BA who doesn't know what the product already does proposes what it
-        // already has.
-        // Precomputed as an owned String: a `format_args!` here would hold a
-        // non-Send temporary across the `.await`s of the task_prompt `format!`
-        // arguments below.
-        let backlog_surface = format!("{backlog_block}{surface_block}");
         let knowledge = prompts::knowledge_block(
             self.files.as_deref(),
             &existing.docs,
@@ -154,6 +148,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
             "",
         )
         .await;
+        let backlog_and_surface = format!("{backlog_block}{surface_block}");
         let request = AgentRequest {
             role: Role::Ba,
             system_prompt: prompts::system_prompt(prompts::BA),
@@ -165,7 +160,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
                  concrete, grounded in what's there, not generic.{}{}{}",
                 self.context,
                 sprint_goal_block(&existing.sprint_goal),
-                backlog_surface,
+                backlog_and_surface,
                 prompts::repo_map_block(self.files.as_deref(), &self.work_dir, true).await,
                 knowledge,
                 prompts::team_memory_block(&existing.decisions, &existing.lessons)
