@@ -55,7 +55,7 @@ pub use readiness_preflight::{
     run_preflight, PreflightItem, PreflightReport, PreflightSnapshot, PreflightProbe,
 };
 pub use recover::RecoverUseCase;
-pub use refine_ticket::{RefineTicketUseCase, RefinedTicket, TeamNote};
+pub use refine_ticket::{FeasLane, Feasibility, RefineTicketUseCase, RefinedTicket, TeamNote};
 pub use release_assembly::{
     assemble, cut_manifest, extract_ticket_refs, filter_verified_subjects, is_verified_complete,
     rc_members, verified_complete_ids, BlockedCandidate, CutManifest, RcAssembly, RcBundle,
