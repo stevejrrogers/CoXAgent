@@ -198,6 +198,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// have PD review the ACTUAL pixels against the design system, and file
     /// at most 2 concrete UI bugs. Every step best-effort — no browser, no
     /// port, or an unparseable review just skips the pass.
+    // Same scoped waiver as `test_has_work` below: the pass is one best-effort
+    // pipeline (capture → attach → review → file bugs) whose steps share
+    // locals; splitting it would scatter that state for no second reader.
+    #[allow(clippy::too_many_lines)]
     pub(super) async fn visual_qa(&self, ticket: &TicketId, report: &mut CycleReport) {
         let (Some(shot), Some(port)) = (&self.shot, self.config.deploy.host_port) else {
             return;

@@ -200,6 +200,27 @@ async fn unauthenticated_post_audit_and_heal_are_refused_before_the_store() {
 // Write-back refusal + quarantine (AC4)
 // ---------------------------------------------------------------------------
 
+/// A state with two doc pages sharing one id — an audit finding the write
+/// boundary can NOT self-heal (which copy survives is a human decision), so a
+/// save carrying it is refused and quarantined (AC4 fixture). It passes the
+/// older schema-level `validate` (which only sees tickets/dependencies), so it
+/// exercises specifically the integrity-audit refusal.
+fn state_with_duplicate_doc_id() -> ProjectState {
+    let mut state = healthy_state();
+    for _ in 0..2 {
+        state.docs.push(coxagent_application::state::DocPage {
+            id: "dup-doc".to_owned(),
+            folder: String::new(),
+            category: "product".to_owned(),
+            title: "t".to_owned(),
+            body: String::new(),
+            updated_at: String::new(),
+            updated_by: String::new(),
+        });
+    }
+    state
+}
+
 #[tokio::test]
 async fn a_save_whose_post_state_fails_the_audit_is_refused_and_quarantined() {
     let (_dir, store) = store_seeded_with(&healthy_state());
@@ -207,8 +228,11 @@ async fn a_save_whose_post_state_fails_the_audit_is_refused_and_quarantined() {
     let router = handler_router(app);
 
     // The corrupted snapshot rides the exact wire shape a runner uses
-    // (`op=save` with a full ProjectState in `data`).
-    let payload = serde_json::to_string(&state_with_dangling_evidence()).expect("serialize");
+    // (`op=save` with a full ProjectState in `data`). The corruption is one
+    // the boundary cannot decide: a duplicate doc id (which copy survives?) —
+    // the dangling-reference class is healed at the boundary instead (see the
+    // heal test below), so refusal is reserved for unhealable findings.
+    let payload = serde_json::to_string(&state_with_duplicate_doc_id()).expect("serialize");
     let resp = post_store(
         router.clone(),
         "save",
@@ -241,14 +265,50 @@ async fn a_save_whose_post_state_fails_the_audit_is_refused_and_quarantined() {
     assert_eq!(quarantined.len(), 1, "the refused payload was quarantined");
     assert_eq!(
         quarantined[0]["rule_id"],
-        serde_json::json!("dangling_ticket_reference")
+        serde_json::json!("duplicate_doc_id")
     );
     assert!(
         quarantined[0]["payload"]
             .as_str()
             .expect("payload")
-            .contains("ticket_evidence"),
+            .contains("dup-doc"),
         "the attempted payload itself is recorded"
+    );
+}
+
+#[tokio::test]
+async fn a_save_with_dangling_references_is_healed_at_the_write_boundary() {
+    // Since the write boundary heals the dangling-reference class (refusing
+    // it bricked every save on first deploy), a save carrying orphaned
+    // evidence succeeds: the entry is dropped, the persisted state audits
+    // clean, and nothing is quarantined.
+    let (_dir, store) = store_seeded_with(&healthy_state());
+    let app = app_with(None, store).await;
+    let router = handler_router(app);
+
+    let payload = serde_json::to_string(&state_with_dangling_evidence()).expect("serialize");
+    let resp = post_store(
+        router.clone(),
+        "save",
+        serde_json::json!({ "data": payload }),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "the dangling reference is healed, not refused"
+    );
+
+    let resp = get_store_at(router, PID, Some("audit"), None, None).await;
+    let doc: serde_json::Value = serde_json::from_str(&body_text(resp).await).expect("json body");
+    assert_eq!(doc["healthy"], serde_json::json!(true), "orphan dropped");
+    assert_eq!(doc["findings"], serde_json::json!([]));
+    assert_eq!(
+        doc["quarantined"],
+        serde_json::json!([]),
+        "a healed save is not quarantined"
     );
 }
 
