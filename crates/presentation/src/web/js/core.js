@@ -340,11 +340,14 @@ function renderRoadmap(){
   const s=STATE,ts=s.tickets||[],hist=s.history||[];
   const el=document.getElementById("roadmap-body");if(!el)return;
   if(!ts.length){el.innerHTML='<div class="panel"><div class="empty">No tickets yet — the roadmap builds itself as work lands.</div></div>';return;}
-  const isDone=t=>t.status==="done"||t.status==="documented";
+  // Every status maps to exactly one bucket: fixed/verified/on_hold used to
+  // match NOTHING, so those tickets vanished from the roadmap entirely and
+  // the header math contradicted the columns ("0 of 5" over 3 visible cards).
+  const isDone=t=>t.status==="done"||t.status==="documented"||t.status==="verified";
   const shipped=ts.filter(isDone);
-  const inflight=ts.filter(t=>t.status==="in_progress"||t.status==="ready"||(t.type==="bug"&&t.status==="open"));
+  const inflight=ts.filter(t=>t.status==="in_progress"||t.status==="ready"||t.status==="fixed"||(t.type==="bug"&&t.status==="open"));
   const next=ts.filter(t=>t.status==="pending"&&(t.design&&t.design.technical));
-  const later=ts.filter(t=>t.status==="pending"&&!(t.design&&t.design.technical));
+  const later=ts.filter(t=>(t.status==="pending"&&!(t.design&&t.design.technical))||t.status==="on_hold");
   const total=ts.length,donePct=Math.round(shipped.length/total*100);
   const rank={high:0,medium:1,low:2};
   const sort=a=>a.slice().sort((x,y)=>(rank[x.priority]??3)-(rank[y.priority]??3));
