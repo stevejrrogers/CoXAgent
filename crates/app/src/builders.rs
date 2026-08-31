@@ -95,6 +95,21 @@ pub fn load_coordination(base: &Path) {
     if std::env::var("COXAGENT_DB_DSN").is_ok_and(|v| !v.is_empty()) {
         return; // an explicit env always wins
     }
+    // Agent sandboxes must never join the operator's shared backend: engine
+    // spawns already strip the DSN env, but a test that runs `coxagent serve`
+    // from a worktree still discovered coordination.json in $HOME and wrote
+    // test-* project rows straight into the production Postgres. Same
+    // heuristic as the scaffold guard: inside .coxagent-worktrees, stay on
+    // the local JSON store.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if cwd.components().any(|c| {
+        c.as_os_str()
+            .to_string_lossy()
+            .starts_with(".coxagent-worktrees")
+    }) {
+        tracing::info!("agent worktree detected — skipping shared coordination backend");
+        return;
+    }
     let path = base.join("coordination.json");
     let Ok(text) = std::fs::read_to_string(&path) else {
         return;
