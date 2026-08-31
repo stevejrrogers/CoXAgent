@@ -150,3 +150,46 @@ test('a ticket can be put on hold, filtered by status, and resumed', async ({ pa
 
   await assertNoConsoleErrors(errors);
 });
+
+test('HTML5 drag from the backlog into the active sprint goes through spqDrop', async ({ page }) => {
+  // The scope test above exercises the API; this one exercises the actual
+  // dataTransfer wiring (spqDrag -> spqDrop) that a mouse drag drives, so a
+  // regression in the handlers cannot hide behind a green API path.
+  const errors: string[] = [];
+  armConsoleGate(page, errors);
+  await openApp(page);
+
+  await page.locator('a[data-v="board"]').click();
+  await page.locator('#work-seg button[data-w="backlog"]').click();
+
+  // A queued sprint to drop onto (the fixture has no running sprint).
+  await page.getByRole('button', { name: /New sprint/ }).click();
+  await page.locator('#cm-input').fill('drag wiring e2e');
+  await page.locator('#cm-ok').click();
+  const card = page.locator('#backlog-body .spq-card', { hasText: 'drag wiring e2e' });
+  await expect(card).toBeVisible();
+
+  const row = page.locator('#backlog-body .act[draggable="true"]').first();
+  await expect(row).toBeVisible();
+  const id = (await row.locator('.tk').first().innerText()).trim();
+
+  await page.evaluate(({ rowSel, cardText }) => {
+    const row = document.querySelector(rowSel) as HTMLElement;
+    const tgt = [...document.querySelectorAll('#backlog-body .spq-card')]
+      .find((c) => c.textContent!.includes(cardText)) as HTMLElement;
+    const dt = new DataTransfer();
+    row.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt }));
+    tgt.dispatchEvent(new DragEvent('dragover', { bubbles: true, dataTransfer: dt, cancelable: true }));
+    tgt.dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer: dt, cancelable: true }));
+  }, { rowSel: '#backlog-body .act[draggable="true"]', cardText: 'drag wiring e2e' });
+
+  // The drop lands the dragged ticket inside the queued sprint's row list.
+  await expect(card.locator('.spq-row', { hasText: id })).toBeVisible({ timeout: 10000 });
+
+  // Drop the plan so the fixture leaves exactly as the sibling specs expect.
+  await card.locator('button', { hasText: 'plan' }).click();
+  await page.locator('#cm-ok').click();
+  await expect(page.locator('#backlog-body .spq-card', { hasText: 'drag wiring e2e' })).toHaveCount(0);
+
+  await assertNoConsoleErrors(errors);
+});
