@@ -7,7 +7,7 @@ const FCOLS=[["pending","Pending","--muted"],["ready","Ready","--blue"],["in_pro
 const BCOLS=[["open","Open","--red"],["fixed","Fixed","--amber"],["verified","Verified","--green"]];
 // Unified board: one lifecycle for features + bugs, each column collecting both.
 const UCOLS=[
-  ["backlog","Backlog","--muted",["pending","open"]],
+  ["backlog","Backlog","--muted",["pending","open","on_hold"]],
   ["ready","Ready","--accent2",["ready"]],
   ["in_progress","In Progress","--amber",["in_progress"]],
   ["done","Done","--green",["done","fixed"]],
@@ -70,10 +70,16 @@ const fmtK=n=>{n=Number(n)||0;return n>=1e9?(n/1e9).toFixed(1)+"B":n>=1e6?(n/1e6
 const AC={BA:"--blue","DEV-FEATURE":"--green","DEV-BUG":"--red",SA:"--purple",TEST:"--teal",DOCS:"--blue",PO:"--amber",SM:"--teal",PD:"--purple",USER:"--accent"};
 // Stable nicknames so each role reads as one consistent person, not a label.
 const AGENT_NICK={BA:"Bella",PO:"Pola",SM:"Sam",SA:"Aria","DEV-FEATURE":"Finn","DEV-BUG":"Bex",TEST:"Quinn",DOCS:"Dana",PD:"Piper"};
-const TITLES={"mg-spaces":["Spaces","every team space in the hub"],"mg-space":["Space","deep dive"],"mg-users":["Users","everyone across the hub"],"mg-usage":["Usage","who burns what"],"mg-audit":["Audit","every action across the hub"],home:["Home","your company · projects · your agents"],overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],inbox:["Inbox","everything waiting on YOU — approve · verify · answer"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Scrum","standups, sprint events & team threads"],docs:["Wiki","product & technical knowledge base"],codemap:["Code map","files · symbols · dependencies the agents navigate"],calendar:["Calendar","meetings · schedule"],terminal:["Terminal","real shell in the project codebase — admin only"],chat:["Chat","talk with your teammates"],review:["Review","open pull requests — approve & merge"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
+const TITLES={"mg-spaces":["Spaces","every team space in the hub"],"mg-space":["Space","deep dive"],"mg-users":["Users","everyone across the hub"],"mg-usage":["Usage","who burns what"],"mg-audit":["Audit","every action across the hub"],home:["Home","your company · projects · your agents"],river:["Fleet river","every agent, every project — one live stream"],overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],inbox:["Inbox","everything waiting on YOU — approve · verify · answer"],activity:["Transcripts & alerts","per-run transcripts · outbound alerts · audit export — this project"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Scrum","standups, sprint events & team threads"],docs:["Wiki","product & technical knowledge base"],codemap:["Code map","files · symbols · dependencies the agents navigate"],calendar:["Calendar","meetings · schedule"],terminal:["Terminal","real shell in the project codebase — admin only"],chat:["Chat","talk with your teammates"],review:["Review","open pull requests — approve & merge"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+// Engine/model provenance (CXA-F257): one attempt as the verify surfaces
+// render it — JS mirror of application::engine_provenance::attempt_label, so
+// an engine that cannot report a model id shows the explicit "model unknown"
+// marker instead of a blank field, identically on card and detail.
+const provLabel=a=>`${a.engine} · ${a.model&&a.model.trim()?a.model:"model unknown"}`;
+const provChip=p=>`<span style="font-family:ui-monospace,Menlo,monospace;font-size:11.5px;font-weight:600;background:var(--card);border:1px solid var(--border2);border-radius:20px;padding:2px 8px;color:${p.model&&p.model.trim()?"var(--muted)":"var(--amber)"};white-space:nowrap">${esc(provLabel(p))}</span>`;
 const cvar=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||"#888";
-let STATE={}, CUR="overview", BF="all", INIT_ACT=false, WORKTAB="board";
+let STATE={}, CUR="overview", BF="all", SF="all", INIT_ACT=false, WORKTAB="board";
 function setWorkTab(w){WORKTAB=w;
   document.querySelectorAll("#work-seg button").forEach(b=>b.classList.toggle("on",b.dataset.w===w));
   document.getElementById("work-board").style.display=w==="board"?"":"none";
@@ -82,6 +88,10 @@ function setWorkTab(w){WORKTAB=w;
   renderActive();}
 
 function nav(v){
+  // An unknown view (stale hash, typo, removed screen) used to blank the
+  // whole pane: every view lost `on` and THEN getElementById(null) threw.
+  // Fall back to overview instead of dying mid-switch.
+  if(!document.getElementById("view-"+v))v="overview";
   // Manage views live in manage mode; everything else in workspace mode.
   if(String(v).startsWith("mg-")&&MODE!=="manage"){MODE="manage";localStorage.setItem("cox_mode",MODE);document.body.classList.add("mode-manage");document.body.classList.remove("mode-chat");}
   if(!String(v).startsWith("mg-")&&MODE==="manage"){MODE="workspace";localStorage.setItem("cox_mode",MODE);document.body.classList.remove("mode-manage");}
@@ -90,13 +100,15 @@ function nav(v){
   // Settings is open to everyone (members see the self-service MCP tab).
   if(v==="access"&&!canManage())v="overview";
   CUR=v;location.hash=v;
+  // The fleet river owns an SSE stream only while it is on screen.
+  if(v!=="river"&&typeof closeFleetRiver==="function")closeFleetRiver();
   document.querySelectorAll(".view").forEach(x=>x.classList.remove("on"));
   document.getElementById("view-"+v).classList.add("on");
   document.querySelectorAll(".nav a").forEach(a=>a.classList.toggle("on",a.dataset.v===v));
   document.getElementById("pg-title").textContent=TITLES[v][0];
   document.getElementById("pg-sub").textContent=TITLES[v][1];
   try{updateSegments();}catch(e){}
-   if(v==="settings")loadSettings(); else if(v==="calendar"){if(!Array.isArray(MEETINGS))MEETINGS=[];loadMeetings().then(renderCalendar).catch(()=>{MEETINGS=[];renderCalendar();});} else if(v==="discuss"){loadComments();} else if(v==="docs"){loadDocs();} else if(v==="people"){renderPeople();} else if(v==="audit"){renderAudit();} else if(v==="access"){renderAccess();} else if(v==="roadmap"){renderRoadmap();} else if(v==="review"){renderReview();} else if(v==="inbox"){renderInbox();} else if(v==="codemap"){renderCodeMap();} else if(v==="team"){loadAgentEvals();renderActive();} else if(v==="terminal"){openTerminal();} else renderActive();
+   if(v==="settings")loadSettings(); else if(v==="calendar"){if(!Array.isArray(MEETINGS))MEETINGS=[];loadMeetings().then(renderCalendar).catch(()=>{MEETINGS=[];renderCalendar();});} else if(v==="discuss"){loadComments();} else if(v==="docs"){loadDocs();} else if(v==="people"){renderPeople();} else if(v==="audit"){renderAudit();} else if(v==="access"){renderAccess();} else if(v==="roadmap"){renderRoadmap();} else if(v==="review"){renderReview();} else if(v==="inbox"){renderInbox();} else if(v==="codemap"){renderCodeMap();} else if(v==="team"){loadAgentEvals();renderActive();} else if(v==="river"){openFleetRiver();} else if(v==="terminal"){openTerminal();} else renderActive();
    setTimeout(centerContent,50);}
 function initials(r){return r.replace("DEV-","").slice(0,2);}
 // A hostname as a person would say it: "Lutons-MacBook-Pro.local" -> "MacBook
@@ -137,6 +149,15 @@ function alertsHtml(s,m,spend){
   if(bud&&spend.total_cost_usd>=bud)al.push(["red","alert-triangle","Budget cap reached",money(spend.total_cost_usd)+" of "+money(bud)+" — loop paused"]);
   else if(bud&&spend.total_cost_usd>=bud*0.8)al.push(["amber","alert-triangle","Budget nearly reached",Math.round(spend.total_cost_usd/bud*100)+"% of "+money(bud)]);
   if(m.openBugs>=5)al.push(["amber","bug",m.openBugs+" open bugs","DEV-BUG is prioritising fixes over features"]);
+  // Merged-then-reverted work (CXA-F047): shipped value that did not stick.
+  // Amber while detections wait on a human; red once confirmed — a fact, not
+  // a suspicion, and planning discounts it next cycle.
+  const rv=s.reverted_work||[];
+  if(rv.length){
+    const pend=rv.filter(e=>e.decision==="pending").length,okd=rv.length-pend;
+    if(pend)al.push(["amber","arrow-back-up","Reverted work",pend+" detected revert"+(pend===1?" needs":"s need")+" your review — decide in the Inbox"]);
+    else if(okd)al.push(["red","arrow-back-up","Reverted work",okd+" confirmed revert"+(okd===1?"":"s")+" — planning weights them down next cycle"]);
+  }
   if(!al.length)return "";
   return al.map(([c,ic,t,d])=>`<div class="panel" style="margin-bottom:12px;display:flex;align-items:center;gap:12px;border-color:var(--${c})">
     <i class="ti ti-${ic}" style="font-size:20px;color:var(--${c})"></i>
@@ -153,6 +174,50 @@ function velocityHtml(sprints){
       <div style="font-size:10px;color:var(--dim)">#${s.number}</div></div>`;}).join("");
   return `<div class="sec">Velocity</div><div class="panel"><div style="display:flex;gap:10px;align-items:flex-end">${bars}</div>
     <div style="color:var(--dim);font-size:11px;margin-top:10px">shipped (cyan) vs committed (grey) per closed sprint</div></div>`;
+}
+// Human governance-attention ledger (CXA-F230): where the operator's own
+// review effort goes, per ticket class and gate kind. Reads the analytics
+// response the backend already computes (60s cache, keyed by project — the
+// same pattern the token-saver panel uses), because the raw ledger never
+// rides the 1 Hz state snapshot. Zero gates render NOTHING: until a first
+// decision lands, the overview reads exactly as before.
+function loadGovernanceAttention(){
+  // The cache is keyed by project: switching projects must never show the
+  // previous project's attention data for the rest of the cache window.
+  if(window._govPid!==PID){window._gov=null;window._govAt=0;}
+  if(window._govAt&&Date.now()-window._govAt<60000){renderGovernanceAttention();return;}
+  window._govPid=PID;window._govAt=Date.now();
+  fetch(api("/metrics/summary")).then(r=>r.json()).then(d=>{
+    window._gov=(d&&d.attention)?d.attention:null;
+    if(CUR==="overview")renderGovernanceAttention();
+  }).catch(()=>{window._gov=null;});
+}
+function renderGovernanceAttention(){
+  const el=document.getElementById("ov-attention");if(!el)return;
+  const a=window._gov;
+  if(!a||!a.interventions_total){setHTML(el,"");return;}
+  const kinds={ready_approve:"ready",verify_pass:"verify ✓",verify_send_back:"verify ↩",cost_approve:"cost",human_pr_reviewed:"PR landed",human_pr_dismissed:"PR dismissed",undo_auto_approve:"undo approval"};
+  const rows=Object.entries(a.attention_by_area||{}).map(([area,counts])=>({
+    area,total:Object.values(counts||{}).reduce((x,y)=>x+(y||0),0),counts:counts||{}
+  })).sort((x,y)=>y.total-x.total);
+  const max=Math.max(1,...rows.map(r=>r.total));
+  const bar=r=>{
+    const w=Math.max(3,Math.round(r.total/max*100));
+    const tip=Object.entries(r.counts).filter(([,v])=>v).map(([k,v])=>(kinds[k]||k)+": "+v).join(" · ")||"no attributed decisions";
+    return `<div style="display:flex;align-items:center;gap:12px;padding:8px 0">
+      <span style="min-width:70px;font-size:12px;text-transform:capitalize">${esc(r.area)}</span>
+      <div style="flex:1;background:var(--card2);border-radius:6px;height:8px;overflow:hidden" title="${esc(tip)}"><div style="width:${w}%;height:100%;background:var(--accent)"></div></div>
+      <span style="font-size:12px;font-family:ui-monospace,monospace;min-width:30px;text-align:right">${r.total}</span></div>`;
+  };
+  const anomaly=a.anomaly?`<div style="display:flex;align-items:flex-start;gap:10px;margin-top:10px;padding:9px 12px;border:1px solid var(--border2);border-left:3px solid var(--amber);border-radius:10px;background:var(--card)">
+    <i class="ti ti-alert-triangle" style="color:var(--amber);font-size:15px"></i>
+    <div style="font-size:12px;color:var(--muted)"><b style="color:var(--text);text-transform:capitalize">${esc(a.anomaly.area)}</b> governance attention spiked — ${a.anomaly.recent_interventions} decisions in 3 days vs ${Number(a.anomaly.baseline_mean).toFixed(1)}/day trailing, with 0 verified tickets of that class in 14 days. Tune the gate, don't just enforce it.</div></div>`:"";
+  setHTML(el,`<div class="sec" style="margin-top:22px">Governance attention <span style="font-size:11px;color:var(--dim);font-weight:400">· your own review effort by ticket class — ${a.interventions_total} gate decision${a.interventions_total===1?"":"s"} recorded</span></div>
+    <div class="panel">
+      ${rows.map(bar).join("")}
+      ${a.unattributed?`<div style="font-size:11px;color:var(--dim);margin-top:8px"><i class="ti ti-eye-off"></i> ${a.unattributed} unattributed — decisions with no resolvable ticket class, counted but never guessed</div>`:""}
+      ${anomaly}
+    </div>`);
 }
 function chartsHtml(s){
   const ts=s.tickets||[],h=s.history||[];
@@ -240,13 +305,27 @@ function milestonesHtml(s){
     const col=reached?"var(--green)":(active?"var(--accent2)":"var(--muted)");
     const icon=reached?"circle-check-filled":(active?"target":"flag");
     const tag=reached?'<span class="pbadge" style="background:color-mix(in srgb,var(--green) 18%,transparent);color:var(--green)">reached</span>':(active?'<span class="pbadge on">in progress</span>':'<span class="pbadge off">planned</span>');
+    // "reached" is derived from the version; goal_complete is the human/PO
+    // call the release pipeline actually waits on. Offer the one click here
+    // instead of leaving the PO daily to flag the same drift forever.
+    const doneBtn=(reached&&!m.goal_complete)?` <button class="gc-btn" style="font-size:11px;padding:2px 8px" data-m="${escAttr(m.name)}" onclick="milestoneComplete(this.dataset.m)"><i class="ti ti-check"></i> Mark complete</button>`:(m.goal_complete?' <span class="pbadge" style="color:var(--green)">✓ complete</span>':'');
     return `<div class="msrow">
       ${i<ms.length-1?'<div class="msline-c"></div>':''}
       <div class="msdot" style="color:${col};border-color:${col}"><i class="ti ti-${icon}"></i></div>
-      <div class="msmeta"><div class="msname">${esc(m.name)} <span class="msver">v${esc(m.target_version)}</span> ${tag}</div>
+      <div class="msmeta"><div class="msname">${esc(m.name)} <span class="msver">v${esc(m.target_version)}</span> ${tag}${doneBtn}</div>
         <div class="msgoal">${esc(m.goal)}</div></div></div>`;}).join("");
   return `<div class="sec" style="margin-top:4px">Milestones <span style="font-size:11px;color:var(--dim);font-weight:400">· shippable targets — each spans several sprints (${sprintsRun} run so far)</span></div>
     <div class="panel msline">${rows}</div>`;
+}
+
+// One click on a reached-but-unconfirmed milestone: the explicit completion
+// the release pipeline waits for.
+async function milestoneComplete(name){
+  try{
+    const r=await fetch(api("/milestone-complete/"+encodeURIComponent(name)),{method:"POST"});
+    if(!r.ok){toast("Could not mark complete: "+(await r.text()));return;}
+    toast("Milestone '"+name+"' marked complete");
+  }catch(e){toast("Could not mark complete");}
 }
 function designSystemHtml(ds){
   if(!ds)return "";
@@ -275,11 +354,14 @@ function renderRoadmap(){
   const s=STATE,ts=s.tickets||[],hist=s.history||[];
   const el=document.getElementById("roadmap-body");if(!el)return;
   if(!ts.length){el.innerHTML='<div class="panel"><div class="empty">No tickets yet — the roadmap builds itself as work lands.</div></div>';return;}
-  const isDone=t=>t.status==="done"||t.status==="documented";
+  // Every status maps to exactly one bucket: fixed/verified/on_hold used to
+  // match NOTHING, so those tickets vanished from the roadmap entirely and
+  // the header math contradicted the columns ("0 of 5" over 3 visible cards).
+  const isDone=t=>t.status==="done"||t.status==="documented"||t.status==="verified";
   const shipped=ts.filter(isDone);
-  const inflight=ts.filter(t=>t.status==="in_progress"||t.status==="ready"||(t.type==="bug"&&t.status==="open"));
+  const inflight=ts.filter(t=>t.status==="in_progress"||t.status==="ready"||t.status==="fixed"||(t.type==="bug"&&t.status==="open"));
   const next=ts.filter(t=>t.status==="pending"&&(t.design&&t.design.technical));
-  const later=ts.filter(t=>t.status==="pending"&&!(t.design&&t.design.technical));
+  const later=ts.filter(t=>(t.status==="pending"&&!(t.design&&t.design.technical))||t.status==="on_hold");
   const total=ts.length,donePct=Math.round(shipped.length/total*100);
   const rank={high:0,medium:1,low:2};
   const sort=a=>a.slice().sort((x,y)=>(rank[x.priority]??3)-(rank[y.priority]??3));
@@ -402,12 +484,42 @@ function renderCycleScores(s){
   if(!rows.length){el.innerHTML='<div class="empty">no cycles scored yet</div>';return;}
   const gc={A:"var(--green)",B:"var(--accent2)",C:"var(--muted)",D:"var(--red)"};
   el.innerHTML='<table class="scoretbl"><thead><tr><th></th><th>cycle</th><th>shipped</th><th>useful/runs</th><th>cost</th><th>errors</th><th>when</th></tr></thead><tbody>'+
-    rows.map(r=>`<tr>
+    rows.map(r=>{
+      // Per-phase breakdown (secs + $) as a hover title — where the cycle went.
+      const secs=r.phase_secs||{},cost=r.phase_cost||{};
+      const keys=[...new Set([...Object.keys(secs),...Object.keys(cost)])];
+      const brk=keys.map(k=>{
+        const t=secs[k]?(secs[k]>=60?Math.round(secs[k]/60)+'m':secs[k]+'s'):'';
+        const c=cost[k]?('$'+cost[k].toFixed(2)):'';
+        return k+': '+[t,c].filter(Boolean).join(' · ');
+      }).join('\n');
+      return `<tr title="${esc(brk)}">
       <td><span class="grade" style="background:color-mix(in srgb,${gc[r.grade]||'var(--muted)'} 16%,transparent);color:${gc[r.grade]||'var(--muted)'}">${esc(r.grade)}</span></td>
       <td>#${r.cycle}</td><td>${r.shipped||0}</td><td>${r.useful||0}/${r.runs||0}</td>
       <td>${r.cost_usd?('$'+r.cost_usd.toFixed(2)):'—'}</td>
       <td>${(r.errors||0)+(r.incidents?(' · '+r.incidents+'⛔'):'')}</td>
-      <td style="color:var(--dim)">${esc((r.at||'').slice(11,16))}</td></tr>`).join("")+'</tbody></table>';
+      <td style="color:var(--dim)">${esc((r.at||'').slice(11,16))}</td></tr>`;}).join("")+'</tbody></table>'
+    +costPerShip(s.cycle_scores||[]);
+}
+// 7-day FinOps digest from the scorecard: cost per role + the headline number
+// "cost per shipped ticket" — the KPI the engine-per-role tuning aims at.
+function costPerShip(scores){
+  const cutoff=Date.now()-7*86400000;
+  const rows=scores.filter(r=>r.at&&new Date(r.at).getTime()>=cutoff);
+  if(!rows.length)return "";
+  let shipped=0,total=0;const byRole={};
+  for(const r of rows){
+    shipped+=r.shipped||0;total+=r.cost_usd||0;
+    for(const[k,v]of Object.entries(r.phase_cost||{}))byRole[k]=(byRole[k]||0)+v;
+  }
+  if(total<0.005)return "";
+  const roles=Object.entries(byRole).sort((a,b)=>b[1]-a[1]).slice(0,6);
+  const per=shipped?("$"+(total/shipped).toFixed(2)):"∞ (nothing shipped)";
+  return `<div class="cps"><div class="cps-head">7 days · $${total.toFixed(2)} spent · ${shipped} shipped · <b>${per}/ship</b></div>
+    <div class="cps-bars">${roles.map(([k,v])=>{
+      const w=Math.max(4,Math.round(v/total*100));
+      return `<div class="cps-row" title="$${v.toFixed(2)}"><span class="cps-lbl">${esc(k)}</span><div class="cps-bar" style="width:${w}%"></div><span class="cps-val">$${v.toFixed(2)}</span></div>`;
+    }).join("")}</div></div>`;
 }
 function actItem(a){const col=cvar(AC[a.agent]||"--muted");
   return `<div class="tlrow"><div class="tl-node" style="--nc:${col}"><i class="ti ti-${actIcon(a.action)}"></i></div>
@@ -417,8 +529,12 @@ function card(t){const a={high:"var(--red)",medium:"var(--amber)",low:"var(--dim
   const ui=t.has_ui?'<span class="b ui">UI</span>':'',bug=t.type==="bug"?'<span class="b bug">bug</span>':'';
   // A human-assigned ticket is out of the agent pool — say WHO owns it.
   const who=t.assignee?`<span class="b" style="background:var(--accentbg);color:var(--accent2)"><i class="ti ti-user" style="font-size:10px"></i> @${esc(t.assignee)}</span>`:'';
-  return `<div class="card-t" onclick="showTicket('${t.id}')"><div class="cid">${esc(t.id)}</div>
-    <div class="ct">${esc(t.title)}</div><div class="badges"><span class="b ${t.priority}">${t.priority}</span>${ui}${bug}${who}</div></div>`;}
+  const doneSet=["done","documented","verified","rejected"];
+  const blockers=(t.depends_on||[]).filter(d=>{const dt=(STATE.tickets||[]).find(x=>x.id===d);return dt&&!doneSet.includes(dt.status);});
+  const blocked=blockers.length?`<span class="b" style="background:color-mix(in srgb,var(--red) 16%,transparent);color:var(--red)" title="blocked by ${esc(blockers.join(', '))}"><i class="ti ti-lock" style="font-size:10px"></i> blocked</span>`:'';
+  const hold=t.status==="on_hold"?`<span class="b" style="background:color-mix(in srgb,var(--amber) 18%,transparent);color:var(--amber)" title="${esc((STATE.hold_reasons||{})[t.id]||'on hold')}"><i class="ti ti-player-pause" style="font-size:10px"></i> on hold</span>`:'';
+  return `<div class="card-t" onclick="showTicket('${t.id}')" ${t.status==="on_hold"?'style="opacity:.65"':''}><div class="cid">${esc(t.id)}</div>
+    <div class="ct">${esc(t.title)}</div><div class="badges"><span class="b ${t.priority}">${t.priority}</span>${hold}${blocked}${ui}${bug}${who}</div></div>`;}
 function column([k,l,c],ts){const items=ts.filter(t=>t.status===k);
   return `<div class="col"><h3><span class="dot" style="background:var(${c})"></span>${l}<span class="n">${items.length}</span></h3>${items.length?items.map(card).join(""):'<div class="empty">—</div>'}</div>`;}
 // Unified column: collects both features and bugs whose status maps to this stage.
@@ -426,12 +542,37 @@ function ucolumn([k,l,c,statuses],ts){const items=ts.filter(t=>statuses.includes
     .sort((a,b)=>(a.type==="bug")-(b.type==="bug")); // bugs after features in the same column
   return `<div class="col"><h3><span class="dot" style="background:var(${c})"></span>${l}<span class="n">${items.length}</span></h3>${items.length?items.map(card).join(""):'<div class="empty">—</div>'}</div>`;}
 
+// Merged-then-reverted work (CXA-F047) on the Work board: the most recent
+// events, with the approve/dismiss decision pending ones still wait on.
+// Renders nothing when the ledger is empty — the board reads as before.
+function renderRevertedWork(s){
+  const el=document.getElementById("board-reverts");if(!el)return;
+  const rv=s.reverted_work||[];
+  if(!rv.length){el.innerHTML="";return;}
+  const row=e=>`<div class="rel" style="align-items:center">
+    <span class="rv" style="background:color-mix(in srgb,var(--red) 14%,transparent);color:var(--red)"><i class="ti ti-arrow-back-up"></i></span>
+    <div class="rt">${esc(e.ticket)} — reverted work<div class="rd">${esc(e.subject)} · ${esc(e.role)} · ${e.decision==="pending"?"awaiting review":esc(e.decision)}</div></div>
+    ${e.decision==="pending"?`<span class="ibx-acts" onclick="event.stopPropagation()">${ibtn("Dismiss",`inboxRevert('${esc(e.sha)}','dismiss')`)+ibtn("Confirm",`inboxRevert('${esc(e.sha)}','approve')`,1)}</span>`:""}</div>`;
+  el.innerHTML=`<div class="panel" style="margin-bottom:12px"><h4><i class="ti ti-arrow-back-up" style="color:var(--red)"></i> Reverted work</h4>${[...rv].reverse().slice(0,5).map(row).join("")}</div>`;
+}
+
+// Engine-health detail for one agent role: what failed, how often, and when —
+// the line on the card is the headline, this is the story.
+function showRoleHealth(role){
+  const hl=(STATE.role_health||{})[role];if(!hl)return;
+  const when=hl.last_error_at?relTime(hl.last_error_at):"—";
+  coxModal({title:role+" · engine health",
+    message:`${hl.errors} error(s), ${hl.timeouts} timeout(s) recorded.\n\nMost recent (${when}):\n${hl.last_error||"—"}\n\nTimeouts mean the provider stalled — failover retried on the fallback chain. Frequent timeouts under parallel load usually mean the concurrency is too high for the provider; lower it in Settings → Workflow.`,
+    confirmText:"OK",cancelText:"Open live log"}).then(ok=>{if(!ok)openAgent(role);});
+}
+
 function renderSidebar(s){
   document.getElementById("ver").textContent=s.current_version||"0.0.0";
   document.getElementById("pn-tickets").textContent=(s.tickets||[]).length+" tickets";
   document.title="CoXAgent · "+(document.getElementById("proj-name").textContent||"");}
 function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overview")return;
   if(CUR==="overview"){
+    renderDriftAlerts(s);
     if(!(s.tickets||[]).length&&!(s.activity||[]).length){
       document.getElementById("kpis").innerHTML=`<div class="panel" style="grid-column:1/-1;text-align:center;padding:40px 20px">
         <i class="ti ti-rocket" style="font-size:34px;color:var(--accent2)"></i>
@@ -442,13 +583,14 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
       document.getElementById("ov-deploy").innerHTML='';
       document.getElementById("ov-activity").innerHTML='<div class="empty">activity appears as agents work</div>';
       document.getElementById("ov-changelog").innerHTML='<div class="empty">no releases yet</div>';
+      const gov=document.getElementById("ov-attention");if(gov)gov.innerHTML='';
       return;
     }
     const m=metricsFrom(s);
     const spend=s.spend||{};
     document.getElementById("ov-alerts").innerHTML=alertsHtml(s,m,spend);
     drainBanner("ov-drain");
-    document.getElementById("kpis").innerHTML=[kpi("Shipped",m.shipped),kpi("In flight",m.inflight),kpi("Open bugs",m.openBugs),kpi("Documented",m.docd),kpi("Releases",m.releases),kpi("Cost",money(spend.total_cost_usd))].join("");
+    document.getElementById("kpis").innerHTML=[kpi("Shipped",m.shipped),kpi("In flight",m.inflight),kpi("Documented",m.docd),kpi("Releases",m.releases),kpi("Cost",money(spend.total_cost_usd))].join("");
     renderHealth(s);
     const dp=s.deploy;
     document.getElementById("ov-deploy").innerHTML=dp?`<div class="panel" style="margin-top:16px;display:flex;align-items:center;gap:13px">
@@ -456,6 +598,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
       <div style="flex:1"><div style="font-size:13px;font-weight:600">Deployment ${dp.ok?'healthy':'failed'}</div><div style="font-size:12px;color:var(--muted)">${esc(dp.summary)}</div></div>
       <div style="font-size:11px;color:var(--dim)">${esc((dp.at||"").slice(0,16).replace("T"," "))}</div></div>`:"";
     document.getElementById("ov-charts").innerHTML=chartsHtml(s);
+    loadGovernanceAttention();
     document.getElementById("ov-design").innerHTML=designSystemHtml(s.design_system);
     const act=[...(s.activity||[])].reverse().slice(0,7);
     document.getElementById("ov-activity").innerHTML=act.length?act.map(actItem).join(""):'<div class="empty">no activity yet</div>';
@@ -511,31 +654,52 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
         statusHtml=`<div class="ag-now"><i class="ti ti-loader-2 att-spin"></i> working now${runners.length>1?`<span class="ag-nteams">${runners.length} teams</span>`:''}</div>
           <div class="ag-runs">${rows}</div>`;
       }else{
-        statusHtml=`<div class="ag-last"><i class="ti ti-point"></i> ${cur?'last touched':'idle'}${lastOp?` · <span class="ag-by" title="${esc(lastOp)}"><i class="ti ti-user-cog"></i> ${esc(workerLabel(lastOp,[lastOp]))}</span>`:''}</div>
+        // Say WHY it idles, not just that it does — the difference between
+        // "nothing scoped for DEV" and "engine down" is the whole diagnosis.
+        let idleWhy='';
+        if(!cur){
+          const scoped=((s.sprint&&s.sprint.committed)||[]).map(id=>((s.tickets||[]).find(x=>x.id===id)||{}));
+          if(r.startsWith('DEV')&&!scoped.some(t=>["ready","open"].includes(t.status)))idleWhy=' — no scoped work';
+          else if(s.ops_down)idleWhy=' — ops down';
+          else idleWhy=' — waiting for its phase';
+        }
+        statusHtml=`<div class="ag-last"><i class="ti ti-point"></i> ${cur?'last touched':'idle'+idleWhy}${lastOp?` · <span class="ag-by" title="${esc(lastOp)}"><i class="ti ti-user-cog"></i> ${esc(workerLabel(lastOp,[lastOp]))}</span>`:''}</div>
           ${cur?taskChip('',cur,'idle'):''}`;
       }
       // Which engine CLI this role is really on — copilot/opencode/claude/… —
       // stamped from the run that actually happened, so failover shows through.
       const engBadge=eng?`<span class="ag-eng" title="engine actually running this agent">${esc(eng)}</span>`:'';
+      const hl=(s.role_health||{})[r];
+      const healthHtml=hl&&hl.errors>0?`<div class="ag-health" title="click for details" onclick="event.stopPropagation();showRoleHealth('${esc(r)}')"><i class="ti ti-alert-triangle"></i> ${hl.errors} error${hl.errors===1?'':'s'}${hl.timeouts?` · ${hl.timeouts} timeout${hl.timeouts===1?'':'s'}`:''}${hl.timeouts>=3?' · <b>provider under load — consider a lower concurrency</b>':''}</div>`:'';
       return `<div class="agent ${live?'run':''}" onclick="openAgent('${r}')" style="cursor:pointer">
         <div class="ag-head"><div class="av" style="background:${col}22;color:${col}">${initials(r)}<span class="sr"></span></div>
           <div class="ag-id"><div class="rl">${r}${engBadge}</div><div class="ds">${d}</div></div>
           <i class="ti ti-terminal-2 ag-term"></i></div>
         <div class="agstats"><span title="actions"><i class="ti ti-bolt"></i> ${st.n}</span><span title="tickets touched"><i class="ti ti-ticket"></i> ${st.tk.size}</span>${cost>0?`<span title="cost"><i class="ti ti-coin"></i> ${money(cost)}</span>`:''}</div>
-        <div class="ag-status">${statusHtml}</div></div>`;}).join("");
+        <div class="ag-status">${statusHtml}</div>${healthHtml}</div>`;}).join("");
     renderDupWarn(s);
     renderCycleScores(s);
     renderTeamsOnline();
     renderSessions();
-    if(ME&&ME.role==="admin")renderTeamPeople();
+    // Populate whenever the card is VISIBLE — applyRole shows .admin-only for
+    // the hub-admin tier (admin, super, open mode; see isHubAdmin). Gating on
+    // role==="admin" alone stranded this card on "loading…" twice: open mode
+    // once, and the hub owner's "super" role until CXA-B132.
+    if(isHubAdmin())renderTeamPeople();
   }else if(CUR==="board"){
     let feats=(s.tickets||[]).filter(t=>t.type!=="bug"),bugs=(s.tickets||[]).filter(t=>t.type==="bug");
     if(BF!=="all"){feats=feats.filter(t=>t.priority===BF);bugs=bugs.filter(t=>t.priority===BF);}
     const fc=["all","high","medium","low"];
-    document.getElementById("board-filters").innerHTML=fc.map(f=>`<span class="fchip ${BF===f?'on':''}" onclick="BF='${f}';renderActive()">${f==='all'?'all priorities':f}</span>`).join("");
+    const sc=["all","pending","ready","in_progress","open","fixed","done","documented","verified","on_hold","rejected"];
+    document.getElementById("board-filters").innerHTML=
+      fc.map(f=>`<span class="fchip ${BF===f?'on':''}" onclick="BF='${f}';renderActive()">${f==='all'?'all priorities':f}</span>`).join("")
+      +'<span style="width:1px;background:var(--border2);margin:0 4px;align-self:stretch"></span>'
+      +sc.map(f=>`<span class="fchip ${SF===f?'on':''}" onclick="SF='${f}';renderActive()">${f==='all'?'all statuses':f.replace('_',' ')}</span>`).join("");
     // One unified board: features + bugs share columns mapped by lifecycle stage.
     let all=(s.tickets||[]);if(BF!=="all")all=all.filter(t=>t.priority===BF);
+    if(SF!=="all")all=all.filter(t=>t.status===SF);
     document.getElementById("board-cols").innerHTML=UCOLS.map(c=>ucolumn(c,all)).join("");
+    renderRevertedWork(s);
     renderSprintPanel(s);
     renderBacklogPanel(s);
   }else if(CUR==="activity"){
@@ -548,7 +712,11 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
       if(day&&day!==lastDay){lastDay=day;html+=`<div class="tl-day">${esc(day)}</div>`;}
       html+=actItem(a);}
     document.getElementById("activity-full").innerHTML=act.length?`<div class="timeline">${html}</div>`:'<div class="empty">no activity yet</div>';
+    if(typeof renderAlerts==="function")renderAlerts();
     renderTranscripts();
+    // CXA-B131: the Work log panel must never sit on 'loading…' when the
+    // agent drawer was never opened — paint its terminal state here.
+    if(typeof paintAgentLogIdle==="function")paintAgentLogIdle();
   }else if(CUR==="insights"){
     const sp=s.spend||{by_role:{}};const tok=(sp.input_tokens||0)+(sp.output_tokens||0);
     // These KPIs are the real measured totals — no counterfactual. The old

@@ -131,7 +131,11 @@ mod tdd_tests {
         RunReleasesUseCase::new(Arc::clone(&store), PathBuf::from("/tmp"))
             .with_git(Some(git as Arc<dyn GitPort>))
             .with_config(Config {
-                releases: ReleasesConfig { enabled: true },
+                releases: ReleasesConfig {
+                    enabled: true,
+                    cut_every_days: 0,
+                    cut_only_verified: true,
+                },
                 ..Config::default()
             })
     }

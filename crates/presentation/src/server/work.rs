@@ -44,6 +44,26 @@ pub(super) async fn analyze_goal_ep(
     }
 }
 
+/// Whether the detail payload carries the live reproduction link (CXA-F244):
+/// a fixed ticket awaiting a human verdict — the same Fixed-plus-evidence
+/// signal the inbox's verify card keys on — is exactly where a person needs
+/// to open the app the fix shipped to.
+fn detail_awaits_verification(status: coxagent_domain::Status, evidence_attached: bool) -> bool {
+    status == coxagent_domain::Status::Fixed && evidence_attached
+}
+
+/// Engine & model provenance for the detail payload (CXA-F257): the ticket's
+/// bounded per-step log of which engine/model ACTUALLY executed, chronological.
+/// `None` when the ticket has no captured runs, so the payload is unchanged
+/// for tickets that predate provenance capture.
+fn provenance_field(
+    state: &coxagent_application::state::ProjectState,
+    id: &str,
+) -> Option<serde_json::Value> {
+    let prov = state.step_provenance(id);
+    (!prov.is_empty()).then(|| serde_json::to_value(prov).unwrap_or_default())
+}
+
 /// Full detail for one ticket — including the `design` specs stripped from list
 /// payloads — loaded only when the user opens it.
 pub(super) async fn ticket_detail_ep(
@@ -53,33 +73,192 @@ pub(super) async fn ticket_detail_ep(
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
+    // The live reproduction link (CXA-F244) needs the project's deploy config;
+    // read it the same way inbox_ep does — a corrupt config degrades to the
+    // default and the link degrades to null, never fails the detail payload.
+    let cfg = std::fs::read_to_string(&p.config_path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
+        .unwrap_or_default();
     match p.store.load().await {
-        Ok(state) => state
-            .tickets
-            .iter()
-            .find(|t| t.id().as_str() == id)
-            .map_or_else(not_found, |t| {
-                let mut v = serde_json::to_value(t).unwrap_or_default();
-                // Cost-gate surface: the hold estimate (if any) and whether a
-                // human already approved this ticket to run.
-                if let Some(obj) = v.as_object_mut() {
-                    if let Some(est) = state.cost_holds.get(&id) {
-                        obj.insert("cost_hold".into(), serde_json::json!(est));
-                    }
-                    if let Some(ev) = state.ticket_evidence.get(&id) {
+        Ok(state) => {
+            // Artifact existence is storage IO, resolved up front so the
+            // (sync) serialization closure below stays sync.
+            let artifacts = screenshot_artifacts(
+                &app.storage,
+                state.ticket_evidence.get(&id).map(Vec::as_slice),
+            )
+            .await;
+            state
+                .tickets
+                .iter()
+                .find(|t| t.id().as_str() == id)
+                .map_or_else(not_found, |t| {
+                    let mut v = serde_json::to_value(t).unwrap_or_default();
+                    // Cost-gate surface: the hold estimate (if any) and whether a
+                    // human already approved this ticket to run.
+                    if let Some(obj) = v.as_object_mut() {
+                        // Test-to-AC traceability (CXA-F024): the Test Coverage tab
+                        // renders straight from the aggregate's computed matrix —
+                        // the status logic stays in the domain, not in the view.
                         obj.insert(
-                            "evidence".into(),
-                            serde_json::to_value(ev).unwrap_or_default(),
+                            "coverage_matrix".into(),
+                            serde_json::to_value(t.coverage_matrix()).unwrap_or_default(),
                         );
+                        if let Some(est) = state.cost_holds.get(&id) {
+                            obj.insert("cost_hold".into(), serde_json::json!(est));
+                        }
+                        if let Some(ev) = state.ticket_evidence.get(&id) {
+                            obj.insert(
+                                "evidence".into(),
+                                evidence_items_with_artifacts(ev, &artifacts).into(),
+                            );
+                        }
+                        // Engine & model provenance (CXA-F257): which engine
+                        // and model actually executed each agent step on this
+                        // ticket, chronological — the verify gate approves
+                        // what ran, not what config asked for. Absent when
+                        // empty, so payloads for tickets with no captured
+                        // runs are unchanged for older readers.
+                        if let Some(pv) = provenance_field(&state, &id) {
+                            obj.insert("provenance".into(), pv);
+                        }
+                        // Live reproduction link (CXA-F244): offered exactly when
+                        // the ticket awaits a human verdict (see
+                        // `detail_awaits_verification`), from the one
+                        // resolvability source the F242 design pins
+                        // (deploy.host_port). Null when no port is configured;
+                        // additive to the payload.
+                        if detail_awaits_verification(
+                            t.status(),
+                            state.ticket_evidence.contains_key(&id),
+                        ) {
+                            obj.insert(
+                                "reproduce_url".into(),
+                                serde_json::json!(
+                                    coxagent_application::repro_url::compute_live_repro_url(
+                                        cfg.deploy.host_port
+                                    )
+                                ),
+                            );
+                            // Per-ticket resolved link (CXA-F246): recorded by
+                            // the capture funnel at evidence-collection time,
+                            // so the panel renders the exact link the evidence
+                            // was captured against — null when none recorded.
+                            obj.insert(
+                                "repro_url".into(),
+                                serde_json::json!(state.repro_urls.get(&id)),
+                            );
+                        }
+                        // The gate spine (CXA-F241): every DoD gate decision the
+                        // governance ledger holds for this ticket, chronological —
+                        // the forensic view groups evidence under these. Absent
+                        // when empty, so payloads for ungated tickets are
+                        // unchanged for older readers.
+                        let gates = coxagent_application::forensics::gate_spine(&state, t.id());
+                        if !gates.is_empty() {
+                            obj.insert(
+                                "gates".into(),
+                                serde_json::to_value(gates).unwrap_or_default(),
+                            );
+                        }
+                        if state.cost_approved.contains(&id) {
+                            obj.insert("cost_approved".into(), serde_json::json!(true));
+                        }
+                        // Attachments ride the detail payload: the modal renders
+                        // from here, always fresh — the SSE snapshot path proved
+                        // unreliable as a source (records reached the store but
+                        // never the client's STATE).
+                        if let Some(atts) = state.ticket_attachments.get(&id) {
+                            obj.insert(
+                                "attachments".into(),
+                                serde_json::to_value(atts).unwrap_or_default(),
+                            );
+                        }
+                        // Dependency radar (CXA-F237): why this ticket is not
+                        // running — direct blockers with their LIVE statuses
+                        // (AC1), and every depends_on id absent from the project
+                        // state surfaced as unknown, never treated as satisfied
+                        // (AC3). Pure derivation over the same loaded snapshot.
+                        obj.insert(
+                            "blocked_by".into(),
+                            serde_json::to_value(coxagent_application::dependency_radar::blocked_by(
+                                &state,
+                                t.id(),
+                            ))
+                            .unwrap_or_default(),
+                        );
+                        let unknown_pairs =
+                            coxagent_application::dependency_radar::unknown_dependencies(&state);
+                        let unknown: Vec<&coxagent_domain::TicketId> = unknown_pairs
+                            .iter()
+                            .filter(|(dep, _)| dep == t.id())
+                            .map(|(_, missing)| missing)
+                            .collect();
+                        if !unknown.is_empty() {
+                            obj.insert(
+                                "unknown_dependencies".into(),
+                                serde_json::to_value(unknown).unwrap_or_default(),
+                            );
+                        }
                     }
-                    if state.cost_approved.contains(&id) {
-                        obj.insert("cost_approved".into(), serde_json::json!(true));
-                    }
-                }
-                Json(v).into_response()
-            }),
+                    Json(v).into_response()
+                })
+        }
         Err(e) => internal_error(&e.to_string()),
     }
+}
+
+/// Evidence forensics (CXA-F241): each item travels with its gate link +
+/// actor (serialized on the record), and screenshots carry the adapter's
+/// artifact-existence verdict so the view can show 'missing artifact'
+/// instead of a broken image or invented content. Pure over the pre-resolved
+/// artifact verdicts — the storage IO happened in `screenshot_artifacts`.
+fn evidence_items_with_artifacts(
+    evidence: &[coxagent_application::state::Evidence],
+    artifacts: &std::collections::BTreeMap<String, bool>,
+) -> Vec<serde_json::Value> {
+    let mut items = Vec::with_capacity(evidence.len());
+    for e in evidence {
+        let mut v = serde_json::to_value(e).unwrap_or_default();
+        if e.kind == "screenshot" {
+            let present = artifacts.get(&e.detail).copied().unwrap_or(false);
+            if let Some(o) = v.as_object_mut() {
+                o.insert(
+                    "artifact".into(),
+                    serde_json::json!(if present { "ok" } else { "missing" }),
+                );
+            }
+        }
+        items.push(v);
+    }
+    items
+}
+
+/// Existence verdicts for a ticket's screenshot artifacts, keyed by the
+/// captured media URL: the storage adapter answers through its port, one
+/// probe per screenshot (≤6 items — the evidence cap). Unknown URLs never
+/// resolve, so the view can show 'missing artifact' explicitly instead of a
+/// broken image or invented content.
+async fn screenshot_artifacts(
+    storage: &std::sync::Arc<dyn coxagent_application::ports::outbound::StoragePort>,
+    evidence: Option<&[coxagent_application::state::Evidence]>,
+) -> std::collections::BTreeMap<String, bool> {
+    let mut out = std::collections::BTreeMap::new();
+    let Some(items) = evidence else {
+        return out;
+    };
+    for e in items.iter().filter(|e| e.kind == "screenshot") {
+        if out.contains_key(&e.detail) {
+            continue;
+        }
+        let present = match coxagent_application::forensics::media_key(&e.detail) {
+            Some(key) => storage.exists(&key).await,
+            None => false,
+        };
+        out.insert(e.detail.clone(), present);
+    }
+    out
 }
 
 pub(super) async fn runner_ep(
@@ -224,6 +403,16 @@ pub(super) async fn create_ticket(
         Some("chore") => TicketType::Chore,
         _ => TicketType::Feature,
     };
+    // Declared product goal (CXA-F228): blank/absent means none; a non-blank
+    // id is parsed strictly so a malformed association is a 400, never a
+    // silently unattributed ticket.
+    let goal = match req.goal.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(g) => match coxagent_domain::GoalId::new(g) {
+            Ok(gid) => Some(gid),
+            Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        },
+    };
     let input = AddTicketInput {
         ticket_type,
         title: title.to_owned(),
@@ -232,6 +421,7 @@ pub(super) async fn create_ticket(
         complexity: req.complexity.unwrap_or(Complexity::Medium),
         has_ui: req.has_ui,
         acceptance_criteria: req.acceptance_criteria.clone(),
+        goal,
     };
     match AddTicketUseCase::new(Arc::clone(&p.store))
         .execute(input)
@@ -286,10 +476,17 @@ pub(super) async fn unpark_ticket(
 pub(super) async fn approve_cost(
     State(app): State<AppState>,
     Path((pid, id)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
+    // Attribution only — the gate decision itself stays open to whoever could
+    // always take it; the ledger records WHO paid attention, it does not start
+    // refusing decisions.
+    let me = super::guards::principal_name(&app, &headers)
+        .await
+        .unwrap_or_else(|| "operator".to_owned());
     let Ok(mut state) = p.store.load().await else {
         return internal_error("load failed");
     };
@@ -298,7 +495,14 @@ pub(super) async fn approve_cost(
     {
         return (axum::http::StatusCode::NOT_FOUND, "no such ticket").into_response();
     }
+    // Governance-attention ledger (CXA-F230): record the FIRST approval only —
+    // re-approving an already-approved ticket is a no-op repeat, and counting
+    // it again would inflate the operator's attributed effort (AC5).
+    let first_approval = !state.cost_approved.contains(&id);
     state.cost_approved.insert(id.clone());
+    if first_approval {
+        state.record_intervention(coxagent_domain::InterventionKind::CostApprove, &id, &me);
+    }
     state.log_activity("USER", "approved cost", Some(id));
     match p.store.save(&state).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
@@ -594,8 +798,36 @@ pub(super) async fn control_ep(
         _ => resolve_username(&app, &headers).await,
     };
     let operator = format!("{account}@{}", machine_host());
+    // Ownership gate: a run belongs to whoever started it. Only that user — or
+    // an admin/root — may pause, stop, or step it. Anyone else pressing Start
+    // while someone's run is live only records THEIR desired-run intent (their
+    // own operator picks it up); it never hijacks or relabels the live run.
+    let (owner, live) = {
+        let s = p.runner.snapshot();
+        (s.operator, s.mode == "running")
+    };
+    let owns = match app.auth.clone() {
+        None => true, // open mode: single-user local
+        Some(auth) => {
+            let caller = resolve_principal(&auth, &headers).await;
+            caller.as_ref().is_some_and(|u| {
+                matches!(
+                    u.role,
+                    coxagent_application::auth::AuthRole::Super
+                        | coxagent_application::auth::AuthRole::Admin
+                ) || owner
+                    .as_deref()
+                    .map_or(true, |o| o.eq_ignore_ascii_case(&u.username))
+            })
+        }
+    };
     match action.as_str() {
         "resume" => {
+            if live && !owns {
+                // Someone else's run is live: just start MY operator.
+                let _ = p.store.set_desired(&operator, true).await;
+                return Json(p.runner.snapshot()).into_response();
+            }
             p.runner.set_operator(&account, &machine_host());
             p.runner.resume();
             // Persist this operator's intent so reopening the app auto-resumes
@@ -604,6 +836,16 @@ pub(super) async fn control_ep(
         }
         // Pause/stop are local to this operator and persist the stopped intent,
         // so a reopen stays idle instead of auto-resuming.
+        "pause" | "step" | "stop" if !owns => {
+            let who = owner.unwrap_or_default();
+            return (
+                axum::http::StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": format!("this run belongs to {who} — only they or an admin can {action} it")
+                })),
+            )
+                .into_response();
+        }
         "pause" => {
             p.runner.pause();
             let _ = p.store.set_desired(&operator, false).await;
@@ -643,9 +885,14 @@ pub(super) async fn operator_control_ep(
     if let Some(auth) = app.auth.clone() {
         let caller = resolve_principal(&auth, &headers).await;
         let account = operator.split('@').next().unwrap_or("");
-        let allowed = caller
-            .as_ref()
-            .is_some_and(|u| u.role.can_manage() || u.username.eq_ignore_ascii_case(account));
+        // Admin/root manage everyone; leads and below only their own operator.
+        let allowed = caller.as_ref().is_some_and(|u| {
+            matches!(
+                u.role,
+                coxagent_application::auth::AuthRole::Super
+                    | coxagent_application::auth::AuthRole::Admin
+            ) || u.username.eq_ignore_ascii_case(account)
+        });
         if !allowed {
             return (
                 axum::http::StatusCode::FORBIDDEN,
@@ -696,6 +943,34 @@ pub(super) async fn set_sprint_goal_ep(
     .await
     {
         Ok(()) => Json(serde_json::json!({ "ok": true, "goal": goal })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Human burn mode (CXA-F030): pause feature work and burn down open bugs
+/// until the count reaches the exit gate. `target: null` sets no numeric
+/// gate — the mode then holds until switched off with `enabled: false`.
+pub(super) async fn burn_mode_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    Json(req): Json<BurnModeReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        s.tuning.burn_mode = req.enabled;
+        s.tuning.burn_until_bugs_le = req.target;
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) => Json(serde_json::json!({
+            "ok": true,
+            "burn_mode": req.enabled,
+            "target": req.target.unwrap_or(0),
+        }))
+        .into_response(),
         Err(e) => internal_error(&e.to_string()),
     }
 }
@@ -760,6 +1035,230 @@ pub(super) async fn sprint_scope_ep(
     }
 }
 
+/// Park a ticket (`on_hold`) or resume it. Holding is a person's process call
+/// for work blocked on the outside world (a billing account, a vendor): the
+/// ticket stays on the board but sprint auto-commit, refill and agent pickup
+/// all skip it — unlike Rejected, it comes back with one click.
+pub(super) async fn hold_ticket_ep(
+    State(app): State<AppState>,
+    Path((pid, id, action)): Path<(String, String, String)>,
+    headers: axum::http::HeaderMap,
+    body: Option<Json<super::HoldReq>>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Ok(tid) = coxagent_domain::TicketId::new(id.clone()) else {
+        return (StatusCode::BAD_REQUEST, "bad id").into_response();
+    };
+    let holding = match action.as_str() {
+        "hold" => true,
+        "resume" => false,
+        _ => return (StatusCode::BAD_REQUEST, "action must be hold or resume").into_response(),
+    };
+    // Same qualification as reject: this is a person's gate decision.
+    let Some(me) = super::inbox::gate_principal(
+        &app,
+        &headers,
+        coxagent_application::AuthRole::can_approve_ready,
+    )
+    .await
+    else {
+        return (
+            StatusCode::FORBIDDEN,
+            "your role may not take this decision",
+        )
+            .into_response();
+    };
+    let mut err: Option<String> = None;
+    match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        let Some(t) = s.tickets.iter_mut().find(|t| t.id() == &tid) else {
+            err = Some("no such ticket".to_owned());
+            return Ok(());
+        };
+        let to = if holding {
+            coxagent_domain::Status::OnHold
+        } else {
+            match t.ticket_type() {
+                coxagent_domain::TicketType::Bug => coxagent_domain::Status::Open,
+                _ => coxagent_domain::Status::Pending,
+            }
+        };
+        if let Err(e) = t.transition_to(coxagent_domain::Role::User, to) {
+            err = Some(e.to_string());
+            return Ok(());
+        }
+        if holding {
+            let reason = body
+                .as_ref()
+                .map(|Json(r)| r.reason.trim().to_owned())
+                .filter(|r| !r.is_empty())
+                .unwrap_or_else(|| "held by a person".to_owned());
+            s.hold_reasons.insert(tid.to_string(), reason);
+        } else {
+            // Resume forgives the failure history (and the hold reason) —
+            // otherwise the auto-hold sweep would park it right back.
+            coxagent_application::sprint::clear_fail_attempts(s, &tid);
+        }
+        s.log_activity(
+            &me,
+            if holding {
+                "put on hold"
+            } else {
+                "resumed from hold"
+            },
+            Some(tid.to_string()),
+        );
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) => match err {
+            Some(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+            None => Json(serde_json::json!({ "ok": true })).into_response(),
+        },
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Queue a sprint to run after the current one. The queue is consumed
+/// front-first at roll-over: the plan's goal and ticket set become the next
+/// sprint's. Planning is additive — an empty queue changes nothing.
+pub(super) async fn queue_sprint_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<super::QueueSprintReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let goal = req.goal.trim().to_owned();
+    if goal.is_empty() {
+        return (StatusCode::BAD_REQUEST, "goal must not be empty").into_response();
+    }
+    let by = resolve_username(&app, &headers).await;
+    let ids: Vec<coxagent_domain::TicketId> = req
+        .tickets
+        .iter()
+        .filter_map(|t| coxagent_domain::TicketId::new(t.trim()).ok())
+        .collect();
+    let mut qid = 0u64;
+    match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        qid = coxagent_application::sprint::queue_sprint(s, &goal, ids.clone(), &by);
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "id": qid })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Add/remove tickets on one queued sprint.
+pub(super) async fn queue_scope_ep(
+    State(app): State<AppState>,
+    Path((pid, qid)): Path<(String, u64)>,
+    Json(req): Json<super::QueueScopeReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let parse = |v: &[String]| -> Vec<coxagent_domain::TicketId> {
+        v.iter()
+            .filter_map(|t| coxagent_domain::TicketId::new(t.trim()).ok())
+            .collect()
+    };
+    let (add, remove) = (parse(&req.add), parse(&req.remove));
+    let mut hit = false;
+    match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        hit = coxagent_application::sprint::scope_queued_sprint(s, qid, &add, &remove);
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) if !hit => (StatusCode::NOT_FOUND, "no such queued sprint").into_response(),
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Rename a queued sprint's goal.
+pub(super) async fn queue_rename_ep(
+    State(app): State<AppState>,
+    Path((pid, qid)): Path<(String, u64)>,
+    Json(req): Json<super::SprintGoalReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    if req.goal.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "goal must not be empty").into_response();
+    }
+    let mut hit = false;
+    match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        hit = coxagent_application::sprint::rename_queued_sprint(s, qid, &req.goal);
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) if !hit => (StatusCode::NOT_FOUND, "no such queued sprint").into_response(),
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Move a queued sprint up or down in run order.
+pub(super) async fn queue_move_ep(
+    State(app): State<AppState>,
+    Path((pid, qid, dir)): Path<(String, u64, String)>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let delta: i64 = match dir.as_str() {
+        "up" => -1,
+        "down" => 1,
+        _ => return (StatusCode::BAD_REQUEST, "dir must be up or down").into_response(),
+    };
+    let mut hit = false;
+    match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        hit = coxagent_application::sprint::move_queued_sprint(s, qid, delta);
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) if !hit => (
+            StatusCode::BAD_REQUEST,
+            "no such queued sprint, or already at that end",
+        )
+            .into_response(),
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Drop a queued sprint outright.
+pub(super) async fn queue_delete_ep(
+    State(app): State<AppState>,
+    Path((pid, qid)): Path<(String, u64)>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let mut hit = false;
+    match coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        hit = coxagent_application::sprint::delete_queued_sprint(s, qid);
+        Ok(())
+    })
+    .await
+    {
+        Ok(()) if !hit => (StatusCode::NOT_FOUND, "no such queued sprint").into_response(),
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
 /// Close the running sprint NOW and open the next one, instead of waiting for
 /// the window to elapse. The closed sprint is archived exactly as a timed
 /// roll-over archives it, so the velocity history stays one shape.
@@ -791,4 +1290,94 @@ pub(super) async fn sprint_close_ep(
 pub(super) struct RejectReq {
     #[serde(default)]
     pub(super) reason: String,
+}
+
+/// The reproduce-link gate (CXA-F244) is a business rule, not a formatting
+/// detail — pinned here as behaviour over the real domain type, the same way
+/// `server/openapi.rs` tests its document builder in-crate.
+/// POST `/api/projects/:pid/milestone-complete/:name` — a person (or PO-role
+/// account) declares a milestone's scope done. The stepper shows "reached"
+/// from the version alone, but the release pipeline waits on this explicit
+/// call — which used to require editing state by hand; the PO daily kept
+/// flagging the same two drifted milestones with no button to act on.
+pub(super) async fn milestone_complete_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path((pid, name)): Path<(String, String)>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Some(_me) = super::inbox::gate_principal(
+        &app,
+        &headers,
+        coxagent_application::AuthRole::can_approve_ready,
+    )
+    .await
+    else {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "your role may not take this decision",
+        )
+            .into_response();
+    };
+    let mut hit = false;
+    let res = coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        if let Some(m) = s.milestones.iter_mut().find(|m| m.name == name) {
+            if !m.goal_complete {
+                m.goal_complete = true;
+                s.log_activity(
+                    "PO",
+                    &format!("milestone '{name}' marked complete by a person"),
+                    None,
+                );
+            }
+            hit = true;
+        }
+        Ok(())
+    })
+    .await;
+    match res {
+        Ok(()) if hit => Json(serde_json::json!({ "ok": true })).into_response(),
+        Ok(()) => (axum::http::StatusCode::NOT_FOUND, "no such milestone").into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod repro_link_gate_tests {
+    use super::detail_awaits_verification;
+    use coxagent_domain::Status;
+
+    #[test]
+    fn fixed_with_attached_evidence_awaits_a_verdict() {
+        assert!(detail_awaits_verification(Status::Fixed, true));
+    }
+
+    #[test]
+    fn fixed_without_evidence_is_not_yet_awaiting_a_verdict() {
+        // The inbox's verify card requires DoD evidence too — until the fix is
+        // proven, no live link is offered.
+        assert!(!detail_awaits_verification(Status::Fixed, false));
+    }
+
+    #[test]
+    fn no_other_status_offers_the_link() {
+        for s in [
+            Status::Pending,
+            Status::Ready,
+            Status::InProgress,
+            Status::Done,
+            Status::Documented,
+            Status::Rejected,
+            Status::OnHold,
+            Status::Open,
+            Status::Verified,
+        ] {
+            assert!(
+                !detail_awaits_verification(s, true),
+                "{s:?} must not carry reproduce_url"
+            );
+        }
+    }
 }

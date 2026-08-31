@@ -78,7 +78,11 @@ fn base64_encode(input: &[u8]) -> String {
 }
 
 /// `git` with extra environment (for token-authenticated HTTPS).
-async fn git_with_env(dir: &Path, args: &[&str], env: &[(String, String)]) -> Result<String, PortError> {
+async fn git_with_env(
+    dir: &Path,
+    args: &[&str],
+    env: &[(String, String)],
+) -> Result<String, PortError> {
     let mut cmd = Command::new("git");
     cmd.args(args).current_dir(dir).stdin(Stdio::null());
     for (k, v) in env {
@@ -242,7 +246,9 @@ impl GitPort for SystemGit {
             Some(env) => git_with_env(work_dir, &["push", "-u", "origin", branch], &env)
                 .await
                 .map(|_| ()),
-            None => git(work_dir, &["push", "-u", "origin", branch]).await.map(|_| ()),
+            None => git(work_dir, &["push", "-u", "origin", branch])
+                .await
+                .map(|_| ()),
         }
     }
 
@@ -313,7 +319,18 @@ impl GitPort for SystemGit {
         // registration may be stale (directory removed out-of-band) — either
         // way, `prune` leaves the repo clean for the next `worktree_add`.
         let _ = git(work_dir, &["worktree", "remove", "--force", &path]).await;
-        git(work_dir, &["worktree", "prune"]).await.map(|_| ())
+        let _ = git(work_dir, &["worktree", "prune"]).await;
+        // `git worktree remove --force` deletes tracked files but leaves
+        // untracked/ignored ones (notably the huge per-worktree `target/` build
+        // cache) behind, so the directory still consumes disk. That is how
+        // abandoned worktrees silently ate tens of GB. Clear any leftover dir —
+        // it is no longer a registered worktree, so nothing the team works in
+        // lives there anymore. Best-effort and never fatal.
+        let dir = Path::new(path.as_ref());
+        if dir.exists() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        Ok(())
     }
 
     async fn changed_paths(
@@ -374,7 +391,10 @@ mod tests {
         assert_eq!(base64_encode(b"foo"), "Zm9v");
         assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
         // The exact shape used for the git Basic-auth header.
-        assert_eq!(base64_encode(b"x-access-token:t"), "eC1hY2Nlc3MtdG9rZW46dA==");
+        assert_eq!(
+            base64_encode(b"x-access-token:t"),
+            "eC1hY2Nlc3MtdG9rZW46dA=="
+        );
     }
 
     #[test]
@@ -384,9 +404,16 @@ mod tests {
         let env = git_token_env().expect("token env");
         std::env::remove_var("COXAGENT_GH_TOKEN");
         assert!(env.iter().any(|(k, _)| k == "GIT_CONFIG_KEY_0"));
-        let val = &env.iter().find(|(k, _)| k == "GIT_CONFIG_VALUE_0").unwrap().1;
+        let val = &env
+            .iter()
+            .find(|(k, _)| k == "GIT_CONFIG_VALUE_0")
+            .unwrap()
+            .1;
         assert!(val.starts_with("Authorization: Basic "));
-        assert!(!val.contains("secret123"), "raw token must not appear verbatim");
+        assert!(
+            !val.contains("secret123"),
+            "raw token must not appear verbatim"
+        );
     }
 
     async fn init_repo(dir: &Path) {
@@ -546,6 +573,40 @@ mod tests {
             .await
             .unwrap();
         assert!(rollback_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn worktree_remove_clears_leftover_untracked_build_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = SystemGit::new();
+        init_repo(tmp.path()).await;
+        fs::write(tmp.path().join("a.txt"), "v1").unwrap();
+        g.commit_all(tmp.path(), "feat: v1", &author())
+            .await
+            .unwrap();
+        let good_sha = g.head_sha(tmp.path()).await.unwrap();
+
+        let rollback_dir = tmp.path().parent().unwrap().join(format!(
+            "{}-rollback",
+            tmp.path().file_name().unwrap().to_string_lossy()
+        ));
+        g.worktree_add(tmp.path(), &rollback_dir, &good_sha)
+            .await
+            .unwrap();
+
+        // Simulate the real leak: a build cache git does not track (ignored or
+        // untracked) left inside the worktree. `git worktree remove --force`
+        // deletes tracked files but leaves this behind, which is how abandoned
+        // worktrees quietly consumed tens of GB of disk.
+        fs::create_dir_all(rollback_dir.join("target/debug")).unwrap();
+        fs::write(rollback_dir.join("target/debug/app"), "binary").unwrap();
+        fs::write(rollback_dir.join("scratch.txt"), "untracked").unwrap();
+
+        g.worktree_remove(tmp.path(), &rollback_dir).await.unwrap();
+        assert!(
+            !rollback_dir.exists(),
+            "worktree_remove must purge leftover build cache + untracked files"
+        );
     }
 
     #[tokio::test]

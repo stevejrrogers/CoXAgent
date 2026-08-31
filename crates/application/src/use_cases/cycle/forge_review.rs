@@ -3,7 +3,10 @@
 
 use super::{diff_has_conflict_markers, ReviewVerdict, RunCycleUseCase};
 use crate::ports::outbound::{AgentEnginePort, AgentRequest, StateStorePort};
-use crate::use_cases::merge_policy::{competing_pr, needs_human_eyes};
+use crate::use_cases::merge_policy::{
+    changed_files, competing_pr, needs_human_eyes, resolve_competing, CompeteCandidate,
+    CompeteOutcome,
+};
 use std::fmt::Write as _;
 
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
@@ -53,6 +56,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // Ticket ids visible in the open queue, for the competing-PR check.
         let open_titles: Vec<(u64, String)> =
             prs.iter().map(|p| (p.number, p.title.clone())).collect();
+        // Mergeability per open PR, so a competing-PR resolution can tell
+        // whether the *other* PR (not this loop's current) can actually land.
+        let open_mergeable: std::collections::HashMap<u64, bool> =
+            prs.iter().map(|p| (p.number, p.mergeable)).collect();
         for pr in prs.into_iter().rev().take(batch) {
             // Only review PRs into the configured target branch; leave PRs aimed
             // elsewhere (e.g. an integration → main promotion) to humans.
@@ -71,20 +78,57 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // still wanted.
             if let Some(tid) = crate::use_cases::merge_policy::ticket_id_in(&pr.title) {
                 if merged_tickets.contains(&tid) && !merged.iter().any(|(n, _)| *n == pr.number) {
-                    let note = format!(
-                        "Closing: a pull request for {tid} is already merged — this branch \
-                         rebuilds what main has. Reopen only if something here is genuinely \
-                         missing from the merged fix."
-                    );
-                    let _ = forge.comment_pr(pr.number, &note).await;
-                    if forge.close_pr(pr.number).await.is_ok() {
-                        self.log_git(&format!(
-                            "review: closed PR #{} — {tid} already merged elsewhere",
-                            pr.number
-                        ))
-                        .await;
+                    // Another PR for this ticket merged — but a second PR can
+                    // still carry work the first one lacks. Same burden of
+                    // proof as the settled-status close below: only close when
+                    // this diff's substance is verifiably on main already.
+                    let landed = match forge.pr_diff(pr.number).await {
+                        Ok(d) => {
+                            let mut on_main = std::collections::HashMap::new();
+                            if let Some(files) = self.files.as_deref() {
+                                for (rel, _) in
+                                    crate::use_cases::merge_policy::added_lines_by_file(&d)
+                                {
+                                    let path = self.work_dir.join(&rel);
+                                    if let Some(body) = files.read(&path).await {
+                                        on_main.insert(rel, body);
+                                    }
+                                }
+                            }
+                            crate::use_cases::merge_policy::diff_landed_on_main(&d, |rel| {
+                                on_main.get(rel).cloned()
+                            })
+                        }
+                        Err(_) => false,
+                    };
+                    if landed {
+                        let note = format!(
+                            "Closing: a pull request for {tid} is already merged and this \
+                             diff's content is present on main — this branch rebuilds what \
+                             main has."
+                        );
+                        let _ = forge.comment_pr(pr.number, &note).await;
+                        if forge.close_pr(pr.number).await.is_ok() {
+                            self.announce_pr_close(
+                                pr.number,
+                                &pr.title,
+                                &format!("{tid} already merged elsewhere and this diff is on main"),
+                            )
+                            .await;
+                            self.log_git(&format!(
+                                "review: closed PR #{} — {tid} already merged elsewhere",
+                                pr.number
+                            ))
+                            .await;
+                        }
+                        continue;
                     }
-                    continue;
+                    self.log_git(&format!(
+                        "review: PR #{} kept OPEN — {tid} merged elsewhere but this \
+                         diff is NOT on main; letting review land it",
+                        pr.number
+                    ))
+                    .await;
                 }
                 let settled = self.store.load().await.ok().and_then(|s| {
                     s.tickets
@@ -101,20 +145,100 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             | coxagent_domain::Status::Rejected
                     )
                 ) {
-                    let note = format!(
-                        "Closing: {tid} is already {:?} — this branch is superseded. Nothing is \
-                         lost; the branch stays in git if any of it is ever wanted.",
-                        settled.unwrap_or(coxagent_domain::Status::Done)
-                    );
-                    let _ = forge.comment_pr(pr.number, &note).await;
-                    if forge.close_pr(pr.number).await.is_ok() {
-                        self.log_git(&format!(
-                            "review: closed PR #{} — {tid} already settled",
-                            pr.number
-                        ))
-                        .await;
+                    // A settled STATUS is not proof the code landed: tickets go
+                    // Done/Verified through the dev flow while their PR merges
+                    // separately, and closing on status alone threw away twelve
+                    // PRs of real work in one night (#185–#196, 2026-08-16).
+                    // Closing is the irreversible side, so it carries the
+                    // burden of proof: only when the diff's substance is
+                    // ALREADY on main is the branch superseded — otherwise the
+                    // PR stays and the normal review flow merges it.
+                    let landed = match forge.pr_diff(pr.number).await {
+                        Ok(d) => {
+                            // Pre-read main's version of every touched file so
+                            // the containment check stays a pure function.
+                            let mut on_main = std::collections::HashMap::new();
+                            if let Some(files) = self.files.as_deref() {
+                                for (rel, _) in
+                                    crate::use_cases::merge_policy::added_lines_by_file(&d)
+                                {
+                                    let path = self.work_dir.join(&rel);
+                                    if let Some(body) = files.read(&path).await {
+                                        on_main.insert(rel, body);
+                                    }
+                                }
+                            }
+                            crate::use_cases::merge_policy::diff_landed_on_main(&d, |rel| {
+                                on_main.get(rel).cloned()
+                            })
+                        }
+                        Err(_) => false,
+                    };
+                    if landed {
+                        let note = format!(
+                            "Closing: {tid} is already {:?} and this diff's content is \
+                             present on main — superseded. The branch stays in git if any \
+                             of it is ever wanted.",
+                            settled.unwrap_or(coxagent_domain::Status::Done)
+                        );
+                        let _ = forge.comment_pr(pr.number, &note).await;
+                        if forge.close_pr(pr.number).await.is_ok() {
+                            self.announce_pr_close(
+                                pr.number,
+                                &pr.title,
+                                &format!("{tid} is settled and this diff is on main"),
+                            )
+                            .await;
+                            self.log_git(&format!(
+                                "review: closed PR #{} — {tid} settled and landed",
+                                pr.number
+                            ))
+                            .await;
+                        }
+                        continue;
                     }
-                    continue;
+                    // "Letting review land it" assumed the reviewer WOULD. When
+                    // the SA engine fails repeatedly (quota, outage), no verdict
+                    // is ever recorded, the PR is re-reviewed every cycle
+                    // forever, and — with the clean-base gate armed — one
+                    // unlandable PR paused BOTH dev lanes for days (#363).
+                    // A settled ticket already went through the dev flow's own
+                    // gates; the review here is a second opinion, not the only
+                    // door. So land it directly, provided the mechanical
+                    // safeties hold: mergeable, no committed conflict markers,
+                    // no scratch in the diff.
+                    if pr.mergeable {
+                        let safe = match forge.pr_diff(pr.number).await {
+                            Ok(d) => {
+                                !diff_has_conflict_markers(&d)
+                                    && crate::use_cases::merge_policy::commits_scratch(&d).is_none()
+                            }
+                            Err(_) => false,
+                        };
+                        if safe && forge.merge_pr(pr.number).await.is_ok() {
+                            let note = format!(
+                                "Merged: {tid} is already settled — the dev flow's own gates \
+                                 accepted this work — and the diff was not yet on main. \
+                                 Landing it directly instead of waiting on a review round \
+                                 that keeps failing to happen."
+                            );
+                            let _ = forge.comment_pr(pr.number, &note).await;
+                            self.log_git(&format!(
+                                "review: merged PR #{} — {tid} settled, diff not on main, \
+                                 mergeable and marker/scratch-free",
+                                pr.number
+                            ))
+                            .await;
+                            continue;
+                        }
+                    }
+                    self.log_git(&format!(
+                        "review: PR #{} kept OPEN — {tid} is settled but the diff is \
+                         NOT on main; letting review land it",
+                        pr.number
+                    ))
+                    .await;
+                    // fall through to the normal review path below
                 }
             }
             // Scratch in the diff is wrong the moment it exists — there is no
@@ -131,6 +255,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     );
                     let _ = forge.comment_pr(pr.number, &note).await;
                     if forge.close_pr(pr.number).await.is_ok() {
+                        self.announce_pr_close(
+                            pr.number,
+                            &pr.title,
+                            &format!("commits agent scratch ({path}); ticket returns to the queue"),
+                        )
+                        .await;
                         self.log_git(&format!(
                             "review: closed PR #{} — commits scratch ({path})",
                             pr.number
@@ -145,6 +275,30 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             let head_sha = self.pr_head_sha(&pr.head).await;
             if self.already_reviewed_at(pr.number, &head_sha).await {
                 continue;
+            }
+            // Per-PR review lease: with a dedicated review runner per MACHINE
+            // (event-dispatch P1) two machines can reach the same fresh head
+            // at once — the head-sha guard only stops repeats after a verdict
+            // is recorded. The stage-claim's TTL covers the reviewer dying
+            // mid-review (the lease expires and the PR is picked up again).
+            {
+                let key = format!("PR-{}", pr.number);
+                let worker = if self.worker.is_empty() {
+                    "local".to_owned()
+                } else {
+                    self.worker.clone()
+                };
+                let Ok(key) = coxagent_domain::TicketId::new(&key) else {
+                    continue;
+                };
+                let claimed = self
+                    .store
+                    .claim_stage(&key, "review", &worker, &crate::state::now_rfc3339())
+                    .await
+                    .unwrap_or(true);
+                if !claimed {
+                    continue; // another runner is reviewing this PR right now
+                }
             }
             // With require_ci off (CI unavailable, e.g. Actions billing dead),
             // CI status is ignored entirely — local test/lint gates plus the
@@ -194,39 +348,247 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
             // Two open PRs solving the same ticket is a race, not twice the
             // work: whichever lands first leaves the other conflicting or
-            // fixing it twice. It happened here — #17 and #18 were competing
-            // fixes for one bug — so say so and let a human choose, rather than
-            // letting arrival order decide.
+            // fixing it twice. Where the winner PROVABLY covers the loser, the
+            // SA self-resolves — closes the duplicate and lets the winner ship,
+            // instead of parking both on a human forever (which is also what
+            // kept the scorecard's useful count at zero). It keeps the human
+            // in the loop only when closing would DROP work or the change is
+            // too load-bearing to auto-merge.
             if let Some(other) = competing_pr(pr.number, &pr.title, &open_titles) {
-                let reason = format!(
-                    "PR #{other} is open for the same ticket. Two changes for one ticket race \
-                     each other: the second to land conflicts or fixes it twice. Close one, or \
-                     fold this into the other, before either merges."
-                );
-                let _ = forge.request_changes(pr.number, &reason).await;
-                self.record_review(pr.number, "request_changes", &reason, &head_sha)
+                // `diff` is the current PR's diff (already fetched and proven
+                // conflict-marker-free by the hard gate above). Only the other
+                // PR needs a fresh read.
+                let Ok(other_diff) = forge.pr_diff(other).await else {
+                    let reason = format!(
+                        "PR #{other} is open for the same ticket. Could not read its diff to \
+                         auto-resolve — close one or fold this into the other before either \
+                         merges."
+                    );
+                    let _ = forge.request_changes(pr.number, &reason).await;
+                    self.record_review(pr.number, "request_changes", &reason, &head_sha)
+                        .await;
+                    self.log_git(&format!(
+                        "SA held PR #{}: competes with #{other} (unreadable)",
+                        pr.number
+                    ))
                     .await;
-                self.log_git(&format!(
-                    "SA held PR #{}: competes with #{other}",
-                    pr.number
-                ))
-                .await;
-                continue;
+                    continue;
+                };
+                let max_changed_lines = self.config.git.max_changed_lines;
+                let cand = |n: u64, d: &str| CompeteCandidate {
+                    number: n,
+                    files: Some(changed_files(d)),
+                    unsafe_change: needs_human_eyes(d, max_changed_lines).is_some()
+                        || crate::use_cases::merge_policy::commits_scratch(d).is_some(),
+                };
+                match resolve_competing(cand(pr.number, &diff), cand(other, &other_diff)) {
+                    CompeteOutcome::MergeClose { winner, loser } => {
+                        // Only close the duplicate once the winner can ACTUALLY
+                        // land; otherwise the queue is left with no live PR.
+                        let winner_ready = if winner == pr.number {
+                            // this diff is conflict-free by the hard gate above
+                            pr.mergeable
+                        } else {
+                            !diff_has_conflict_markers(&other_diff)
+                                && open_mergeable.get(&winner).copied().unwrap_or(false)
+                        };
+                        if winner_ready {
+                            let note = format!(
+                                "Closing #{loser}: PR #{winner} already covers every file this \
+                                 touches — a duplicate fix for the same ticket. Nothing here is \
+                                 lost; the winner proceeds through review."
+                            );
+                            let _ = forge.comment_pr(loser, &note).await;
+                            if forge.close_pr(loser).await.is_ok() {
+                                let _ = crate::ports::outbound::mutate_state(
+                                    self.store.as_ref(),
+                                    |s| {
+                                        s.seen_closed_prs.insert(loser);
+                                        Ok(())
+                                    },
+                                )
+                                .await;
+                            }
+                            if loser == pr.number {
+                                self.log_git(&format!(
+                                    "SA resolved competing PRs: closed #{loser} (duplicate), \
+                                     keeping #{winner}"
+                                ))
+                                .await;
+                                continue;
+                            }
+                            // This PR is the winner: drop the duplicate, then fall
+                            // through to the normal review that lands this PR.
+                            self.log_git(&format!(
+                                "SA resolved competing PRs: closed #{loser} (duplicate); \
+                                 reviewing #{winner}"
+                            ))
+                            .await;
+                        } else {
+                            let reason = format!(
+                                "PR #{other} is open for the same ticket. The preferred fix \
+                                 #{winner} is not currently landable (conflict/CI), so this is \
+                                 left for a person rather than closing the only candidate."
+                            );
+                            let _ = forge.request_changes(pr.number, &reason).await;
+                            self.record_review(pr.number, "request_changes", &reason, &head_sha)
+                                .await;
+                            self.log_git(&format!(
+                                "SA held PR #{}: competes with #{other}",
+                                pr.number
+                            ))
+                            .await;
+                            continue;
+                        }
+                    }
+                    CompeteOutcome::Proceed {
+                        winner,
+                        unsafe_other,
+                    } => {
+                        // The current PR is a SAFE, small subset of a
+                        // load-bearing same-ticket competitor. It is not held
+                        // hostage by that risk — it proceeds to the normal
+                        // review below, where its own size/impact gates still
+                        // apply, while the unsafe sibling waits for a person.
+                        // (The resolver only ever yields Proceed for the safe
+                        // PR, so `winner` is this PR; guard anyway.)
+                        if winner != pr.number {
+                            let reason = format!(
+                                "PR #{other} is open for the same ticket. Holding for a person: \
+                                 the safe candidate is not this PR. Close one or fold this in."
+                            );
+                            let _ = forge.request_changes(pr.number, &reason).await;
+                            self.record_review(pr.number, "request_changes", &reason, &head_sha)
+                                .await;
+                            self.log_git(&format!(
+                                "SA held PR #{}: competes with #{other}",
+                                pr.number
+                            ))
+                            .await;
+                            continue;
+                        }
+                        self.log_git(&format!(
+                            "SA unblocked PR #{}: safe subset of load-bearing #{unsafe_other}; \
+                             routing to normal review",
+                            pr.number
+                        ))
+                        .await;
+                    }
+                    CompeteOutcome::Hold(why) => {
+                        let reason = format!(
+                            "PR #{other} is open for the same ticket. Holding for a person: \
+                             {why}. Close one or fold this into the other."
+                        );
+                        let _ = forge.request_changes(pr.number, &reason).await;
+                        self.record_review(pr.number, "request_changes", &reason, &head_sha)
+                            .await;
+                        self.log_git(&format!(
+                            "SA held PR #{}: competes with #{other}",
+                            pr.number
+                        ))
+                        .await;
+                        continue;
+                    }
+                }
+            }
+            // Anti-starvation deadline: a CLEAN, mergeable PR that has sat open
+            // with NO review verdict past `review_deadline_hours` is verified
+            // and landed by the runner rather than waiting on a reviewer that
+            // may never reach it. Same verify-then-merge path an approval
+            // takes, so nothing red lands.
+            if auto_merge
+                && pr.mergeable
+                && self.config.git.review_deadline_hours > 0
+                && !self.has_review_for(pr.number).await
+            {
+                let deadline_secs = u64::from(self.config.git.review_deadline_hours) * 3600;
+                if let Some(age_secs) = crate::use_cases::cycle::seconds_since(&pr.created) {
+                    if age_secs >= deadline_secs {
+                        let deadline_hold =
+                            needs_human_eyes(&diff, self.config.git.max_changed_lines)
+                                .or(self.fix_on_fix_hold(&pr.title).await);
+                        if let Some(why) = deadline_hold {
+                            self.log_git(&format!(
+                                "PR #{} past review deadline but held for a human: {why}",
+                                pr.number
+                            ))
+                            .await;
+                        } else if let Err(why) = self.verify_merged_result(&pr.head, target).await {
+                            self.log_git(&format!(
+                                "PR #{} past review deadline, merged result failed \
+                             verification: {why}",
+                                pr.number
+                            ))
+                            .await;
+                        } else {
+                            match forge.merge_pr(pr.number).await {
+                                Ok(()) => {
+                                    self.log_git(&format!(
+                                        "PR #{} auto-landed after {}h with no review (deadline)",
+                                        pr.number,
+                                        age_secs / 3600
+                                    ))
+                                    .await;
+                                    self.reporter()
+                                        .report_hold(
+                                            pr.number,
+                                            "landed via review-deadline (never reviewed)",
+                                        )
+                                        .await;
+                                }
+                                Err(e) => {
+                                    self.log_git(&format!("merge PR #{} failed: {e}", pr.number))
+                                        .await;
+                                }
+                            }
+                        }
+                        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                            s.pr_review_skips.remove(&pr.number);
+                            Ok(())
+                        })
+                        .await;
+                        continue;
+                    }
+                }
             }
             match self.sa_review(&pr.title, &pr.head, &diff).await {
                 Some((true, summary)) => {
+                    let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                        s.pr_review_skips.remove(&pr.number);
+                        Ok(())
+                    })
+                    .await;
                     self.record_review(pr.number, "approve", &summary, &head_sha)
                         .await;
                     if auto_merge {
                         // Size and blast radius the machine should not decide
                         // alone: a change this large, or one that edits how the
                         // project builds and deploys itself, gets a human even
-                        // when every gate is green.
-                        if let Some(why) = needs_human_eyes(&diff) {
+                        // when every gate is green. The fix-on-fix brake joins
+                        // the same hold: a SECOND PR for a ticket that merged
+                        // within the last day is the stacked-chain smell
+                        // (B036→B044; B065 landed twice in one night) — the
+                        // machine does not auto-land another layer on a fix
+                        // it just landed.
+                        let fix_on_fix = self.fix_on_fix_hold(&pr.title).await;
+                        if let Some(why) =
+                            needs_human_eyes(&diff, self.config.git.max_changed_lines)
+                                .or(fix_on_fix)
+                        {
                             let msg = format!(
                                 "Approved, but not auto-merging: {why}. Ask a human to land this."
                             );
                             let _ = forge.comment_pr(pr.number, &msg).await;
+                            // Surface the hold on the hub so the Inbox can ask
+                            // a person instead of the PR waiting silently —
+                            // and ping the webhook so they hear about it away
+                            // from the dashboard too.
+                            self.reporter().report_hold(pr.number, &why).await;
+                            self.notify(
+                                "human_eyes",
+                                format!("PR #{} approved but held for a human: {why}", pr.number),
+                            )
+                            .await;
                             self.log_git(&format!(
                                 "PR #{} approved but held for a human: {why}",
                                 pr.number
@@ -275,13 +637,60 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     }
                 }
                 Some((false, comment)) => {
+                    let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                        s.pr_review_skips.remove(&pr.number);
+                        Ok(())
+                    })
+                    .await;
                     let _ = forge.request_changes(pr.number, &comment).await;
                     self.record_review(pr.number, "request_changes", &comment, &head_sha)
                         .await;
                     self.log_git(&format!("SA requested changes on PR #{}", pr.number))
                         .await;
                 }
-                None => {}
+                None => {
+                    // SA failed to render a verdict (engine crash / bad JSON).
+                    // Track consecutive failures so a PR the reviewer silently
+                    // chokes on is surfaced to a human instead of starving
+                    // forever; a successful verdict above resets this count.
+                    let threshold = self.config.git.review_max_skips;
+                    if threshold > 0 {
+                        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                            let n = s.pr_review_skips.entry(pr.number).or_insert(0);
+                            *n += 1;
+                            Ok(())
+                        })
+                        .await;
+                        let skips = self.store.load().await.map_or(0, |s| {
+                            s.pr_review_skips.get(&pr.number).copied().unwrap_or(0)
+                        });
+                        if skips >= threshold {
+                            self.reporter()
+                                .report_hold(pr.number, "SA keeps failing to review this PR")
+                                .await;
+                            self.notify(
+                                "human_eyes",
+                                format!(
+                                    "PR #{} — the SA reviewer keeps failing to render a \
+                                     verdict; it may be stalled.",
+                                    pr.number
+                                ),
+                            )
+                            .await;
+                            self.log_git(&format!(
+                                "PR #{} surfaced: SA failed to review {threshold}+ times in a row",
+                                pr.number
+                            ))
+                            .await;
+                        } else {
+                            self.log_git(&format!(
+                                "review of PR #{} yielded no verdict (skip)",
+                                pr.number
+                            ))
+                            .await;
+                        }
+                    }
+                }
             }
         }
     }
@@ -313,6 +722,36 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
         self.reporter().fetch_reviews().await.iter().any(|r| {
             r.number == number && r.decision == "request_changes" && r.head_sha == head_sha
+        })
+    }
+
+    /// Whether the SA has rendered ANY verdict (approve or request-changes)
+    /// on this PR. A CLEAN PR with no verdict at all is a starvation candidate —
+    /// the anti-starvation deadline and the "SA keeps failing" surface key off
+    /// this so a never-touched PR can't wait forever undistributed.
+    pub(super) async fn has_review_for(&self, number: u64) -> bool {
+        self.reporter()
+            .fetch_reviews()
+            .await
+            .iter()
+            .any(|r| r.number == number)
+    }
+
+    /// The fix-on-fix brake: `Some(reason)` when this PR's ticket already had
+    /// a PR MERGE within the last 24h. A second layer landing that fast means
+    /// the first fix missed the mechanism — a person should look before the
+    /// chain grows (B036→B044 was nine layers; B065 landed twice in a night).
+    async fn fix_on_fix_hold(&self, pr_title: &str) -> Option<String> {
+        let tid = crate::use_cases::merge_policy::ticket_id_in(pr_title)?;
+        let state = self.store.load().await.ok()?;
+        let at = state.ticket_last_merge.get(&tid)?;
+        let age = crate::use_cases::cycle::seconds_since(at)?;
+        (age < 24 * 3600).then(|| {
+            format!(
+                "{tid} already merged a PR {}h ago — a second layer this fast usually \
+                 means the first fix missed the mechanism",
+                age / 3600
+            )
         })
     }
 

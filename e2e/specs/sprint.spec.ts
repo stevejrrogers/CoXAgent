@@ -74,3 +74,79 @@ test('a ticket id that is not one is rejected rather than silently ignored', asy
   expect(status).toBe(400);
 
 });
+
+test('a sprint can be queued from the backlog tab and dropped again', async ({ page }) => {
+  const errors: string[] = [];
+  armConsoleGate(page, errors);
+  await openApp(page);
+
+  await page.locator('a[data-v="board"]').click();
+  await page.locator('#work-seg button[data-w="backlog"]').click();
+
+  // Queue a sprint through the modal.
+  await page.getByRole('button', { name: /New sprint/ }).click();
+  await page.locator('#cm-input').fill('harden the queue e2e');
+  await page.locator('#cm-ok').click();
+  const card = page.locator('#backlog-body .spq-card', { hasText: 'harden the queue e2e' });
+  await expect(card).toBeVisible();
+  await expect(card).toContainText('up next');
+
+  // Scope a ticket onto the plan through the API the drag uses, then see it.
+  const pid = await projectId(page);
+  const qid = await page.evaluate(async (pid) => {
+    const s = await (await fetch(`/api/projects/${pid}/state`)).json();
+    return s.sprint_queue[0].id as number;
+  }, pid);
+  await page.evaluate(async ({ pid, qid }) => {
+    await fetch(`/api/projects/${pid}/sprint-queue/${qid}/scope`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ add: ['F001'], remove: [] }),
+    });
+  }, { pid, qid });
+  await page.locator('#work-seg button[data-w="board"]').click();
+  await page.locator('#work-seg button[data-w="backlog"]').click();
+  await expect(page.locator('#backlog-body .spq-card .spq-row', { hasText: 'F001' })).toBeVisible();
+
+  // Drop the plan — the fixture leaves exactly as the other specs expect.
+  await card.locator('button', { hasText: 'plan' }).click();
+  await page.locator('#cm-ok').click();
+  await expect(page.locator('#backlog-body .spq-card', { hasText: 'harden the queue e2e' })).toHaveCount(0);
+
+  await assertNoConsoleErrors(errors);
+});
+
+test('a ticket can be put on hold, filtered by status, and resumed', async ({ page }) => {
+  const errors: string[] = [];
+  armConsoleGate(page, errors);
+  await openApp(page);
+  const pid = await projectId(page);
+
+  // Hold F002 through the API the dialog button uses.
+  await page.evaluate(async (pid) => {
+    await fetch(`/api/projects/${pid}/ticket/F002/status/hold`, { method: 'POST' });
+  }, pid);
+  await page.locator('a[data-v="board"]').click();
+  await page.locator('#work-seg button[data-w="board"]').click();
+  await expect(page.locator('#board-cols .card-t', { hasText: 'F002' })).toContainText('on hold');
+
+  // The status filter isolates held tickets.
+  await page.locator('#board-filters .fchip', { hasText: 'on hold' }).click();
+  await expect(page.locator('#board-cols .card-t')).toHaveCount(1);
+  await page.locator('#board-filters .fchip', { hasText: 'all statuses' }).click();
+
+  // The backlog row is marked and offers no sprint pull while held.
+  await page.locator('#work-seg button[data-w="backlog"]').click();
+  const held = page.locator('#backlog-body .act', { hasText: 'F002' });
+  await expect(held).toContainText('on hold');
+  await expect(held.locator('.sp-scope')).toHaveCount(0);
+
+  // Resume — the fixture leaves exactly as the other specs expect.
+  await page.evaluate(async (pid) => {
+    await fetch(`/api/projects/${pid}/ticket/F002/status/resume`, { method: 'POST' });
+  }, pid);
+  await page.locator('#work-seg button[data-w="board"]').click();
+  await page.locator('#work-seg button[data-w="backlog"]').click();
+  await expect(page.locator('#backlog-body .act', { hasText: 'F002' }).locator('.sp-scope')).toHaveCount(1);
+
+  await assertNoConsoleErrors(errors);
+});

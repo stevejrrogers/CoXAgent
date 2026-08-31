@@ -119,13 +119,30 @@ pub async fn rate_limit_mw(
     window: Duration,
     trust_proxy: bool,
 ) -> Result<Response, StatusCode> {
-    // Only the credential-guessing surface is limited: login and 2FA. The rest
-    // of /api/auth/* is read traffic the UI polls (`/me`, session lists) — and
-    // on a local hub every client shares 127.0.0.1, so limiting those 429'd the
-    // dashboard itself within a minute of normal use.
+    // The ticket's acceptance criteria require the limiter in front of all of
+    // /api/auth/*, not just the credential-guessing surface (COX-C016 AC3/4).
+    // Trade-off: on a hub where many users share one apparent IP (NAT, or a
+    // local dashboard with COXAGENT_HOST=127.0.0.1), this window is shared
+    // too — set COXAGENT_TRUST_PROXY=1 behind a real LB/proxy so the key is
+    // the actual client, not the shared TCP peer.
     let path = req.uri().path();
-    if path == "/api/auth/login" || path.starts_with("/api/auth/2fa/") {
-        let key = client_key(&req, trust_proxy);
+    if path.starts_with("/api/auth/") {
+        // Every /api/auth/* route stays limited (COX-C016 AC3/4), but the
+        // session-gated read-only GETs get their own, far roomier bucket:
+        // they are dashboard chrome fetched once per page load, and counting
+        // them against login's strict window let ordinary page loads (or a
+        // UI render burst) starve real sign-ins into a 429 storm. Credential
+        // guessing happens on POST login/2FA — that window is unchanged.
+        let read_only = req.method() == axum::http::Method::GET
+            && matches!(path, "/api/auth/sessions" | "/api/auth/me");
+        let (key, max) = if read_only {
+            (
+                format!("{}:ro", client_key(&req, trust_proxy)),
+                max.saturating_mul(12),
+            )
+        } else {
+            (client_key(&req, trust_proxy), max)
+        };
         if !limiter.check(&key, max, window, Instant::now()) {
             tracing::warn!(
                 client = %key,
@@ -179,7 +196,10 @@ mod tests {
         for _ in 0..MAX {
             assert!(rl.check("carol", MAX, WINDOW, t0));
         }
-        assert!(!rl.check("carol", MAX, WINDOW, t0), "should be denied before roll-over");
+        assert!(
+            !rl.check("carol", MAX, WINDOW, t0),
+            "should be denied before roll-over"
+        );
 
         // Advance past the window — all previous hits expire.
         let t1 = t0 + WINDOW + Duration::from_millis(1);

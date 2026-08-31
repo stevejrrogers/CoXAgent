@@ -9,6 +9,11 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # and NOT to $HERE itself. That keeps bootstrap_admin()'s account file out of
 # $HERE/auth.json, which would otherwise switch ON RBAC for the sibling open
 # (non-AUTH) playwright config on any machine that runs both suites.
+# A previous run's fixture server can outlive its suite (an interrupted
+# Playwright run leaves it up) and the next run dies with "port already
+# used". The port is ours by contract, so anything squatting it is stale.
+lsof -ti :"$PORT" 2>/dev/null | xargs kill 2>/dev/null || true
+sleep 1
 STATE="$HERE/.state-auth/serve"
 rm -rf "$STATE"
 mkdir -p "$STATE"

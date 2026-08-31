@@ -49,6 +49,10 @@ pub struct WorkerEntry {
     /// agents actually run on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tooling: Option<serde_json::Value>,
+    /// The coxagent build this runner reports (see [`WorkerCaps::version`]) —
+    /// the dashboard flags a worker trailing the hub's own version.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub version: String,
 }
 
 /// The outcome of probing git + forge access from the machine that will run
@@ -96,6 +100,29 @@ pub struct WorkerCaps {
     pub models: Vec<String>,
     pub git: Option<GitCheck>,
     pub tooling: Option<serde_json::Value>,
+    /// The coxagent build this worker runs (`CARGO_PKG_VERSION`). The hub
+    /// self-upgrades but remote headless workers do not — a worker whose
+    /// version trails the hub is running OLD orchestration rules (pre-fix
+    /// sweeps, no canary…), and that skew must be visible, not silent.
+    pub version: String,
+}
+
+/// One write the structural-integrity audit refused at the write boundary
+/// (CXA-F229): the attempted payload is quarantined in the adapter's audit
+/// ledger instead of being silently persisted, so the corruption that would
+/// have poisoned goal-line attribution stays inspectable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuarantineEntry {
+    /// RFC3339 instant of the refused write.
+    pub at: String,
+    /// The first integrity rule the payload violated (see
+    /// `state::integrity`); `detail` names every rule that fired.
+    pub rule_id: String,
+    /// The violation detail — the same text the refusing store returned.
+    pub detail: String,
+    /// The attempted payload, JSON-serialized and capped — enough to
+    /// diagnose, not enough to matter as storage.
+    pub payload: String,
 }
 
 /// Atomic read-modify-write with retry: load the state, apply `f`, and save. If
@@ -169,6 +196,14 @@ pub trait StateStorePort: Send + Sync {
     /// today's behaviour; callers treat `None` as "no guard available".
     async fn current_version(&self) -> Result<Option<i64>, PortError> {
         Ok(None)
+    }
+
+    /// Recent quarantine ledger entries: payloads the structural-integrity
+    /// audit refused at write-back, kept so a refused corruption is
+    /// inspectable instead of only a failed HTTP call. Default: an empty
+    /// ledger (backends that keep none). Newest last.
+    async fn quarantined(&self) -> Vec<QuarantineEntry> {
+        Vec::new()
     }
 
     /// Atomically claim `id` for `worker` (`account@host`), stamping `now` as the

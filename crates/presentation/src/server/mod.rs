@@ -32,8 +32,11 @@ use tokio::sync::RwLock;
 use tokio_stream::wrappers::IntervalStream;
 use tokio_stream::{Stream, StreamExt};
 
-use crate::middleware::{cors_layer, rate_limit_mw, RateLimiter, AUTH_RATE_MAX, AUTH_RATE_WINDOW};
+use crate::middleware::{
+    cors_layer, rate_limit_mw, telemetry_mw, RateLimiter, AUTH_RATE_MAX, AUTH_RATE_WINDOW,
+};
 
+mod alerts;
 mod assets;
 mod auth;
 mod background;
@@ -41,26 +44,37 @@ mod broken_projects;
 mod channels;
 mod chat;
 mod comments;
+mod deps;
 mod docs;
 mod downloads;
 mod engines;
+mod fleet;
 mod forge;
+mod goals;
 mod guards;
 mod hub_docs;
 mod inbox;
 mod manage;
 mod meetings;
+mod metrics_admin;
+mod openapi;
 mod people;
 mod pr_listing;
+mod preflight;
 mod projects;
 mod realtime;
+mod repro_url;
 mod requests;
 mod security;
+mod share_link;
+mod share_page;
 mod status;
 mod store_rpc;
 mod transcripts;
+mod tunecockpit;
 mod work;
 
+use alerts::*;
 use assets::*;
 use auth::*;
 use background::*;
@@ -72,20 +86,28 @@ use comments::*;
 use docs::*;
 use downloads::*;
 use engines::*;
+use fleet::*;
 use forge::*;
 use guards::*;
 use hub_docs::*;
 use inbox::*;
 use manage::*;
 use meetings::*;
+use metrics_admin::spawn_metrics_admin;
+use openapi::*;
 use people::*;
 use pr_listing::*;
+use preflight::*;
 use projects::*;
 use realtime::*;
+use repro_url::*;
 use requests::*;
 use security::*;
+use share_link::*;
+use share_page::*;
 use status::*;
 use transcripts::*;
+use tunecockpit::*;
 use work::*;
 
 /// The embedded single-page dashboard.
@@ -98,6 +120,13 @@ const XTERM_FIT_JS: &str = include_str!("../web/xterm-addon-fit.min.js");
 // load order (they share one global scope; the split is for merge-conflict
 // surface, not modularity). Embedded like everything else: one binary.
 const APP_CSS: &str = include_str!("../web/app.css");
+// Vendored Tabler icons webfont (pinned v3.24.0, MIT) — embedded for the same
+// reason as Mermaid above: deployed containers have no CDN egress, and a
+// webfont that fails to load leaves every `.ti-*` glyph with zero ink (the
+// icon characters exist only as CSS `content`, so there is no text fallback).
+// CXA-B112: the sign-in CTA rendered text-only in deploys for exactly this.
+const TABLER_CSS: &str = include_str!("../web/tabler-icons.min.css");
+const TABLER_WOFF2: &[u8] = include_bytes!("../web/fonts/tabler-icons.woff2");
 const APP_JS: &[(&str, &str)] = &[
     // Vendored Mermaid (pinned v11 UMD build) so Wiki pages render
     // sequence/flow diagrams offline — the hub never loads from a CDN.
@@ -105,10 +134,13 @@ const APP_JS: &[(&str, &str)] = &[
     ("core.js", include_str!("../web/js/core.js")),
     ("manage.js", include_str!("../web/js/manage.js")),
     ("home.js", include_str!("../web/js/home.js")),
+    ("river.js", include_str!("../web/js/river.js")),
     ("chat.js", include_str!("../web/js/chat.js")),
     ("mcp.js", include_str!("../web/js/mcp.js")),
     ("docs.js", include_str!("../web/js/docs.js")),
     ("inbox.js", include_str!("../web/js/inbox.js")),
+    ("drift.js", include_str!("../web/js/drift.js")),
+    ("alerts.js", include_str!("../web/js/alerts.js")),
     ("shell.js", include_str!("../web/js/shell.js")),
 ];
 
@@ -150,9 +182,20 @@ pub struct ProjectHandle {
     /// Deploy adapter, so on-demand actions (e.g. a chat "deploy" request) can
     /// build & run the app.
     pub deploy: Option<Arc<dyn coxagent_application::ports::outbound::DeployPort>>,
+    /// Blob storage (MinIO/S3 or the local blob dir) for ticket attachments
+    /// and evidence media.
+    pub storage: Option<Arc<dyn coxagent_application::ports::outbound::StoragePort>>,
+    /// Durable outbound-alert spool (CXA-F235): powers the operator's
+    /// delivery-history view and one-click replay. `None` where the
+    /// composition root has no webhook sink to spool for.
+    pub outbox: Option<Arc<dyn coxagent_application::ports::outbound::OutboxStorePort>>,
     /// Workspace file access for on-demand reviews; injected by the
     /// composition root so this layer stays free of infrastructure.
     pub files: Option<Arc<dyn coxagent_application::ports::outbound::WorkspaceFilesPort>>,
+    /// Lockfile discovery for the dependency-health scan (CXA-B111); injected
+    /// by the composition root so this layer stays free of infrastructure.
+    pub deps_discovery:
+        Option<Arc<dyn coxagent_application::ports::outbound::DependencyDiscoveryPort>>,
 }
 
 /// Builds a fresh project on demand (scaffold + register), injected by the
@@ -224,10 +267,10 @@ struct AppState {
     docs_editors: Arc<std::sync::Mutex<HashMap<String, HashMap<String, usize>>>>,
     order: Arc<RwLock<Vec<String>>>,
     /// Registered projects that could not be loaded, kept so the listing can
-    /// name them and their reason (COX-B043). Fixed at boot: a config repaired
-    /// while the hub runs is picked up by restarting it, which is what loading
-    /// a project takes anyway.
-    broken: Arc<Vec<BrokenProject>>,
+    /// name them and their reason (COX-B043). Live, not frozen at boot: the
+    /// composition root retries failed loads (CXA-B114) and admits a
+    /// recovered project, whose entry is cleared here the moment it lands.
+    broken: Arc<RwLock<Vec<BrokenProject>>>,
     factory: Option<ProjectFactory>,
     auth: Option<Arc<dyn AuthPort>>,
     audit: Arc<dyn AuditPort>,
@@ -514,6 +557,11 @@ pub struct HubExtras {
     /// `coxagent.json`), so the dashboard can show why one is missing instead
     /// of silently omitting it — COX-B043.
     pub broken: Vec<BrokenProject>,
+    /// Inbox for projects the composition root recovered after boot
+    /// (CXA-B114): a failed store connect is retried in the background, and
+    /// when it succeeds the live handle arrives here to join the registry
+    /// without a restart.
+    pub recoveries: Option<tokio::sync::mpsc::Receiver<ProjectHandle>>,
 }
 
 /// Warn threshold for a space's budget, matching the dashboard's own amber one
@@ -542,14 +590,24 @@ pub async fn serve_full(
     projects: Vec<ProjectHandle>,
     port: u16,
     audit: Arc<dyn AuditPort>,
-    extras: HubExtras,
+    mut extras: HubExtras,
 ) -> std::io::Result<()> {
     let backup_dir = extras
         .hub_dir
         .clone()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("backups");
+    // Taken out before build_state (which consumes the rest of `extras`): a
+    // mpsc Receiver cannot live inside the Clone-able AppState — it is
+    // drained by exactly one background task instead.
+    let recoveries = extras.recoveries.take();
     let state = build_state(projects, audit, extras).await;
+    // CXA-B114: a project that failed to load at boot (e.g. the DB was still
+    // starting) is rebuilt by the composition root; when it recovers, the
+    // handle arrives here and joins the live registry — no restart.
+    if let Some(recoveries) = recoveries {
+        tokio::spawn(admit_recovered_projects(state.clone(), recoveries));
+    }
     tracing::info!("hub role: {:?}", hub_role());
     // Batch/watchdog loops belong to the knowledge role (and the all-in-one).
     if matches!(hub_role(), HubRole::All | HubRole::Knowledge) {
@@ -594,7 +652,16 @@ pub async fn serve_full(
             "/assets/xterm-addon-fit.min.js",
             get(|| async { ([("content-type", "application/javascript")], XTERM_FIT_JS) }),
         )
+        .route(
+            "/assets/tabler-icons.min.css",
+            get(|| async { ([("content-type", "text/css; charset=utf-8")], TABLER_CSS) }),
+        )
+        .route(
+            "/assets/fonts/tabler-icons.woff2",
+            get(|| async { ([("content-type", "font/woff2")], TABLER_WOFF2) }),
+        )
         .route("/api/health", get(health))
+        .route("/api/openapi.json", get(openapi_ep))
         .route("/api/mcp", post(mcp_ep))
         .route("/api/app/latest", get(app_latest_ep))
         .route("/api/app/download/:file", get(app_download_ep))
@@ -711,6 +778,10 @@ pub async fn serve_full(
         .route("/api/chat/media/:file", get(syschat_media_ep))
         .route("/api/engines", get(engines_ep))
         .route("/api/engines/opencode/models", get(opencode_models_ep))
+        // Cross-project live agent activity river (CXA-F233): every registered
+        // project's runner phase + activity in ONE SSE stream, filterable by
+        // project id and agent phase (see fleet.rs).
+        .route("/api/fleet/river", get(fleet_river_ep))
         .route("/api/tooling", get(tooling_ep))
         .route("/api/analyze-goal", post(analyze_goal_ep))
         .route("/api/projects", get(list_projects).post(create_project))
@@ -718,20 +789,71 @@ pub async fn serve_full(
             "/api/projects/:pid",
             axum::routing::delete(delete_project_ep).patch(rename_project_ep),
         )
-        .route("/api/projects/:pid/store", post(store_rpc::store_rpc_ep))
+        .route(
+            "/api/projects/:pid/store",
+            post(store_rpc::store_rpc_ep).get(store_rpc::store_audit_ep),
+        )
         .route("/api/projects/:pid/state", get(state_ep))
+        .route("/api/projects/:pid/preflight", get(preflight_ep))
+        .route("/api/projects/:pid/dependencies", get(dependencies_ep))
         .route("/api/projects/:pid/metrics", get(metrics_ep))
+        .route(
+            "/api/projects/:pid/milestones/projection",
+            get(milestones_projection_ep),
+        )
+        .route(
+            "/api/projects/:pid/milestone-complete/:name",
+            post(milestone_complete_ep),
+        )
+        .route(
+            "/api/projects/:pid/metrics/summary",
+            get(metrics_summary_ep),
+        )
+        .route("/api/projects/:pid/metrics/trends", get(metrics_trends_ep))
+        .route(
+            "/api/projects/:pid/metrics/burndown",
+            get(metrics_burndown_ep),
+        )
         .route("/api/projects/:pid/agent-evals", get(agent_evals_ep))
         .route("/api/projects/:pid/runner", get(runner_ep))
         .route("/api/projects/:pid/workers", get(workers_ep))
         .route("/api/token-saver", get(token_saver_ep))
         .route("/api/projects/:pid/audit", get(audit_ep))
+        .route("/api/projects/:pid/alerts", get(list_alerts_ep))
+        .route(
+            "/api/projects/:pid/alerts/:id/replay",
+            post(replay_alert_ep),
+        )
         .route("/api/projects/:pid/config", get(get_config).put(put_config))
         .route("/api/projects/:pid/control/:action", post(control_ep))
+        .route("/api/projects/:pid/burn-mode", post(burn_mode_ep))
+        .route("/api/projects/:pid/brakes", get(brakes_ep))
+        .route(
+            "/api/projects/:pid/brakes/:brake/hold",
+            post(brake_hold_ep).delete(brake_hold_clear_ep),
+        )
         .route("/api/projects/:pid/sprint/goal", post(set_sprint_goal_ep))
         .route("/api/projects/:pid/sprint/close", post(sprint_close_ep))
+        .route("/api/projects/:pid/sprint-queue", post(queue_sprint_ep))
+        .route(
+            "/api/projects/:pid/sprint-queue/:qid/scope",
+            post(queue_scope_ep),
+        )
+        .route(
+            "/api/projects/:pid/sprint-queue/:qid/rename",
+            post(queue_rename_ep),
+        )
+        .route(
+            "/api/projects/:pid/sprint-queue/:qid/move/:dir",
+            post(queue_move_ep),
+        )
+        .route(
+            "/api/projects/:pid/sprint-queue/:qid",
+            axum::routing::delete(queue_delete_ep),
+        )
         .route("/api/projects/:pid/sprint/:action", post(sprint_scope_ep))
         .route("/api/projects/:pid/digest", post(digest_ep))
+        .route("/api/projects/:pid/deps/scan", post(deps::scan_ep))
         .route("/api/projects/:pid/merge-sweep", post(merge_sweep_ep))
         .route(
             "/api/workspace",
@@ -753,6 +875,18 @@ pub async fn serve_full(
         .route("/api/me/agents", get(my_agents_ep))
         .route("/join/:token", get(join_page_ep))
         .route("/api/workspace/join", post(join_ep))
+        // Public share-link status page (CXA-F069): the token IS the
+        // credential, so no session is required (allowlisted in auth_mw).
+        .route("/s/:token", get(share_page_ep))
+        // Share-link management (admin): mint, list, revoke.
+        .route(
+            "/api/projects/:pid/share-links",
+            get(share_link_list_ep).post(share_link_create_ep),
+        )
+        .route(
+            "/api/projects/:pid/share-links/:token",
+            axum::routing::delete(share_link_revoke_ep),
+        )
         .route(
             "/api/projects/:pid/operators/:operator/:action",
             post(operator_control_ep),
@@ -797,14 +931,41 @@ pub async fn serve_full(
         .route("/api/projects/:pid/ticket/:id/priority", post(set_priority))
         .route("/api/projects/:pid/ticket/:id/reject", post(reject_ticket))
         .route(
+            "/api/projects/:pid/ticket/:id/status/:action",
+            post(hold_ticket_ep),
+        )
+        .route(
             "/api/projects/:pid/ticket/:id/approve-cost",
             post(approve_cost),
         )
         .route("/api/projects/:pid/inbox", get(inbox_ep))
+        .route("/api/projects/:pid/goals", post(goals::add_goal_ep))
+        .route("/api/projects/:pid/goals/outcomes", get(goals::outcomes_ep))
+        .route(
+            "/api/projects/:pid/goals/:gid/rename",
+            post(goals::rename_goal_ep),
+        )
+        .route(
+            "/api/projects/:pid/ticket/:id/goal",
+            post(goals::ticket_set_goal_ep),
+        )
+        .route("/api/projects/:pid/pr/:number/human", post(human_pr_ep))
+        .route("/api/projects/:pid/reverts/:sha", post(revert_decision_ep))
+        .route("/api/projects/:pid/attachment", get(attachment_ep))
+        .route(
+            "/api/projects/:pid/ticket/:id/attachments",
+            post(upload_attachment_ep)
+                .delete(delete_attachment_ep)
+                .layer(axum::extract::DefaultBodyLimit::max(25 * 1024 * 1024)),
+        )
         .route("/api/projects/:pid/ticket/:id/ready", post(human_ready_ep))
         .route(
             "/api/projects/:pid/ticket/:id/verify",
             post(human_verify_ep),
+        )
+        .route(
+            "/api/projects/:pid/ticket/:id/reproduction-url",
+            get(ticket_reproduction_url_ep),
         )
         .route(
             "/api/projects/:pid/ticket/:id/send-back",
@@ -864,6 +1025,10 @@ pub async fn serve_full(
         .route("/api/projects/:pid/prs/:num/diff", get(pr_diff_ep))
         .route("/api/projects/:pid/prs/:num/:action", post(pr_action_ep))
         .route("/api/projects/:pid/agent-log", get(agent_log_ep))
+        .route(
+            "/api/projects/:pid/agent-log/stream",
+            get(agent_log_stream_ep),
+        )
         .route("/api/projects/:pid/transcripts", get(list_transcripts))
         .route("/api/projects/:pid/transcripts/:name", get(get_transcript))
         .route("/api/projects/:pid/events", get(events_ep))
@@ -885,12 +1050,36 @@ pub async fn serve_full(
     // Applies a per-IP sliding-window limit to all /api/auth/ routes.
     // COXAGENT_TRUST_PROXY=1 reads the client IP from X-Forwarded-For (LB
     // topology); default is TCP peer address (safe for direct exposure).
-    let trust_proxy =
-        std::env::var("COXAGENT_TRUST_PROXY").ok().as_deref() == Some("1");
+    let trust_proxy = std::env::var("COXAGENT_TRUST_PROXY").ok().as_deref() == Some("1");
     let limiter = Arc::new(RateLimiter::new());
     let app = app.layer(axum::middleware::from_fn(move |req, next| {
-        rate_limit_mw(req, next, Arc::clone(&limiter), AUTH_RATE_MAX, AUTH_RATE_WINDOW, trust_proxy)
+        rate_limit_mw(
+            req,
+            next,
+            Arc::clone(&limiter),
+            AUTH_RATE_MAX,
+            AUTH_RATE_WINDOW,
+            trust_proxy,
+        )
     }));
+
+    // --- HTTP telemetry layer (outermost, CXA-C039) ---
+    // Sits outside CORS/rate-limit/auth so the recorded status is the one the
+    // client actually sees (429s included), exactly once per request. The
+    // registry is shared with the metrics admin listener below; its creation
+    // also starts the uptime clock.
+    let registry = Arc::new(coxagent_application::MetricsRegistry::new());
+    let telemetry_registry = Arc::clone(&registry);
+    let app = app.layer(axum::middleware::from_fn(move |req, next| {
+        telemetry_mw(req, next, Arc::clone(&telemetry_registry))
+    }));
+
+    // --- Metrics admin listener (CXA-C039) ---
+    // Served by gateway/realtime roles (and the all-in-one); knowledge pods
+    // run batch loops only — same surface rule as the Redis bus bridge.
+    if !matches!(hub_role(), HubRole::Knowledge) {
+        spawn_metrics_admin(registry);
+    }
 
     // Bind loopback by default (safe for local use); a container sets
     // COXAGENT_HOST=0.0.0.0 so published ports are reachable from the host.
@@ -919,6 +1108,7 @@ async fn index() -> impl IntoResponse {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
             APP_CSS.hash(&mut h);
+            TABLER_CSS.hash(&mut h);
             for (_, body) in APP_JS {
                 body.hash(&mut h);
             }
@@ -927,20 +1117,26 @@ async fn index() -> impl IntoResponse {
         };
         INDEX_HTML
             .replace("/assets/app.css", &format!("/assets/app.css?v={v}"))
+            .replace(
+                "/assets/tabler-icons.min.css",
+                &format!("/assets/tabler-icons.min.css?v={v}"),
+            )
             .replace(".js\"></script>", &format!(".js?v={v}\"></script>"))
     });
     // Always revalidate so a rebuilt dashboard is picked up on reload (the SPA is
     // small; no-cache avoids stale UI after an upgrade).
     //
     // CSP + hardening headers. The dashboard uses inline <script>/<style> (a
-    // single embedded file) so 'unsafe-inline' is required there; the Inter font
-    // and Tabler icon webfont come from Google Fonts / jsDelivr, so those hosts
-    // are allow-listed for style/font. Everything else is locked to same-origin,
-    // WebSocket to self, images/fonts to data:, and framing is denied.
+    // single embedded file) so 'unsafe-inline' is required there; the Inter
+    // font still comes from Google Fonts, so that host is allow-listed for
+    // style/font. The Tabler icon webfont is vendored (served from 'self'),
+    // like Mermaid and xterm, so deploys without CDN egress still get icons.
+    // Everything else is locked to same-origin, WebSocket to self,
+    // images/fonts to data:, and framing is denied.
     const CSP: &str = "default-src 'self'; \
         script-src 'self' 'unsafe-inline'; \
-        style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; \
-        font-src 'self' data: https://fonts.gstatic.com https://cdn.jsdelivr.net; \
+        style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
+        font-src 'self' data: https://fonts.gstatic.com; \
         img-src 'self' data:; \
         connect-src 'self' ws: wss:; \
         object-src 'none'; base-uri 'self'; frame-ancestors 'none'";
@@ -1050,10 +1246,44 @@ struct SprintGoalReq {
     goal: String,
 }
 
+/// Turn the human burn mode (CXA-F030) on/off and set its numeric exit gate.
+#[derive(serde::Deserialize)]
+struct BurnModeReq {
+    enabled: bool,
+    /// Clear the mode by itself once the open-bug count reaches this;
+    /// `null` keeps it on until switched off by hand.
+    #[serde(default)]
+    target: Option<u32>,
+}
+
 /// Which tickets to pull into (or drop from) the running sprint.
 #[derive(serde::Deserialize)]
 struct SprintScopeReq {
     tickets: Vec<String>,
+}
+
+/// Why a ticket is being put on hold.
+#[derive(serde::Deserialize)]
+struct HoldReq {
+    #[serde(default)]
+    reason: String,
+}
+
+/// A sprint queued to run after the current one (goal + optional ticket picks).
+#[derive(serde::Deserialize)]
+struct QueueSprintReq {
+    goal: String,
+    #[serde(default)]
+    tickets: Vec<String>,
+}
+
+/// Ticket adds/removes on one queued sprint.
+#[derive(serde::Deserialize)]
+struct QueueScopeReq {
+    #[serde(default)]
+    add: Vec<String>,
+    #[serde(default)]
+    remove: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1085,8 +1315,28 @@ fn internal_error(msg: &str) -> axum::response::Response {
 }
 
 #[cfg(test)]
+mod alerts_tests;
+#[cfg(test)]
 mod avatar_media_security_tests;
+#[cfg(test)]
+mod cors_rate_limit_tests;
 #[cfg(test)]
 mod pr_preview_tests;
 #[cfg(test)]
 mod pr_review_gate_tests;
+#[cfg(test)]
+mod repro_url_tests;
+#[cfg(test)]
+mod share_link_tests;
+#[cfg(test)]
+mod store_rpc_audit_tests;
+#[cfg(test)]
+mod store_rpc_auth_enforcement_tests;
+#[cfg(test)]
+mod store_rpc_guard_tests;
+#[cfg(test)]
+mod store_rpc_stale_write_tests;
+#[cfg(test)]
+mod store_rpc_test_support;
+#[cfg(test)]
+mod ui_contrast_tests;

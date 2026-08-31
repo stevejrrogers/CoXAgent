@@ -7,12 +7,17 @@
 //! concurrency (a monotonic `revision`) rejects lost updates from two writers.
 
 use async_trait::async_trait;
-use coxagent_application::ports::outbound::{StateStorePort, WorkerCaps, WorkerEntry};
+use coxagent_application::ports::outbound::{
+    QuarantineEntry, StateStorePort, WorkerCaps, WorkerEntry,
+};
 use coxagent_application::state::{ProjectState, SCHEMA_VERSION};
 use coxagent_application::PortError;
 use coxagent_domain::{Role, TicketId};
 use deadpool_postgres::{Config, Pool, Runtime};
+use std::sync::Arc;
 use tokio_postgres::NoTls;
+
+use super::quarantine::{gate_save, QuarantineLedger};
 
 /// Schema for the shared project + coordination tables. Idempotent; run on
 /// connect. `project_coord` is the cross-machine coordination row set: one
@@ -46,7 +51,10 @@ ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS models TEXT;
 -- Worker registry: JSON result of probing git + forge access on that machine.
 ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS gitcheck TEXT;
 -- Worker registry: that machine's OS + developer tooling, as JSON.
-ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS tooling TEXT;";
+ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS tooling TEXT;
+-- Worker registry: the coxagent build that runner runs (CARGO_PKG_VERSION) —
+-- the hub self-upgrades but remote workers do not, and skew must be visible.
+ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS version TEXT;";
 
 /// Leader lease lifetime (seconds) — a runner must renew within this or another
 /// takes over. Matches the JSON store.
@@ -70,6 +78,10 @@ pub struct SqlStateStore {
     /// Postgres save so a lost Postgres volume can be re-seeded from disk
     /// (the seed logic in `app::make_store` picks it up automatically).
     local_mirror: Option<super::JsonStateStore>,
+    /// Audit trail of write-backs the structural-integrity gate refused
+    /// (CXA-F229). Memory-only: Postgres gains no table for it, so a hub
+    /// restart drops the trail and every refusal is also logged.
+    quarantine: Arc<QuarantineLedger>,
 }
 
 impl SqlStateStore {
@@ -90,6 +102,7 @@ impl SqlStateStore {
             project_id: project_id.into(),
             redis: None,
             local_mirror: None,
+            quarantine: Arc::new(QuarantineLedger::memory_only()),
         };
         store.migrate().await?;
         Ok(store)
@@ -303,12 +316,13 @@ impl StateStorePort for SqlStateStore {
             .execute(
                 "INSERT INTO project_coord
                     (project_id, kind, coord_key, worker, at, role, ticket,
-                     engines, models, gitcheck, tooling)
-                 VALUES ($1, 'worker', $2, $2, now(), $3, $4, $5, $6, $7, $8)
+                     engines, models, gitcheck, tooling, version)
+                 VALUES ($1, 'worker', $2, $2, now(), $3, $4, $5, $6, $7, $8, $9)
                  ON CONFLICT (project_id, kind, coord_key) DO UPDATE
                     SET at = now(), role = EXCLUDED.role, ticket = EXCLUDED.ticket,
                         engines = EXCLUDED.engines, models = EXCLUDED.models,
-                        gitcheck = EXCLUDED.gitcheck, tooling = EXCLUDED.tooling",
+                        gitcheck = EXCLUDED.gitcheck, tooling = EXCLUDED.tooling,
+                        version = EXCLUDED.version",
                 &[
                     &self.project_id,
                     &worker,
@@ -326,6 +340,7 @@ impl StateStorePort for SqlStateStore {
                         .as_ref()
                         .and_then(|t| serde_json::to_string(t).ok())
                         .unwrap_or_default(),
+                    &caps.version,
                 ],
             )
             .await
@@ -343,7 +358,8 @@ impl StateStorePort for SqlStateStore {
                 "SELECT worker, coalesce(role,''), coalesce(ticket,''),
                         to_char(at, 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),
                         coalesce(engines,''), coalesce(models,''),
-                        coalesce(gitcheck,''), coalesce(tooling,'')
+                        coalesce(gitcheck,''), coalesce(tooling,''),
+                        coalesce(version,'')
                    FROM project_coord
                   WHERE project_id = $1 AND kind = 'worker'
                     AND at > now() - make_interval(secs => $2)
@@ -373,6 +389,7 @@ impl StateStorePort for SqlStateStore {
                     .collect(),
                 git: serde_json::from_str(&r.get::<_, String>(6)).ok(),
                 tooling: serde_json::from_str(&r.get::<_, String>(7)).ok(),
+                version: r.get(8),
             })
             .collect())
     }
@@ -427,6 +444,10 @@ impl StateStorePort for SqlStateStore {
         }
         Ok(true)
     }
+
+    async fn quarantined(&self) -> Vec<QuarantineEntry> {
+        self.quarantine.recent()
+    }
 }
 
 impl SqlStateStore {
@@ -469,14 +490,21 @@ impl SqlStateStore {
     /// sound for intra-process writers sharing one store instance).
     async fn persist_at_revision(
         &self,
-        state: ProjectState,
+        mut state: ProjectState,
         expected_revision: Option<i64>,
     ) -> Result<(), PortError> {
-        state.validate().map_err(|e| {
-            PortError::Corrupt(format!("refusing to save invalid state: {e}"))
-        })?;
-        let value = serde_json::to_value(&state)
-            .map_err(|e| PortError::Backend(format!("encode: {e}")))?;
+        // The pre-existing schema-level validation is untouched; the
+        // structural-integrity audit (CXA-F229) is the additional gate. The
+        // ledger is memory-only here, so every refusal is also logged.
+        if let Err(e) = gate_save(&mut state, &self.quarantine) {
+            tracing::error!(
+                "[{}] write-back refused by structural integrity audit: {e}",
+                self.project_id
+            );
+            return Err(e);
+        }
+        let value =
+            serde_json::to_value(&state).map_err(|e| PortError::Backend(format!("encode: {e}")))?;
 
         let client = self.client().await?;
         let expected = match expected_revision {
@@ -510,5 +538,4 @@ impl SqlStateStore {
         self.mirror_save(&state).await;
         Ok(())
     }
-
 }

@@ -17,6 +17,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// 3. Review comments starting with `LESSON:` become team lessons.
     #[allow(clippy::too_many_lines)] // three linear hygiene passes; splitting hurts readability
     pub(super) async fn forge_hygiene(&self) {
+        // 0. LEARN: merged-then-reverted work (CXA-F047) — needs only local
+        //    git, not the forge, so it runs before the forge gate below.
+        self.learn_reverted_work().await;
         let Some(forge) = &self.forge else {
             return;
         };
@@ -71,13 +74,38 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     continue;
                 }
                 if run(vec!["checkout".into(), "-B".into(), pr.head.clone(), local]).await
-                    && run(vec!["merge".into(), base_ref, "--no-edit".into()]).await
+                    && run(vec!["merge".into(), base_ref.clone(), "--no-edit".into()]).await
                 {
                     if run(vec!["push".into(), "origin".into(), pr.head.clone()]).await {
                         rebased.push(pr.number);
                     }
                 } else {
-                    let _ = run(vec!["merge".into(), "--abort".into()]).await;
+                    // A PR already open that the moving base has made conflicted
+                    // must be resolved HERE, not parked — otherwise the queue
+                    // hangs at CONFLICTING with nobody holding the pen (the same
+                    // law that governs a fresh PR in commit_for_ticket). List
+                    // the unmerged files and let the DEV engine read both sides,
+                    // preserving both intents; abort only when that genuinely
+                    // cannot complete.
+                    let (_, out) = git
+                        .raw(&self.work_dir, &["diff", "--name-only", "--diff-filter=U"])
+                        .await;
+                    let files: Vec<String> = out
+                        .lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                    let resolved = !files.is_empty()
+                        && self
+                            .resolve_merge_in_progress(&pr.head, &target, &files)
+                            .await;
+                    if resolved {
+                        if run(vec!["push".into(), "origin".into(), pr.head.clone()]).await {
+                            rebased.push(pr.number);
+                        }
+                    } else {
+                        let _ = run(vec!["merge".into(), "--abort".into()]).await;
+                    }
                 }
                 let _ = run(vec!["checkout".into(), target.clone()]).await;
             }
@@ -235,11 +263,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // left COX-B006 parked while its merged fix sat on main.
         if let Ok(merged) = forge.recently_merged().await {
             for (number, head) in merged {
+                // A merged release PR (`release/vX.Y.Z`) gets its tag now —
+                // the merge IS the release; the tag is its immutable mark.
+                if head.starts_with("release/v") {
+                    self.tag_merged_release(&head).await;
+                }
                 let ticket = head.rsplit('/').next().unwrap_or(&head).to_owned();
                 let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
                     if s.seen_merged_prs.contains(&number) {
                         return Ok(());
                     }
+                    // Stamp the merge time — the fix-on-fix brake reads it.
+                    s.ticket_last_merge
+                        .insert(ticket.clone(), crate::state::now_rfc3339());
                     s.ticket_fail_attempts.remove(&ticket);
                     s.ticket_journal.remove(&ticket);
                     // Merged into main — the DEV work-session for this ticket is
@@ -376,6 +412,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .chars()
             .take(12_000)
             .collect();
+        // Run the SA rescue in the leader's ISOLATED feedback worktree — the
+        // shared checkout is dirty mid-cycle, so branch switching there aborts
+        // and the rescue never lands (the stuck PR spins forever). The tree
+        // shares repo refs, so checkout/commit/push work as on the main tree.
+        let fix_dir = self
+            .feedback_work_dir
+            .clone()
+            .unwrap_or_else(|| self.work_dir.clone());
         let request = crate::ports::outbound::AgentRequest {
             role: coxagent_domain::Role::Sa,
             system_prompt: crate::prompts::system_prompt(crate::prompts::SA),
@@ -397,7 +441,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 h = pr.head,
                 t = pr.title,
             ),
-            work_dir: self.work_dir.clone(),
+            work_dir: fix_dir.clone(),
             timeout: std::time::Duration::from_secs(900),
             escalation_level: 0,
             label: None,
@@ -408,7 +452,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         };
         // The SA may have switched branches while fixing — repark the checkout.
         if let Some(git) = &self.git {
-            let _ = git.checkout_branch(&self.work_dir, self.flow_base()).await;
+            let _ = git.checkout_branch(&fix_dir, self.flow_base()).await;
         }
         let say = |msg: String| {
             let store = Arc::clone(&self.store);
@@ -427,6 +471,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
                         s.pr_fix_attempts.remove(&pr.number);
                         s.pr_sessions.remove(&pr.number);
+                        s.pr_review_skips.remove(&pr.number);
                         Ok(())
                     })
                     .await;
@@ -452,6 +497,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 )
                 .await;
             if forge.close_pr(pr.number).await.is_ok() {
+                let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                    s.seen_closed_prs.insert(pr.number);
+                    Ok(())
+                })
+                .await;
                 say(format!(
                     "🧯 SM→SA rescue PR #{}: SA kết luận ĐÓNG (đã bị thay thế/sai hướng).",
                     pr.number
@@ -531,7 +581,32 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             match deploy.run_tests(&dir).await {
                 // `deployed=false` means no toolchain was recognised: there is
                 // no suite to be red.
-                Ok(r) if r.success || !r.deployed => Ok(()),
+                Ok(r) if r.success || !r.deployed => {
+                    // UI-touching merges also face the browser suite: with
+                    // hosted CI dead (billing), SA prose review was the ONLY
+                    // gate between a broken screen and main. Golden
+                    // screenshots + the console-error gate run here instead.
+                    let (ok_diff, names) = git
+                        .raw(&dir, &["diff", "--name-only", &sha, "HEAD"])
+                        .await;
+                    let touches_ui = ok_diff
+                        && names.lines().any(|l| {
+                            l.starts_with("crates/presentation/src/web/") || l.starts_with("e2e/")
+                        });
+                    if touches_ui {
+                        let seed = self.work_dir.join("e2e").join("node_modules");
+                        match deploy.run_e2e(&dir, Some(seed.as_path())).await {
+                            Ok(r) if r.success || !r.deployed => Ok(()),
+                            Ok(r) => Err(format!(
+                                "browser e2e fails on the merged tree: {}",
+                                r.summary.chars().take(300).collect::<String>()
+                            )),
+                            Err(e) => Err(format!("could not run the e2e suite: {e}")),
+                        }
+                    } else {
+                        Ok(())
+                    }
+                }
                 Ok(r) => Err(format!(
                     "tests fail on the merged tree: {}",
                     r.summary.chars().take(300).collect::<String>()
@@ -712,6 +787,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     );
                     let _ = forge.comment_pr(pr.number, &note).await;
                     if forge.close_pr(pr.number).await.is_ok() {
+                        self.announce_pr_close(
+                            pr.number,
+                            &pr.title,
+                            &format!(
+                                "stale + commits agent scratch ({path}); ticket returns to the queue"
+                            ),
+                        )
+                        .await;
                         self.log_git(&format!(
                             "stale sweep: closed PR #{} — commits scratch ({path})",
                             pr.number
@@ -721,7 +804,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     continue;
                 }
                 // Never touch work a human is deliberately sitting on.
-                if crate::use_cases::merge_policy::needs_human_eyes(&diff).is_some() {
+                if crate::use_cases::merge_policy::needs_human_eyes(
+                    &diff,
+                    self.config.git.max_changed_lines,
+                )
+                .is_some()
+                {
                     continue;
                 }
             }
@@ -752,7 +840,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     pr.title
                 );
                 let _ = forge.comment_pr(pr.number, &note).await;
-                let _ = forge.close_pr(pr.number).await;
+                if forge.close_pr(pr.number).await.is_ok() {
+                    let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                        s.seen_closed_prs.insert(pr.number);
+                        Ok(())
+                    })
+                    .await;
+                }
                 self.log_git(&format!("stale sweep: closed idle PR #{}", pr.number))
                     .await;
             }

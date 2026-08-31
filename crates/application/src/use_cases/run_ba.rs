@@ -115,8 +115,30 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
             .map(|t| normalize_title(t.title()))
             .collect();
 
-        // A BA who doesn't know what the product already does proposes what it
-        // already has.
+        // The product surface, by name: the Wiki documents every shipped
+        // feature, so its page titles ARE the feature inventory. Without this
+        // list the BA re-invented existing surfaces as parallel features
+        // (CXA-F233 built a second Activity feed instead of improving the
+        // first) — it wasn't dumb, it was blind.
+        let surface: Vec<String> = existing
+            .docs
+            .iter()
+            .map(|d| format!("- {}", d.title))
+            .take(60)
+            .collect();
+        let surface_block = if surface.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n\nPRODUCT SURFACE — features that already exist (the Wiki's page \
+                 titles). PREFER proposing an IMPROVEMENT to one of these over a \
+                 parallel new feature. A brand-new screen or menu is allowed only \
+                 when extending the closest existing surface genuinely cannot work — \
+                 and then your description MUST name that surface and say in one \
+                 sentence why extension is not enough:\n{}",
+                surface.join("\n")
+            )
+        };
         let knowledge = prompts::knowledge_block(
             self.files.as_deref(),
             &existing.docs,
@@ -126,6 +148,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
             "",
         )
         .await;
+        // Hoisted out of the task_prompt's format! args (clippy: format in
+        // format args) — same single allocation the inner format! made.
+        let backlog_and_surface = format!("{backlog_block}{surface_block}");
         let request = AgentRequest {
             role: Role::Ba,
             system_prompt: prompts::system_prompt(prompts::BA),
@@ -137,7 +162,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
                  concrete, grounded in what's there, not generic.{}{}{}",
                 self.context,
                 sprint_goal_block(&existing.sprint_goal),
-                backlog_block,
+                backlog_and_surface,
                 prompts::repo_map_block(self.files.as_deref(), &self.work_dir, true).await,
                 knowledge,
                 prompts::team_memory_block(&existing.decisions, &existing.lessons)
@@ -252,6 +277,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
                     complexity: p.complexity,
                     has_ui: p.has_ui,
                     acceptance_criteria: p.acceptance_criteria,
+                    goal: None,
                 })
                 .await?;
             created.push(id);
@@ -413,6 +439,8 @@ mod tests {
                 session_id: None,
                 sandbox: SandboxStatus::default(),
                 engine: String::new(),
+                model: String::new(),
+                attempts: Vec::new(),
             })
         }
     }
@@ -496,6 +524,8 @@ mod tests {
                         session_id: None,
                         sandbox: SandboxStatus::default(),
                         engine: String::new(),
+                        model: String::new(),
+                        attempts: Vec::new(),
                     }),
                     // No repair available: any SM call fails outright, so
                     // repair_json yields None and we fall through to salvage.
@@ -546,6 +576,8 @@ mod tests {
                     session_id: None,
                     sandbox: SandboxStatus::default(),
                     engine: String::new(),
+                    model: String::new(),
+                    attempts: Vec::new(),
                 })
             }
         }

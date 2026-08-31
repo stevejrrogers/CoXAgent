@@ -22,6 +22,16 @@ pub enum Command {
     Report,
     /// List agent engine CLIs detected on this machine's PATH.
     Discover,
+    /// Detect this machine's agent engine CLIs and report them to a hub, so its
+    /// dashboard shows them even before any runner cycle starts.
+    Probe {
+        /// Hub gateway origin without trailing slash (e.g., http://127.0.0.1:4000).
+        #[arg(long)]
+        hub: String,
+        /// Project id whose /store heartbeat records this machine's engines.
+        #[arg(long)]
+        project: String,
+    },
     /// Run the BA agent once: propose features and append them to the backlog.
     RunBa {
         /// Working directory handed to the engine (the managed codebase).

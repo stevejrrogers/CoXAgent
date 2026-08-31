@@ -364,18 +364,25 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // The next DEV run reads the journal, so the rescue lands where
             // the work happens instead of only in a chat message.
             s.journal_note(&id, &format!("{who} rescue: {out}"));
+            // Number the rescue so a second one for the same ticket reads as a
+            // distinct action instead of a byte-for-byte repeat — two identical
+            // messages in the stream is how the SM chat reads as spam. The
+            // `claimed` closure above already bumped this counter, so the
+            // current value IS the attempt number (1, then 2).
+            let attempt = s.ticket_redesigns.get(&id).copied().unwrap_or(1);
             let msg = match route {
                 EscalationRoute::Spec => format!(
-                    "🧯 SM→BA: {id} bị 3 lần đỏ vì spec chưa rõ — BA đã viết lại yêu cầu, \
-                     DEV làm lại. Đỏ tiếp là chuyển người quyết."
+                    "🧯 SM→BA (rescues {attempt}): {id} bị 3 lần đỏ vì spec chưa rõ — BA đã \
+                     viết lại yêu cầu, DEV làm lại. Đỏ tiếp là chuyển người quyết."
                 ),
                 EscalationRoute::Mechanical => format!(
-                    "🧯 SM→SA: {id} bị 3 lần đỏ ở cổng chất lượng (lint/test) chứ không phải \
-                     thiết kế — SA đưa cách gỡ đúng chỗ đó. Đỏ tiếp là chuyển người quyết."
+                    "🧯 SM→SA (rescues {attempt}): {id} bị 3 lần đỏ ở cổng chất lượng (lint/test) \
+                     chứ không phải thiết kế — SA đưa cách gỡ đúng chỗ đó. Đỏ tiếp là \
+                     chuyển người quyết."
                 ),
                 EscalationRoute::Design => format!(
-                    "🧯 SM→SA: {id} được RE-DESIGN sau 3 build đỏ — DEV thử lại với hướng mới. \
-                     Đỏ tiếp là chuyển người quyết."
+                    "🧯 SM→SA (rescues {attempt}): {id} được RE-DESIGN sau 3 build đỏ — DEV thử \
+                     lại với hướng mới. Đỏ tiếp là chuyển người quyết."
                 ),
             };
             s.post_comment("SM", &msg, Some(id.clone()));
@@ -402,6 +409,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 let age_min = super::seconds_since(&q.asked_at).map_or(0, |secs| secs / 60);
                 if age_min >= sla_min {
                     q.escalated = true;
+                    // Past its SLA a question bypasses batching entirely
+                    // (CXA-F176): it re-enters the live inbox immediately
+                    // instead of waiting for the owner's focus window to end.
+                    q.deferred = false;
                     escalations.push(format!(
                         "⏰ {} has waited {age_min}m for {} (SLA {sla_min}m) — ticket {} is \
                          blocked on it: \"{}\"",
@@ -415,6 +426,52 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             for msg in escalations {
                 s.post_chat_in("SM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
                 s.log_activity("SM", "escalated an overdue human question", None);
+            }
+            Ok(())
+        })
+        .await;
+    }
+
+    /// Flush the focus-window digests whose boundary has passed (CXA-F176):
+    /// each person holding queued questions gets ONE batched message the
+    /// moment their window is no longer active, and every held question
+    /// leaves the queue — surfaced ones inside the digest, stale ones
+    /// (answered, or their ticket resolved while queued) silently released.
+    /// Runs beside the SLA escalation so a focus window can delay a question
+    /// but never hide it past its SLA or lose it.
+    pub(super) async fn flush_focus_digests(&self) {
+        let human = self.config.workflow.human.clone();
+        let now = crate::use_cases::question_batching::now_minutes_utc();
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+            for (owner, batch) in crate::use_cases::question_batching::flush_batches(s, &human, now)
+            {
+                // Re-checked under this write pass: flush_batches filtered
+                // against the just-loaded state, so `batch` is exactly what
+                // the digest carries. Release each one as it is delivered.
+                for q in &batch {
+                    if let Some(held) = s.questions.iter_mut().find(|h| h.id == q.id) {
+                        held.deferred = false;
+                    }
+                }
+                // Stale holds must not stay deferred past the boundary — a
+                // held flag with no digest would be a question that is both
+                // invisible and unescalatable. Released ones reappear as
+                // ordinary inbox items (or nowhere, once answered).
+                let owner_tag = format!("@{owner}");
+                for q in s
+                    .questions
+                    .iter_mut()
+                    .filter(|q| q.deferred && q.to.eq_ignore_ascii_case(&owner_tag))
+                {
+                    q.deferred = false;
+                }
+                let msg = crate::use_cases::question_batching::digest_message(&owner, &batch);
+                s.post_chat_in("SM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+                s.log_activity(
+                    "SM",
+                    &format!("flushed {} queued question(s) to @{owner}", batch.len()),
+                    None,
+                );
             }
             Ok(())
         })

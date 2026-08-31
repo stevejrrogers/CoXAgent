@@ -6,13 +6,19 @@ pub mod approval_memory;
 pub mod approval_risk;
 pub mod ceremony;
 pub mod conformance_check;
+pub mod coverage;
 pub mod cycle;
 pub mod generate_docs;
 pub mod json_repair;
+pub mod manual_rollback;
 pub mod merge_policy;
 pub mod merge_sweep;
+pub mod question_batching;
+pub mod readiness_preflight;
 pub mod recover;
 pub mod refine_ticket;
+pub mod release_assembly;
+pub mod repro_url;
 pub mod run_ba;
 pub mod run_chat_reply;
 pub mod run_design_system;
@@ -29,20 +35,35 @@ pub mod run_sa;
 pub mod run_standup;
 pub mod run_test;
 pub mod runner;
+pub mod scan_deps;
 
 pub use add_ticket::{AddTicketInput, AddTicketUseCase};
 pub use analyze_attachment::{AnalyzeAttachmentUseCase, ReadableAttachment};
 pub use conformance_check::RunConformanceUseCase;
+pub use coverage::{match_score, matches_criterion, record_verdicts};
 pub use cycle::{CycleReport, RunCycleUseCase};
 pub use generate_docs::GenerateDocsUseCase;
 pub use json_repair::repair_json;
+pub use manual_rollback::{known_good_target, ManualRollbackInput, RollbackOutcome};
 pub use merge_policy::{
     competing_pr, escalation_route, needs_human_eyes, route_from_failures, EscalationRoute,
     MAX_TICKET_RESCUES,
 };
 pub use merge_sweep::{merge_sweep, SweepOutcome};
+pub use question_batching::{flush_batches, select_deferred, should_defer};
+pub use readiness_preflight::{
+    run_preflight, PreflightItem, PreflightReport, PreflightSnapshot, PreflightProbe,
+};
 pub use recover::RecoverUseCase;
-pub use refine_ticket::{RefineTicketUseCase, RefinedTicket, TeamNote};
+pub use refine_ticket::{FeasLane, Feasibility, RefineTicketUseCase, RefinedTicket, TeamNote};
+pub use release_assembly::{
+    assemble, cut_manifest, extract_ticket_refs, filter_verified_subjects, is_verified_complete,
+    rc_members, verified_complete_ids, BlockedCandidate, CutManifest, RcAssembly, RcBundle,
+    SubjectManifest,
+};
+pub use repro_url::{
+    resolve_repro_url, ReproSource, ReproUrl, ReproUrlSnapshot, ResolveReproUrlUseCase,
+};
 pub use run_ba::RunBaUseCase;
 pub use run_chat_reply::RunChatReplyUseCase;
 pub use run_design_system::RunDesignSystemUseCase;
@@ -59,8 +80,15 @@ pub use run_sa::RunSaUseCase;
 pub use run_standup::RunStandupUseCase;
 pub use run_test::RunTestUseCase;
 pub use runner::{run_forever, RunnerHandle, RunnerSnapshot};
+pub use scan_deps::{FindingReport, ScanDependenciesUseCase, ScanDepsInput, ScanDepsOutcome};
 
+#[cfg(test)]
+mod mod_guard_tests;
+#[cfg(test)]
+mod release_assembly_tests;
 #[cfg(test)]
 mod run_releases_tdd_tests;
 #[cfg(test)]
 mod run_releases_tests;
+#[cfg(test)]
+mod run_test_tdd_tests;
