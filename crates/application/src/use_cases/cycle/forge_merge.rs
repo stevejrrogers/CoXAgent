@@ -460,6 +460,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if let Some(git) = &self.git {
             let _ = git.checkout_branch(&fix_dir, self.flow_base()).await;
         }
+        let vi = self.config.workflow.language.is_vi();
         let say = |msg: String| {
             let store = Arc::clone(&self.store);
             async move {
@@ -481,17 +482,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         Ok(())
                     })
                     .await;
-                    say(format!(
-                        "🧯 SM→SA rescue PR #{}: SA TỰ XỬ xong — verification pass, chờ merge sweep.",
-                        pr.number
-                    ))
+                    say(if vi {
+                        format!("🧯 SM→SA rescue PR #{}: SA TỰ XỬ xong — verification pass, chờ merge sweep.", pr.number)
+                    } else {
+                        format!("🧯 SM→SA rescue PR #{}: SA fixed it directly — verification passed, awaiting the merge sweep.", pr.number)
+                    })
                     .await;
                 }
                 Err(why) => {
-                    say(format!(
-                        "🧯 SM→SA rescue PR #{}: SA báo FIXED nhưng verification từ chối ({why}) — chuyển người quyết.",
-                        pr.number
-                    ))
+                    say(if vi {
+                        format!("🧯 SM→SA rescue PR #{}: SA báo FIXED nhưng verification từ chối ({why}) — chuyển người quyết.", pr.number)
+                    } else {
+                        format!("🧯 SM→SA rescue PR #{}: SA said FIXED but verification refused it ({why}) — escalating to a person.", pr.number)
+                    })
                     .await;
                 }
             }
@@ -508,10 +511,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     Ok(())
                 })
                 .await;
-                say(format!(
-                    "🧯 SM→SA rescue PR #{}: SA kết luận ĐÓNG (đã bị thay thế/sai hướng).",
-                    pr.number
-                ))
+                say(if vi {
+                    format!("🧯 SM→SA rescue PR #{}: SA kết luận ĐÓNG (đã bị thay thế/sai hướng).", pr.number)
+                } else {
+                    format!("🧯 SM→SA rescue PR #{}: SA ruled CLOSE (superseded / wrong direction).", pr.number)
+                })
                 .await;
             }
         } else if let Some(steps) = out.strip_prefix("INSTRUCT") {
@@ -527,16 +531,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 Ok(())
             })
             .await;
-            say(format!(
-                "🧯 SM→SA rescue PR #{}: SA để lại chỉ dẫn cụ thể — DEV được một vòng thử lại có định hướng.",
-                pr.number
-            ))
+            say(if vi {
+                format!("🧯 SM→SA rescue PR #{}: SA để lại chỉ dẫn cụ thể — DEV được một vòng thử lại có định hướng.", pr.number)
+            } else {
+                format!("🧯 SM→SA rescue PR #{}: SA left concrete instructions — DEV gets one guided retry.", pr.number)
+            })
             .await;
         } else {
-            say(format!(
-                "🧯 SM→SA rescue PR #{}: SA không kết luận được — chuyển người quyết.",
-                pr.number
-            ))
+            say(if vi {
+                format!("🧯 SM→SA rescue PR #{}: SA không kết luận được — chuyển người quyết.", pr.number)
+            } else {
+                format!("🧯 SM→SA rescue PR #{}: SA could not reach a verdict — escalating to a person.", pr.number)
+            })
             .await;
         }
     }
@@ -634,6 +640,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// the PR branch, verify (markers + forge-mergeable), merge, and narrate to
     /// #agents. Same machinery as address_pr_feedback, same hard gates.
     pub(super) async fn force_merge_job(&self, num: u64, by: &str) {
+        let vi = self.config.workflow.language.is_vi();
         let Some(forge) = self.forge.clone() else {
             return;
         };
@@ -652,17 +659,20 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return;
         };
         let Some(pr) = prs.into_iter().find(|p| p.number == num) else {
-            say(format!(
-                "⚡ Force-merge #{num} ({by}): PR không còn mở — bỏ qua."
-            ))
+            say(if vi {
+                format!("⚡ Force-merge #{num} ({by}): PR không còn mở — bỏ qua.")
+            } else {
+                format!("⚡ Force-merge #{num} ({by}): the PR is no longer open — skipping.")
+            })
             .await;
             return;
         };
         if !pr.mergeable {
-            say(format!(
-                "⚡ Force-merge #{num} ({by}): runner đang gỡ conflict trên `{}`…",
-                pr.head
-            ))
+            say(if vi {
+                format!("⚡ Force-merge #{num} ({by}): runner đang gỡ conflict trên `{}`…", pr.head)
+            } else {
+                format!("⚡ Force-merge #{num} ({by}): the runner is resolving conflicts on `{}`…", pr.head)
+            })
             .await;
             let request = crate::ports::outbound::AgentRequest {
                 role: coxagent_domain::Role::DevBug,
@@ -689,29 +699,37 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 let _ = git.checkout_branch(&self.work_dir, self.flow_base()).await;
             }
             if !ok {
-                say(format!(
-                    "⚡ Force-merge #{num}: gỡ conflict THẤT BẠI — cần xử lý tay: {}",
-                    pr.url
-                ))
+                say(if vi {
+                    format!("⚡ Force-merge #{num}: gỡ conflict THẤT BẠI — cần xử lý tay: {}", pr.url)
+                } else {
+                    format!("⚡ Force-merge #{num}: conflict resolution FAILED — needs a manual fix: {}", pr.url)
+                })
                 .await;
                 return;
             }
             if let Err(why) = self.verify_conflict_resolution(num).await {
-                say(format!(
-                    "⚡ Force-merge #{num}: verification từ chối ({why}) — KHÔNG merge: {}",
-                    pr.url
-                ))
+                say(if vi {
+                    format!("⚡ Force-merge #{num}: verification từ chối ({why}) — KHÔNG merge: {}", pr.url)
+                } else {
+                    format!("⚡ Force-merge #{num}: verification refused ({why}) — NOT merging: {}", pr.url)
+                })
                 .await;
                 return;
             }
         }
         match forge.merge_pr(num).await {
-            Ok(()) => say(format!("⚡ Force-merge #{num} ({by}): ✅ đã merge.")).await,
+            Ok(()) => say(if vi {
+                format!("⚡ Force-merge #{num} ({by}): ✅ đã merge.")
+            } else {
+                format!("⚡ Force-merge #{num} ({by}): ✅ merged.")
+            })
+            .await,
             Err(e) => {
-                say(format!(
-                    "⚡ Force-merge #{num}: merge bị từ chối — {e}: {}",
-                    pr.url
-                ))
+                say(if vi {
+                    format!("⚡ Force-merge #{num}: merge bị từ chối — {e}: {}", pr.url)
+                } else {
+                    format!("⚡ Force-merge #{num}: the merge was refused — {e}: {}", pr.url)
+                })
                 .await;
             }
         }
