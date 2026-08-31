@@ -44,8 +44,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         };
         let passed = |target: &str| -> bool {
             match (&released, SemVer::parse(target)) {
-                (Some(rel), Ok(t)) => SemVer::parse(rel)
-                    .is_ok_and(|r| r >= t),
+                (Some(rel), Ok(t)) => SemVer::parse(rel).is_ok_and(|r| r >= t),
                 _ => false,
             }
         };
@@ -89,9 +88,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .iter()
             .filter(|t| {
                 matches!(t.status(), Status::Pending | Status::Open)
-                    && t.created_at().is_some_and(|c| {
-                        days_between(c.get(..10).unwrap_or(""), &week_ago) >= 7
-                    })
+                    && t.created_at()
+                        .is_some_and(|c| days_between(c.get(..10).unwrap_or(""), &week_ago) >= 7)
             })
             .map(|t| t.id().to_string())
             .collect();

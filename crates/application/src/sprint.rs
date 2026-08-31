@@ -999,7 +999,11 @@ mod tests {
             tickets: vec![
                 mk("F001", "polish the settings page", Priority::Medium),
                 mk("F002", "urgent auth fix", Priority::High),
-                mk("F003", "sibling-project knowledge dashboard", Priority::Medium),
+                mk(
+                    "F003",
+                    "sibling-project knowledge dashboard",
+                    Priority::Medium,
+                ),
             ],
             ..ProjectState::default()
         };

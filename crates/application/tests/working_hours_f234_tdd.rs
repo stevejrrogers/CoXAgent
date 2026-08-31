@@ -159,7 +159,10 @@ fn settings_document(tz_offset: &str, windows: &serde_json::Value) -> String {
 #[test]
 fn ac1_invalid_tz_offset_is_rejected_at_save() {
     for tz in ["+99:00", "+02:60"] {
-        let doc = settings_document(tz, &json!([{ "weekday": "monday", "start": "09:00", "end": "17:30" }]));
+        let doc = settings_document(
+            tz,
+            &json!([{ "weekday": "monday", "start": "09:00", "end": "17:30" }]),
+        );
         let err = parse_config(&doc)
             .expect_err("an impossible tz offset must be REJECTED at save, not stored silently");
         assert!(
@@ -174,16 +177,21 @@ fn ac1_invalid_tz_offset_is_rejected_at_save() {
 #[test]
 fn ac1_malformed_window_range_is_rejected_at_save() {
     for (start, end) in [
-        ("25:00", "17:30"),  // hour out of range
-        ("09:00", "24:00"),  // end hour out of range
-        ("09:00", "17:61"),  // minute out of range
-        ("nine", "17:30"),   // not an HH:MM range at all
+        ("25:00", "17:30"), // hour out of range
+        ("09:00", "24:00"), // end hour out of range
+        ("09:00", "17:61"), // minute out of range
+        ("nine", "17:30"),  // not an HH:MM range at all
     ] {
-        let doc =
-            settings_document("+02:00", &json!([{ "weekday": "monday", "start": start, "end": end }]));
-        let err = parse_config(&doc).expect_err(format!(
-            "a malformed range {start}-{end} must be REJECTED at save, not stored silently"
-        ).as_str());
+        let doc = settings_document(
+            "+02:00",
+            &json!([{ "weekday": "monday", "start": start, "end": end }]),
+        );
+        let err = parse_config(&doc).expect_err(
+            format!(
+                "a malformed range {start}-{end} must be REJECTED at save, not stored silently"
+            )
+            .as_str(),
+        );
         assert!(
             err.field.contains("working_hours"),
             "the rejection must name the offending section, got: {} ({})",
@@ -264,7 +272,13 @@ fn ac2_the_actionable_for_operator_decision_exists_as_a_pure_application_derivat
     });
     // The AC's own vocabulary, over real timestamps: a UTC instant, the
     // operator's declared windows, and the weekend/day rule.
-    for token in ["actionable", "OffsetDateTime", "UtcOffset", "Weekday", "window"] {
+    for token in [
+        "actionable",
+        "OffsetDateTime",
+        "UtcOffset",
+        "Weekday",
+        "window",
+    ] {
         assert!(
             src.contains(token),
             "the actionable-for-operator derivation must speak the AC's vocabulary; \
@@ -343,8 +357,16 @@ fn guard_dst_boundary_instants_are_real_calendar_facts() {
         let t = at.to_offset(*offset);
         u32::from(t.hour()) * 60 + u32::from(t.minute())
     };
-    assert_eq!(local_minutes(&winter, &spring), 2 * 60, "02:00 local before the jump");
-    assert_eq!(local_minutes(&summer, &spring), 3 * 60, "03:00 local after the jump");
+    assert_eq!(
+        local_minutes(&winter, &spring),
+        2 * 60,
+        "02:00 local before the jump"
+    );
+    assert_eq!(
+        local_minutes(&summer, &spring),
+        3 * 60,
+        "03:00 local after the jump"
+    );
 }
 
 #[test]
