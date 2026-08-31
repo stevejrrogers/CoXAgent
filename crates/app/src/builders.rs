@@ -475,12 +475,22 @@ pub(crate) async fn build_project(
         // delays a ripe PR by a whole cycle. It reuses the full gate stack;
         // duplicate work across machines is stopped by the per-PR review
         // lease + head-sha guard. It respects Pause and stops with the hub.
+        // TWO review lanes: the per-PR lease (claim_stage "PR-n") already
+        // stops them colliding on one PR, so a second loop simply doubles
+        // review throughput — the queue used to pin at the WIP limit behind
+        // a single GLM reviewer digesting one PR at a time.
         if config.git.enabled && forge.is_some() {
+        for lane in 1u8..=2 {
+            let lane_slug = if lane == 1 {
+                format!("{id}-review")
+            } else {
+                format!("{id}-review-{lane}")
+            };
             let reviewer = RunCycleUseCase::new(
                 Arc::clone(&store),
                 engine.clone(),
                 config.clone(),
-                worktree_at(work_dir.clone(), &format!("{id}-review")),
+                worktree_at(work_dir.clone(), &lane_slug),
                 context.clone(),
             )
             .with_leader_election(false)
@@ -493,7 +503,7 @@ pub(crate) async fn build_project(
                 coxagent_infrastructure::FsWorkspaceFiles::new(),
             )));
             let mut reviewer = reviewer;
-            reviewer.set_worker(format!("review@{}", worker_host()));
+            reviewer.set_worker(format!("review{lane}@{}", worker_host()));
             let reviewer = if let Some(ref f) = forge {
                 reviewer.with_forge(Arc::clone(f))
             } else {
@@ -516,6 +526,8 @@ pub(crate) async fn build_project(
             };
             let rh = Arc::clone(&handle);
             tokio::spawn(async move {
+                // Staggered so the two lanes scan the queue out of phase.
+                tokio::time::sleep(Duration::from_secs(u64::from(lane) * 45)).await;
                 loop {
                     tokio::time::sleep(Duration::from_secs(90)).await;
                     let snap = rh.snapshot();
@@ -528,7 +540,8 @@ pub(crate) async fn build_project(
                     reviewer.run_review_pass().await;
                 }
             });
-            tracing::info!("[{id}] dedicated review runner armed (90s loop)");
+            tracing::info!("[{id}] review lane {lane} armed (90s loop)");
+        }
         }
     }
 
