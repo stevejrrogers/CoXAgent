@@ -571,11 +571,19 @@ function canManage(){return !ME||!ME.auth||roleCanManage(ME.role);}
 // AuthRole::can_review, which auth_mw enforces (COX-B038). Keep the two in step:
 // a role shown a Merge button the server refuses is a 403 the user can't act on.
 function roleCanReview(r){return r==="super"||r==="admin"||r==="reviewer"||LEAD_ROLES.includes(r);}
+// Admin-only surfaces (Audit, People, the Team view's people panel) are the
+// hub-admin tier: Super AND Admin — bootstrap_admin provisions the hub owner
+// as Super, and the server admits Super on these surfaces (AuthRole::can_manage),
+// so gating the UI on "admin" exactly locked the owner out of panels the API
+// already serves (CXA-B132). Open/local mode (no auth) sees them too, same
+// as canManage().
+function roleIsHubAdmin(r){return r==="super"||r==="admin";}
+function isHubAdmin(){return !ME||!ME.auth||roleIsHubAdmin(ME.role);}
 // Only the legacy read-only Viewer gets a locked-down UI; every real role writes.
 function applyRole(){
   const isViewer=ME&&ME.auth&&ME.role==="viewer";
-  // Admin surfaces (Audit, user mgmt) show for admins and in open/local mode.
-  const isAdmin=!ME||!ME.auth||ME.role==="admin";
+  // Admin surfaces (Audit, user mgmt) show for the hub-admin tier and in open/local mode.
+  const isAdmin=isHubAdmin();
   document.body.classList.toggle("viewer",!!isViewer);
   document.body.classList.toggle("admin",!!isAdmin);
   document.body.classList.toggle("manage",canManage());
@@ -1818,7 +1826,7 @@ function toast(msg,type){const c=document.getElementById("toasts");if(!c)return;
 const NAV_IC={overview:"layout-dashboard",team:"robot",board:"columns",roadmap:"timeline",activity:"activity",discuss:"messages",insights:"coin",people:"user-star",audit:"shield-lock",access:"user-cog",settings:"settings"};
 let CMDK_ITEMS=[],CMDK_SEL=0;
 function cmdkBuild(){
-  const items=[];const isAdmin=ME&&ME.role==="admin";
+  const items=[];const isAdmin=!!ME&&roleIsHubAdmin(ME.role);
   Object.keys(TITLES).forEach(v=>{const a=document.querySelector(`.nav a[data-v="${v}"]`);if(!a)return;
     if(a.classList.contains("admin-only")&&!isAdmin)return;
     if(a.classList.contains("manage-only")&&!canManage())return;
