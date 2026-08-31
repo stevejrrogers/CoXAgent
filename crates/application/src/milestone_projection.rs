@@ -133,11 +133,7 @@ pub fn project_milestones(state: &ProjectState) -> Vec<MilestoneProjection> {
     let scope = committed_scope(state);
     let open_scope: Vec<TicketId> = scope
         .iter()
-        .filter(|id| {
-            state
-                .ticket(id)
-                .is_some_and(|t| !closes_scope(t.status()))
-        })
+        .filter(|id| state.ticket(id).is_some_and(|t| !closes_scope(t.status())))
         .cloned()
         .collect();
     let active = active_target_index(state);
@@ -191,7 +187,12 @@ mod tests {
         Complexity, Priority, Role, Status, TechnicalDesign, Ticket, TicketId, TicketType,
     };
 
-    fn milestone(name: &str, target: &str, goal_complete: bool, fulfilled: bool) -> crate::state::Milestone {
+    fn milestone(
+        name: &str,
+        target: &str,
+        goal_complete: bool,
+        fulfilled: bool,
+    ) -> crate::state::Milestone {
         crate::state::Milestone {
             name: name.to_owned(),
             goal: format!("the {name} goal"),
@@ -232,12 +233,16 @@ mod tests {
             t.set_technical_design(Role::Sa, TechnicalDesign::default())
                 .expect("attach design");
             t.transition_to(Role::Sa, Status::Ready).expect("ready");
-            if matches!(status, Status::InProgress | Status::Done | Status::Documented) {
+            if matches!(
+                status,
+                Status::InProgress | Status::Done | Status::Documented
+            ) {
                 t.transition_to(Role::DevFeature, Status::InProgress)
                     .expect("claim");
             }
             if matches!(status, Status::Done | Status::Documented) {
-                t.transition_to(Role::DevFeature, Status::Done).expect("done");
+                t.transition_to(Role::DevFeature, Status::Done)
+                    .expect("done");
             }
             if status == Status::Documented {
                 t.transition_to(Role::Docs, Status::Documented)
@@ -264,14 +269,19 @@ mod tests {
             t.transition_to(Role::Po, Status::Rejected).expect("reject");
             return t;
         }
-        if matches!(status, Status::InProgress | Status::Fixed | Status::Verified) {
-            t.transition_to(Role::DevBug, Status::InProgress).expect("claim");
+        if matches!(
+            status,
+            Status::InProgress | Status::Fixed | Status::Verified
+        ) {
+            t.transition_to(Role::DevBug, Status::InProgress)
+                .expect("claim");
         }
         if matches!(status, Status::Fixed | Status::Verified) {
             t.transition_to(Role::DevBug, Status::Fixed).expect("fixed");
         }
         if status == Status::Verified {
-            t.transition_to(Role::Test, Status::Verified).expect("verified");
+            t.transition_to(Role::Test, Status::Verified)
+                .expect("verified");
         }
         t
     }
@@ -298,10 +308,7 @@ mod tests {
     fn fulfilled_reads_released_regardless_of_version() {
         // A fulfilled milestone below an unreachable target stays released:
         // the pipeline's own record wins over version arithmetic.
-        let state = state_with(
-            "0.1.0",
-            vec![milestone("Ancient", "9.9.9", false, true)],
-        );
+        let state = state_with("0.1.0", vec![milestone("Ancient", "9.9.9", false, true)]);
         let rows = project_milestones(&state);
         assert!(rows[0].released, "fulfilled -> released: {rows:?}");
         assert!(rows[0].reached, "released is definitionally reached");
@@ -311,10 +318,7 @@ mod tests {
     fn version_at_or_above_target_reads_reached_when_not_fulfilled() {
         // Scope done, version there, release not yet tagged: the pipeline's
         // pending-release state, visible as reached without released.
-        let state = state_with(
-            "0.5.2",
-            vec![milestone("Beta", "0.5.0", true, false)],
-        );
+        let state = state_with("0.5.2", vec![milestone("Beta", "0.5.0", true, false)]);
         let rows = project_milestones(&state);
         assert!(!rows[0].released);
         assert!(rows[0].reached, "current >= target -> reached: {rows:?}");
@@ -323,13 +327,13 @@ mod tests {
 
     #[test]
     fn scope_done_below_target_is_the_ready_to_ship_row() {
-        let state = state_with(
-            "0.5.2",
-            vec![milestone("Beta", "0.9.0", true, false)],
-        );
+        let state = state_with("0.5.2", vec![milestone("Beta", "0.9.0", true, false)]);
         let rows = project_milestones(&state);
         assert!(!rows[0].released);
-        assert!(!rows[0].reached, "current < target is never reached: {rows:?}");
+        assert!(
+            !rows[0].reached,
+            "current < target is never reached: {rows:?}"
+        );
         assert!(rows[0].goal_complete, "the ready-to-ship marker");
     }
 
@@ -343,10 +347,7 @@ mod tests {
             ],
         );
         let rows = project_milestones(&state);
-        let targets: Vec<&str> = rows
-            .iter()
-            .map(|r| r.target_version.as_str())
-            .collect();
+        let targets: Vec<&str> = rows.iter().map(|r| r.target_version.as_str()).collect();
         assert_eq!(
             targets,
             vec!["0.9.0", "1.0.0"],
@@ -359,7 +360,10 @@ mod tests {
         let state = state_with("0.5.2", vec![milestone("Broken", "soon", false, false)]);
         let rows = project_milestones(&state);
         assert!(!rows[0].released);
-        assert!(!rows[0].reached, "an unparseable target must not read as done");
+        assert!(
+            !rows[0].reached,
+            "an unparseable target must not read as done"
+        );
         // ...but a FULFILLED milestone needs no parseable target: the
         // release gate checks fulfilled before it ever parses.
         let done = state_with("0.5.2", vec![milestone("Shipped", "soon", true, true)]);
@@ -431,7 +435,13 @@ mod tests {
             bug_at("BUG-REJ", Status::Rejected),
         ];
         state.sprint = Some(scrum(&[
-            "FEAT-DONE", "FEAT-DOC", "FEAT-PROG", "FEAT-HOLD", "BUG-VER", "BUG-GATE", "BUG-REJ",
+            "FEAT-DONE",
+            "FEAT-DOC",
+            "FEAT-PROG",
+            "FEAT-HOLD",
+            "BUG-VER",
+            "BUG-GATE",
+            "BUG-REJ",
         ]));
 
         let rows = project_milestones(&state);
@@ -628,23 +638,19 @@ mod tests {
 
     #[test]
     fn projection_is_a_pure_deterministic_read() {
-        let mut state = state_with(
-            "0.5.2",
-            vec![milestone("Beta", "0.9.0", false, false)],
-        );
+        let mut state = state_with("0.5.2", vec![milestone("Beta", "0.9.0", false, false)]);
         state.tickets.push(feature_at("FEAT-A", Status::Pending));
         // A commit over delivered + in-flight work: the scope half of the
         // read model runs too, not just the classification half.
-        state
-            .tickets
-            .push(feature_at("FEAT-B", Status::Done));
+        state.tickets.push(feature_at("FEAT-B", Status::Done));
         state.sprint = Some(scrum(&["FEAT-A", "FEAT-B"]));
         let before = state.clone();
 
         let first = projection_report(&state);
         assert_eq!(state, before, "the read never mutates the state it reads");
         assert_eq!(
-            projection_report(&state), first,
+            projection_report(&state),
+            first,
             "the same snapshot always yields the same report"
         );
         assert_eq!(
@@ -656,10 +662,7 @@ mod tests {
 
     #[test]
     fn wire_shape_is_exactly_the_contract() {
-        let mut state = state_with(
-            "0.5.2",
-            vec![milestone("Beta", "0.9.0", false, false)],
-        );
+        let mut state = state_with("0.5.2", vec![milestone("Beta", "0.9.0", false, false)]);
         state.tickets.push(feature_at("FEAT-A", Status::Pending));
         // An open Scrum sprint that did not commit FEAT-A gives the payload a
         // blocked row to pin.

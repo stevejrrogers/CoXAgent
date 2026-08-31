@@ -48,6 +48,7 @@ mod downloads;
 mod engines;
 mod factory;
 mod fleet;
+mod fleet_spend;
 mod forge;
 mod goals;
 mod guards;
@@ -86,6 +87,7 @@ use docs::*;
 use downloads::*;
 use engines::*;
 use fleet::*;
+use fleet_spend::*;
 use forge::*;
 use guards::*;
 use hub_docs::*;
@@ -590,6 +592,8 @@ pub async fn serve_full(
     if matches!(hub_role(), HubRole::All | HubRole::Knowledge) {
         // Space budget enforcement runs for the life of the hub.
         tokio::spawn(space_budget_watchdog(state.clone()));
+        // Hub-level daily soft-ceiling alert (CXA-F278): notify-only, ever.
+        tokio::spawn(fleet_ceiling_watchdog(state.clone()));
         // Meeting reminders, start announcements, and absent-participant rings.
         tokio::spawn(meeting_watchdog(state.clone()));
         // Nightly snapshots of the hub-level documents (workspace, spaces, chat).
@@ -759,6 +763,14 @@ pub async fn serve_full(
         // project's runner phase + activity in ONE SSE stream, filterable by
         // project id and agent phase (see fleet.rs).
         .route("/api/fleet/river", get(fleet_river_ep))
+        // Fleet spend cockpit (CXA-F278): hub-level cross-project cost
+        // aggregation with cap headroom + the soft-ceiling setting (see
+        // fleet_spend.rs). Super admin; visibility-only by design.
+        .route("/api/fleet/spend", get(fleet_spend_ep))
+        .route(
+            "/api/fleet/ceiling",
+            axum::routing::put(fleet_ceiling_put_ep),
+        )
         .route("/api/tooling", get(tooling_ep))
         .route("/api/analyze-goal", post(analyze_goal_ep))
         .route("/api/projects", get(list_projects).post(create_project))
@@ -1308,6 +1320,8 @@ mod alerts_tests;
 mod avatar_media_security_tests;
 #[cfg(test)]
 mod cors_rate_limit_tests;
+#[cfg(test)]
+mod delete_project_tests;
 #[cfg(test)]
 mod pr_preview_tests;
 #[cfg(test)]

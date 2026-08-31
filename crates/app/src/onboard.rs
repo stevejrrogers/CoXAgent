@@ -433,11 +433,46 @@ fn refuse_agent_scaffold() -> Result<(), Box<dyn std::error::Error>> {
             .to_string_lossy()
             .starts_with(".coxagent-worktrees")
     }) {
-        return Err("refusing to scaffold a project from inside an agent worktree — \
+        return Err(
+            "refusing to scaffold a project from inside an agent worktree — \
                     this would register a live project in the operator's hub. Use a \
                     plain temp directory (outside .coxagent-worktrees) for cleanroom \
                     tests."
-            .into());
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// An expected onboarding conflict: the target store already holds tickets, so
+/// re-onboarding is refused. The caller asked to scaffold a workspace that is
+/// already alive — a client-side conflict, not a server fault. Typed so the
+/// HTTP layer can map it to 409 instead of 500 (CXA-B129).
+#[derive(Debug)]
+pub struct OnboardConflict(pub String);
+
+impl std::fmt::Display for OnboardConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for OnboardConflict {}
+
+/// Classify an onboarding failure (CXA-B129): `Some(message)` when it is the
+/// expected client conflict, `None` for a genuine fault. Pure.
+pub fn conflict_message(err: &(dyn std::error::Error + 'static)) -> Option<String> {
+    err.downcast_ref::<OnboardConflict>().map(|c| c.0.clone())
+}
+
+/// Refuse re-onboarding over an active backlog (CXA-F003): scaffolding again
+/// on top of existing tickets would silently double-seed or lose state. Typed
+/// as [`OnboardConflict`] so the API layer returns 409, never 500 (CXA-B129).
+fn refuse_existing_tickets(state: &ProjectState) -> Result<(), Box<dyn std::error::Error>> {
+    if !state.tickets.is_empty() {
+        return Err(Box::new(OnboardConflict(
+            "workspace already has tickets; refusing to re-onboard".into(),
+        )));
     }
     Ok(())
 }

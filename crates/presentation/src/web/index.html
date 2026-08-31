@@ -117,6 +117,7 @@
       <a data-v="mg-spaces" onclick="nav('mg-spaces')"><i class="ti ti-building-community"></i> Spaces</a>
       <a data-v="mg-users" onclick="nav('mg-users')"><i class="ti ti-users"></i> Users</a>
       <a data-v="mg-usage" onclick="nav('mg-usage')"><i class="ti ti-chart-bar"></i> Usage</a>
+      <a data-v="mg-fleet" onclick="nav('mg-fleet')"><i class="ti ti-report-money"></i> Fleet spend</a>
       <a data-v="mg-audit" onclick="nav('mg-audit')"><i class="ti ti-shield-search"></i> Audit</a>
     </nav>
     <div id="user-badge" class="userbox">
@@ -176,6 +177,7 @@
       <div class="view" id="view-mg-space"><div id="mg-space-body"></div></div>
       <div class="view" id="view-mg-users"><div id="mg-people-body"></div></div>
       <div class="view" id="view-mg-usage"><div id="mg-usage-body"></div></div>
+      <div class="view" id="view-mg-fleet"><div id="mg-fleet-body"></div></div>
       <div class="view" id="view-mg-audit"><div id="mg-audit-body"></div></div>
       <div class="view" id="view-home">
         <div id="ws-hero"></div>
@@ -200,6 +202,7 @@
         <div id="ov-preflight"></div>
         <div id="ov-goal"></div>
         <div class="kpis" id="kpis"></div>
+        <div id="ov-velocity"></div>
         <div id="ov-health"></div>
         <div id="ov-cycle-perf"></div>
         <div id="ov-attention"></div>
@@ -418,6 +421,7 @@
         <div class="sec">Cost by agent</div><div class="panel" id="cost-roles"></div>
         <div class="sec">Cost by user <span style="font-size:11px;color:var(--dim);font-weight:400">· token spend per operator (account@host)</span></div><div class="panel" id="cost-operators"></div>
         <div class="sec">Budget</div><div class="panel" id="cost-budget"></div>
+        <div class="sec">Daily spend <span style="font-size:11px;color:var(--dim);font-weight:400">&middot; closed UTC days + today</span></div><div class="panel" id="cost-trend"></div>
         <div class="sec">Engine reliability <span style="font-size:11px;color:var(--dim);font-weight:400">&middot; errors &amp; timeouts per role, from role_health</span></div><div class="panel" id="cost-engines"></div>
         <div class="sec">Token-saver <span style="font-size:11px;color:var(--dim);font-weight:400">· rtk-style compression on tool output before agents read it</span></div>
         <div class="panel" id="cost-tokensaver"></div></div>

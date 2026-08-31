@@ -30,6 +30,13 @@ test('the cost view draws all four panels plus KPI labels', async ({ page }) => 
   await expect(page.locator('#cost-operators')).toContainText(
     'no per-user spend yet',
   );
+  // Daily-spend trend: the fixture seeds three closed days, so real bars
+  // must render (one per day) with the day-range footer — not the empty
+  // state, and never a blank panel (a blank panel is how a JS error
+  // presents here).
+  await expect(page.locator('#cost-trend div[title*="2026-08-27"]')).toHaveCount(1);
+  await expect(page.locator('#cost-trend')).toContainText('2026-08-27');
+  await expect(page.locator('#cost-trend')).not.toContainText('no spend recorded');
   // Token-saver shows actual seeded compression stats in this fixture.
   await expect(page.locator('#cost-tokensaver')).toContainText('compressed');
   await expect(page.locator('#cost-tokensaver')).toContainText('saved');

@@ -9,7 +9,7 @@ use super::*;
 use axum::body::Body;
 use coxagent_infrastructure::MemoryAuditSink;
 use std::sync::Arc;
-use store_rpc_test_support::{CountingStore, PID, UnusedEngine};
+use store_rpc_test_support::{CountingStore, UnusedEngine, PID};
 use tower::ServiceExt;
 
 /// A hub with no registered projects and the given factory; the exact shape
@@ -73,8 +73,7 @@ async fn a_workspace_conflict_is_mapped_to_409_with_the_error_json() {
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     let body = body_json(resp).await;
     assert_eq!(
-        body["error"],
-        "workspace already has tickets; refusing to re-onboard",
+        body["error"], "workspace already has tickets; refusing to re-onboard",
         "the operator-facing message must survive the status mapping"
     );
 }

@@ -457,7 +457,10 @@ mod tests {
             "an unresolved route is OMITTED, never serialized as a guessed link: {v}"
         );
         let round: CaseEvidence = serde_json::from_value(v).expect("deserialize pre-F248 record");
-        assert_eq!(round, *ev, "old==new comparison holds through the round trip");
+        assert_eq!(
+            round, *ev,
+            "old==new comparison holds through the round trip"
+        );
     }
 
     /// The full recording story: a resolved repro attaches beside existing
@@ -466,10 +469,7 @@ mod tests {
     #[test]
     fn set_repro_preserves_note_image_and_status() {
         let mut t = case_with_note("GET /settings 200");
-        assert!(t.set_test_case_repro(
-            "settings persist",
-            "http://127.0.0.1:8101/settings".into(),
-        ));
+        assert!(t.set_test_case_repro("settings persist", "http://127.0.0.1:8101/settings".into(),));
         let ev = t.test_cases()[0].evidence.as_ref().expect("evidence");
         assert_eq!(
             ev.repro.as_deref(),
@@ -480,9 +480,19 @@ mod tests {
         assert_eq!(t.test_cases()[0].status, TestCaseStatus::Passed);
 
         // A screenshot pass attaches the image; the repro must survive it.
-        assert!(t.set_test_case_image("settings persist", "/api/projects/cxa/media/s.png".into(), "t2".into()));
+        assert!(t.set_test_case_image(
+            "settings persist",
+            "/api/projects/cxa/media/s.png".into(),
+            "t2".into()
+        ));
         // A re-run's verdict (no image) must not wipe either.
-        assert!(t.set_test_case_result("settings persist", false, Some("now failing".into()), None, "t3".into()));
+        assert!(t.set_test_case_result(
+            "settings persist",
+            false,
+            Some("now failing".into()),
+            None,
+            "t3".into()
+        ));
         let ev = t.test_cases()[0].evidence.as_ref().expect("evidence");
         assert_eq!(ev.repro.as_deref(), Some("http://127.0.0.1:8101/settings"));
         assert_eq!(ev.image.as_deref(), Some("/api/projects/cxa/media/s.png"));
@@ -492,7 +502,10 @@ mod tests {
         // Persisted through the aggregate's serde and back.
         let v = serde_json::to_value(&t).expect("serialize ticket");
         let back: Ticket = serde_json::from_value(v).expect("deserialize ticket");
-        assert_eq!(back, t, "the recorded repro round-trips through the store payload");
+        assert_eq!(
+            back, t,
+            "the recorded repro round-trips through the store payload"
+        );
     }
 
     /// An unresolved route never becomes a fabricated link: blank (and
@@ -508,7 +521,11 @@ mod tests {
         assert!(!t.set_test_case_repro("no such criterion", "http://x/".into()));
         let ev = t.test_cases()[0].evidence.as_ref().expect("evidence");
         assert_eq!(ev.repro, None, "refusals leave the field absent");
-        assert_eq!(ev.note.as_deref(), Some("GET /settings 200"), "note untouched");
+        assert_eq!(
+            ev.note.as_deref(),
+            Some("GET /settings 200"),
+            "note untouched"
+        );
     }
 
     /// A re-run's freshly resolved route REPLACES the recorded one — the
@@ -517,9 +534,10 @@ mod tests {
     fn set_repro_overwrites_with_the_fresher_route() {
         let mut t = case_with_note("GET /settings 200");
         assert!(t.set_test_case_repro("settings persist", "http://127.0.0.1:8101/settings".into()));
-        assert!(
-            t.set_test_case_repro("settings persist", "http://127.0.0.1:8101/settings#v2".into())
-        );
+        assert!(t.set_test_case_repro(
+            "settings persist",
+            "http://127.0.0.1:8101/settings#v2".into()
+        ));
         assert_eq!(
             t.test_cases()[0]
                 .evidence
@@ -541,7 +559,10 @@ mod tests {
         t.ensure_test_cases_from_acceptance();
         assert!(t.test_cases()[0].evidence.is_none());
         assert!(t.set_test_case_repro("bare criterion", "http://127.0.0.1:8101/x".into()));
-        let ev = t.test_cases()[0].evidence.as_ref().expect("evidence created");
+        let ev = t.test_cases()[0]
+            .evidence
+            .as_ref()
+            .expect("evidence created");
         assert_eq!(ev.repro.as_deref(), Some("http://127.0.0.1:8101/x"));
         assert_eq!(ev.image, None);
         assert_eq!(ev.note, None);

@@ -112,9 +112,13 @@ async fn first_event(mut resp: reqwest::Response, want: &str) -> Vec<String> {
         let chunk = match tokio::time::timeout_at(deadline, resp.chunk()).await {
             // Timed out: the server never sent the event — the exact stall
             // this contract test exists to catch.
-            Err(e) => panic!("timed out waiting for the next SSE chunk ({e}); frames so far: {buf}"),
+            Err(e) => {
+                panic!("timed out waiting for the next SSE chunk ({e}); frames so far: {buf}")
+            }
             Ok(Err(e)) => panic!("stream read failed: {e}; frames so far: {buf}"),
-            Ok(Ok(None)) => panic!("stream closed before delivering `{want}`; frames so far: {buf}"),
+            Ok(Ok(None)) => {
+                panic!("stream closed before delivering `{want}`; frames so far: {buf}")
+            }
             Ok(Ok(Some(bytes))) => bytes,
         };
         buf.push_str(&String::from_utf8_lossy(&chunk));
@@ -147,9 +151,8 @@ async fn fresh_open_with_no_live_log_still_sends_init_promptly() {
     let _hub = boot(vec![handle("empty", scratch.path())], PORT).await;
     let client = reqwest::Client::new();
 
-    let url = format!(
-        "http://127.0.0.1:{PORT}/api/projects/empty/agent-log/stream?role=dev_feature"
-    );
+    let url =
+        format!("http://127.0.0.1:{PORT}/api/projects/empty/agent-log/stream?role=dev_feature");
     let resp = client.get(&url).send().await.unwrap();
     assert_eq!(resp.status().as_u16(), 200);
     assert!(resp
@@ -182,19 +185,20 @@ async fn fresh_open_with_a_live_log_sends_init_then_the_snapshot() {
     let _hub = boot(vec![handle("live", scratch.path())], PORT_LIVE).await;
     let client = reqwest::Client::new();
 
-    let url = format!(
-        "http://127.0.0.1:{PORT_LIVE}/api/projects/live/agent-log/stream?role=dev_feature"
-    );
+    let url =
+        format!("http://127.0.0.1:{PORT_LIVE}/api/projects/live/agent-log/stream?role=dev_feature");
     let resp = client.get(&url).send().await.unwrap();
     let data = first_event(resp, "init").await;
     let v: serde_json::Value =
         serde_json::from_str(data.first().map_or("", String::as_str)).unwrap();
-    assert_eq!(v["live"], true, "an existing live log must stream as live:true");
+    assert_eq!(
+        v["live"], true,
+        "an existing live log must stream as live:true"
+    );
 
     // Non-regression: the snapshot bytes still follow the init kick-off.
-    let url = format!(
-        "http://127.0.0.1:{PORT_LIVE}/api/projects/live/agent-log/stream?role=dev_feature"
-    );
+    let url =
+        format!("http://127.0.0.1:{PORT_LIVE}/api/projects/live/agent-log/stream?role=dev_feature");
     let resp = client.get(&url).send().await.unwrap();
     let data = first_event(resp, "line").await;
     let text: String = data.join("\n");

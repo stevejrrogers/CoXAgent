@@ -10,13 +10,12 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  # CXA-B079: deploy-smoke (the "app answers on 8101" availability gate) runs
-  # again on every push/PR. `check` and `deploy-build` stay gated on purpose:
-  # 0387409f disabled every job while the repo was private (GitHub-hosted runs
-  # blocked without a paid plan) and neither has been re-verified on a hosted
-  # runner since. Re-enable those separately.
+  # CXA-B079 re-enabled deploy-smoke; CXA-C016 re-enables `check` and
+  # `deploy-build` now that the debt that kept them red is paid (fmt drift
+  # fixed, clippy pedantic baseline at zero, unit suite green). 0387409f had
+  # disabled every job while the repo was private (GitHub-hosted runs blocked
+  # without a paid plan). ci_availability_gate.rs fails if any job is re-gated.
   check:
-    if: false
     name: fmt · clippy · test
     runs-on: ubuntu-latest
     steps:
@@ -33,7 +32,6 @@ jobs:
         run: cargo test --all-features
 
   deploy-build:
-    if: false
     # COX-B006 regression guard: reproduce the Docker builder's compile — the
     # release binary for Linux, no `test` cfg — which is what turned an ungated
     # macOS-only helper into `error: function ... is never used` under the

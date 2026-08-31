@@ -44,8 +44,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         };
         let passed = |target: &str| -> bool {
             match (&released, SemVer::parse(target)) {
-                (Some(rel), Ok(t)) => SemVer::parse(rel)
-                    .is_ok_and(|r| r >= t),
+                (Some(rel), Ok(t)) => SemVer::parse(rel).is_ok_and(|r| r >= t),
                 _ => false,
             }
         };
@@ -89,12 +88,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .iter()
             .filter(|t| {
                 matches!(t.status(), Status::Pending | Status::Open)
-                    && t.created_at().is_some_and(|c| {
-                        days_between(c.get(..10).unwrap_or(""), &week_ago) >= 7
-                    })
+                    && t.created_at()
+                        .is_some_and(|c| days_between(c.get(..10).unwrap_or(""), &week_ago) >= 7)
             })
             .map(|t| t.id().to_string())
             .collect();
+        let merged_pending = merged_pending_ids(&state);
         // Engine health: roles that errored TODAY (old counters are history,
         // not news — a role whose last error was days ago stays quiet).
         let engine_lines: Vec<String> = state
@@ -110,7 +109,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 )
             })
             .collect();
-        let msg = po_daily_message(&lines, &stuck_high, &stale_ids, &engine_lines);
+        let msg = po_daily_message(
+            &lines,
+            &stuck_high,
+            &stale_ids,
+            &merged_pending,
+            &engine_lines,
+        );
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
             s.daily_jobs.insert("po_daily".to_owned(), today.clone());
             s.post_comment("PO", &msg, None);
@@ -143,10 +148,26 @@ fn days_between(a: &str, b: &str) -> i64 {
     }
 }
 
+/// Pending/open tickets whose branch already has a recorded merge: the work
+/// landed but the status machine never moved — TEST/SA should verify them or
+/// the PO should close them.
+fn merged_pending_ids(state: &crate::state::ProjectState) -> Vec<String> {
+    state
+        .tickets
+        .iter()
+        .filter(|t| {
+            matches!(t.status(), Status::Pending | Status::Open)
+                && state.ticket_last_merge.contains_key(&t.id().to_string())
+        })
+        .map(|t| t.id().to_string())
+        .collect()
+}
+
 fn po_daily_message(
     milestones: &[String],
     stuck_high: &[String],
     stale: &[String],
+    merged_pending: &[String],
     engine: &[String],
 ) -> String {
     let mut msg = String::from("📋 PO daily — roadmap & backlog:\n");
@@ -175,7 +196,15 @@ fn po_daily_message(
             stale.join(", ")
         );
     }
-    if stuck_high.is_empty() && stale.is_empty() {
+    if !merged_pending.is_empty() {
+        use std::fmt::Write as _;
+        let _ = writeln!(
+            msg,
+            "🔀 Merged but never advanced: {} — the work landed; TEST/SA verify it or close it.",
+            merged_pending.join(", ")
+        );
+    }
+    if stuck_high.is_empty() && stale.is_empty() && merged_pending.is_empty() {
         msg.push_str("Backlog: clean — nothing stale, no stranded High tickets.\n");
     }
     if !engine.is_empty() {
@@ -198,14 +227,19 @@ mod tests {
             &["• M1 (target v1.0) — 🚧 in progress".into()],
             &["CXA-F002".into()],
             &["CXA-F003".into()],
+            &["CXA-F229".into()],
             &["• SA: 2 error(s), 1 timeout(s) — last: opencode timed out".into()],
         );
         assert!(msg.contains("CXA-F002"));
         assert!(msg.contains("CXA-F003"));
         assert!(msg.contains("M1"));
         assert!(msg.contains("Engine health"));
-        let clean = po_daily_message(&[], &[], &[], &[]);
+        assert!(msg.contains("Merged but never advanced: CXA-F229"));
+        let clean = po_daily_message(&[], &[], &[], &[], &[]);
         assert!(clean.contains("clean"));
+        // A merged-but-pending ticket alone still suppresses the clean line.
+        let only_merged = po_daily_message(&[], &[], &[], &["CXA-F229".into()], &[]);
+        assert!(!only_merged.contains("clean"));
     }
 
     #[test]

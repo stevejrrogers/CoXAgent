@@ -766,7 +766,15 @@ async function renderReview(){
   REVIEW_CONFIGURED=!!d.configured||prs.length>0;
   if(!d.configured&&!prs.length){drainBanner("rv-drain");el.innerHTML=`<div class="rev-empty"><i class="ti ti-git-pull-request"></i><div>Git review isn't set up</div><span>Configure a repository in <a onclick="nav('settings')">Settings → Git &amp; version control</a> to open and review pull requests here.</span></div>`;return;}
   const roNote=!d.configured?' · <b class="rev-ro-note"><i class="ti ti-lock"></i> read-only — configure git in Settings for actions</b>':'';
-  const head=`<div class="sec">Pull requests <span style="font-size:11px;color:var(--dim);font-weight:400">· ${prs.length} open${roNote}${d.error?' · <span style=\"color:var(--red)\">'+esc(d.error)+'</span>':''}</span></div>`;
+  // Review-latency pulse from the SA's recorded verdicts (rides the state
+  // snapshot): how long a PR waits for its review, over the last 20.
+  const lat=(typeof STATE!=="undefined"&&Array.isArray(STATE.reviews)?STATE.reviews:[])
+    .slice(-20).map(r=>r.latency_secs||0).filter(n=>n>0);
+  const fmtMin=s=>s>=5400?`${Math.round(s/3600*10)/10}h`:`${Math.round(s/60)}m`;
+  const latNote=lat.length
+    ?` · review latency avg ${fmtMin(lat.reduce((a,b)=>a+b,0)/lat.length)} · max ${fmtMin(Math.max(...lat))} (last ${lat.length})`
+    :"";
+  const head=`<div class="sec">Pull requests <span style="font-size:11px;color:var(--dim);font-weight:400">· ${prs.length} open${latNote}${roNote}${d.error?' · <span style=\"color:var(--red)\">'+esc(d.error)+'</span>':''}</span></div>`;
   if(!prs.length){el.innerHTML=head+`<div class="rev-empty"><i class="ti ti-check"></i><div>No open pull requests</div><span>Agent-shipped tickets will appear here for review.</span></div>`;return;}
   const ciBadge=c=>{const m={passing:["passing","var(--green)","circle-check"],failing:["failing","var(--red)","circle-x"],pending:["CI running","var(--amber)","loader"],none:["no CI","var(--dim)","minus"]}[c]||["",""];
     return `<span class="rev-ci" style="color:${m[1]}"><i class="ti ti-${m[2]}"></i> ${m[0]}</span>`;};
@@ -1964,7 +1972,7 @@ function renderSlackMsg(m){
   const gutter=m.grouped?`<span class="sgt">${time}</span>`:avat(m.user,"sav");
   // Hybrid gate announcements become ACTION CARDS: the decision is one click
   // away from the message that asked for it (see docs/HYBRID_TEAM.md).
-  const gate=(!deleted&&m.user==="SYSTEM")?gateActions(m.body):"";
+  const gate=(!deleted&&(m.user==="SYSTEM"||m.user==="SM"))?gateActions(m.body):"";
   return `<div class="smsg${m.grouped?' grouped':''}" id="msg-${esc(m.id)}">
     <div class="sgut">${gutter}</div>
     <div class="smain">
@@ -1984,12 +1992,26 @@ function gateActions(body){
     return `<div style="display:flex;gap:8px;margin-top:7px">${btn("Approve → Ready","ti-checks",`chatGate('${id}','ready')`,1)}${btn("Open ticket","ti-external-link",`showTicket('${id}')`)}</div>`;
   if(b.includes("awaiting HUMAN verification")||b.includes("gate_verify"))
     return `<div style="display:flex;gap:8px;margin-top:7px">${btn("Mark Verified","ti-shield-check",`chatGate('${id}','verify')`,1)}${btn("Open ticket","ti-external-link",`showTicket('${id}')`)}</div>`;
+  // SM's cost-hold chase ("… sits behind a cost hold — approve or reject it")
+  // gets the same one-click treatment as the Inbox card: chat and Inbox stay
+  // two doors to one decision.
+  if(b.includes("cost hold")||b.includes("cost_approve"))
+    return `<div style="display:flex;gap:8px;margin-top:7px">${btn("Approve spend","ti-coin",`chatGate('${id}','approve-cost')`,1)}${btn("Reject","ti-x",`chatCostReject('${id}')`)}${btn("Open ticket","ti-external-link",`showTicket('${id}')`)}</div>`;
   return "";
 }
 async function chatGate(id,action){
   try{const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/"+action),{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
     if(!r.ok)toasty(await r.text(),"err");
-    else toasty(action==="ready"?(id+" → Ready"):(id+" verified"),"ok");
+    else toasty(action==="ready"?(id+" → Ready"):action==="approve-cost"?(id+" spend approved"):(id+" verified"),"ok");
+  }catch(e){}
+}
+// Rejecting a cost hold from chat still requires a reason — the reason is
+// what the agents learn from (same contract as the Inbox reject).
+async function chatCostReject(id){
+  const reason=await coxModal({title:"Reject "+id,message:"Why? (agents learn from this)",input:{placeholder:"e.g. not worth the spend"},confirmText:"Reject"});
+  if(reason===null||reason===undefined)return;
+  try{const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/reject"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reason:String(reason||"")})});
+    if(!r.ok)toasty(await r.text(),"err");else toasty(id+" rejected","ok");
   }catch(e){}
 }
 // Wrap the selection of any input/textarea in a markdown marker (**,*,`).
