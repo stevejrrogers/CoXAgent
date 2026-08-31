@@ -766,7 +766,15 @@ async function renderReview(){
   REVIEW_CONFIGURED=!!d.configured||prs.length>0;
   if(!d.configured&&!prs.length){drainBanner("rv-drain");el.innerHTML=`<div class="rev-empty"><i class="ti ti-git-pull-request"></i><div>Git review isn't set up</div><span>Configure a repository in <a onclick="nav('settings')">Settings → Git &amp; version control</a> to open and review pull requests here.</span></div>`;return;}
   const roNote=!d.configured?' · <b class="rev-ro-note"><i class="ti ti-lock"></i> read-only — configure git in Settings for actions</b>':'';
-  const head=`<div class="sec">Pull requests <span style="font-size:11px;color:var(--dim);font-weight:400">· ${prs.length} open${roNote}${d.error?' · <span style=\"color:var(--red)\">'+esc(d.error)+'</span>':''}</span></div>`;
+  // Review-latency pulse from the SA's recorded verdicts (rides the state
+  // snapshot): how long a PR waits for its review, over the last 20.
+  const lat=(typeof STATE!=="undefined"&&Array.isArray(STATE.reviews)?STATE.reviews:[])
+    .slice(-20).map(r=>r.latency_secs||0).filter(n=>n>0);
+  const fmtMin=s=>s>=5400?`${Math.round(s/3600*10)/10}h`:`${Math.round(s/60)}m`;
+  const latNote=lat.length
+    ?` · review latency avg ${fmtMin(lat.reduce((a,b)=>a+b,0)/lat.length)} · max ${fmtMin(Math.max(...lat))} (last ${lat.length})`
+    :"";
+  const head=`<div class="sec">Pull requests <span style="font-size:11px;color:var(--dim);font-weight:400">· ${prs.length} open${latNote}${roNote}${d.error?' · <span style=\"color:var(--red)\">'+esc(d.error)+'</span>':''}</span></div>`;
   if(!prs.length){el.innerHTML=head+`<div class="rev-empty"><i class="ti ti-check"></i><div>No open pull requests</div><span>Agent-shipped tickets will appear here for review.</span></div>`;return;}
   const ciBadge=c=>{const m={passing:["passing","var(--green)","circle-check"],failing:["failing","var(--red)","circle-x"],pending:["CI running","var(--amber)","loader"],none:["no CI","var(--dim)","minus"]}[c]||["",""];
     return `<span class="rev-ci" style="color:${m[1]}"><i class="ti ti-${m[2]}"></i> ${m[0]}</span>`;};
