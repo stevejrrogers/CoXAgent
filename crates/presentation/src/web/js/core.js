@@ -533,8 +533,17 @@ function card(t){const a={high:"var(--red)",medium:"var(--amber)",low:"var(--dim
   const blockers=(t.depends_on||[]).filter(d=>{const dt=(STATE.tickets||[]).find(x=>x.id===d);return dt&&!doneSet.includes(dt.status);});
   const blocked=blockers.length?`<span class="b" style="background:color-mix(in srgb,var(--red) 16%,transparent);color:var(--red)" title="blocked by ${esc(blockers.join(', '))}"><i class="ti ti-lock" style="font-size:10px"></i> blocked</span>`:'';
   const hold=t.status==="on_hold"?`<span class="b" style="background:color-mix(in srgb,var(--amber) 18%,transparent);color:var(--amber)" title="${esc((STATE.hold_reasons||{})[t.id]||'on hold')}"><i class="ti ti-player-pause" style="font-size:10px"></i> on hold</span>`:'';
+  // Age heat: how long a ticket has WAITED. Only pre-work statuses — a card
+  // being built isn't stale — and only tickets that carry created_at (older
+  // ones have unknown age and stay quiet). Amber at 3 days, red at 7.
+  let age='';
+  if(t.created_at&&(t.status==="pending"||t.status==="open")){
+    const days=Math.floor((Date.now()-Date.parse(t.created_at))/86400000);
+    if(days>=3){const c=days>=7?"var(--red)":"var(--amber)";
+      age=`<span class="b" style="background:color-mix(in srgb,${c} 14%,transparent);color:${c}" title="filed ${esc(t.created_at.slice(0,10))}"><i class="ti ti-hourglass" style="font-size:10px"></i> ${days}d</span>`;}
+  }
   return `<div class="card-t" onclick="showTicket('${t.id}')" ${t.status==="on_hold"?'style="opacity:.65"':''}><div class="cid">${esc(t.id)}</div>
-    <div class="ct">${esc(t.title)}</div><div class="badges"><span class="b ${t.priority}">${t.priority}</span>${hold}${blocked}${ui}${bug}${who}</div></div>`;}
+    <div class="ct">${esc(t.title)}</div><div class="badges"><span class="b ${t.priority}">${t.priority}</span>${hold}${blocked}${age}${ui}${bug}${who}</div></div>`;}
 function column([k,l,c],ts){const items=ts.filter(t=>t.status===k);
   return `<div class="col"><h3><span class="dot" style="background:var(${c})"></span>${l}<span class="n">${items.length}</span></h3>${items.length?items.map(card).join(""):'<div class="empty">—</div>'}</div>`;}
 // Unified column: collects both features and bugs whose status maps to this stage.
