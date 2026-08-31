@@ -65,6 +65,7 @@ mod projects;
 mod realtime;
 mod repro_url;
 mod requests;
+mod search;
 mod security;
 mod share_link;
 mod share_page;
@@ -103,6 +104,7 @@ use projects::*;
 use realtime::*;
 use repro_url::*;
 use requests::*;
+use search::*;
 use security::*;
 use share_link::*;
 use share_page::*;
@@ -137,6 +139,9 @@ const APP_JS: &[(&str, &str)] = &[
     ("home.js", include_str!("../web/js/home.js")),
     ("river.js", include_str!("../web/js/river.js")),
     ("chat.js", include_str!("../web/js/chat.js")),
+    // Global search palette (CXA-F275) — extracted from chat.js so the box
+    // used from every view has one home. Load after chat.js (runtime refs).
+    ("search.js", include_str!("../web/js/search.js")),
     ("mcp.js", include_str!("../web/js/mcp.js")),
     ("docs.js", include_str!("../web/js/docs.js")),
     ("inbox.js", include_str!("../web/js/inbox.js")),
@@ -600,6 +605,11 @@ pub async fn serve_full(
         tokio::spawn(nightly_backup(state.clone(), backup_dir));
         // App-release watcher: new tagged builds surface as update notices.
         tokio::spawn(releases_watchdog(state.clone()));
+        // Loop-liveness watchdog (CXA-F259): alerts when a running loop goes
+        // silently stale — the blind spot a hung cycle leaves (the worker
+        // keeps beating its registry heartbeat while nothing progresses), and
+        // the checker runs HERE, outside the unit that can hang.
+        tokio::spawn(liveness_watchdog(state.clone()));
         // Keep the docker host clean of dead agent deploys.
         tokio::spawn(docker_janitor());
     }
@@ -772,6 +782,10 @@ pub async fn serve_full(
             axum::routing::put(fleet_ceiling_put_ep),
         )
         .route("/api/tooling", get(tooling_ep))
+        // Global search (CXA-F275): one box across tickets, wiki pages and
+        // chat threads. No :pid in the path — the handler enforces project
+        // scope itself (see server/search.rs).
+        .route("/api/search", get(global_search_ep))
         .route("/api/analyze-goal", post(analyze_goal_ep))
         .route("/api/projects", get(list_projects).post(create_project))
         .route(

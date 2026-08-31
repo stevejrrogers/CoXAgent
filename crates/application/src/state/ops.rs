@@ -186,6 +186,29 @@ pub struct PendingJob {
     pub queued_by: String,
 }
 
+/// One open loop-liveness stall episode (CXA-F259): the persisted record the
+/// hub-side watchdog dedupes against, so the same stall alerts once — not
+/// once per sweep — survives a hub restart, and self-clears when new activity
+/// lands. Written only on alert open/escalate/clear (a handful of CAS-safe
+/// writes per day, never per sweep). serde-defaulted so state persisted
+/// before this existed loads untouched — the additive-field convention.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StallEpisode {
+    /// RFC3339 when this episode's stall was first detected.
+    pub since: String,
+    /// The stale worker the alert named (`account@host`, or `"none"` when the
+    /// registry had no live worker left — the process is gone).
+    pub worker: String,
+    /// RFC3339 of the newest activity-trail entry when the alert opened.
+    pub last_activity_at: String,
+    /// RFC3339 of the most recent alert (open or escalation) — the dedupe
+    /// clock the escalation horizon measures from.
+    pub last_alert_at: String,
+    /// How many escalation re-alerts have fired for this episode.
+    pub escalations: u32,
+}
+
 #[cfg(test)]
 mod engine_incident_tests {
     use super::ProjectState;
