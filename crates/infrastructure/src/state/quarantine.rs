@@ -127,10 +127,24 @@ pub(crate) fn gate_save(
         // pre-auditor legacy keys ("2.26.2", renamed ticket ids) failed every
         // save, so nothing the agents did could persist. Heal that class in
         // place and save; anything else still refuses and quarantines.
+        // Name WHAT dangled: the bare count recurred every ~20 minutes with
+        // no way to trace which writer keeps minting orphaned keys.
+        let dangling: Vec<String> = violation
+            .findings
+            .iter()
+            .map(|f| {
+                format!(
+                    "{}: {}",
+                    f.ticket_id.as_deref().unwrap_or("?"),
+                    f.detail.chars().take(80).collect::<String>()
+                )
+            })
+            .collect();
         match state.heal_dangling_references() {
             Ok(healed) if healed > 0 => {
                 tracing::warn!(
-                    "structural integrity audit: healed {healed} dangling ticket reference(s) at the write boundary"
+                    "structural integrity audit: healed {healed} dangling ticket reference(s) at the write boundary: {}",
+                    dangling.join(" | ")
                 );
                 return Ok(());
             }
