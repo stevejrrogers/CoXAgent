@@ -714,6 +714,9 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
     document.getElementById("activity-full").innerHTML=act.length?`<div class="timeline">${html}</div>`:'<div class="empty">no activity yet</div>';
     if(typeof renderAlerts==="function")renderAlerts();
     renderTranscripts();
+    // CXA-B131: the Work log panel must never sit on 'loading…' when the
+    // agent drawer was never opened — paint its terminal state here.
+    if(typeof paintAgentLogIdle==="function")paintAgentLogIdle();
   }else if(CUR==="insights"){
     const sp=s.spend||{by_role:{}};const tok=(sp.input_tokens||0)+(sp.output_tokens||0);
     // These KPIs are the real measured totals — no counterfactual. The old
