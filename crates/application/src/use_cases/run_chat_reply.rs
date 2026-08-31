@@ -1312,7 +1312,11 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                 Some(ch) if body.chars().count() > 500 => {
                     state.post_comment(author, body, None);
                     let head: String = body.chars().take(180).collect();
-                    let ptr = format!("{head}… — chi tiết đầy đủ bên tab Scrum 📋");
+                    let ptr = if self.lang.is_vi() {
+                        format!("{head}… — chi tiết đầy đủ bên tab Scrum 📋")
+                    } else {
+                        format!("{head}… — full details in the Scrum tab 📋")
+                    };
                     state.post_chat_in(author, &ptr, ch, Vec::new());
                 }
                 Some(ch) => state.post_chat_in(author, body, ch, Vec::new()),
