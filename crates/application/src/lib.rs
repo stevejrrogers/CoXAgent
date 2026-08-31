@@ -15,6 +15,7 @@ pub mod deps_scan;
 pub mod engine_provenance;
 pub mod error;
 pub mod faults;
+pub mod fleet;
 pub mod forensics;
 pub mod metrics;
 pub mod metrics_brakes;
