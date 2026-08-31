@@ -186,6 +186,7 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/metrics/summary", &["get"]),
     route("/api/projects/:pid/metrics/trends", &["get"]),
     route("/api/projects/:pid/milestones/projection", &["get"]),
+    route("/api/projects/:pid/milestone-complete/:name", &["post"]),
     route("/api/projects/:pid/operators/:operator/:action", &["post"]),
     route("/api/projects/:pid/pr/:number/human", &["post"]),
     route("/api/projects/:pid/preflight", &["get"]),

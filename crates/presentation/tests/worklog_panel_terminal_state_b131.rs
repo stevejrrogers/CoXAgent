@@ -12,7 +12,6 @@
 //! The same no-harness discipline as `signin_icon_font_b112.rs`: these tests
 //! pin the bytes the hub actually serves and the JS wiring that normalises
 //! the panel — no server, no port, no invented types.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 /// The dashboard shell the router serves verbatim.
 const INDEX_HTML: &str = include_str!("../src/web/index.html");
@@ -29,11 +28,11 @@ fn panel_bytes() -> &'static str {
     let after = INDEX_HTML
         .split("id=\"agent-transcript\"")
         .nth(1)
-        .expect("index.html must contain the #agent-transcript Work log panel");
+        .unwrap_or_else(|| panic!("index.html must contain the #agent-transcript Work log panel"));
     after
         .split("<div class=\"ov\"")
         .next()
-        .expect("the Work log panel modal is followed by another overlay")
+        .unwrap_or_else(|| panic!("the Work log panel modal is followed by another overlay"))
 }
 
 /// AC1: the panel must ship in a terminal state — never the indefinite
@@ -72,9 +71,9 @@ fn activity_render_path_paints_the_worklog_terminal_state() {
 /// re-render would wipe a live log back to the empty state.
 #[test]
 fn paint_agent_log_idle_is_guarded_against_a_live_drawer() {
-    let idx = SHELL_JS.find("function paintAgentLogIdle()").expect(
-        "shell.js must define paintAgentLogIdle() next to the other terminal-state painters",
-    );
+    let idx = SHELL_JS.find("function paintAgentLogIdle()").unwrap_or_else(|| {
+        panic!("shell.js must define paintAgentLogIdle() next to the other terminal-state painters")
+    });
     let body = &SHELL_JS[idx..];
     assert!(
         body.contains("AGENT_LOG_ROLE||AGENT_LOG_ES||AGENT_LOG_BUF.trim()"),

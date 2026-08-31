@@ -305,13 +305,27 @@ function milestonesHtml(s){
     const col=reached?"var(--green)":(active?"var(--accent2)":"var(--muted)");
     const icon=reached?"circle-check-filled":(active?"target":"flag");
     const tag=reached?'<span class="pbadge" style="background:color-mix(in srgb,var(--green) 18%,transparent);color:var(--green)">reached</span>':(active?'<span class="pbadge on">in progress</span>':'<span class="pbadge off">planned</span>');
+    // "reached" is derived from the version; goal_complete is the human/PO
+    // call the release pipeline actually waits on. Offer the one click here
+    // instead of leaving the PO daily to flag the same drift forever.
+    const doneBtn=(reached&&!m.goal_complete)?` <button class="gc-btn" style="font-size:11px;padding:2px 8px" data-m="${escAttr(m.name)}" onclick="milestoneComplete(this.dataset.m)"><i class="ti ti-check"></i> Mark complete</button>`:(m.goal_complete?' <span class="pbadge" style="color:var(--green)">✓ complete</span>':'');
     return `<div class="msrow">
       ${i<ms.length-1?'<div class="msline-c"></div>':''}
       <div class="msdot" style="color:${col};border-color:${col}"><i class="ti ti-${icon}"></i></div>
-      <div class="msmeta"><div class="msname">${esc(m.name)} <span class="msver">v${esc(m.target_version)}</span> ${tag}</div>
+      <div class="msmeta"><div class="msname">${esc(m.name)} <span class="msver">v${esc(m.target_version)}</span> ${tag}${doneBtn}</div>
         <div class="msgoal">${esc(m.goal)}</div></div></div>`;}).join("");
   return `<div class="sec" style="margin-top:4px">Milestones <span style="font-size:11px;color:var(--dim);font-weight:400">· shippable targets — each spans several sprints (${sprintsRun} run so far)</span></div>
     <div class="panel msline">${rows}</div>`;
+}
+
+// One click on a reached-but-unconfirmed milestone: the explicit completion
+// the release pipeline waits for.
+async function milestoneComplete(name){
+  try{
+    const r=await fetch(api("/milestone-complete/"+encodeURIComponent(name)),{method:"POST"});
+    if(!r.ok){toast("Could not mark complete: "+(await r.text()));return;}
+    toast("Milestone '"+name+"' marked complete");
+  }catch(e){toast("Could not mark complete");}
 }
 function designSystemHtml(ds){
   if(!ds)return "";
@@ -340,11 +354,14 @@ function renderRoadmap(){
   const s=STATE,ts=s.tickets||[],hist=s.history||[];
   const el=document.getElementById("roadmap-body");if(!el)return;
   if(!ts.length){el.innerHTML='<div class="panel"><div class="empty">No tickets yet — the roadmap builds itself as work lands.</div></div>';return;}
-  const isDone=t=>t.status==="done"||t.status==="documented";
+  // Every status maps to exactly one bucket: fixed/verified/on_hold used to
+  // match NOTHING, so those tickets vanished from the roadmap entirely and
+  // the header math contradicted the columns ("0 of 5" over 3 visible cards).
+  const isDone=t=>t.status==="done"||t.status==="documented"||t.status==="verified";
   const shipped=ts.filter(isDone);
-  const inflight=ts.filter(t=>t.status==="in_progress"||t.status==="ready"||(t.type==="bug"&&t.status==="open"));
+  const inflight=ts.filter(t=>t.status==="in_progress"||t.status==="ready"||t.status==="fixed"||(t.type==="bug"&&t.status==="open"));
   const next=ts.filter(t=>t.status==="pending"&&(t.design&&t.design.technical));
-  const later=ts.filter(t=>t.status==="pending"&&!(t.design&&t.design.technical));
+  const later=ts.filter(t=>(t.status==="pending"&&!(t.design&&t.design.technical))||t.status==="on_hold");
   const total=ts.length,donePct=Math.round(shipped.length/total*100);
   const rank={high:0,medium:1,low:2};
   const sort=a=>a.slice().sort((x,y)=>(rank[x.priority]??3)-(rank[y.priority]??3));
