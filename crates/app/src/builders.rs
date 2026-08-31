@@ -92,8 +92,18 @@ pub(crate) async fn make_store(
 /// `<base>/coordination.json` into the environment, unless already set. Lets the
 /// Finder-launched app join the distributed backend without env plumbing.
 pub fn load_coordination(base: &Path) {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    load_coordination_in(&cwd, base);
+    load_coordination_in(base, &std::env::current_dir().unwrap_or_default());
+}
+
+/// Is this working directory an agent slot checkout? Pure — the rule is the
+/// same everywhere, only the caller decides which cwd applies (the process
+/// cwd in production, an explicit path in tests).
+fn in_agent_worktree(cwd: &Path) -> bool {
+    cwd.components().any(|c| {
+        c.as_os_str()
+            .to_string_lossy()
+            .starts_with(".coxagent-worktrees")
+    })
 }
 
 /// The decision behind [`load_coordination`] as a pure function of the inputs
@@ -101,7 +111,7 @@ pub fn load_coordination(base: &Path) {
 /// config base dir. Split out so the suite can exercise the load path from
 /// any cwd — the test binary itself runs inside `.coxagent-worktrees`, where
 /// the real guard must (and does) bail.
-fn load_coordination_in(cwd: &Path, base: &Path) {
+fn load_coordination_in(base: &Path, cwd: &Path) {
     if std::env::var("COXAGENT_DB_DSN").is_ok_and(|v| !v.is_empty()) {
         return; // an explicit env always wins
     }
@@ -111,11 +121,7 @@ fn load_coordination_in(cwd: &Path, base: &Path) {
     // test-* project rows straight into the production Postgres. Same
     // heuristic as the scaffold guard: inside .coxagent-worktrees, stay on
     // the local JSON store.
-    if cwd.components().any(|c| {
-        c.as_os_str()
-            .to_string_lossy()
-            .starts_with(".coxagent-worktrees")
-    }) {
+    if in_agent_worktree(cwd) {
         tracing::info!("agent worktree detected — skipping shared coordination backend");
         return;
     }
@@ -1107,7 +1113,7 @@ pub(crate) fn port_holder(port: u16) -> Option<String> {
 
 #[cfg(test)]
 mod builders_tests {
-    use super::provision_local_token;
+    use super::{in_agent_worktree, load_coordination_in, provision_local_token};
     use std::path::{Path, PathBuf};
 
     /// These tests read/write process-global env vars; serialize them so they
@@ -1222,12 +1228,12 @@ mod builders_tests {
         .unwrap();
 
         // Case A — fresh environment: all five keys land on their env vars,
-        // including the new remote-store pair. Called through the pure core
-        // with a non-worktree cwd: this suite runs inside
-        // `.coxagent-worktrees`, where the real `load_coordination` must bail
-        // (the fa33aa58 security guard) — only the injected-cwd core can
-        // exercise the load path from here.
-        super::load_coordination_in(Path::new("/opt/agent-free-host"), &base);
+        // including the new remote-store pair. The file→env mapping under
+        // test is independent of the process cwd, so pin it to a neutral one:
+        // load_coordination's worktree guard keys off the LIVE cwd, and agent
+        // slots run the suite from inside .coxagent-worktrees — where the
+        // guard (correctly, for real boots) skips the file entirely.
+        load_coordination_in(&base, Path::new("/"));
         for (_, env_key, expected) in &cases {
             assert_eq!(
                 std::env::var(env_key).ok(),
@@ -1242,7 +1248,7 @@ mod builders_tests {
             std::env::remove_var(env_key);
         }
         std::env::set_var("COXAGENT_REMOTE_STORE_URL", "http://already-set");
-        super::load_coordination_in(Path::new("/opt/agent-free-host"), &base);
+        load_coordination_in(&base, Path::new("/"));
         assert_eq!(
             std::env::var("COXAGENT_REMOTE_STORE_URL").unwrap(),
             "http://already-set",
@@ -1266,9 +1272,9 @@ mod builders_tests {
         for (_, env_key, _) in &cases {
             std::env::remove_var(env_key);
         }
-        super::load_coordination_in(
-            Path::new("/Users/x/.coxagent-worktrees/cxa-slot-9"),
+        load_coordination_in(
             &base,
+            Path::new("/Users/x/.coxagent-worktrees/cxa-slot-9"),
         );
         for (_, env_key, _) in &cases {
             assert_eq!(
@@ -1282,5 +1288,21 @@ mod builders_tests {
         for (_, env_key, _) in &cases {
             std::env::remove_var(env_key);
         }
+    }
+
+    /// fa33aa58's sandbox rule, pinned: a cwd inside a `.coxagent-worktrees`
+    /// slot must never reach the shared coordination backend. Without this
+    /// pin the rule was only exercised incidentally — and the five-key test
+    /// above broke the moment the suite ran FROM such a slot.
+    #[test]
+    fn agent_worktree_cwd_is_refused_the_shared_coordination_backend() {
+        assert!(in_agent_worktree(Path::new(
+            "/Users/dev/CoXAgent/cxa/.coxagent-worktrees/cxa-slot-1"
+        )));
+        assert!(in_agent_worktree(Path::new(".coxagent-worktrees/slot-2")));
+        // A normal checkout, the hub's own tree, or a tempdir never trips it.
+        assert!(!in_agent_worktree(Path::new("/")));
+        assert!(!in_agent_worktree(Path::new("/Users/dev/CoXAgent/cxa")));
+        assert!(!in_agent_worktree(Path::new("/var/folders/8c/x/T/test-dir")));
     }
 }
