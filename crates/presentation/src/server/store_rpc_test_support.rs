@@ -255,6 +255,11 @@ impl StateStorePort for CountingStore {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(true)
     }
+
+    async fn delete(&self) -> Result<(), PortError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 /// Never invoked by the store RPC path under test.
@@ -450,5 +455,8 @@ pub(super) fn all_ops() -> Vec<(&'static str, serde_json::Value)> {
             "acquire_operator",
             serde_json::json!({ "worker": "operator", "now": "instance-1" }),
         ),
+        // CXA-B130: the REST counterpart of deregistering a project. No args;
+        // the RBAC gate must treat it like every other state write.
+        ("delete", serde_json::json!({})),
     ]
 }

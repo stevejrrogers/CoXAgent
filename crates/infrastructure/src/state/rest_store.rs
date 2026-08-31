@@ -314,6 +314,15 @@ impl StateStorePort for RestStateStore {
         body.now = Some(instance.to_owned());
         self.won("acquire_operator", body).await
     }
+
+    /// Ask the gateway to purge this project's persisted footprint. The
+    /// control plane decides what "everything" means for its backend; a
+    /// silent no-op here would resurrect the deleted project's state on the
+    /// hub that owns the row (CXA-B130), so failures propagate.
+    async fn delete(&self) -> Result<(), PortError> {
+        self.post("delete", Body::new()).await?;
+        Ok(())
+    }
 }
 
 impl RestStateStore {

@@ -1602,6 +1602,17 @@ function showAgentLogError(on){
     body.innerHTML='<div class="wl-empty"><i class="ti ti-wifi-off"></i> live log connection lost — retrying</div>';
   }
 }
+// CXA-B131: the Work log panel lives in the page DOM on every view, but only
+// openAgent() ever painted a terminal state into it — a visit to Transcripts
+// & alerts left the panel on its bare 'loading…' placeholder forever, with no
+// stream engaged and no error to show. Normalise it to the honest empty state.
+// Guards keep this from fighting the drawer: an open drawer (AGENT_LOG_ROLE
+// set, stream or retry in flight) or buffered history is left exactly as-is.
+function paintAgentLogIdle(){
+  const body=document.getElementById("agent-transcript");
+  if(!body||AGENT_LOG_ROLE||AGENT_LOG_ES||AGENT_LOG_BUF.trim())return;
+  body.innerHTML='<div class="wl-empty"><i class="ti ti-moon-stars"></i> this agent hasn\'t run yet</div>';
+}
 function renderAgentLog(force){
   const body=document.getElementById("agent-transcript");
   const badge=document.getElementById("agent-live-badge");

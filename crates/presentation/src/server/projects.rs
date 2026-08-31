@@ -204,8 +204,11 @@ pub(super) async fn rename_project_ep(
     Json(serde_json::json!({ "ok": true, "name": name })).into_response()
 }
 
-/// Delete (deregister) a project: stop its runner, remove it from the hub, and
-/// deregister it from the registry. The workspace files are left on disk.
+/// Delete (deregister) a project: stop its runner, purge its persisted state
+/// from the store (shared Postgres row + coordination rows, CXA-B130), remove
+/// it from the hub and the registry, and remove the workspace scaffolding from
+/// disk. Every step that could resurrect the project under a recreated id is
+/// fatal (500); a 200 therefore means the stored state is really gone.
 pub(super) async fn delete_project_ep(
     State(app): State<AppState>,
     Path(pid): Path<String>,
@@ -242,6 +245,16 @@ pub(super) async fn delete_project_ep(
         drop(sp);
         app.spaces.save().await;
     }
+    // Purge the project's persisted footprint BEFORE the registry removal:
+    // this is the row that resurrected deleted projects (recreating a name
+    // whose derived id collided adopted the stale tickets/spend and hit the
+    // onboarding "already has tickets" refusal, CXA-B126). A failed purge
+    // must NOT answer 200 — the project stays in the registry file, so a
+    // restart (or a retry once the store recovers) re-registers it intact
+    // and the delete can be attempted again.
+    if let Err(e) = p.store.delete().await {
+        return internal_error(&e.to_string());
+    }
     if let Some(remover) = &app.remover {
         if let Err(e) = remover(pid.clone()).await {
             return internal_error(&e);
@@ -249,17 +262,20 @@ pub(super) async fn delete_project_ep(
     }
     // Clean up the project directory on disk. For imported projects this only
     // removes the CoXAgent workspace scaffolding (state/, coxagent.json, etc.)
-    // — never the original imported codebase.
+    // — never the original imported codebase. Awaited (not fire-and-forget) so
+    // a 200 means the scaffolding is actually gone: a surviving directory
+    // keeps the derived id occupied and forces `-2` suffixed recreations.
     if let Some(root) = p.config_path.parent() {
         let project_dir = root.to_path_buf();
         let codebase_linked = project_dir.join("codebase.lnk").exists();
-        // Spawn cleanup in the background — errors are logged, never surfaced.
-        tokio::spawn(async move {
+        let fs_result = tokio::task::spawn_blocking(move || {
             if codebase_linked {
                 // Imported project: only delete CoXAgent scaffolding, not the code.
                 let _ = std::fs::remove_file(project_dir.join("codebase.lnk"));
                 if let Err(e) = std::fs::remove_dir_all(project_dir.join("state")) {
-                    tracing::warn!("delete_project: cannot remove state dir: {e}");
+                    if project_dir.join("state").exists() {
+                        return Err(format!("state dir: {e}"));
+                    }
                 }
                 let _ = std::fs::remove_file(project_dir.join("coxagent.json"));
                 if let Ok(entries) = std::fs::read_dir(&project_dir) {
@@ -270,10 +286,30 @@ pub(super) async fn delete_project_ep(
             } else {
                 // Greenfield: remove the entire project workspace.
                 if let Err(e) = std::fs::remove_dir_all(&project_dir) {
-                    tracing::warn!("delete_project: cannot remove project dir: {e}");
+                    if project_dir.exists() {
+                        return Err(format!("project dir: {e}"));
+                    }
                 }
             }
-            // Also clean up the Docker compose project if it was deployed.
+            Ok(())
+        })
+        .await;
+        match fs_result {
+            Ok(Ok(())) => {}
+            Ok(Err(what)) => {
+                // The dangerous footprint (the stored state + its mirror) is
+                // already purged above; a leftover directory is cosmetically
+                // annoying, never a resurrection. Say so loudly anyway.
+                tracing::warn!("delete_project {pid}: workspace cleanup failed ({what})");
+            }
+            Err(e) => {
+                tracing::warn!("delete_project {pid}: workspace cleanup task failed: {e}");
+            }
+        }
+        // Also stop + remove the project's Docker compose app, if it was
+        // deployed. Detached and best-effort: `docker stop` waits out a grace
+        // period we must not spend inside the HTTP request.
+        tokio::spawn(async move {
             let container_name = format!("cox-{pid}-codebase-app-1");
             if let Ok(out) = std::process::Command::new("docker")
                 .args(["stop", &container_name])

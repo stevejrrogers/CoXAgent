@@ -82,6 +82,15 @@ pub struct SqlStateStore {
     /// (CXA-F229). Memory-only: Postgres gains no table for it, so a hub
     /// restart drops the trail and every refusal is also logged.
     quarantine: Arc<QuarantineLedger>,
+    /// Set by [`StateStorePort::delete`]: the project was deregistered and its
+    /// rows purged. A runner cycle in flight at delete time checks `STOPPED`
+    /// only at the cycle boundary (runner.rs), so one of its phase-end saves
+    /// can land minutes after the purge — without this flag it would silently
+    /// re-INSERT the deleted row and resurrect the old team under a recreated
+    /// id. A recreated project builds a FRESH store (new connect), so the flag
+    /// never blocks legitimate new work. Narrows the late-write window to a
+    /// simultaneous-writer race; fully closing it needs a DB-level tombstone.
+    deleted: std::sync::atomic::AtomicBool,
 }
 
 impl SqlStateStore {
@@ -103,6 +112,7 @@ impl SqlStateStore {
             redis: None,
             local_mirror: None,
             quarantine: Arc::new(QuarantineLedger::memory_only()),
+            deleted: std::sync::atomic::AtomicBool::new(false),
         };
         store.migrate().await?;
         Ok(store)
@@ -231,6 +241,11 @@ impl StateStorePort for SqlStateStore {
         worker: &str,
         now: &str,
     ) -> Result<bool, PortError> {
+        // A deleted project's store refuses all state writes (see `deleted`).
+        // `false` = "you did not win" — the honest answer for a late claim.
+        if self.deleted.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(false);
+        }
         // Serialize claims cluster-wide with a row lock: the whole
         // read-check-set-write runs in one transaction, so two machines racing
         // on the same backlog can never both win the ticket.
@@ -448,6 +463,70 @@ impl StateStorePort for SqlStateStore {
     async fn quarantined(&self) -> Vec<QuarantineEntry> {
         self.quarantine.recent()
     }
+
+    /// Purge this project's row in `project_state` AND every `project_coord`
+    /// row scoped to the same id (CXA-B130): one transaction, so a shared
+    /// store never keeps a half-purged project. The row was the resurrection
+    /// bug — recreating a project under a deleted id adopted the stale
+    /// aggregate deterministically (CXA-B126's "workspace already has
+    /// tickets" 500). Coordination rows go too: the operator's desired-run
+    /// state is persistent and would auto-resume the deleted project's
+    /// runner under the reused id.
+    async fn delete(&self) -> Result<(), PortError> {
+        // Arm the write refusal BEFORE purging, so a save already in flight
+        // when the rows go finds the flag (see `deleted` for the race this
+        // narrows).
+        self.deleted
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut client = self.client().await?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|e| PortError::Backend(format!("begin: {e}")))?;
+        let state_rows = tx
+            .execute(
+                "DELETE FROM project_state WHERE project_id = $1",
+                &[&self.project_id],
+            )
+            .await
+            .map_err(|e| PortError::Backend(format!("delete state: {e}")))?;
+        tx.execute(
+            "DELETE FROM project_coord WHERE project_id = $1",
+            &[&self.project_id],
+        )
+        .await
+        .map_err(|e| PortError::Backend(format!("delete coord: {e}")))?;
+        tx.commit()
+            .await
+            .map_err(|e| PortError::Backend(format!("commit: {e}")))?;
+        // The ephemeral Redis keys (leases, presence) are TTL'd, but the
+        // desired-run state is persistent — sweep the project's whole
+        // keyspace. Best-effort: a Redis outage must not make the hub re-report
+        // an already-purged project as undeleteable.
+        if let Some(r) = &self.redis {
+            if let Err(e) = r.forget_project().await {
+                tracing::warn!(
+                    "[{}] redis keyspace cleanup failed (leases expire on their own): {e}",
+                    self.project_id
+                );
+            }
+        }
+        // Drop the local JSON mirror too, or the seed logic in `make_store`
+        // would re-import it into the recreated project's empty Postgres row.
+        if let Some(mirror) = &self.local_mirror {
+            if let Err(e) = mirror.delete().await {
+                tracing::warn!(
+                    "[{}] local JSON mirror cleanup failed (best-effort backup): {e}",
+                    self.project_id
+                );
+            }
+        }
+        tracing::info!(
+            "[{}] deleted persisted state ({state_rows} state row(s) purged)",
+            self.project_id
+        );
+        Ok(())
+    }
 }
 
 impl SqlStateStore {
@@ -493,6 +572,15 @@ impl SqlStateStore {
         mut state: ProjectState,
         expected_revision: Option<i64>,
     ) -> Result<(), PortError> {
+        // A deleted project's store refuses all state writes (see `deleted`) —
+        // an explicit error, never a silent "saved", so the stopping runner's
+        // cycle reports the refusal instead of believing it persisted.
+        if self.deleted.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(PortError::Backend(format!(
+                "[{}] write refused: project was deleted",
+                self.project_id
+            )));
+        }
         // The pre-existing schema-level validation is untouched; the
         // structural-integrity audit (CXA-F229) is the additional gate. The
         // ledger is memory-only here, so every refusal is also logged.
