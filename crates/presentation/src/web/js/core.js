@@ -305,13 +305,27 @@ function milestonesHtml(s){
     const col=reached?"var(--green)":(active?"var(--accent2)":"var(--muted)");
     const icon=reached?"circle-check-filled":(active?"target":"flag");
     const tag=reached?'<span class="pbadge" style="background:color-mix(in srgb,var(--green) 18%,transparent);color:var(--green)">reached</span>':(active?'<span class="pbadge on">in progress</span>':'<span class="pbadge off">planned</span>');
+    // "reached" is derived from the version; goal_complete is the human/PO
+    // call the release pipeline actually waits on. Offer the one click here
+    // instead of leaving the PO daily to flag the same drift forever.
+    const doneBtn=(reached&&!m.goal_complete)?` <button class="gc-btn" style="font-size:11px;padding:2px 8px" data-m="${escAttr(m.name)}" onclick="milestoneComplete(this.dataset.m)"><i class="ti ti-check"></i> Mark complete</button>`:(m.goal_complete?' <span class="pbadge" style="color:var(--green)">✓ complete</span>':'');
     return `<div class="msrow">
       ${i<ms.length-1?'<div class="msline-c"></div>':''}
       <div class="msdot" style="color:${col};border-color:${col}"><i class="ti ti-${icon}"></i></div>
-      <div class="msmeta"><div class="msname">${esc(m.name)} <span class="msver">v${esc(m.target_version)}</span> ${tag}</div>
+      <div class="msmeta"><div class="msname">${esc(m.name)} <span class="msver">v${esc(m.target_version)}</span> ${tag}${doneBtn}</div>
         <div class="msgoal">${esc(m.goal)}</div></div></div>`;}).join("");
   return `<div class="sec" style="margin-top:4px">Milestones <span style="font-size:11px;color:var(--dim);font-weight:400">· shippable targets — each spans several sprints (${sprintsRun} run so far)</span></div>
     <div class="panel msline">${rows}</div>`;
+}
+
+// One click on a reached-but-unconfirmed milestone: the explicit completion
+// the release pipeline waits for.
+async function milestoneComplete(name){
+  try{
+    const r=await fetch(api("/milestone-complete/"+encodeURIComponent(name)),{method:"POST"});
+    if(!r.ok){toast("Could not mark complete: "+(await r.text()));return;}
+    toast("Milestone '"+name+"' marked complete");
+  }catch(e){toast("Could not mark complete");}
 }
 function designSystemHtml(ds){
   if(!ds)return "";

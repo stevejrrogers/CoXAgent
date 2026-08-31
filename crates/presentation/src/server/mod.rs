@@ -802,6 +802,10 @@ pub async fn serve_full(
             get(milestones_projection_ep),
         )
         .route(
+            "/api/projects/:pid/milestone-complete/:name",
+            post(milestone_complete_ep),
+        )
+        .route(
             "/api/projects/:pid/metrics/summary",
             get(metrics_summary_ep),
         )
