@@ -145,7 +145,12 @@ impl GroupedSearch {
 /// membership (AC2), then per-row channel visibility for chat (AC2's thread
 /// half). A viewer with no access gets the empty result — never an error.
 #[must_use]
-pub fn global_search(state: &ProjectState, pid: &str, query: &str, viewer: &AuthUser) -> GroupedSearch {
+pub fn global_search(
+    state: &ProjectState,
+    pid: &str,
+    query: &str,
+    viewer: &AuthUser,
+) -> GroupedSearch {
     group_rows(project_rows(state, pid, query, viewer))
 }
 
@@ -222,11 +227,14 @@ fn ticket_rows(state: &ProjectState, q: &SearchQuery) -> Vec<Row> {
         .iter()
         .filter_map(|t| {
             let id = t.id().to_string();
-            let score = best_score(&[
-                (t.title(), W_LABEL),
-                (id.as_str(), W_ID),
-                (t.description(), W_BODY),
-            ], &q.needle)?;
+            let score = best_score(
+                &[
+                    (t.title(), W_LABEL),
+                    (id.as_str(), W_ID),
+                    (t.description(), W_BODY),
+                ],
+                &q.needle,
+            )?;
             let hit = SearchHit {
                 kind: SearchKind::Ticket,
                 id,
@@ -237,7 +245,11 @@ fn ticket_rows(state: &ProjectState, q: &SearchQuery) -> Vec<Row> {
                 at: t.created_at().unwrap_or_default().to_owned(),
                 link: SearchKind::Ticket.link(),
             };
-            Some(Row { hit, score, at: t.created_at().unwrap_or_default().to_owned() })
+            Some(Row {
+                hit,
+                score,
+                at: t.created_at().unwrap_or_default().to_owned(),
+            })
         })
         .collect()
 }
@@ -252,7 +264,11 @@ fn page_rows(state: &ProjectState, q: &SearchQuery) -> Vec<Row> {
                 return None;
             }
             let score = best_score(
-                &[(d.title.as_str(), W_LABEL), (d.id.as_str(), W_ID), (d.body.as_str(), W_BODY)],
+                &[
+                    (d.title.as_str(), W_LABEL),
+                    (d.id.as_str(), W_ID),
+                    (d.body.as_str(), W_BODY),
+                ],
                 &q.needle,
             )?;
             let sub = if d.folder.trim().is_empty() {
@@ -270,7 +286,11 @@ fn page_rows(state: &ProjectState, q: &SearchQuery) -> Vec<Row> {
                 at: d.updated_at.clone(),
                 link: SearchKind::Page.link(),
             };
-            Some(Row { hit, score, at: d.updated_at.clone() })
+            Some(Row {
+                hit,
+                score,
+                at: d.updated_at.clone(),
+            })
         })
         .collect()
 }
@@ -303,7 +323,11 @@ fn comment_rows(state: &ProjectState, q: &SearchQuery) -> Vec<Row> {
                 at: c.at.clone(),
                 link: SearchKind::Comment.link(),
             };
-            Some(Row { hit, score, at: c.at.clone() })
+            Some(Row {
+                hit,
+                score,
+                at: c.at.clone(),
+            })
         })
         .collect()
 }
@@ -324,8 +348,10 @@ fn message_rows(state: &ProjectState, viewer: &AuthUser, q: &SearchQuery) -> Vec
                 .is_some_and(|c| c.can_view(&viewer.username))
         })
         .filter_map(|m| {
-            let score =
-                best_score(&[(m.body.as_str(), W_LABEL), (m.user.as_str(), W_ID)], &q.needle)?;
+            let score = best_score(
+                &[(m.body.as_str(), W_LABEL), (m.user.as_str(), W_ID)],
+                &q.needle,
+            )?;
             let hit = SearchHit {
                 kind: SearchKind::Message,
                 id: m.id.clone(),
@@ -336,7 +362,11 @@ fn message_rows(state: &ProjectState, viewer: &AuthUser, q: &SearchQuery) -> Vec
                 at: m.at.clone(),
                 link: SearchKind::Message.link(),
             };
-            Some(Row { hit, score, at: m.at.clone() })
+            Some(Row {
+                hit,
+                score,
+                at: m.at.clone(),
+            })
         })
         .collect()
 }
@@ -357,7 +387,11 @@ impl SearchQuery {
             return None;
         }
         Some(Self {
-            needle: trimmed.chars().take(MAX_QUERY_LEN).collect::<String>().to_lowercase(),
+            needle: trimmed
+                .chars()
+                .take(MAX_QUERY_LEN)
+                .collect::<String>()
+                .to_lowercase(),
         })
     }
 }
@@ -428,7 +462,12 @@ fn group_rows(rows: Vec<Row>) -> GroupedSearch {
     });
     capped.truncate(MAX_TOTAL);
     let mut groups = Vec::new();
-    for kind in [SearchKind::Ticket, SearchKind::Page, SearchKind::Comment, SearchKind::Message] {
+    for kind in [
+        SearchKind::Ticket,
+        SearchKind::Page,
+        SearchKind::Comment,
+        SearchKind::Message,
+    ] {
         let hits: Vec<SearchHit> = capped
             .iter()
             .filter(|r| r.hit.kind == kind)
@@ -438,7 +477,11 @@ fn group_rows(rows: Vec<Row>) -> GroupedSearch {
             continue;
         }
         let has_more = more_by_kind.iter().any(|(k, more)| *k == kind && *more);
-        groups.push(SearchGroup { kind, hits, has_more });
+        groups.push(SearchGroup {
+            kind,
+            hits,
+            has_more,
+        });
     }
     GroupedSearch { groups }
 }
@@ -467,7 +510,11 @@ fn snippet(body: &str, needle: &str) -> String {
     let lead = match_char.saturating_sub(SNIPPET_WINDOW.saturating_sub(needle_chars) / 2);
     let window: String = flat.chars().skip(lead).take(SNIPPET_WINDOW).collect();
     let prefix = if lead > 0 { "…" } else { "" };
-    let suffix = if lead + window.chars().count() < flat.chars().count() { "…" } else { "" };
+    let suffix = if lead + window.chars().count() < flat.chars().count() {
+        "…"
+    } else {
+        ""
+    };
     format!("{prefix}{window}{suffix}")
 }
 
@@ -496,7 +543,9 @@ fn status_label(status: coxagent_domain::Status) -> String {
 mod tests {
     use super::*;
     use crate::state::{ChatMsg, DocPage};
-    use coxagent_domain::{Complexity, Priority, Role, Status, TechnicalDesign, Ticket, TicketId, TicketType};
+    use coxagent_domain::{
+        Complexity, Priority, Role, Status, TechnicalDesign, Ticket, TicketId, TicketType,
+    };
 
     // Fixtures over the REAL constructors — no fabricated shapes (the same
     // discipline as global_search_f275_tdd.rs, which drives the domain's
@@ -516,16 +565,25 @@ mod tests {
     }
 
     fn done_feature(id: &str, title: &str) -> Ticket {
-        let mut t = feature(id, title, "the payment provider drops the connection mid-retry");
+        let mut t = feature(
+            id,
+            title,
+            "the payment provider drops the connection mid-retry",
+        );
         t.set_technical_design(
             Role::Sa,
-            TechnicalDesign { approach: "exponential backoff on the retry loop".to_owned(), ..TechnicalDesign::default() },
+            TechnicalDesign {
+                approach: "exponential backoff on the retry loop".to_owned(),
+                ..TechnicalDesign::default()
+            },
         )
         .expect("SA owns the design");
-        t.transition_to(Role::Sa, Status::Ready).expect("designed feature readies");
+        t.transition_to(Role::Sa, Status::Ready)
+            .expect("designed feature readies");
         t.claim(Role::DevFeature, "finn@mac", "2026-08-30T09:00:00Z")
             .expect("claim is a legal edge");
-        t.transition_to(Role::DevFeature, Status::Done).expect("DEV completes the work");
+        t.transition_to(Role::DevFeature, Status::Done)
+            .expect("DEV completes the work");
         t
     }
 
@@ -540,15 +598,23 @@ mod tests {
             false,
         )
         .expect("valid ticket");
-        t.transition_to(Role::DevBug, Status::InProgress).expect("bug claim is a legal edge");
-        t.transition_to(Role::DevBug, Status::Fixed).expect("DEV completes the fix");
-        t.transition_to(Role::Test, Status::Verified).expect("TEST renders the verify verdict");
+        t.transition_to(Role::DevBug, Status::InProgress)
+            .expect("bug claim is a legal edge");
+        t.transition_to(Role::DevBug, Status::Fixed)
+            .expect("DEV completes the fix");
+        t.transition_to(Role::Test, Status::Verified)
+            .expect("TEST renders the verify verdict");
         t
     }
 
     fn rejected_feature(id: &str, title: &str) -> Ticket {
-        let mut t = feature(id, title, "duplicate of the payment retry work already shipped");
-        t.transition_to(Role::Po, Status::Rejected).expect("PO owns the reject gate");
+        let mut t = feature(
+            id,
+            title,
+            "duplicate of the payment retry work already shipped",
+        );
+        t.transition_to(Role::Po, Status::Rejected)
+            .expect("PO owns the reject gate");
         t
     }
 
@@ -602,16 +668,29 @@ mod tests {
 
     fn searchable_state() -> ProjectState {
         let mut s = ProjectState::default();
-        s.tickets.push(done_feature("CXC-F275-live", "Fix payment webhook retries"));
+        s.tickets
+            .push(done_feature("CXC-F275-live", "Fix payment webhook retries"));
         s.docs.push(wiki_page(
             "doc-payments",
             "Payment webhook integration guide",
             "…configure retry with exponential backoff for failed payment hooks…",
         ));
-        s.create_channel("Payments", "maya").expect("maya creates the room");
-        s.invite_to_channel("payments", "maya", "bob").expect("maya invites bob");
-        s.chat.push(chat_message("msg-1", "maya", "the payment hook keeps timing out", "payments"));
-        s.chat.push(chat_message("msg-2", "bob", "general chatter about the board", "general"));
+        s.create_channel("Payments", "maya")
+            .expect("maya creates the room");
+        s.invite_to_channel("payments", "maya", "bob")
+            .expect("maya invites bob");
+        s.chat.push(chat_message(
+            "msg-1",
+            "maya",
+            "the payment hook keeps timing out",
+            "payments",
+        ));
+        s.chat.push(chat_message(
+            "msg-2",
+            "bob",
+            "general chatter about the board",
+            "general",
+        ));
         s
     }
 
@@ -629,7 +708,11 @@ mod tests {
     #[test]
     fn title_prefix_beats_body_substring() {
         let mut s = ProjectState::default();
-        s.tickets.push(feature("CXC-F001", "Payment webhook retries", "unrelated body text"));
+        s.tickets.push(feature(
+            "CXC-F001",
+            "Payment webhook retries",
+            "unrelated body text",
+        ));
         s.tickets.push(feature(
             "CXC-F002",
             "Unrelated title entirely",
@@ -645,7 +728,8 @@ mod tests {
     #[test]
     fn id_matches_rank_between_title_and_body() {
         let mut s = ProjectState::default();
-        s.tickets.push(feature("CXC-PAY-1", "Unrelated title", "unrelated body"));
+        s.tickets
+            .push(feature("CXC-PAY-1", "Unrelated title", "unrelated body"));
         let r = global_search(&s, "cxa", "CXC-PAY", &member_viewer());
         assert_eq!(ticket_hits(&r).len(), 1, "the id field is searchable");
     }
@@ -661,7 +745,10 @@ mod tests {
         s.tickets.push(newer);
         let r = global_search(&s, "cxa", "payment webhook", &member_viewer());
         let hits = ticket_hits(&r);
-        assert_eq!(hits[0].id, "CXC-F002", "the more recent ticket wins the tie");
+        assert_eq!(
+            hits[0].id, "CXC-F002",
+            "the more recent ticket wins the tie"
+        );
     }
 
     #[test]
@@ -681,9 +768,18 @@ mod tests {
             .expect("the page matches")
             .hits[0]
             .clone();
-        assert!(page.snippet.starts_with('…'), "the window is elided on the left");
-        assert!(page.snippet.contains("endpoint"), "the match stays inside the window");
-        assert!(page.snippet.chars().count() <= SNIPPET_WINDOW + 2, "the window is bounded");
+        assert!(
+            page.snippet.starts_with('…'),
+            "the window is elided on the left"
+        );
+        assert!(
+            page.snippet.contains("endpoint"),
+            "the match stays inside the window"
+        );
+        assert!(
+            page.snippet.chars().count() <= SNIPPET_WINDOW + 2,
+            "the window is bounded"
+        );
     }
 
     /// Regression: `find` returns a BYTE offset; cutting the window with it on
@@ -722,8 +818,14 @@ mod tests {
         let s = searchable_state();
         for q in ["", "p", "  ", "  p  "] {
             let r = global_search(&s, "cxa", q, &member_viewer());
-            assert!(r.is_empty(), "query {q:?} must return the empty result, not hits");
-            assert!(r.groups.is_empty(), "the empty state is explicit: no groups to render");
+            assert!(
+                r.is_empty(),
+                "query {q:?} must return the empty result, not hits"
+            );
+            assert!(
+                r.groups.is_empty(),
+                "the empty state is explicit: no groups to render"
+            );
         }
     }
 
@@ -731,7 +833,10 @@ mod tests {
     fn zero_matches_yield_the_explicit_empty_state() {
         let s = searchable_state();
         let r = global_search(&s, "cxa", "zzqx", &member_viewer());
-        assert!(r.is_empty(), "no matches — the palette renders its no-results state");
+        assert!(
+            r.is_empty(),
+            "no matches — the palette renders its no-results state"
+        );
     }
 
     #[test]
@@ -758,9 +863,16 @@ mod tests {
             ));
         }
         let r = global_search(&s, "cxa", "payment", &member_viewer());
-        let group = r.groups.iter().find(|g| g.kind == SearchKind::Ticket).expect("tickets match");
+        let group = r
+            .groups
+            .iter()
+            .find(|g| g.kind == SearchKind::Ticket)
+            .expect("tickets match");
         assert_eq!(group.hits.len(), MAX_PER_KIND, "the per-kind cap holds");
-        assert!(group.has_more, "the overflow is reported as the show-more signal");
+        assert!(
+            group.has_more,
+            "the overflow is reported as the show-more signal"
+        );
     }
 
     #[test]
@@ -770,14 +882,28 @@ mod tests {
         // per-kind cap — enough to prove the 30-total cap fires.
         for i in 0..11 {
             let tid = format!("CXC-F{i:03}");
-            s.tickets.push(feature(&tid, &format!("payment ticket {i}"), "b"));
-            s.docs.push(wiki_page(&format!("doc-{i}"), &format!("payment page {i}"), "b"));
+            s.tickets
+                .push(feature(&tid, &format!("payment ticket {i}"), "b"));
+            s.docs.push(wiki_page(
+                &format!("doc-{i}"),
+                &format!("payment page {i}"),
+                "b",
+            ));
             s.post_comment("USER", &format!("payment thread {i}"), Some(tid));
-            s.chat.push(chat_message(&format!("m{i}"), "maya", &format!("payment message {i}"), "general"));
+            s.chat.push(chat_message(
+                &format!("m{i}"),
+                "maya",
+                &format!("payment message {i}"),
+                "general",
+            ));
         }
         let r = global_search(&s, "cxa", "payment", &member_viewer());
         assert_eq!(r.flat().len(), MAX_TOTAL, "the whole response stays capped");
-        assert_eq!(r.groups.len(), 4, "every kind still contributes under the cap");
+        assert_eq!(
+            r.groups.len(),
+            4,
+            "every kind still contributes under the cap"
+        );
     }
 
     // --- row hygiene ---------------------------------------------------------
@@ -788,20 +914,43 @@ mod tests {
         let mut gone = chat_message("m-gone", "maya", "payment secret note", "general");
         gone.deleted = true;
         s.chat.push(gone);
-        s.chat.push(chat_message("m-here", "bob", "payment note that stays", "general"));
+        s.chat.push(chat_message(
+            "m-here",
+            "bob",
+            "payment note that stays",
+            "general",
+        ));
         let r = global_search(&s, "cxa", "payment", &member_viewer());
-        let msgs = &r.groups.iter().find(|g| g.kind == SearchKind::Message).expect("one hit").hits;
+        let msgs = &r
+            .groups
+            .iter()
+            .find(|g| g.kind == SearchKind::Message)
+            .expect("one hit")
+            .hits;
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].id, "m-here", "the soft-deleted message never surfaces");
+        assert_eq!(
+            msgs[0].id, "m-here",
+            "the soft-deleted message never surfaces"
+        );
     }
 
     #[test]
     fn empty_title_pages_are_excluded() {
         let mut s = ProjectState::default();
-        s.docs.push(wiki_page("doc-blank", "   ", "payment body without a title"));
-        s.docs.push(wiki_page("doc-ok", "Payment guide", "payment body"));
+        s.docs.push(wiki_page(
+            "doc-blank",
+            "   ",
+            "payment body without a title",
+        ));
+        s.docs
+            .push(wiki_page("doc-ok", "Payment guide", "payment body"));
         let r = global_search(&s, "cxa", "payment", &member_viewer());
-        let pages = &r.groups.iter().find(|g| g.kind == SearchKind::Page).expect("one hit").hits;
+        let pages = &r
+            .groups
+            .iter()
+            .find(|g| g.kind == SearchKind::Page)
+            .expect("one hit")
+            .hits;
         assert_eq!(pages.len(), 1);
         assert_eq!(pages[0].id, "doc-ok");
     }
@@ -811,15 +960,24 @@ mod tests {
     #[test]
     fn closed_tickets_search_like_any_other_row_without_error() {
         let mut s = ProjectState::default();
-        s.tickets.push(done_feature("CXC-F001", "Fix payment webhook retries"));
-        s.tickets.push(verified_bug("CXC-B001", "Payment webhook timeout"));
-        s.tickets.push(rejected_feature("CXC-F002", "Duplicate payment retry idea"));
+        s.tickets
+            .push(done_feature("CXC-F001", "Fix payment webhook retries"));
+        s.tickets
+            .push(verified_bug("CXC-B001", "Payment webhook timeout"));
+        s.tickets
+            .push(rejected_feature("CXC-F002", "Duplicate payment retry idea"));
         let r = global_search(&s, "cxa", "payment", &member_viewer());
         let hits = ticket_hits(&r);
-        assert_eq!(hits.len(), 3, "closed tickets are the prior art — they surface");
+        assert_eq!(
+            hits.len(),
+            3,
+            "closed tickets are the prior art — they surface"
+        );
         let subs: Vec<&str> = hits.iter().map(|h| h.sub.as_str()).collect();
-        assert!(subs.contains(&"done") && subs.contains(&"verified") && subs.contains(&"rejected"),
-            "each closed ticket carries its terminal status: {subs:?}");
+        assert!(
+            subs.contains(&"done") && subs.contains(&"verified") && subs.contains(&"rejected"),
+            "each closed ticket carries its terminal status: {subs:?}"
+        );
     }
 
     // --- AC2: scoping --------------------------------------------------------
@@ -835,7 +993,10 @@ mod tests {
     fn a_read_only_member_still_sees_results() {
         let s = searchable_state();
         let r = global_search(&s, "cxa", "payment", &member_viewer());
-        assert!(!r.is_empty(), "Viewer is read-only, not blind — membership is the gate");
+        assert!(
+            !r.is_empty(),
+            "Viewer is read-only, not blind — membership is the gate"
+        );
     }
 
     #[test]
@@ -849,7 +1010,10 @@ mod tests {
             projects: Vec::new(),
         };
         let r = global_search(&s, "cxa", "payment", &super_no_membership);
-        assert!(!r.is_empty(), "the documented house bypass holds for search too");
+        assert!(
+            !r.is_empty(),
+            "the documented house bypass holds for search too"
+        );
     }
 
     #[test]
@@ -865,7 +1029,10 @@ mod tests {
             projects: vec!["cxa".to_owned()],
         };
         let r = global_search(&s, "cxa", "timing out", &member_outside_room);
-        assert!(r.is_empty(), "the private room's message is invisible to a non-member");
+        assert!(
+            r.is_empty(),
+            "the private room's message is invisible to a non-member"
+        );
         let r = global_search(&s, "cxa", "timing out", &member_viewer());
         assert_eq!(r.flat().len(), 1, "the owner sees her own room's message");
     }
@@ -875,8 +1042,11 @@ mod tests {
         let s = searchable_state();
         let r = global_search(&s, "cxa", "board", &member_viewer());
         let msgs = r.flat();
-        assert!(msgs.iter().any(|h| h.kind == SearchKind::Message && h.ref_ == "general"),
-            "#general is open: {msgs:?}");
+        assert!(
+            msgs.iter()
+                .any(|h| h.kind == SearchKind::Message && h.ref_ == "general"),
+            "#general is open: {msgs:?}"
+        );
     }
 
     // --- merging several projects (the endpoint's no-pid sweep) --------------
@@ -884,7 +1054,8 @@ mod tests {
     #[test]
     fn many_projects_merge_into_one_capped_ranked_response() {
         let mut a = searchable_state();
-        a.tickets.push(feature("CXC-F900", "Payment across projects", "b"));
+        a.tickets
+            .push(feature("CXC-F900", "Payment across projects", "b"));
         let mut b = searchable_state();
         b.docs.push(wiki_page("doc-b", "Payment runbook", "b"));
         let member_of_both = AuthUser {
@@ -896,9 +1067,14 @@ mod tests {
         };
         let joined = [("cxa", &a), ("other", &b)];
         let r = global_search_many(joined, "payment", &member_of_both);
-        assert!(ticket_hits(&r).iter().any(|h| h.id == "CXC-F900"), "project A's tickets surface");
         assert!(
-            r.flat().iter().any(|h| h.kind == SearchKind::Page && h.id == "doc-b"),
+            ticket_hits(&r).iter().any(|h| h.id == "CXC-F900"),
+            "project A's tickets surface"
+        );
+        assert!(
+            r.flat()
+                .iter()
+                .any(|h| h.kind == SearchKind::Page && h.id == "doc-b"),
             "project B's pages merge into the same response"
         );
     }
