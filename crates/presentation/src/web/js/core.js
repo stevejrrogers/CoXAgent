@@ -655,9 +655,10 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
     renderTeamsOnline();
     renderSessions();
     // Populate whenever the card is VISIBLE — applyRole shows .admin-only for
-    // admins AND open/local mode (no auth). Gating on role==="admin" alone left
-    // the card stuck on "loading…" forever in open mode.
-    if(!ME||!ME.auth||ME.role==="admin")renderTeamPeople();
+    // the hub-admin tier (admin, super, open mode; see isHubAdmin). Gating on
+    // role==="admin" alone stranded this card on "loading…" twice: open mode
+    // once, and the hub owner's "super" role until CXA-B132.
+    if(isHubAdmin())renderTeamPeople();
   }else if(CUR==="board"){
     let feats=(s.tickets||[]).filter(t=>t.type!=="bug"),bugs=(s.tickets||[]).filter(t=>t.type==="bug");
     if(BF!=="all"){feats=feats.filter(t=>t.priority===BF);bugs=bugs.filter(t=>t.priority===BF);}
