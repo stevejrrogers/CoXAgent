@@ -95,7 +95,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             })
             .map(|t| t.id().to_string())
             .collect();
-        let msg = po_daily_message(&lines, &stuck_high, &stale_ids);
+        // Engine health: roles that errored TODAY (old counters are history,
+        // not news — a role whose last error was days ago stays quiet).
+        let engine_lines: Vec<String> = state
+            .role_health
+            .iter()
+            .filter(|(_, h)| h.last_error_at.get(..10) == Some(today.as_str()))
+            .map(|(role, h)| {
+                format!(
+                    "• {role}: {} error(s), {} timeout(s) — last: {}",
+                    h.errors,
+                    h.timeouts,
+                    h.last_error.chars().take(90).collect::<String>()
+                )
+            })
+            .collect();
+        let msg = po_daily_message(&lines, &stuck_high, &stale_ids, &engine_lines);
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
             s.daily_jobs.insert("po_daily".to_owned(), today.clone());
             s.post_comment("PO", &msg, None);
@@ -128,7 +143,12 @@ fn days_between(a: &str, b: &str) -> i64 {
     }
 }
 
-fn po_daily_message(milestones: &[String], stuck_high: &[String], stale: &[String]) -> String {
+fn po_daily_message(
+    milestones: &[String],
+    stuck_high: &[String],
+    stale: &[String],
+    engine: &[String],
+) -> String {
     let mut msg = String::from("📋 PO daily — roadmap & backlog:\n");
     if milestones.is_empty() {
         msg.push_str("Roadmap: no milestones defined yet.\n");
@@ -158,6 +178,13 @@ fn po_daily_message(milestones: &[String], stuck_high: &[String], stale: &[Strin
     if stuck_high.is_empty() && stale.is_empty() {
         msg.push_str("Backlog: clean — nothing stale, no stranded High tickets.\n");
     }
+    if !engine.is_empty() {
+        msg.push_str("Engine health (errors today):\n");
+        for l in engine {
+            msg.push_str(l);
+            msg.push('\n');
+        }
+    }
     msg
 }
 
@@ -171,11 +198,13 @@ mod tests {
             &["• M1 (target v1.0) — 🚧 in progress".into()],
             &["CXA-F002".into()],
             &["CXA-F003".into()],
+            &["• SA: 2 error(s), 1 timeout(s) — last: opencode timed out".into()],
         );
         assert!(msg.contains("CXA-F002"));
         assert!(msg.contains("CXA-F003"));
         assert!(msg.contains("M1"));
-        let clean = po_daily_message(&[], &[], &[]);
+        assert!(msg.contains("Engine health"));
+        let clean = po_daily_message(&[], &[], &[], &[]);
         assert!(clean.contains("clean"));
     }
 
