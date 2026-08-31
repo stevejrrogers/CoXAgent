@@ -244,13 +244,20 @@ async fn sql_store_delete_purges_state_and_coordination_for_the_project_only() {
         "the revision must be back at the baseline — a recreated id starts fresh"
     );
     assert_eq!(
-        store.get_desired("op@host").await.expect("desired after delete"),
+        store
+            .get_desired("op@host")
+            .await
+            .expect("desired after delete"),
         None,
         "the persistent desired-run state must be purged with the project, or \
          a recreated id auto-resumes the deleted project's runner"
     );
     assert!(
-        store.workers().await.expect("workers after delete").is_empty(),
+        store
+            .workers()
+            .await
+            .expect("workers after delete")
+            .is_empty(),
         "the worker registry rows must be purged with the project"
     );
 
@@ -275,7 +282,8 @@ async fn sql_store_delete_purges_state_and_coordination_for_the_project_only() {
         "the refused save must have written nothing"
     );
     assert!(
-        !store.claim_ticket(&TicketId::new("B130-001").expect("id"), "dev@host", "now")
+        !store
+            .claim_ticket(&TicketId::new("B130-001").expect("id"), "dev@host", "now")
             .await
             .expect("claim after delete"),
         "a late claim must not win — and must not recreate the row"

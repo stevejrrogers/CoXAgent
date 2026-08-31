@@ -182,10 +182,9 @@ pub(super) async fn ticket_detail_ep(
                         // (AC3). Pure derivation over the same loaded snapshot.
                         obj.insert(
                             "blocked_by".into(),
-                            serde_json::to_value(coxagent_application::dependency_radar::blocked_by(
-                                &state,
-                                t.id(),
-                            ))
+                            serde_json::to_value(
+                                coxagent_application::dependency_radar::blocked_by(&state, t.id()),
+                            )
                             .unwrap_or_default(),
                         );
                         let unknown_pairs =

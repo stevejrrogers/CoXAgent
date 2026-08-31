@@ -1,8 +1,9 @@
-//! CXA-B079 regression guard: CI must actually run the availability gate.
+//! CI workflow wiring guard (CXA-B079 + CXA-C016): the gates ci.yml declares
+//! must actually run.
 //!
-//! The bug: every job in ci.yml carried `if: false` (0387409f disabled all
-//! GitHub-hosted runs while the repo was private), so the `deploy-smoke` job —
-//! the "app answers on 8101" gate — never executed and availability
+//! The bug (B079): every job in ci.yml carried `if: false` (0387409f disabled
+//! all GitHub-hosted runs while the repo was private), so the `deploy-smoke`
+//! job — the "app answers on 8101" gate — never executed and availability
 //! regressions shipped silently. Re-enabling it was a one-line delete, and it
 //! is exactly as easy to undo. This file pins the wiring: the job exists, no
 //! job-level `if:` disables it, its run step invokes the real `deploy_smoke`
@@ -10,13 +11,21 @@
 //! the workflow triggers on the events the gate must cover — pushes to main
 //! (post-merge verification, the ticket's whole point) and pull requests.
 //!
-//! `why_not_wired` is a pure function over the workflow text that returns
-//! `Err` instead of panicking. The tests at the bottom feed it synthetic
-//! workflows to prove the guard actually bites: re-gating the job, dropping
-//! `--ignored`, or losing a trigger are all caught. Step-level
-//! `if: failure()` / `if: always()` conditions inside the job are legitimate
-//! and must NOT read as a job gate — `job_gate` keys on the exact four-space
-//! indentation of a job-level key, the edge case the real workflow exercises.
+//! C016 extends the same pin to the other two jobs: `check` (the fmt · clippy
+//! · test pedantic baseline, re-enabled once its debt was paid) and
+//! `deploy-build` (the linux release build the Docker builder reproduces).
+//! Each must exist, be ungated, and still run its gate steps — dropping the
+//! fmt step from `check` must fail here, not surface a month later as green
+//! PRs over red gates.
+//!
+//! `why_not_wired` and `why_quality_gates_not_wired` are pure functions over
+//! the workflow text that return `Err` instead of panicking. The tests at the
+//! bottom feed them synthetic workflows to prove the guards actually bite:
+//! re-gating a job, dropping a gate step, or losing a trigger are all caught.
+//! Step-level `if: failure()` / `if: always()` conditions inside a job are
+//! legitimate and must NOT read as a job gate — `job_gate` keys on the exact
+//! four-space indentation of a job-level key, the edge case the real workflow
+//! exercises.
 
 #![allow(clippy::unwrap_used)]
 
@@ -27,6 +36,21 @@ const CI_WORKFLOW: &str = ".github/workflows/ci.yml";
 
 /// The job whose run step must execute the deploy smoke test.
 const SMOKE_JOB: &str = "deploy-smoke";
+
+/// The jobs whose run steps are the quality gates (C016): the pedantic
+/// baseline (`fmt · clippy · test`) and the release build the Docker builder
+/// reproduces. Each entry is `(job, substrings that must appear in its block)`.
+const QUALITY_GATES: [(&str, &[&str]); 2] = [
+    (
+        "check",
+        &[
+            "cargo fmt --all --check",
+            "cargo clippy --all-targets --all-features",
+            "cargo test --all-features",
+        ],
+    ),
+    ("deploy-build", &["cargo build --release --bin coxagent"]),
+];
 
 /// One job's YAML block: from its two-space `  <name>:` line to the next
 /// job-level key or end of file. `None` when the workflow has no such job.
@@ -83,6 +107,28 @@ fn why_not_wired(src: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Why would CI not enforce the quality gates after a merge? `Ok` only when
+/// every [`QUALITY_GATES`] job exists, is not disabled by a job-level `if:`,
+/// and still runs each of its gate steps.
+fn why_quality_gates_not_wired(src: &str) -> Result<(), String> {
+    for (job, steps) in QUALITY_GATES {
+        let block = job_block(src, job).ok_or_else(|| format!("no `{job}` job in the workflow"))?;
+        if let Some(gate) = job_gate(&block) {
+            return Err(format!(
+                "`{job}` is disabled by a job-level `{gate}` — the quality gates never run"
+            ));
+        }
+        for step in steps {
+            if !block.contains(step) {
+                return Err(format!(
+                    "`{job}` no longer runs `{step}` — a gate step was dropped"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -93,6 +139,15 @@ fn ci_runs_the_availability_gate() {
     let src = std::fs::read_to_string(&path).unwrap();
     if let Err(why) = why_not_wired(&src) {
         panic!("{CI_WORKFLOW} no longer wires up the availability gate: {why}");
+    }
+}
+
+#[test]
+fn ci_runs_the_quality_gates() {
+    let path = repo_root().join(CI_WORKFLOW);
+    let src = std::fs::read_to_string(&path).unwrap();
+    if let Err(why) = why_quality_gates_not_wired(&src) {
+        panic!("{CI_WORKFLOW} no longer wires up the quality gates: {why}");
     }
 }
 
@@ -184,4 +239,63 @@ jobs:
 ";
     let why = why_not_wired(src).unwrap_err();
     assert!(why.contains("no `deploy-smoke` job"), "unhelpful: {why}");
+}
+
+#[test]
+fn a_regated_quality_job_is_caught() {
+    let src = "\
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  check:
+    if: false
+    name: fmt · clippy · test
+    steps:
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --all-features
+      - run: cargo test --all-features
+";
+    let why = why_quality_gates_not_wired(src).unwrap_err();
+    assert!(why.contains("`check` is disabled"), "unhelpful: {why}");
+    assert!(why.contains("if: false"), "unhelpful: {why}");
+}
+
+#[test]
+fn a_dropped_gate_step_is_caught() {
+    let src = "\
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  check:
+    name: fmt · clippy · test
+    steps:
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --all-features
+";
+    let why = why_quality_gates_not_wired(src).unwrap_err();
+    assert!(
+        why.contains("`check` no longer runs `cargo test --all-features`"),
+        "unhelpful: {why}"
+    );
+}
+
+#[test]
+fn a_missing_quality_job_is_caught() {
+    let src = "\
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  deploy-build:
+    name: release build (linux, as the Docker builder sees it)
+    steps:
+      - run: cargo build --release --bin coxagent
+";
+    let why = why_quality_gates_not_wired(src).unwrap_err();
+    assert!(why.contains("no `check` job"), "unhelpful: {why}");
 }
