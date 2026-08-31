@@ -477,23 +477,32 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // (pr_stuck in the inbox) — counting it here left the clean-base gate
         // waiting on a PR no agent may touch, which locked ALL dev work behind
         // one human decision indefinitely.
-        let handed_off: std::collections::BTreeSet<u64> = self
-            .store
-            .load()
-            .await
-            .map(|s| {
-                s.pr_fix_attempts
+        let (handed_off, in_flight) = match self.store.load().await {
+            Ok(s) => {
+                let handed: std::collections::BTreeSet<u64> = s
+                    .pr_fix_attempts
                     .iter()
                     .filter(|(_, n)| **n > 2)
                     .map(|(k, _)| *k)
-                    .collect()
-            })
-            .unwrap_or_default();
+                    .collect();
+                // Every claimed (InProgress) ticket is a PR that hasn't
+                // opened yet. Counting only OPEN PRs was a 20-minute TOCTOU:
+                // three workers all passed the check at open=5 and the queue
+                // landed at 9 over a limit of 6. Reserve their slots now.
+                let flying = s
+                    .tickets
+                    .iter()
+                    .filter(|t| t.status() == coxagent_domain::Status::InProgress)
+                    .count();
+                (handed, flying)
+            }
+            Err(_) => (std::collections::BTreeSet::new(), 0),
+        };
         let open = prs
             .iter()
             .filter(|p| p.base == target && !handed_off.contains(&p.number))
             .count();
-        if open == 0 {
+        if open == 0 && in_flight == 0 {
             return false;
         }
         if self.clean_base_required().await {
@@ -501,7 +510,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.announce_drain_hold(open).await;
             return true;
         }
-        open >= limit as usize
+        open + in_flight >= limit as usize
     }
     /// The SA says the quiet part out loud, once per sprint: the refactor is ON
     /// HOLD until every open PR merges — posted to the Scrum feed AND #agents
