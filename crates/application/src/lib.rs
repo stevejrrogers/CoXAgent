@@ -17,6 +17,7 @@ pub mod error;
 pub mod faults;
 pub mod fleet;
 pub mod forensics;
+pub mod liveness;
 pub mod metrics;
 pub mod metrics_brakes;
 pub mod metrics_burndown;

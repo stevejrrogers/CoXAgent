@@ -292,6 +292,25 @@ pub struct WorkflowConfig {
     /// (the historical behaviour), so existing configs deserialize unchanged.
     #[serde(default)]
     pub bug_burn_floor: Option<Priority>,
+    /// Loop-liveness stall watchdog (CXA-F259, default on): a hub-side
+    /// checker that alerts when a running loop goes silently stale — no new
+    /// activity-trail entry for `stall_timeout_secs` while desired-run is on
+    /// and no documented pause (budget cap, quota exhaustion, user pause,
+    /// empty backlog) is in effect. Covers the blind spot a hung cycle
+    /// leaves: the worker keeps beating its registry heartbeat, so every
+    /// dashboard says "online" while nothing progresses.
+    #[serde(default = "default_true")]
+    pub stall_watchdog: bool,
+    /// Seconds of activity-trail silence past which a running loop counts as
+    /// stalled (0 = default 3600). A single engine call longer than this also
+    /// reads as silence — raise it if your runs are longer.
+    #[serde(default)]
+    pub stall_timeout_secs: u64,
+    /// Seconds an already-alerted stall may stay silent before one escalation
+    /// re-alert (0 = default 14400). Within the window the episode is deduped:
+    /// a multi-hour stall is one alert, not one per sweep.
+    #[serde(default)]
+    pub stall_hub_timeout_secs: u64,
 }
 
 /// How often the periodic phases run. Zeros mean "use the built-in default" so
@@ -555,6 +574,9 @@ impl Default for WorkflowConfig {
             cadence: CadenceConfig::default(),
             quiet_hours_utc: String::new(),
             bug_burn_floor: None,
+            stall_watchdog: true,
+            stall_timeout_secs: 0,
+            stall_hub_timeout_secs: 0,
         }
     }
 }
@@ -1109,6 +1131,43 @@ mod tests {
         assert_eq!(c.docs_refreshes_per_day(), 2);
         assert_eq!(c.debt_sweep_every_cycles(), 50);
         assert_eq!(c.arch_review_every_sprints(), 3);
+    }
+
+    /// CXA-F259: a legacy `coxagent.json` without the stall knobs loads with
+    /// the watchdog ON and zero thresholds — serde defaults keep old
+    /// documents parsing, and the zero-means-default resolution lives with
+    /// the predicate (`liveness::stall_threshold` / `stall_escalation`).
+    #[test]
+    fn legacy_document_loads_with_the_watchdog_enabled_and_zero_thresholds() {
+        // The pre-F259 workflow shape: only the then-existing keys, no stall
+        // knobs anywhere.
+        let legacy = r#"{
+            "ba_every_n_cycles": 4,
+            "feature_dev_enabled": true,
+            "sleep_seconds": 30
+        }"#;
+        let wf: WorkflowConfig = serde_json::from_str(legacy).expect("a pre-F259 document loads");
+        assert!(wf.stall_watchdog);
+        assert_eq!(wf.stall_timeout_secs, 0);
+        assert_eq!(wf.stall_hub_timeout_secs, 0);
+        assert_eq!(
+            crate::liveness::stall_threshold(&wf),
+            3600,
+            "zero resolves to the built-in default"
+        );
+        assert_eq!(crate::liveness::stall_escalation(&wf), 14_400);
+
+        // Explicit values win over the defaults, and zero means default.
+        let tuned: WorkflowConfig = serde_json::from_str(
+            r#"{"ba_every_n_cycles":4,"feature_dev_enabled":true,"sleep_seconds":30,"stall_timeout_secs":600}"#,
+        )
+        .expect("tuned");
+        assert_eq!(crate::liveness::stall_threshold(&tuned), 600);
+        let off: WorkflowConfig = serde_json::from_str(
+            r#"{"ba_every_n_cycles":4,"feature_dev_enabled":true,"sleep_seconds":30,"stall_watchdog":false}"#,
+        )
+        .expect("an explicit off is honoured");
+        assert!(!off.stall_watchdog);
     }
 
     #[test]
