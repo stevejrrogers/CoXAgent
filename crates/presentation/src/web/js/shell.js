@@ -2322,16 +2322,16 @@ boot();
 // same generic feature gets independently invented everywhere — this view is
 // where a human redirects, rejects, or explicitly allows a pair. Nothing is
 // auto-suppressed: a legitimately-shared infrastructure ticket stays allowed.
-let DUPES=null;
 async function renderDupes(){
   const el=document.getElementById("dupes-body");if(!el)return;
   el.innerHTML='<div class="empty">scanning the fleet…</div>';
+  let data=null;
   try{
     const r=await fetch("/api/workspace/duplicates");
     if(!r.ok){el.innerHTML='<div class="empty">unable to load the duplicate radar ('+r.status+')</div>';return;}
-    DUPES=await r.json();
+    data=await r.json();
   }catch(_){el.innerHTML='<div class="empty">unable to load the duplicate radar</div>';return;}
-  const pairs=(DUPES&&DUPES.crossProjectDuplicates)||[];
+  const pairs=(data&&data.crossProjectDuplicates)||[];
   if(!pairs.length){
     el.innerHTML=`<div class="panel"><div class="dupe-empty"><i class="ti ti-copy"></i>
       <div class="dupe-empty-t">No cross-project duplicates</div>
