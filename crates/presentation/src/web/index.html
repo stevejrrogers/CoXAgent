@@ -159,7 +159,7 @@
         <button class="rp-ctl" id="ctl-step" onclick="ctl('step')" title="Step one cycle"><i class="ti ti-player-track-next"></i></button>
       </div>
       <div class="tb-div"></div>
-      <button class="iconbtn" onclick="openCmdk()" title="Search &amp; jump — ⌘K"><i class="ti ti-search"></i></button>
+      <button class="iconbtn" onclick="openCmdk()" title="Search &amp; jump — ⌘/"><i class="ti ti-search"></i></button>
       <span class="iconbtn viewers-pill" id="viewers-chip" title="distinct users viewing" style="display:none"><i class="ti ti-eye"></i> <span id="viewers-n">1</span></span>
       <div class="tb-div"></div>
       <div style="position:relative;display:flex;align-items:center">
@@ -216,6 +216,7 @@
       </div>
       <div class="view" id="view-team">
         <div class="kpis" id="team-summary"></div>
+        <div id="team-liveness"></div>
         <div id="team-online"></div>
         <div id="team-dupwarn"></div>
         <div id="team-sessions"></div>
@@ -679,11 +680,12 @@
       <div class="pfpane" id="chset-body"></div>
     </div>
   </div></div>
-  <!-- Chat search: channels, people and messages in one palette. -->
+  <!-- Global search (CXA-F275): tickets, wiki and chat in one palette. -->
   <div class="ov" id="ov-chatsearch" onclick="if(event.target===this)closeChatSearch()"><div class="modal" style="max-width:620px;padding:0;overflow:hidden">
     <div class="cmdk-inp" style="border-radius:0"><i class="ti ti-search"></i>
-      <input id="chatsearch-input" placeholder="Search channels, people, messages, tickets, pages…" autocomplete="off"
+      <input id="chatsearch-input" placeholder="Search tickets, wiki, chat, people…" autocomplete="off"
         oninput="chatSearchRun()" onkeydown="if(event.key==='Escape')closeChatSearch()"><kbd>esc</kbd></div>
+    <div class="cs-chips" id="cs-chips"></div>
     <div class="cmdk-list" id="chatsearch-list" style="max-height:60vh"></div>
   </div></div>
   <div class="toasts" id="toasts"></div>
@@ -792,6 +794,7 @@
 <script src="/assets/js/manage.js"></script>
 <script src="/assets/js/home.js"></script>
 <script src="/assets/js/chat.js"></script>
+<script src="/assets/js/search.js"></script>
 <script src="/assets/js/mcp.js"></script>
 <script src="/assets/js/docs.js"></script>
 <script src="/assets/js/inbox.js"></script>

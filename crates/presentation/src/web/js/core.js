@@ -688,6 +688,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
         <div class="agstats"><span title="actions"><i class="ti ti-bolt"></i> ${st.n}</span><span title="tickets touched"><i class="ti ti-ticket"></i> ${st.tk.size}</span>${cost>0?`<span title="cost"><i class="ti ti-coin"></i> ${money(cost)}</span>`:''}</div>
         <div class="ag-status">${statusHtml}</div>${healthHtml}</div>`;}).join("");
     renderDupWarn(s);
+    renderLiveness(s);
     renderCycleScores(s);
     renderTeamsOnline();
     renderSessions();
