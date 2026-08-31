@@ -600,6 +600,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
     document.getElementById("ov-alerts").innerHTML=alertsHtml(s,m,spend);
     drainBanner("ov-drain");
     document.getElementById("kpis").innerHTML=[kpi("Shipped",m.shipped),kpi("In flight",m.inflight),kpi("Documented",m.docd),kpi("Releases",m.releases),kpi("Cost",money(spend.total_cost_usd))].join("");
+    const ovv=document.getElementById("ov-velocity");if(ovv)ovv.innerHTML=velocityHtml(s);
     renderHealth(s);
     const dp=s.deploy;
     document.getElementById("ov-deploy").innerHTML=dp?`<div class="panel" style="margin-top:16px;display:flex;align-items:center;gap:13px">
