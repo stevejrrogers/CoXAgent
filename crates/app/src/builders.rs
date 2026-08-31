@@ -106,6 +106,11 @@ fn in_agent_worktree(cwd: &Path) -> bool {
     })
 }
 
+/// The decision behind [`load_coordination`] as a pure function of the inputs
+/// the real one reads: the process cwd (the worktree guard's input) and the
+/// config base dir. Split out so the suite can exercise the load path from
+/// any cwd — the test binary itself runs inside `.coxagent-worktrees`, where
+/// the real guard must (and does) bail.
 fn load_coordination_in(base: &Path, cwd: &Path) {
     if std::env::var("COXAGENT_DB_DSN").is_ok_and(|v| !v.is_empty()) {
         return; // an explicit env always wins
@@ -1260,6 +1265,24 @@ mod builders_tests {
             "postgres://auth"
         );
         assert_eq!(std::env::var("COXAGENT_REMOTE_TOKEN").unwrap(), "t0k");
+
+        // Case C — the fa33aa58 guard itself: a cwd inside .coxagent-worktrees
+        // bails BEFORE reading coordination.json even with the file present,
+        // so an agent sandbox can never join the operator's shared backend.
+        for (_, env_key, _) in &cases {
+            std::env::remove_var(env_key);
+        }
+        load_coordination_in(
+            &base,
+            Path::new("/Users/x/.coxagent-worktrees/cxa-slot-9"),
+        );
+        for (_, env_key, _) in &cases {
+            assert_eq!(
+                std::env::var_os(env_key),
+                None,
+                "{env_key} must never be set from coordination.json inside a worktree"
+            );
+        }
 
         // Leave no trace behind for parallel tests.
         for (_, env_key, _) in &cases {
