@@ -66,7 +66,9 @@ async fn distributed_coordination_across_two_hubs() {
         return;
     }
     if common::is_live_hub_db(&env("COXAGENT_TEST_PG_DSN").expect("dsn")).await {
-        eprintln!("COXAGENT_TEST_PG_DSN points at a LIVE hub database — refusing the coordination test");
+        eprintln!(
+            "COXAGENT_TEST_PG_DSN points at a LIVE hub database — refusing the coordination test"
+        );
         return;
     }
     // Unique project id per run so reruns start clean.
@@ -141,7 +143,9 @@ async fn delete_sweeps_the_project_redis_keyspace_including_desired_state() {
         return;
     }
     if common::is_live_hub_db(&env("COXAGENT_TEST_PG_DSN").expect("dsn")).await {
-        eprintln!("COXAGENT_TEST_PG_DSN points at a LIVE hub database — refusing the coordination test");
+        eprintln!(
+            "COXAGENT_TEST_PG_DSN points at a LIVE hub database — refusing the coordination test"
+        );
         return;
     }
     let project = format!(
