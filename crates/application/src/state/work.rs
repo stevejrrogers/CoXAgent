@@ -59,6 +59,13 @@ pub struct Spend {
     /// surfaced on the dashboard.
     #[serde(default)]
     pub last_sandbox_status: String,
+    /// Per-run engine/model provenance deltas captured by the `MeteringEngine`
+    /// since the last drain (CXA-F257), folded into
+    /// `ProjectState.ticket_step_provenance` by the cycle's `drain_meter`.
+    /// The meter is a since-last-drain accumulator that resets at the cycle
+    /// boundary, so persisted spend snapshots never carry these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub step_provenance: Vec<MeteredStep>,
 }
 
 impl Spend {

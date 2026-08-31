@@ -12,6 +12,7 @@ pub mod config_parse;
 pub mod conformance;
 pub mod dependency_radar;
 pub mod deps_scan;
+pub mod engine_provenance;
 pub mod error;
 pub mod faults;
 pub mod forensics;

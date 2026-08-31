@@ -280,6 +280,8 @@ impl AgentEnginePort for CopilotEngine {
             session_id: parsed.session_id,
             sandbox,
             engine: "copilot".to_owned(),
+            model: self.model.clone(),
+            attempts: Vec::new(),
         })
     }
 
@@ -346,6 +348,8 @@ impl AgentEnginePort for CopilotEngine {
             session_id: parsed.session_id.or_else(|| Some(session_id.to_owned())),
             sandbox,
             engine: "copilot".to_owned(),
+            model: self.model.clone(),
+            attempts: Vec::new(),
         })
     }
 }

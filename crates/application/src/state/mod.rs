@@ -14,6 +14,7 @@ mod governance;
 mod integrity;
 mod ops;
 mod outbox;
+mod provenance;
 mod work;
 
 pub use chat::*;
@@ -24,6 +25,7 @@ pub use governance::*;
 pub use integrity::*;
 pub use ops::*;
 pub use outbox::*;
+pub use provenance::*;
 pub use work::*;
 
 /// Current on-disk schema version. Bumped when the serialized shape changes;
@@ -319,6 +321,14 @@ pub struct ProjectState {
     /// only reaches Verified with context-appropriate proof attached.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub ticket_evidence: std::collections::BTreeMap<String, Vec<Evidence>>,
+    /// Engine & model provenance per ticket (CXA-F257, bounded per ticket —
+    /// see [`provenance`]): which engine and model ACTUALLY executed each
+    /// agent step, post-failover and post-escalation, so the human verify
+    /// gate sees what produced the work it is approving. serde-defaulted
+    /// (the `ticket_failures` additive precedent) so pre-change snapshots
+    /// load to an empty map — no migration, no schema bump.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub ticket_step_provenance: std::collections::BTreeMap<String, Vec<StepProvenance>>,
     /// Resolved live reproduction URL per shipped ticket (CXA-F246): ticket id
     /// → the `http://127.0.0.1:{host_port}/` link the evidence-capture funnel
     /// recorded when it collected the ticket's DoD evidence, so every verify
@@ -567,6 +577,7 @@ impl Default for ProjectState {
             tuning_overrides: std::collections::BTreeMap::new(),
             tuning_history: Vec::new(),
             ticket_evidence: std::collections::BTreeMap::new(),
+            ticket_step_provenance: std::collections::BTreeMap::new(),
             repro_urls: std::collections::BTreeMap::new(),
             drain_notice_sprint: 0,
             ticket_fail_attempts: std::collections::BTreeMap::new(),

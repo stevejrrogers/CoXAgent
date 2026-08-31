@@ -86,6 +86,21 @@ pub struct AgentOutcome {
     /// instead of the one config asked for (they differ the moment failover
     /// fires). Empty when unstamped (a bare engine or a test double).
     pub engine: String,
+    /// The model id that ACTUALLY executed this run — stamped by each adapter
+    /// at the same site that stamps `engine`, because escalation ladders swap
+    /// models INSIDE adapters (`model_for`): the configured model and the
+    /// executing model differ the moment a retry escalates, and the verify
+    /// gate must see the real one (CXA-F257). Empty when the engine cannot
+    /// report a stable model id; provenance surfaces then show the engine
+    /// with an explicit "model unknown" marker instead of a blank.
+    pub model: String,
+    /// Every engine/model attempt that produced this outcome, in run order —
+    /// primary first, then any failover — stamped by [`FailoverEngine`], the
+    /// only component that knows the sequence (CXA-F257 AC2: a failed-over
+    /// step must show each attempt, not only the last). Empty when the
+    /// outcome did not pass through one (a bare adapter or test double),
+    /// where `engine` + `model` are the whole story.
+    pub attempts: Vec<crate::state::EngineAttempt>,
 }
 
 impl AgentOutcome {
@@ -188,6 +203,8 @@ mod tests {
             session_id: None,
             sandbox: SandboxStatus::default(),
             engine: String::new(),
+            model: String::new(),
+            attempts: Vec::new(),
         }
     }
 

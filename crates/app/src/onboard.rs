@@ -579,7 +579,9 @@ pub async fn brownfield<S: StateStorePort + 'static>(
         };
         cfg.engine.default.engine = engine;
         if has_opencode {
-            "bizbrain/DeepSeek-V4-Pro".clone_into(&mut cfg.engine.default.model);
+            // V4-Pro was removed from the provider catalog; every project
+            // onboarded with it warned at boot and failed its default runs.
+            "bizbrain/DeepSeek-V4-Flash".clone_into(&mut cfg.engine.default.model);
         }
         cfg.engine.auto_fallback = false;
         // Save consumed ports so assign_host_port skips them

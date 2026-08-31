@@ -11,6 +11,11 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # for a suite whose specs are all unauthenticated, turning them into login-wall
 # timeouts until someone deletes it by hand. Nesting keeps the parent inside
 # the wiped dir, so each run really does start with no accounts.
+# A previous run's fixture server can outlive its suite (an interrupted
+# Playwright run leaves it up) and the next run dies with "port already
+# used". The port is ours by contract, so anything squatting it is stale.
+lsof -ti :"$PORT" 2>/dev/null | xargs kill 2>/dev/null || true
+sleep 1
 STATE="$HERE/.state/serve"
 rm -rf "$HERE/.state"
 # Residue from the flat layout above: on any machine that ran the old script,
