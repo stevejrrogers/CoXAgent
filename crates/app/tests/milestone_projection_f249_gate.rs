@@ -13,7 +13,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use coxagent_application::milestone_projection::{projection_report, project_milestones};
+use coxagent_application::milestone_projection::{project_milestones, projection_report};
 use coxagent_application::state::ProjectState;
 
 const ROUTE: &str = "/api/projects/:pid/milestones/projection";
@@ -28,8 +28,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn read(rel: &str) -> String {
-    std::fs::read_to_string(repo_root().join(rel))
-        .unwrap_or_else(|e| panic!("read {rel}: {e}"))
+    std::fs::read_to_string(repo_root().join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"))
 }
 
 fn quoted_args(src: &str, prefix: &str) -> BTreeSet<String> {

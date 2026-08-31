@@ -1030,7 +1030,11 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             let committed = if to_sprint {
                 crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
                     crate::sprint::commit_ticket(s, &id);
-                    s.log_activity("SM", "committed into the running sprint", Some(id.to_string()));
+                    s.log_activity(
+                        "SM",
+                        "committed into the running sprint",
+                        Some(id.to_string()),
+                    );
                     Ok(())
                 })
                 .await
@@ -1045,7 +1049,9 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             };
             let msg = if self.lang.is_vi() {
                 if committed {
-                    format!("🎫 Đã tạo {id} ({kind_str}): {title} — và đã đưa vào sprint đang chạy.")
+                    format!(
+                        "🎫 Đã tạo {id} ({kind_str}): {title} — và đã đưa vào sprint đang chạy."
+                    )
                 } else {
                     format!("🎫 Đã tạo {id} ({kind_str}): {title}. Team sẽ đưa vào quy trình.")
                 }
@@ -1507,7 +1513,12 @@ fn strip_kw<'a>(a: &'a str, kw: &str) -> Option<&'a str> {
 /// the ticket waits in the backlog for rollover.
 fn parse_ticket_payload(
     payload: &str,
-) -> (String, String, Option<coxagent_domain::ticket::Priority>, bool) {
+) -> (
+    String,
+    String,
+    Option<coxagent_domain::ticket::Priority>,
+    bool,
+) {
     let mut parts = payload.splitn(4, "::").map(str::trim);
     let title = parts.next().unwrap_or("").trim();
     let desc = parts.next().unwrap_or("");
@@ -1562,7 +1573,10 @@ mod tests {
     fn ticket_payload_parses_the_sprint_suffix_in_every_position() {
         use coxagent_domain::ticket::Priority;
         let (t, d, p, sp) = parse_ticket_payload("Paste images :: add listener :: high :: sprint");
-        assert_eq!((t.as_str(), d.as_str(), p, sp), ("Paste images", "add listener", Some(Priority::High), true));
+        assert_eq!(
+            (t.as_str(), d.as_str(), p, sp),
+            ("Paste images", "add listener", Some(Priority::High), true)
+        );
         let (_, _, p, sp) = parse_ticket_payload("Paste images :: add listener :: sprint");
         assert_eq!((p, sp), (None, true));
         let (_, _, p, sp) = parse_ticket_payload("Paste images :: add listener :: low");

@@ -38,7 +38,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use coxagent_application::milestone_projection::projection_report;
-use coxagent_application::selection::{BlockedReason, work_blockers};
+use coxagent_application::selection::{work_blockers, BlockedReason};
 use coxagent_application::state::{Milestone, ProjectState, Sprint};
 use coxagent_domain::{
     Complexity, Priority, Role, SemVer, Status, TechnicalDesign, Ticket, TicketId, TicketType,
@@ -103,7 +103,11 @@ fn scrum(committed: &[&str]) -> Sprint {
         goal: String::new(),
         started_cycle: 0,
         length_cycles: 10,
-        committed: committed.iter().copied().filter_map(|c| TicketId::new(c).ok()).collect(),
+        committed: committed
+            .iter()
+            .copied()
+            .filter_map(|c| TicketId::new(c).ok())
+            .collect(),
         started_at: String::new(),
         bug_burn_floor: None,
     }
@@ -149,7 +153,10 @@ fn ac1_the_projection_reads_purely_and_per_milestone() {
     let row = &report.milestones[0];
     assert_eq!(row.name, "Beta");
     assert_eq!(row.target_version, "0.9.0");
-    assert!(!row.released && !row.reached, "AC1: the active row: {row:?}");
+    assert!(
+        !row.released && !row.reached,
+        "AC1: the active row: {row:?}"
+    );
 
     // The in-flight work IS visible — as named blocked-scope risks (AC2's
     // surface), never as a per-milestone membership the model does not have.
@@ -191,7 +198,11 @@ fn ac2_blockers_carry_named_tickets_and_machine_readable_reasons() {
         .collect();
     assert_eq!(
         rows,
-        vec![("FEAT-B", "feature FEAT-B", BlockedReason::DependencyUnsatisfied)],
+        vec![(
+            "FEAT-B",
+            "feature FEAT-B",
+            BlockedReason::DependencyUnsatisfied
+        )],
         "AC2: the blocker is the named ticket, the reason machine-readable: {rows:?}"
     );
 
@@ -268,7 +279,8 @@ fn ac3_the_forecast_recomputes_when_state_changes() {
     .expect("ticket");
     bug.transition_to(Role::DevBug, Status::InProgress)
         .expect("claim");
-    bug.transition_to(Role::DevBug, Status::Fixed).expect("fixed");
+    bug.transition_to(Role::DevBug, Status::Fixed)
+        .expect("fixed");
     bug.transition_to(Role::Test, Status::Verified)
         .expect("verified");
     resolved.tickets.push(bug);

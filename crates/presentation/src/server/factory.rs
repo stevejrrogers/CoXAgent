@@ -16,7 +16,9 @@ use super::ProjectHandle;
 /// Takes a [`NewProjectReq`], returns a ready [`ProjectHandle`] or a
 /// classified [`FactoryError`].
 pub type ProjectFactory = Arc<
-    dyn Fn(NewProjectReq) -> Pin<Box<dyn Future<Output = Result<ProjectHandle, FactoryError>> + Send>>
+    dyn Fn(
+            NewProjectReq,
+        ) -> Pin<Box<dyn Future<Output = Result<ProjectHandle, FactoryError>> + Send>>
         + Send
         + Sync,
 >;

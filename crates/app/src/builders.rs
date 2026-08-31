@@ -495,68 +495,70 @@ pub(crate) async fn build_project(
         // review throughput — the queue used to pin at the WIP limit behind
         // a single GLM reviewer digesting one PR at a time.
         if config.git.enabled && forge.is_some() {
-        for lane in 1u8..=2 {
-            let lane_slug = if lane == 1 {
-                format!("{id}-review")
-            } else {
-                format!("{id}-review-{lane}")
-            };
-            let reviewer = RunCycleUseCase::new(
-                Arc::clone(&store),
-                engine.clone(),
-                config.clone(),
-                worktree_at(work_dir.clone(), &lane_slug),
-                context.clone(),
-            )
-            .with_leader_election(false)
-            .with_meter(meter.clone())
-            .with_live_budget(Arc::clone(&live_budget))
-            .with_deploy(Arc::new(DockerComposeDeploy::new()))
-            .with_host_port_probe(host_port_probe)
-            .with_git(Arc::new(coxagent_infrastructure::SystemGit::new()))
-            .with_files(Some(Arc::new(
-                coxagent_infrastructure::FsWorkspaceFiles::new(),
-            )));
-            let mut reviewer = reviewer;
-            reviewer.set_worker(format!("review{lane}@{}", worker_host()));
-            let reviewer = if let Some(ref f) = forge {
-                reviewer.with_forge(Arc::clone(f))
-            } else {
-                reviewer
-            };
-            let reviewer = reviewer.with_notifier(build_notifier(
-                Arc::clone(&store),
-                webhook.clone(),
-                Arc::clone(&outbox),
-            ));
-            let reviewer = if let Some(r) = build_pr_reporter(&config, auth, id, id).await {
-                reviewer.with_reporter(r)
-            } else {
-                // Same-process hub: reviews/holds/latency write straight to
-                // the shared store — the Null fallback silently dropped them.
-                reviewer.with_reporter(Arc::new(
-                    coxagent_application::ports::outbound::StorePrReporter::new(Arc::clone(&store)
-                        as Arc<dyn coxagent_application::ports::outbound::StateStorePort>),
-                ))
-            };
-            let rh = Arc::clone(&handle);
-            tokio::spawn(async move {
-                // Staggered so the two lanes scan the queue out of phase.
-                tokio::time::sleep(Duration::from_secs(u64::from(lane) * 45)).await;
-                loop {
-                    tokio::time::sleep(Duration::from_secs(90)).await;
-                    let snap = rh.snapshot();
-                    if snap.mode == "stopped" {
-                        break;
+            for lane in 1u8..=2 {
+                let lane_slug = if lane == 1 {
+                    format!("{id}-review")
+                } else {
+                    format!("{id}-review-{lane}")
+                };
+                let reviewer = RunCycleUseCase::new(
+                    Arc::clone(&store),
+                    engine.clone(),
+                    config.clone(),
+                    worktree_at(work_dir.clone(), &lane_slug),
+                    context.clone(),
+                )
+                .with_leader_election(false)
+                .with_meter(meter.clone())
+                .with_live_budget(Arc::clone(&live_budget))
+                .with_deploy(Arc::new(DockerComposeDeploy::new()))
+                .with_host_port_probe(host_port_probe)
+                .with_git(Arc::new(coxagent_infrastructure::SystemGit::new()))
+                .with_files(Some(Arc::new(
+                    coxagent_infrastructure::FsWorkspaceFiles::new(),
+                )));
+                let mut reviewer = reviewer;
+                reviewer.set_worker(format!("review{lane}@{}", worker_host()));
+                let reviewer = if let Some(ref f) = forge {
+                    reviewer.with_forge(Arc::clone(f))
+                } else {
+                    reviewer
+                };
+                let reviewer = reviewer.with_notifier(build_notifier(
+                    Arc::clone(&store),
+                    webhook.clone(),
+                    Arc::clone(&outbox),
+                ));
+                let reviewer = if let Some(r) = build_pr_reporter(&config, auth, id, id).await {
+                    reviewer.with_reporter(r)
+                } else {
+                    // Same-process hub: reviews/holds/latency write straight to
+                    // the shared store — the Null fallback silently dropped them.
+                    reviewer.with_reporter(Arc::new(
+                        coxagent_application::ports::outbound::StorePrReporter::new(Arc::clone(
+                            &store,
+                        )
+                            as Arc<dyn coxagent_application::ports::outbound::StateStorePort>),
+                    ))
+                };
+                let rh = Arc::clone(&handle);
+                tokio::spawn(async move {
+                    // Staggered so the two lanes scan the queue out of phase.
+                    tokio::time::sleep(Duration::from_secs(u64::from(lane) * 45)).await;
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(90)).await;
+                        let snap = rh.snapshot();
+                        if snap.mode == "stopped" {
+                            break;
+                        }
+                        if snap.mode != "running" {
+                            continue; // paused — the review loop pauses with the team
+                        }
+                        reviewer.run_review_pass().await;
                     }
-                    if snap.mode != "running" {
-                        continue; // paused — the review loop pauses with the team
-                    }
-                    reviewer.run_review_pass().await;
-                }
-            });
-            tracing::info!("[{id}] review lane {lane} armed (90s loop)");
-        }
+                });
+                tracing::info!("[{id}] review lane {lane} armed (90s loop)");
+            }
         }
     }
 
@@ -724,9 +726,7 @@ pub(crate) async fn build_project(
         files: Some(std::sync::Arc::new(
             coxagent_infrastructure::FsWorkspaceFiles::new(),
         )),
-        deps_discovery: Some(Arc::new(
-            coxagent_infrastructure::FsLockfileDiscovery::new(),
-        )),
+        deps_discovery: Some(Arc::new(coxagent_infrastructure::FsLockfileDiscovery::new())),
         deploy: Some(Arc::new(DockerComposeDeploy::new())),
         outbox: Some(outbox),
         storage: Some(build_storage().await.unwrap_or_else(|| {
@@ -1303,6 +1303,8 @@ mod builders_tests {
         // A normal checkout, the hub's own tree, or a tempdir never trips it.
         assert!(!in_agent_worktree(Path::new("/")));
         assert!(!in_agent_worktree(Path::new("/Users/dev/CoXAgent/cxa")));
-        assert!(!in_agent_worktree(Path::new("/var/folders/8c/x/T/test-dir")));
+        assert!(!in_agent_worktree(Path::new(
+            "/var/folders/8c/x/T/test-dir"
+        )));
     }
 }

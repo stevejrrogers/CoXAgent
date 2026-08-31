@@ -86,10 +86,7 @@ fn parse_rfc3339(s: &str) -> Option<time::OffsetDateTime> {
 pub fn split_expired_holds(
     holds: &BTreeMap<String, BrakeHold>,
     now: &str,
-) -> (
-    BTreeMap<String, BrakeHold>,
-    BTreeMap<String, BrakeHold>,
-) {
+) -> (BTreeMap<String, BrakeHold>, BTreeMap<String, BrakeHold>) {
     let Some(now_ts) = parse_rfc3339(now) else {
         return (BTreeMap::new(), holds.clone());
     };
@@ -122,7 +119,9 @@ pub fn apply_brake_holds(
     let mut effective = raw.clone();
     for (_, field) in BRAKES {
         if let Some(hold) = holds.get(*field) {
-            let pinned = hold.pinned_value.unwrap_or_else(|| brake_value(current, field));
+            let pinned = hold
+                .pinned_value
+                .unwrap_or_else(|| brake_value(current, field));
             set_brake_value(&mut effective, field, pinned);
         }
     }
@@ -186,10 +185,7 @@ pub fn reconcile_brake_holds(state: &mut ProjectState, now: &str) -> bool {
 /// riding on top. `current` for the hysteresis pass is the tuning AS PERSISTED
 /// — the same anchoring the daily pass uses, so expiry and clear cannot flip
 /// what the bands themselves would hold.
-fn recompose_autonomous(
-    state: &ProjectState,
-    holds: &BTreeMap<String, BrakeHold>,
-) -> Tuning {
+fn recompose_autonomous(state: &ProjectState, holds: &BTreeMap<String, BrakeHold>) -> Tuning {
     let evals = agent_evals(state);
     let backlog = brake_backlog(state);
     let today = crate::state::now_rfc3339()[..10].to_owned();
@@ -407,12 +403,8 @@ mod tests {
     #[test]
     fn holds_expire_inclusive_of_their_bound() {
         let mut holds = BTreeMap::new();
-        holds.insert(
-            "skip_ba".to_owned(),
-            hold(None, "2026-08-29T00:00:00Z"),
-        );
-        let (active, _) =
-            split_expired_holds(&holds, "2026-08-29T00:00:00Z");
+        holds.insert("skip_ba".to_owned(), hold(None, "2026-08-29T00:00:00Z"));
+        let (active, _) = split_expired_holds(&holds, "2026-08-29T00:00:00Z");
         assert!(active.is_empty(), "bound == now is expired");
     }
 }

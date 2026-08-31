@@ -248,7 +248,8 @@ fn config() -> Config {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_apply_pins_some_value_overrides_raw_even_when_hysteresis_disagrees_and_leaves_unrelated_field_to_normal_policy() {
+fn a_apply_pins_some_value_overrides_raw_even_when_hysteresis_disagrees_and_leaves_unrelated_field_to_normal_policy(
+) {
     // The loop's raw verdict: quality brake ON (hot churn), intake OFF.
     let raw = Tuning {
         bugs_first: true,
@@ -258,7 +259,10 @@ fn a_apply_pins_some_value_overrides_raw_even_when_hysteresis_disagrees_and_leav
     let current = Tuning::default();
     let mut holds = BTreeMap::new();
     // The operator pins the quality brake OFF although the hysteresis says ON.
-    holds.insert("bugs_first".to_owned(), hold(Some(false), "not yet", &future_stamp()));
+    holds.insert(
+        "bugs_first".to_owned(),
+        hold(Some(false), "not yet", &future_stamp()),
+    );
     let effective = apply_brake_holds(&raw, &holds, &current);
     assert!(!effective.bugs_first, "the pin wins over the raw policy");
     assert!(
@@ -281,7 +285,10 @@ fn a_frozen_hold_keeps_the_current_value_not_recomputed_even_if_inputs_would_fli
         ..Tuning::default()
     };
     let mut holds = BTreeMap::new();
-    holds.insert("skip_ba".to_owned(), hold(None, "mid-migration", &future_stamp()));
+    holds.insert(
+        "skip_ba".to_owned(),
+        hold(None, "mid-migration", &future_stamp()),
+    );
     let effective = apply_brake_holds(&raw, &holds, &current);
     assert!(!effective.skip_ba, "frozen at the current value");
     assert!(effective.bugs_first == raw.bugs_first, "unheld field = raw");
@@ -295,7 +302,11 @@ fn a_frozen_hold_keeps_the_current_value_not_recomputed_even_if_inputs_would_fli
 fn b_clearing_a_hold_resumes_normal_policy_next_pass() {
     let mut s = shipped_team_state();
     // The loop wants skip_ba OFF (team shipping); the operator pins it ON.
-    assert!(set_brake_hold(&mut s, "skip_ba", hold(Some(true), "freeze intake", &future_stamp())));
+    assert!(set_brake_hold(
+        &mut s,
+        "skip_ba",
+        hold(Some(true), "freeze intake", &future_stamp())
+    ));
     assert!(s.tuning.skip_ba, "the hold lands immediately");
     assert_eq!(s.tuning_overrides["skip_ba"].pinned_value, Some(true));
     assert!(
@@ -324,18 +335,31 @@ fn b_clearing_a_hold_resumes_normal_policy_next_pass() {
 fn b_reconcile_passes_are_idempotent_given_unchanged_inputs() {
     let mut s = shipped_team_state();
     // Active (unexpired) hold: recomposition changes nothing, twice.
-    s.tuning_overrides
-        .insert("bugs_first".to_owned(), hold(Some(false), "hold", &future_stamp()));
+    s.tuning_overrides.insert(
+        "bugs_first".to_owned(),
+        hold(Some(false), "hold", &future_stamp()),
+    );
     s.tuning.bugs_first = false;
     let before = s.tuning.clone();
-    assert!(!reconcile_brake_holds(&mut s, &now_rfc3339()), "nothing expired");
+    assert!(
+        !reconcile_brake_holds(&mut s, &now_rfc3339()),
+        "nothing expired"
+    );
     assert_eq!(s.tuning, before, "active holds ride, nothing moves");
     // Expired hold: the first pass releases it, the second is a no-op.
-    s.tuning_overrides
-        .insert("bugs_first".to_owned(), hold(Some(false), "hold", &past_stamp()));
-    assert!(reconcile_brake_holds(&mut s, &now_rfc3339()), "expired → released");
+    s.tuning_overrides.insert(
+        "bugs_first".to_owned(),
+        hold(Some(false), "hold", &past_stamp()),
+    );
+    assert!(
+        reconcile_brake_holds(&mut s, &now_rfc3339()),
+        "expired → released"
+    );
     let released = s.tuning.clone();
-    assert!(!reconcile_brake_holds(&mut s, &now_rfc3339()), "second pass is a no-op");
+    assert!(
+        !reconcile_brake_holds(&mut s, &now_rfc3339()),
+        "second pass is a no-op"
+    );
     assert_eq!(s.tuning, released, "and nothing moved on the second pass");
 }
 
@@ -359,7 +383,11 @@ fn c_audit_appends_every_change_with_source_and_fieldwise_from_to() {
     });
     // Operator hold on the other brake, with its window.
     let window = future_stamp();
-    set_brake_hold(&mut s, "skip_ba", hold(Some(true), "freeze intake", &window));
+    set_brake_hold(
+        &mut s,
+        "skip_ba",
+        hold(Some(true), "freeze intake", &window),
+    );
     let flip = &s.tuning_history[0];
     assert_eq!(flip.source, "self_tune");
     assert_eq!(flip.brake, "bugs_first");
@@ -369,7 +397,11 @@ fn c_audit_appends_every_change_with_source_and_fieldwise_from_to() {
     assert_eq!(set.source, "hold");
     assert_eq!(set.brake, "skip_ba");
     assert_eq!(set.reason, "freeze intake", "the operator's own reason");
-    assert_eq!(set.until.as_deref(), Some(window.as_str()), "window recorded");
+    assert_eq!(
+        set.until.as_deref(),
+        Some(window.as_str()),
+        "window recorded"
+    );
 }
 
 #[test]
@@ -379,10 +411,17 @@ fn c_freeze_hold_that_changes_nothing_is_still_audited() {
     // a governance event and lands in the trail with its window.
     let mut s = shipped_team_state();
     assert!(!s.tuning.skip_ba, "fixture: intake brake already off");
-    assert!(set_brake_hold(&mut s, "skip_ba", hold(None, "hold it off", &future_stamp())));
+    assert!(set_brake_hold(
+        &mut s,
+        "skip_ba",
+        hold(None, "hold it off", &future_stamp())
+    ));
     let entry = s.tuning_history.last().expect("hold entry");
     assert_eq!(entry.source, "hold");
-    assert_eq!(entry.from, entry.to, "value untouched, event still recorded");
+    assert_eq!(
+        entry.from, entry.to,
+        "value untouched, event still recorded"
+    );
     assert_eq!(entry.reason, "hold it off");
 }
 
@@ -402,7 +441,11 @@ fn c_history_cap_prunes_oldest_at_exactly_500_non_fatal() {
             until: None,
         });
     }
-    assert_eq!(s.tuning_history.len(), MAX_TUNING_HISTORY, "bounded, not fatal");
+    assert_eq!(
+        s.tuning_history.len(),
+        MAX_TUNING_HISTORY,
+        "bounded, not fatal"
+    );
     assert_eq!(
         s.tuning_history[0].reason,
         format!("entry {}", TOTAL - MAX_TUNING_HISTORY),
@@ -538,8 +581,10 @@ async fn expired_hold_is_filtered_before_the_cycle_reads_the_brakes() {
     assert!(auto.bugs_first, "fixture: hot churn wants the brake ON");
     // An operator released it anyway; that hold has EXPIRED and the persisted
     // tuning still carries the forced OFF (the daily pass has not re-run).
-    pre.tuning_overrides
-        .insert("bugs_first".to_owned(), hold(Some(false), "ship anyway", &past_stamp()));
+    pre.tuning_overrides.insert(
+        "bugs_first".to_owned(),
+        hold(Some(false), "ship anyway", &past_stamp()),
+    );
     pre.tuning.bugs_first = false;
 
     let (store, dir) = world(pre);
@@ -575,8 +620,10 @@ async fn expired_hold_is_filtered_before_the_cycle_reads_the_brakes() {
 fn cockpit_reports_signals_thresholds_holds_and_trail() {
     let mut s = shipped_team_state();
     s.tuning = autonomous_decision(&s);
-    s.tuning_overrides
-        .insert("bugs_first".to_owned(), hold(Some(false), "not yet", &future_stamp()));
+    s.tuning_overrides.insert(
+        "bugs_first".to_owned(),
+        hold(Some(false), "not yet", &future_stamp()),
+    );
     s.tuning.bugs_first = false;
     let now = now_rfc3339();
     let c = brake_cockpit(&s, &now);
@@ -587,9 +634,16 @@ fn cockpit_reports_signals_thresholds_holds_and_trail() {
         .expect("quality card");
     assert_eq!(quality.field_name, "bugs_first");
     assert_eq!(quality.mode, "overridden");
-    assert!(!quality.effective_value, "the pinned value is what consumers read");
+    assert!(
+        !quality.effective_value,
+        "the pinned value is what consumers read"
+    );
     assert!(quality.auto_would_be, "and the loop would want ON");
-    let intake = c.cards.iter().find(|card| card.id == "intake").expect("intake card");
+    let intake = c
+        .cards
+        .iter()
+        .find(|card| card.id == "intake")
+        .expect("intake card");
     assert_eq!(intake.mode, "auto", "the unheld brake is autonomous");
     assert_eq!(c.inputs.backlog, brake_backlog(&s));
     assert_eq!(c.inputs.shipped_last7_days, agent_evals(&s).shipped_7d);
@@ -611,7 +665,11 @@ fn cockpit_reports_signals_thresholds_holds_and_trail() {
 #[test]
 fn unknown_brake_fields_are_rejected_by_the_pure_layer() {
     let mut s = ProjectState::default();
-    assert!(!set_brake_hold(&mut s, "burn_mode", hold(Some(true), "x", &future_stamp())));
+    assert!(!set_brake_hold(
+        &mut s,
+        "burn_mode",
+        hold(Some(true), "x", &future_stamp())
+    ));
     assert!(!clear_brake_hold(&mut s, "burn_mode", "op"));
     assert!(s.tuning_overrides.is_empty());
 }
