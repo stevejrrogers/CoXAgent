@@ -30,6 +30,9 @@ test('the cost view draws all four panels plus KPI labels', async ({ page }) => 
   await expect(page.locator('#cost-operators')).toContainText(
     'no per-user spend yet',
   );
+  // Daily-spend trend renders either bars or its own empty state — never
+  // a blank panel (a blank panel is how a JS error presents here).
+  await expect(page.locator('#cost-trend')).not.toBeEmpty();
   // Token-saver shows actual seeded compression stats in this fixture.
   await expect(page.locator('#cost-tokensaver')).toContainText('compressed');
   await expect(page.locator('#cost-tokensaver')).toContainText('saved');

@@ -764,6 +764,16 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
         <div style="background:var(--card2);border-radius:6px;height:10px;overflow:hidden"><div style="width:${used}%;height:100%;background:${used>=90?'var(--red)':used>=70?'var(--amber)':'var(--accent2)'}"></div></div>
         <div style="color:var(--dim);font-size:11px;margin-top:8px">Loop auto-pauses when the cap is reached.</div>`);
     }else{setHTML(document.getElementById("cost-budget"),'<div class="empty">no budget cap set — add "budget_usd" in coxagent.json</div>');}
+    // Daily spend trend: closed UTC days from spend_history plus the running
+    // "today" bar (accent). Bars, not a line — a single day is the unit the
+    // daily budget cap reasons about, so days should read individually.
+    const shist=(s.spend_history||[]).slice(-30)
+      .concat(s.spend_day?[{day:s.spend_day,usd:s.spend_today_usd||0,today:true}]:[]);
+    const smax=Math.max(...shist.map(d=>d.usd||0),0.01);
+    setHTML(document.getElementById("cost-trend"),shist.length?`<div style="display:flex;gap:4px;align-items:flex-end;height:92px">${shist.map(d=>{
+      const h=Math.max(3,Math.round((d.usd||0)/smax*80));
+      return `<div title="${escAttr(d.day+": "+money(d.usd||0))}" style="flex:1;max-width:26px;height:${h}px;background:${d.today?"var(--accent)":"var(--accent2)"};border-radius:3px 3px 0 0"></div>`;}).join("")}</div>
+      <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--dim);margin-top:6px"><span>${esc(shist[0].day||"")}</span><span>today ${money(s.spend_today_usd||0)}</span></div>`:'<div class="empty">no spend recorded yet</div>');
     // Engine reliability: the question "is GLM healthy today?" answered
     // where cost already lives, instead of only in hub.log greps.
     const rh=Object.entries(s.role_health||{}).sort((a,b)=>((b[1].errors||0)+(b[1].timeouts||0))-((a[1].errors||0)+(a[1].timeouts||0)));
