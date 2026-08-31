@@ -1488,7 +1488,27 @@ pub(crate) fn worktree_at(work_dir: PathBuf, slug: &str) -> PathBuf {
         .unwrap_or(&work_dir)
         .join(".coxagent-worktrees")
         .join(&slug);
+    // The onboarding-generated context files (.coxagent/REPO_MAP.md and
+    // friends) are gitignored, so `git worktree add` never carries them —
+    // a DEV run in a fresh slot then failed its own precondition ("REPO_MAP
+    // is missing in this worktree"). Seed/refresh them from the primary
+    // checkout on every call, existing worktrees included.
+    let seed_context = |wt: &std::path::Path| {
+        let src = work_dir.join(".coxagent");
+        if !src.is_dir() || wt.join(".coxagent").join("REPO_MAP.md").exists() {
+            return;
+        }
+        let _ = std::fs::create_dir_all(wt.join(".coxagent"));
+        if let Ok(rd) = std::fs::read_dir(&src) {
+            for e in rd.flatten() {
+                if e.path().is_file() {
+                    let _ = std::fs::copy(e.path(), wt.join(".coxagent").join(e.file_name()));
+                }
+            }
+        }
+    };
     if wt.exists() {
+        seed_context(&wt);
         return wt;
     }
     let base = std::process::Command::new("git")
@@ -1510,6 +1530,7 @@ pub(crate) fn worktree_at(work_dir: PathBuf, slug: &str) -> PathBuf {
         .status()
         .is_ok_and(|s| s.success());
     if ok {
+        seed_context(&wt);
         tracing::info!("worker checkout isolated at {}", wt.display());
         wt
     } else {
