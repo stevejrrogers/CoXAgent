@@ -716,8 +716,10 @@ function goalIsRefactor(){
   const g=(((STATE||{}).sprint||{}).goal||"")+" "+((STATE||{}).sprint_goal||"");
   return ((STATE||{}).refactor_mode===true)||/refactor|restructure|migrat|tái cấu trúc|cấu trúc lại/i.test(g);
 }
+let REVIEW_CONFIGURED=true;
 async function drainBanner(elId){
   const el=document.getElementById(elId);if(!el)return;
+  if(elId==="rv-drain"&&!REVIEW_CONFIGURED){el.innerHTML="";return;}
   const sweepBtn=`<button class="gc-btn pri" onclick="mergeSweep()" title="SA merges every green PR right now (oldest first) — no tokens"><i class="ti ti-git-merge"></i> SA merge sweep</button>`;
   // The Review tab always offers the sweep, drain or not.
   const toolbar=elId==="rv-drain"?`<div style="display:flex;justify-content:flex-end;margin-bottom:10px">${sweepBtn}</div>`:"";
@@ -759,7 +761,10 @@ async function renderReview(){
   el.innerHTML='<div class="empty">loading pull requests…</div>';
   let d={};try{d=await(await fetch(api("/prs"))).json();}catch(e){el.innerHTML='<div class="empty">unable to load</div>';return;}
   const prs=d.prs||[];
-  if(!d.configured&&!prs.length){el.innerHTML=`<div class="rev-empty"><i class="ti ti-git-pull-request"></i><div>Git review isn't set up</div><span>Configure a repository in <a onclick="nav('settings')">Settings → Git &amp; version control</a> to open and review pull requests here.</span></div>`;return;}
+  // Remembered for drainBanner: offering "SA merge sweep" over an
+  // unconfigured repo is a dead-end button next to a "not set up" notice.
+  REVIEW_CONFIGURED=!!d.configured||prs.length>0;
+  if(!d.configured&&!prs.length){drainBanner("rv-drain");el.innerHTML=`<div class="rev-empty"><i class="ti ti-git-pull-request"></i><div>Git review isn't set up</div><span>Configure a repository in <a onclick="nav('settings')">Settings → Git &amp; version control</a> to open and review pull requests here.</span></div>`;return;}
   const roNote=!d.configured?' · <b class="rev-ro-note"><i class="ti ti-lock"></i> read-only — configure git in Settings for actions</b>':'';
   const head=`<div class="sec">Pull requests <span style="font-size:11px;color:var(--dim);font-weight:400">· ${prs.length} open${roNote}${d.error?' · <span style=\"color:var(--red)\">'+esc(d.error)+'</span>':''}</span></div>`;
   if(!prs.length){el.innerHTML=head+`<div class="rev-empty"><i class="ti ti-check"></i><div>No open pull requests</div><span>Agent-shipped tickets will appear here for review.</span></div>`;return;}
