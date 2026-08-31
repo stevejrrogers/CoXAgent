@@ -505,6 +505,11 @@ pub struct ProjectState {
     /// — the dashboard's zero indicator must read 0, never absence.
     #[serde(default)]
     pub drift_alerts: Vec<DriftAlert>,
+    /// Open loop-liveness stall episode (CXA-F259): `Some` while the hub-side
+    /// watchdog has an unresolved stall alert (dedupe key + the chip's data).
+    /// serde-defaulted so state written before this existed loads untouched.
+    #[serde(default)]
+    pub liveness: Option<StallEpisode>,
 }
 
 /// One day's open/fixed/verified bug counts — the persisted burn-down point
@@ -624,6 +629,7 @@ impl Default for ProjectState {
             bug_snapshots: std::collections::BTreeMap::new(),
             governance_interventions: Vec::new(),
             drift_alerts: Vec::new(),
+            liveness: None,
         }
     }
 }
