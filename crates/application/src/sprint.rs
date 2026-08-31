@@ -465,6 +465,26 @@ pub const MIN_ACTIONABLE_SCOPE: usize = 4; // default for config dev_scope_floor
 /// Pulls Ready features/chores first (priority order is the backlog's own),
 /// then Open bugs; anything OnHold/Rejected never qualifies. Returns how many
 /// tickets were committed.
+/// The goal text of the first milestone whose scope is not complete — the one
+/// the roadmap timeline shows as "in progress".
+fn active_milestone_goal(state: &ProjectState) -> Option<String> {
+    state
+        .milestones
+        .iter()
+        .find(|m| !m.goal_complete)
+        .map(|m| format!("{} {}", m.name, m.goal).to_lowercase())
+}
+
+/// Crude, dependency-free relevance: the ticket title shares at least one
+/// meaningful (5+ char) word with the milestone's name/goal text.
+fn pushes_goal(goal: &str, title: &str) -> bool {
+    title
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() >= 5)
+        .any(|w| goal.contains(w))
+}
+
 pub fn top_up_scope(state: &mut ProjectState, floor: usize) -> usize {
     if let Some(sprint) = &mut state.sprint {
         // Concurrent refill/top-up races have produced doubles; keep the
@@ -491,7 +511,12 @@ pub fn top_up_scope(state: &mut ProjectState, floor: usize) -> usize {
         return 0;
     }
     let want = floor - actionable;
-    let picks: Vec<TicketId> = state
+    // The PO's pick order, not list order: highest priority first, and inside
+    // a priority band tickets that push the ACTIVE milestone (first one whose
+    // goal is not complete) come before unrelated work — the roadmap moves
+    // instead of only the newest backlog.
+    let goal = active_milestone_goal(state);
+    let mut ranked: Vec<(u8, u8, TicketId)> = state
         .tickets
         .iter()
         .filter(|t| {
@@ -502,9 +527,18 @@ pub fn top_up_scope(state: &mut ProjectState, floor: usize) -> usize {
                     _ => false,
                 }
         })
-        .map(|t| t.id().clone())
-        .take(want)
+        .map(|t| {
+            let prio = match t.priority() {
+                Priority::High => 0u8,
+                Priority::Medium => 1,
+                Priority::Low => 2,
+            };
+            let ms = u8::from(!goal.as_deref().is_some_and(|g| pushes_goal(g, t.title())));
+            (prio, ms, t.id().clone())
+        })
         .collect();
+    ranked.sort();
+    let picks: Vec<TicketId> = ranked.into_iter().map(|(_, _, id)| id).take(want).collect();
     let n = picks.len();
     if let Some(sprint) = &mut state.sprint {
         sprint.committed.extend(picks);
@@ -934,5 +968,64 @@ mod tests {
             .expect("fmt");
         state.sprint.as_mut().expect("s").started_at = old;
         assert_eq!(advance(&mut state, 1000, SprintPolicy::days(1)), Some(2));
+    }
+
+    #[test]
+    fn top_up_prefers_high_priority_then_active_milestone_work() {
+        // Backlog order is adversarial: an unrelated Medium ticket comes
+        // first; the PO must still pick the High ticket, then the Medium one
+        // that pushes the active milestone, and leave the unrelated Medium.
+        let mk = |id: &str, title: &str, prio| {
+            let mut t = coxagent_domain::Ticket::new(
+                TicketId::new(id).expect("id"),
+                TicketType::Feature,
+                title,
+                "",
+                prio,
+                coxagent_domain::Complexity::Small,
+                false,
+            )
+            .expect("t");
+            t.set_technical_design(
+                coxagent_domain::Role::Sa,
+                coxagent_domain::TechnicalDesign::default(),
+            )
+            .expect("design");
+            t.transition_to(coxagent_domain::Role::Sa, Status::Ready)
+                .expect("ready");
+            t
+        };
+        let mut state = ProjectState {
+            tickets: vec![
+                mk("F001", "polish the settings page", Priority::Medium),
+                mk("F002", "urgent auth fix", Priority::High),
+                mk("F003", "sibling-project knowledge dashboard", Priority::Medium),
+            ],
+            ..ProjectState::default()
+        };
+        state.milestones.push(crate::state::Milestone {
+            name: "Cross-Project Knowledge Graph".into(),
+            goal: "sibling-project index and knowledge dashboard".into(),
+            target_version: "9.9.9".into(),
+            goal_complete: false,
+            fulfilled: false,
+        });
+        state.sprint = Some(Sprint {
+            number: 1,
+            goal: "g".into(),
+            started_cycle: 1,
+            length_cycles: 10,
+            committed: Vec::new(),
+            started_at: crate::state::now_rfc3339(),
+            bug_burn_floor: None,
+        });
+        assert_eq!(top_up_scope(&mut state, 2), 2);
+        let committed = &state.sprint.as_ref().expect("sprint").committed;
+        assert_eq!(committed[0].to_string(), "F002", "High priority first");
+        assert_eq!(
+            committed[1].to_string(),
+            "F003",
+            "milestone-aligned Medium beats unrelated Medium"
+        );
     }
 }
