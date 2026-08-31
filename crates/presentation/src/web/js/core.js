@@ -754,5 +754,17 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
         <div style="background:var(--card2);border-radius:6px;height:10px;overflow:hidden"><div style="width:${used}%;height:100%;background:${used>=90?'var(--red)':used>=70?'var(--amber)':'var(--accent2)'}"></div></div>
         <div style="color:var(--dim);font-size:11px;margin-top:8px">Loop auto-pauses when the cap is reached.</div>`);
     }else{setHTML(document.getElementById("cost-budget"),'<div class="empty">no budget cap set — add "budget_usd" in coxagent.json</div>');}
+    // Engine reliability: the question "is GLM healthy today?" answered
+    // where cost already lives, instead of only in hub.log greps.
+    const rh=Object.entries(s.role_health||{}).sort((a,b)=>((b[1].errors||0)+(b[1].timeouts||0))-((a[1].errors||0)+(a[1].timeouts||0)));
+    setHTML(document.getElementById("cost-engines"),rh.length?rh.map(([r,h])=>{
+      const total=(h.errors||0)+(h.timeouts||0);
+      const today=(h.last_error_at||"").slice(0,10)===new Date().toISOString().slice(0,10);
+      const col=today?"var(--red)":(total?"var(--amber)":"var(--green)");
+      return `<div style="display:flex;align-items:center;gap:12px;padding:7px 0">
+        <span style="min-width:110px;font-size:12px">${esc(r)}</span>
+        <span style="font-size:12px;color:${col};min-width:150px">${h.errors||0} error(s) &middot; ${h.timeouts||0} timeout(s)</span>
+        <span style="flex:1;font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escAttr(h.last_error||"")}">${today?"today: ":""}${esc((h.last_error||"").slice(0,90))}</span></div>`;
+    }).join(""):'<div class="empty">no engine failures recorded — all roles healthy</div>');
     renderTokenSaver();
   }else if(CUR==="discuss"){renderDiscuss();}else if(CUR==="roadmap"){renderRoadmap();}else if(CUR==="home"){renderHome();}else if(CUR==="mg-spaces"){renderManage();}else if(CUR==="mg-users"){renderManage();}else if(CUR==="mg-usage"){renderManage();}else if(CUR==="mg-audit"){renderManage();}}
