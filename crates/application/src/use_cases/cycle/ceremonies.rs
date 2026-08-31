@@ -696,6 +696,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// judgement: stuck PRs (fix-attempt brake tripped), parked tickets
     /// (3 failed builds), a red deploy, and active queue recovery.
     pub(super) async fn impediment_watch(&self) {
+        let vi = self.config.workflow.language.is_vi();
+        // One digest line, in the workspace language.
+        let bi = |v: String, e: String| if vi { v } else { e };
         let today = crate::state::now_rfc3339()[..10].to_owned();
         let Ok(state) = self.store.load().await else {
             return;
@@ -720,9 +723,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .map(|(pr, _)| format!("#{pr}"))
             .collect();
         if !stuck.is_empty() {
-            items.push(format!(
-                "PR kẹt SAU khi SA đã rescue (cần người quyết): {}",
-                stuck.join(", ")
+            items.push(bi(
+                format!("PR kẹt SAU khi SA đã rescue (cần người quyết): {}", stuck.join(", ")),
+                format!("PRs still stuck AFTER an SA rescue (a person must decide): {}", stuck.join(", ")),
             ));
         }
         let active_ticket = |id: &str| {
@@ -744,16 +747,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .map(|(id, _)| id.clone())
             .collect();
         if !parked.is_empty() {
-            items.push(format!(
-                "Ticket bị PARK sau 3 lần build đỏ: {}",
-                parked.join(", ")
+            items.push(bi(
+                format!("Ticket bị PARK sau 3 lần build đỏ: {}", parked.join(", ")),
+                format!("Tickets PARKED after 3 red builds: {}", parked.join(", ")),
             ));
         }
         if let Some(d) = &state.deploy {
             if !d.ok {
-                items.push(format!(
-                    "Deploy đang ĐỎ: {}",
-                    d.summary.lines().next().unwrap_or("")
+                items.push(bi(
+                    format!("Deploy đang ĐỎ: {}", d.summary.lines().next().unwrap_or("")),
+                    format!("Deploy is RED: {}", d.summary.lines().next().unwrap_or("")),
                 ));
             }
         }
