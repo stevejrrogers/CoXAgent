@@ -21,7 +21,7 @@ use coxagent_infrastructure::{
     discover, AnyStateStore, DockerComposeDeploy, JsonStateStore, RestConfig, RestStateStore,
     SqlStateStore, WebhookNotifier,
 };
-use coxagent_presentation::{cli, render_changelog, render_report, Command};
+use coxagent_presentation::{cli, render_changelog, render_report, Command, FactoryError};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -319,6 +319,36 @@ mod project_id_tests {
         // `coxagent --state-dir state` from a workspace root: no parent name to
         // take, and "default" is the id a single-project install already uses.
         assert_eq!(project_id_for(Path::new("state")), "default");
+    }
+}
+
+/// CXA-B129: the onboarding refusal must arrive at the API classified as a
+/// client conflict — the glue between [`onboard::OnboardConflict`] and the
+/// presentation layer's [`FactoryError`].
+#[cfg(test)]
+mod onboard_error_classification_tests {
+    use super::classify_onboard_error;
+    use crate::onboard::OnboardConflict;
+
+    #[test]
+    fn the_re_onboard_refusal_is_classified_as_a_conflict() {
+        let err: Box<dyn std::error::Error> = Box::new(OnboardConflict(
+            "workspace already has tickets; refusing to re-onboard".into(),
+        ));
+        let mapped = classify_onboard_error(err.as_ref());
+        assert!(mapped.conflict, "the refusal must map to 409 material");
+        assert_eq!(
+            mapped.message,
+            "workspace already has tickets; refusing to re-onboard"
+        );
+    }
+
+    #[test]
+    fn any_other_onboarding_failure_stays_a_server_fault() {
+        let err: Box<dyn std::error::Error> = "store unreachable".into();
+        let mapped = classify_onboard_error(err.as_ref());
+        assert!(!mapped.conflict, "an ordinary fault must map to 500");
+        assert_eq!(mapped.message, "store unreachable");
     }
 }
 
@@ -721,6 +751,17 @@ fn remove_from_registry(registry_path: &Path, id: &str) -> Result<(), String> {
     std::fs::rename(&tmp, registry_path).map_err(|e| e.to_string())
 }
 
+/// Map an onboarding failure onto the factory's classified error (CXA-B129):
+/// the typed "workspace already has tickets" conflict becomes 409 material at
+/// the API; everything else stays a server fault.
+fn classify_onboard_error(e: &(dyn std::error::Error + 'static)) -> FactoryError {
+    if let Some(message) = onboard::conflict_message(e) {
+        FactoryError::conflict(message)
+    } else {
+        FactoryError::internal(e.to_string())
+    }
+}
+
 /// Scaffold a new project workspace under `base`, seed it, append it to the hub
 /// registry, and build a live [`ProjectHandle`]. Used by the dashboard's
 /// "new project" flow.
@@ -729,7 +770,7 @@ async fn onboard_project(
     registry_path: &Path,
     req: coxagent_presentation::NewProjectReq,
     auth: Option<&Arc<dyn coxagent_application::auth::AuthPort>>,
-) -> Result<coxagent_presentation::ProjectHandle, String> {
+) -> Result<coxagent_presentation::ProjectHandle, FactoryError> {
     let name = req.name.trim();
     let derived = req
         .alias
@@ -738,11 +779,11 @@ async fn onboard_project(
     let id = unique_id(base, &derived.to_lowercase());
     let proj_dir = base.join(&id);
     let state_dir = proj_dir.join("state");
-    std::fs::create_dir_all(&state_dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&state_dir).map_err(|e| FactoryError::internal(e.to_string()))?;
 
     let store = make_store(&id, &state_dir)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| FactoryError::internal(e.to_string()))?;
 
     // Git-URL import: clone into the workspace first, then adopt it exactly
     // like a local brownfield import (remote detection pre-fills git config).
@@ -757,7 +798,9 @@ async fn onboard_project(
                 || url.starts_with("https://")
                 || url.starts_with("http://"))
             {
-                return Err("git URL must start with git@, https:// or http://".to_owned());
+                return Err(FactoryError::internal(
+                    "git URL must start with git@, https:// or http://",
+                ));
             }
             let wd = proj_dir.join("codebase");
             let out = tokio::process::Command::new("git")
@@ -766,13 +809,13 @@ async fn onboard_project(
                 .stdin(std::process::Stdio::null())
                 .output()
                 .await
-                .map_err(|e| format!("spawn git clone: {e}"))?;
+                .map_err(|e| FactoryError::internal(format!("spawn git clone: {e}")))?;
             if !out.status.success() {
                 let err = String::from_utf8_lossy(&out.stderr);
-                return Err(format!(
+                return Err(FactoryError::internal(format!(
                     "git clone failed: {}",
                     err.lines().last().unwrap_or("unknown error")
-                ));
+                )));
             }
             Some(wd)
         }
@@ -784,14 +827,14 @@ async fn onboard_project(
     let work_dir = if let Some(path) = cloned.as_ref().or(req.existing.as_ref()) {
         onboard::brownfield(&store, &state_dir, name, req.alias.clone(), path)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| classify_onboard_error(e.as_ref()))?;
         path.clone()
     } else {
         let wd = proj_dir.join("codebase");
-        std::fs::create_dir_all(&wd).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&wd).map_err(|e| FactoryError::internal(e.to_string()))?;
         onboard::greenfield(&store, &state_dir, name, req.alias.clone())
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| classify_onboard_error(e.as_ref()))?;
         wd
     };
 
@@ -814,13 +857,15 @@ async fn onboard_project(
 
     // Assign a unique host port so this project's `docker compose` deploy does
     // not clash with the others on this host.
-    assign_host_port(base, registry_path, &proj_dir).map_err(|e| e.to_string())?;
+    assign_host_port(base, registry_path, &proj_dir)
+        .map_err(|e| FactoryError::internal(e.to_string()))?;
 
-    append_registry(registry_path, &id, &proj_dir).map_err(|e| e.to_string())?;
+    append_registry(registry_path, &id, &proj_dir)
+        .map_err(|e| FactoryError::internal(e.to_string()))?;
 
     build_project(&id, &state_dir, work_dir, auth)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| FactoryError::internal(e.to_string()))
 }
 
 /// Pick an id not already taken by a workspace directory under `base`.

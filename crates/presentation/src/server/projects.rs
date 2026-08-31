@@ -151,7 +151,11 @@ pub(super) async fn create_project(
     .await
     {
         Ok(h) => h,
-        Err(e) => return internal_error(&e),
+        // CXA-B129: the factory classifies its failures — an expected client
+        // conflict (the target workspace already holds tickets) reaches the
+        // client as 409, everything else stays a 500.
+        Err(e) if e.conflict => return conflict_error(&e.message),
+        Err(e) => return internal_error(&e.message),
     };
     let id = handle.id.clone();
     {

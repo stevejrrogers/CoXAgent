@@ -533,8 +533,17 @@ function card(t){const a={high:"var(--red)",medium:"var(--amber)",low:"var(--dim
   const blockers=(t.depends_on||[]).filter(d=>{const dt=(STATE.tickets||[]).find(x=>x.id===d);return dt&&!doneSet.includes(dt.status);});
   const blocked=blockers.length?`<span class="b" style="background:color-mix(in srgb,var(--red) 16%,transparent);color:var(--red)" title="blocked by ${esc(blockers.join(', '))}"><i class="ti ti-lock" style="font-size:10px"></i> blocked</span>`:'';
   const hold=t.status==="on_hold"?`<span class="b" style="background:color-mix(in srgb,var(--amber) 18%,transparent);color:var(--amber)" title="${esc((STATE.hold_reasons||{})[t.id]||'on hold')}"><i class="ti ti-player-pause" style="font-size:10px"></i> on hold</span>`:'';
+  // Age heat: how long a ticket has WAITED. Only pre-work statuses — a card
+  // being built isn't stale — and only tickets that carry created_at (older
+  // ones have unknown age and stay quiet). Amber at 3 days, red at 7.
+  let age='';
+  if(t.created_at&&(t.status==="pending"||t.status==="open")){
+    const days=Math.floor((Date.now()-Date.parse(t.created_at))/86400000);
+    if(days>=3){const c=days>=7?"var(--red)":"var(--amber)";
+      age=`<span class="b" style="background:color-mix(in srgb,${c} 14%,transparent);color:${c}" title="filed ${esc(t.created_at.slice(0,10))}"><i class="ti ti-hourglass" style="font-size:10px"></i> ${days}d</span>`;}
+  }
   return `<div class="card-t" onclick="showTicket('${t.id}')" ${t.status==="on_hold"?'style="opacity:.65"':''}><div class="cid">${esc(t.id)}</div>
-    <div class="ct">${esc(t.title)}</div><div class="badges"><span class="b ${t.priority}">${t.priority}</span>${hold}${blocked}${ui}${bug}${who}</div></div>`;}
+    <div class="ct">${esc(t.title)}</div><div class="badges"><span class="b ${t.priority}">${t.priority}</span>${hold}${blocked}${age}${ui}${bug}${who}</div></div>`;}
 function column([k,l,c],ts){const items=ts.filter(t=>t.status===k);
   return `<div class="col"><h3><span class="dot" style="background:var(${c})"></span>${l}<span class="n">${items.length}</span></h3>${items.length?items.map(card).join(""):'<div class="empty">—</div>'}</div>`;}
 // Unified column: collects both features and bugs whose status maps to this stage.
@@ -591,6 +600,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
     document.getElementById("ov-alerts").innerHTML=alertsHtml(s,m,spend);
     drainBanner("ov-drain");
     document.getElementById("kpis").innerHTML=[kpi("Shipped",m.shipped),kpi("In flight",m.inflight),kpi("Documented",m.docd),kpi("Releases",m.releases),kpi("Cost",money(spend.total_cost_usd))].join("");
+    const ovv=document.getElementById("ov-velocity");if(ovv)ovv.innerHTML=velocityHtml(s);
     renderHealth(s);
     const dp=s.deploy;
     document.getElementById("ov-deploy").innerHTML=dp?`<div class="panel" style="margin-top:16px;display:flex;align-items:center;gap:13px">
@@ -754,5 +764,17 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
         <div style="background:var(--card2);border-radius:6px;height:10px;overflow:hidden"><div style="width:${used}%;height:100%;background:${used>=90?'var(--red)':used>=70?'var(--amber)':'var(--accent2)'}"></div></div>
         <div style="color:var(--dim);font-size:11px;margin-top:8px">Loop auto-pauses when the cap is reached.</div>`);
     }else{setHTML(document.getElementById("cost-budget"),'<div class="empty">no budget cap set — add "budget_usd" in coxagent.json</div>');}
+    // Engine reliability: the question "is GLM healthy today?" answered
+    // where cost already lives, instead of only in hub.log greps.
+    const rh=Object.entries(s.role_health||{}).sort((a,b)=>((b[1].errors||0)+(b[1].timeouts||0))-((a[1].errors||0)+(a[1].timeouts||0)));
+    setHTML(document.getElementById("cost-engines"),rh.length?rh.map(([r,h])=>{
+      const total=(h.errors||0)+(h.timeouts||0);
+      const today=(h.last_error_at||"").slice(0,10)===new Date().toISOString().slice(0,10);
+      const col=today?"var(--red)":(total?"var(--amber)":"var(--green)");
+      return `<div style="display:flex;align-items:center;gap:12px;padding:7px 0">
+        <span style="min-width:110px;font-size:12px">${esc(r)}</span>
+        <span style="font-size:12px;color:${col};min-width:150px">${h.errors||0} error(s) &middot; ${h.timeouts||0} timeout(s)</span>
+        <span style="flex:1;font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escAttr(h.last_error||"")}">${today?"today: ":""}${esc((h.last_error||"").slice(0,90))}</span></div>`;
+    }).join(""):'<div class="empty">no engine failures recorded — all roles healthy</div>');
     renderTokenSaver();
   }else if(CUR==="discuss"){renderDiscuss();}else if(CUR==="roadmap"){renderRoadmap();}else if(CUR==="home"){renderHome();}else if(CUR==="mg-spaces"){renderManage();}else if(CUR==="mg-users"){renderManage();}else if(CUR==="mg-usage"){renderManage();}else if(CUR==="mg-audit"){renderManage();}}
