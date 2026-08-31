@@ -22,10 +22,8 @@ use coxagent_application::DocPage;
 use serde_json::json;
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -48,6 +46,7 @@ mod deps;
 mod docs;
 mod downloads;
 mod engines;
+mod factory;
 mod fleet;
 mod forge;
 mod goals;
@@ -200,31 +199,9 @@ pub struct ProjectHandle {
 
 /// Builds a fresh project on demand (scaffold + register), injected by the
 /// composition root so the presentation layer stays free of infrastructure.
-/// Takes `(name, alias)`, returns a ready [`ProjectHandle`] or an error message.
-pub type ProjectFactory = Arc<
-    dyn Fn(NewProjectReq) -> Pin<Box<dyn Future<Output = Result<ProjectHandle, String>> + Send>>
-        + Send
-        + Sync,
->;
-
-/// A request to create a project. `existing` adopts a codebase (brownfield);
-/// `goal` seeds the project context (from AI-assisted goal drafting).
-#[derive(Clone, Default)]
-pub struct NewProjectReq {
-    pub name: String,
-    pub alias: Option<String>,
-    pub existing: Option<PathBuf>,
-    /// Import straight from a git URL: the factory clones it into the
-    /// project workspace, then adopts it like any existing codebase (remote
-    /// auto-detected, config pre-filled).
-    pub git_url: Option<String>,
-    pub goal: Option<String>,
-}
-
-/// Deregisters a project (removes it from the hub registry), injected by the
-/// composition root. Returns an error message on failure.
-pub type ProjectRemover =
-    Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>;
+/// The contract lives in [`factory`]; re-exported here because every
+/// submodule globs `super::*` and `lib.rs` re-exports the names.
+pub use factory::{FactoryError, NewProjectReq, ProjectFactory, ProjectRemover};
 
 /// Extract the project ID from a URL path like `/api/projects/:pid/...`.
 fn extract_pid_from_path(path: &str) -> Option<&str> {
@@ -1314,6 +1291,17 @@ fn internal_error(msg: &str) -> axum::response::Response {
         .into_response()
 }
 
+/// An expected client conflict (CXA-B129): the same JSON error shape as
+/// [`internal_error`], but 409 so a client can react instead of retry-blind
+/// against what looks like a server fault.
+fn conflict_error(msg: &str) -> axum::response::Response {
+    (
+        axum::http::StatusCode::CONFLICT,
+        Json(serde_json::json!({ "error": msg })),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod alerts_tests;
 #[cfg(test)]
@@ -1324,6 +1312,8 @@ mod cors_rate_limit_tests;
 mod pr_preview_tests;
 #[cfg(test)]
 mod pr_review_gate_tests;
+#[cfg(test)]
+mod project_create_tests;
 #[cfg(test)]
 mod repro_url_tests;
 #[cfg(test)]
