@@ -78,3 +78,60 @@ test('the work log opens into a terminal state, never stuck on loading…', asyn
     (window as unknown as { closeAgent: () => void }).closeAgent();
   });
 });
+
+// CXA-B131 regression: the Work log panel is embedded in the page DOM on
+// every view, but only openAgent() ever painted a terminal state into it.
+// Visiting Transcripts & alerts and never opening the drawer left the panel
+// on its bare 'loading…' placeholder forever — no stream, no error, no
+// empty state. The activity render path must land it on a terminal state.
+test('the activity view never leaves the work log panel on loading… without the drawer', async ({ page }) => {
+  const errors: string[] = [];
+  armConsoleGate(page, errors);
+  await openApp(page);
+
+  // Exactly the deployed-hub repro: navigate to Transcripts & alerts and
+  // give any phantom work a moment — the panel must already be terminal.
+  await page.evaluate(() => {
+    AGENT_LOG_ROLE = null;
+    AGENT_LOG_WORKER = '';
+    nav('activity');
+  });
+  const body = page.locator('#agent-transcript');
+  await expect(body).toContainText("hasn't run yet", { timeout: 5000 });
+  await expect(body).not.toContainText('loading…');
+  // No stream was started behind the closed drawer, so neither badge lies.
+  await expect(page.locator('#agent-live-badge')).toBeHidden();
+  await expect(page.locator('#agent-err-badge')).toBeHidden();
+  await assertNoConsoleErrors(errors);
+});
+
+// CXA-B131 guard: the idle painter must never fight an ENGAGED drawer.
+// renderActive() fires on every state snapshot, so while the agent drawer is
+// open the activity branch runs constantly — a painter without the role guard
+// would wipe a live log back to the empty state on the next snapshot.
+test('the idle painter leaves an engaged drawer panel untouched', async ({ page }) => {
+  const errors: string[] = [];
+  armConsoleGate(page, errors);
+  await openApp(page);
+
+  // Simulate an engaged drawer (the state openAgent leaves behind: role set,
+  // panel owned by the stream) without a live socket, then re-render the
+  // activity view exactly as an arriving state snapshot would.
+  await page.evaluate(() => {
+    AGENT_LOG_ROLE = 'dev';
+    AGENT_LOG_WORKER = '';
+    document.getElementById('agent-transcript')!.innerHTML =
+      '<div class="wl-item wl-line">sentinel log line</div>';
+    nav('activity');
+  });
+  await expect(page.locator('#agent-transcript')).toContainText('sentinel log line');
+
+  // Drawer released: the same painter now normalises the panel again.
+  await page.evaluate(() => {
+    AGENT_LOG_ROLE = null;
+    (window as unknown as { paintAgentLogIdle: () => void }).paintAgentLogIdle();
+  });
+  await expect(page.locator('#agent-transcript')).toContainText("hasn't run yet");
+  await expect(page.locator('#agent-transcript')).not.toContainText('sentinel log line');
+  await assertNoConsoleErrors(errors);
+});
