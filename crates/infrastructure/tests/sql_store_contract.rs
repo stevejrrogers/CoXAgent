@@ -28,6 +28,19 @@ fn sample_ticket(id: &str) -> Ticket {
 /// with "migrate: db error". Run the first migration once, alone.
 static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
+
+/// Refuse to run destructive contract tests against a database that already
+/// holds a real hub project. A dedicated test database has no `cxa` row; a
+/// live hub's `cxa` row always carries revision > 0. This closed a real
+/// incident: an exported COXAGENT_TEST_PG_DSN pointing at the production
+/// store filled it with `test-<pid>` project rows.
+async fn is_live_hub_db(dsn: &str) -> bool {
+    let Ok(probe) = SqlStateStore::connect(dsn, "cxa").await else {
+        return false;
+    };
+    matches!(probe.current_version().await, Ok(Some(v)) if v > 0)
+}
+
 async fn connect_store(dsn: &str, pid: &str) -> SqlStateStore {
     MIGRATED
         .get_or_init(|| async {
@@ -47,6 +60,10 @@ async fn sql_store_satisfies_contract() {
         eprintln!("COXAGENT_TEST_PG_DSN unset — skipping Postgres contract test");
         return;
     };
+    if is_live_hub_db(&dsn).await {
+        eprintln!("COXAGENT_TEST_PG_DSN points at a LIVE hub database — refusing the contract test");
+        return;
+    }
     // Unique project id per run so repeated runs against the same DB are clean.
     let pid = format!("test-{}", std::process::id());
     let store = connect_store(&dsn, &pid).await;
@@ -101,6 +118,10 @@ async fn sql_store_rejects_stale_revision_write_with_conflict() {
         eprintln!("COXAGENT_TEST_PG_DSN unset — skipping Postgres OCC test");
         return;
     };
+    if is_live_hub_db(&dsn).await {
+        eprintln!("COXAGENT_TEST_PG_DSN points at a LIVE hub database — refusing the OCC test");
+        return;
+    }
     let pid = format!("occ-test-{}", std::process::id());
     let store = connect_store(&dsn, &pid).await;
 
@@ -172,6 +193,10 @@ async fn sql_store_delete_purges_state_and_coordination_for_the_project_only() {
         eprintln!("COXAGENT_TEST_PG_DSN unset — skipping Postgres delete test");
         return;
     };
+    if is_live_hub_db(&dsn).await {
+        eprintln!("COXAGENT_TEST_PG_DSN points at a LIVE hub database — refusing the delete test");
+        return;
+    }
     let pid = format!("del-test-{}", std::process::id());
     let store = connect_store(&dsn, &pid).await;
 
