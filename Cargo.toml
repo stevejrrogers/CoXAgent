@@ -16,7 +16,7 @@ members = [
 exclude = ["desktop/coxagent-desktop"]
 
 [workspace.package]
-version = "2.26.1"
+version = "2.29.0"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT"
@@ -86,3 +86,11 @@ module_name_repetitions = "allow"
 # "CoXAgent" is a CamelCase product name that appears throughout doc comments;
 # doc_markdown would flag every mention as a missing-backtick code item.
 doc_markdown = "allow"
+
+# Debug builds carried full DWARF for ~700 crates; with 5+ agent worktrees each
+# holding its own target/, that was 150+ GB of debug info alone. Line tables
+# keep panic backtraces and line numbers (all the agents ever use) at a
+# fraction of the size; attach a full debugger by overriding locally with
+# CARGO_PROFILE_DEV_DEBUG=2.
+[profile.dev]
+debug = "line-tables-only"

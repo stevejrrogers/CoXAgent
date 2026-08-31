@@ -8,7 +8,6 @@ use crate::error::AppError;
 use crate::ports::outbound::StateStorePort;
 use crate::use_cases::{AddTicketInput, AddTicketUseCase};
 use coxagent_domain::{Complexity, Priority, TicketId, TicketType};
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -41,7 +40,13 @@ impl<S: StateStorePort> RunConformanceUseCase<S> {
         self
     }
 
-    /// Run the check, filing a bug per new violation. Returns the filed bug ids.
+    /// Run the check, filing a bug per new violation and reconciling the
+    /// operator-facing drift-alert surface (`ProjectState::drift_alerts`)
+    /// against this scan: alerts open with their bug's id, survive re-scans
+    /// keyed by (area, message), and clear automatically once resolved. The
+    /// cleared surface is SAVED even when nothing was filed — a resolving
+    /// scan must reach storage and the dashboard without a manual dismissal.
+    /// Returns the ids of the bugs this pass filed.
     ///
     /// # Errors
     /// [`AppError`] on load/save failure.
@@ -63,40 +68,74 @@ impl<S: StateStorePort> RunConformanceUseCase<S> {
             by_area.insert(rule.area.clone(), listed);
         }
         let violations = conformance::check(&by_area, &self.rules);
+
+        // Clean scan: the only surface work possible is clearing, and there
+        // is nothing to clear unless a previous scan left alerts open.
         if violations.is_empty() {
+            let mut state = self.store.load().await?;
+            if state.drift_alerts.is_empty() {
+                return Ok(Vec::new());
+            }
+            state.sync_drift_alerts(&[], &|_| None);
+            self.store.save(&state).await?;
             return Ok(Vec::new());
         }
 
-        // Dedupe against existing open bug titles so re-scans don't pile up.
-        let existing: HashSet<String> = self
-            .store
-            .load()
-            .await?
-            .tickets
-            .iter()
-            .filter(|t| t.ticket_type() == TicketType::Bug)
-            .map(|t| t.title().to_lowercase())
-            .collect();
+        // Bug inventory by title (the filing dedupe key): at most one bug per
+        // drift title exists — filing refuses duplicates — so the scan's alert
+        // links resolve through this map. Scoped so the stale aggregate is
+        // visibly dead before filing starts: filing saves through the adder.
+        let mut bug_by_title: std::collections::BTreeMap<String, String> = {
+            let state = self.store.load().await?;
+            state
+                .tickets
+                .iter()
+                .filter(|t| t.ticket_type() == TicketType::Bug)
+                .map(|t| (t.title().to_lowercase(), t.id().as_str().to_owned()))
+                .collect()
+        };
 
         let adder = AddTicketUseCase::new(Arc::clone(&self.store));
         let mut filed = Vec::new();
-        for v in violations {
+        for v in &violations {
             let title = v.bug_title();
-            if existing.contains(&title.to_lowercase()) {
+            let key = title.to_lowercase();
+            if bug_by_title.contains_key(&key) {
                 continue;
             }
-            let id = adder
+            let outcome = adder
                 .execute(AddTicketInput {
                     ticket_type: TicketType::Bug,
                     title,
-                    description: v.message,
+                    description: v.message.clone(),
                     priority: Priority::High,
                     complexity: Complexity::Medium,
                     has_ui: false,
                     acceptance_criteria: Vec::new(),
+                    goal: None,
                 })
-                .await?;
-            filed.push(id);
+                .await;
+            match outcome {
+                Ok(id) => {
+                    bug_by_title.insert(key, id.as_str().to_owned());
+                    filed.push(id);
+                }
+                // Two drifts can share a theme in one sweep; the gate refusing
+                // the second is correct — skip it, never abort the sweep.
+                Err(e)
+                    if e.to_string()
+                        .contains(crate::use_cases::add_ticket::DUPLICATE_REFUSED) => {}
+                Err(e) => return Err(e),
+            }
+        }
+
+        // Reconcile the alert surface on a FRESH load: filing saved the new
+        // bugs into state, so the stale aggregate above must not be saved back.
+        let mut state = self.store.load().await?;
+        if state.sync_drift_alerts(&violations, &|v| {
+            bug_by_title.get(&v.bug_title().to_lowercase()).cloned()
+        }) {
+            self.store.save(&state).await?;
         }
         Ok(filed)
     }
@@ -198,5 +237,50 @@ mod tests {
         let store = Arc::new(MemStore::default());
         let uc = RunConformanceUseCase::new(store, dir.path().to_path_buf(), vec![]);
         assert!(uc.execute().await.expect("run").is_empty());
+    }
+
+    /// Regression (CXA-F226): the scan reconciles the drift-alert surface —
+    /// alerts open linked to the filed bug, and a resolving scan clears them
+    /// from storage even though nothing was filed.
+    #[tokio::test]
+    async fn scan_opens_alerts_linked_to_their_bug_and_a_resolving_scan_clears_them() {
+        let root = std::path::PathBuf::from("/w");
+        let store = Arc::new(MemStore::default());
+        let dirty =
+            RunConformanceUseCase::new(Arc::clone(&store), root.clone(), vec![rust_server_rule()])
+                .with_files(Some(Arc::new(FixedFiles(vec![
+                    root.join("server/src/index.ts")
+                ]))));
+        let filed = dirty.execute().await.expect("run");
+        assert_eq!(
+            filed.len(),
+            1,
+            "both violations of one area share one bug title"
+        );
+
+        let state = store.load().await.expect("load");
+        assert_eq!(state.drift_alerts.len(), 2, "one alert per (area, message)");
+        assert!(
+            state
+                .drift_alerts
+                .iter()
+                .all(|a| a.area == "server" && a.ticket == filed[0].as_str()),
+            "every alert names the area and links the filed bug: {:?}",
+            state.drift_alerts
+        );
+
+        let clean =
+            RunConformanceUseCase::new(Arc::clone(&store), root.clone(), vec![rust_server_rule()])
+                .with_files(Some(Arc::new(FixedFiles(vec![
+                    root.join("server/Cargo.toml"),
+                    root.join("server/src/main.rs"),
+                ]))));
+        assert!(clean.execute().await.expect("run").is_empty());
+        let state = store.load().await.expect("load");
+        assert!(
+            state.drift_alerts.is_empty(),
+            "a resolving scan clears the surface from storage: {:?}",
+            state.drift_alerts
+        );
     }
 }

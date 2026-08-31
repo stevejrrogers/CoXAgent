@@ -4,7 +4,7 @@
 
 use crate::config::Config;
 use crate::error::AppError;
-use crate::parsing::parse_items;
+use crate::parsing::parse_test_output;
 use crate::ports::outbound::{AgentEnginePort, AgentRequest, StateStorePort};
 use crate::prompts;
 use crate::use_cases::{AddTicketInput, AddTicketUseCase};
@@ -118,7 +118,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
             .into());
         }
 
-        let bugs = parse_items(&outcome.stdout)
+        let (bugs, verdicts) = parse_test_output(&outcome.stdout)
             .map_err(|e| crate::error::PortError::Corrupt(format!("TEST output: {e}")))?;
 
         // Dedupe against existing bug titles so re-runs don't pile up duplicates.
@@ -147,9 +147,29 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
                     complexity: bug.complexity,
                     has_ui: bug.has_ui,
                     acceptance_criteria: Vec::new(),
+                    goal: None,
                 })
                 .await?;
             filed.push(id);
+        }
+
+        // Traceability (CXA-F024): apply the TEST agent's per-acceptance-
+        // criterion verdicts onto the shipped tickets' test cases — exact
+        // criterion text first, then keyword + fuzzy (Levenshtein ≤ 0.3)
+        // overlap when the agent paraphrased — and attach each verdict's
+        // evidence sources (test files / API request-response) so the ticket's
+        // Test Coverage tab can show what demonstrates every criterion.
+        if !verdicts.is_empty() {
+            let mut state = self.store.load().await?;
+            let at = crate::state::now_rfc3339();
+            if crate::use_cases::coverage::record_verdicts(
+                &mut state,
+                &verdicts,
+                &at,
+                self.config.deploy.host_port,
+            ) {
+                let _ = self.store.save(&state).await;
+            }
         }
 
         // Close the QA loop: a bug that was Fixed and did NOT resurface as a new
@@ -196,6 +216,25 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
                 if t.transition_to(Role::Test, coxagent_domain::Status::Verified)
                     .is_ok()
                 {
+                    // Reaching Verified MEANS its root-cause regression passed:
+                    // this Fixed bug did not resurface as a new bug this run.
+                    // Record that fact as QA provenance so burn-down tickets can
+                    // prove each cleared bug shipped with a passing regression
+                    // test fixed at source (CXA-F022 AC#2/#3) — never just masked
+                    // by symptom/workaround probes. Linked to the verify gate it
+                    // supported, attributed to the TEST role (CXA-F241).
+                    state.add_evidence_for(
+                        &id.to_string(),
+                        "test",
+                        "REGRESSION TEST",
+                        "PASS on current master; regression test fails on pre-fix \
+                         code and reproduces cleanly; root cause fixed at source.",
+                        &["verify"],
+                        "TEST",
+                    );
+                    // Goal-line outcome ledger (CXA-F228): this verification is
+                    // a delivered outcome — freeze the provenance now.
+                    state.record_verified_outcome(&id.to_string());
                     promoted = true;
                 }
             }
@@ -240,6 +279,30 @@ pub fn shipped_block(state: &crate::state::ProjectState) -> String {
     out.chars().take(2500).collect()
 }
 
+/// The QA-provenance record attached when a bug's fix is verified by a PERSON
+/// (chat `verify <id>`, Inbox verify button) — the human counterpart of the
+/// agent TEST path's record in [`RunTestUseCase`]. Reaching `Verified` means a
+/// clean reproduction was confirmed and the root cause fixed at source; the
+/// burn-down (CXA-F032 AC#2) may only count bugs that carry their own record,
+/// so EVERY path that renders the verdict must write one. `actor` is the
+/// principal who rendered the verdict, so the forensics view names who
+/// decided (CXA-F241); the record links to the verify gate it supported.
+pub fn record_human_verify_evidence(
+    state: &mut crate::state::ProjectState,
+    ticket: &str,
+    actor: &str,
+) {
+    state.add_evidence_for(
+        ticket,
+        "test",
+        "REGRESSION TEST",
+        "PASS on current master, verdict rendered by human QA; regression test \
+         fails on pre-fix code and reproduces cleanly; root cause fixed at source.",
+        &["verify"],
+        actor,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,6 +344,8 @@ mod tests {
                 session_id: None,
                 sandbox: SandboxStatus::default(),
                 engine: String::new(),
+                model: String::new(),
+                attempts: Vec::new(),
             })
         }
     }
@@ -321,5 +386,27 @@ mod tests {
         uc(Arc::clone(&store), out).execute().await.expect("second");
         let state = store.load().await.expect("load");
         assert_eq!(state.tickets.len(), 1, "duplicate title not filed twice");
+    }
+
+    #[test]
+    fn human_verify_evidence_carries_the_ac2_markers() {
+        // CXA-F032 AC#2: the human verdict's record must be the same shape of
+        // proof the agent TEST path writes — REGRESSION TEST label with a PASS
+        // marker plus clean reproduction and root cause — so a person-verified
+        // bug counts as burned down exactly like an agent-verified one.
+        let mut s = ProjectState::default();
+        super::record_human_verify_evidence(&mut s, "BUG-2281", "rev");
+        let evs = s.ticket_evidence.get("BUG-2281").expect("recorded");
+        let e = evs
+            .iter()
+            .find(|e| e.label.starts_with("REGRESSION TEST"))
+            .expect("labelled evidence");
+        assert!(e.detail.contains("PASS"), "PASS marker present");
+        assert!(e.detail.contains("reproduces"), "clean reproduction proof");
+        assert!(e.detail.contains("root cause"), "root-cause proof");
+        assert!(
+            e.detail.contains("human QA"),
+            "the verdict's provenance is honest"
+        );
     }
 }

@@ -3,18 +3,34 @@
 //! ports, presentation drives the inbound ones.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod artifacts;
 pub mod auth;
+pub mod backlog_scoping;
 pub mod codegraph;
 pub mod config;
 pub mod config_parse;
 pub mod conformance;
+pub mod dependency_radar;
+pub mod deps_scan;
+pub mod engine_provenance;
 pub mod error;
 pub mod faults;
+pub mod forensics;
 pub mod metrics;
+pub mod metrics_brakes;
+pub mod metrics_burndown;
+pub mod metrics_gate;
+pub mod metrics_governance;
+pub mod metrics_health;
+pub mod metrics_registry;
+pub mod milestone_projection;
 pub mod parsing;
 pub mod policy;
 pub mod ports;
 pub mod prompts;
+pub mod prompts_resolve;
+pub mod release_candidates;
+pub mod repro_url;
 pub mod selection;
 pub mod sprint;
 pub mod state;
@@ -23,17 +39,28 @@ pub mod tokens;
 pub mod ts;
 pub mod use_cases;
 pub mod verify_cache;
+pub mod working_hours;
 
+#[cfg(test)]
+mod release_candidates_tdd_tests;
+
+pub use artifacts::{ArtifactRegistry, ARTIFACT_SCHEMA_VERSION};
 pub use auth::{AuthPort, AuthRole, AuthUser, LoginResult, TokenInfo};
 pub use config::{
-    BudgetCaps, Config, DeployConfig, EngineChoice, EngineKind, EngineMapping, LiveBudget, Mode,
-    PolicyConfig, WorkflowConfig,
+    ArtifactsConfig, BudgetCaps, Config, CoverageConfig, DeployConfig, DepsConfig, EngineChoice,
+    EngineKind, EngineMapping, LiveBudget, Mode, PolicyConfig, WorkflowConfig,
+    CONFIG_SCHEMA_VERSION,
 };
 pub use config_parse::{parse_config, ConfigParseError};
 pub use error::{AppError, PortError};
+pub use metrics_registry::{
+    encode_prometheus, label_bucket, MetricsRegistry, HTTP_REQUESTS, HTTP_REQUEST_DURATION,
+    PROCESS_UPTIME, PROMETHEUS_CONTENT_TYPE,
+};
 pub use state::{
-    Attachment, Channel, ChatMsg, Comment, DesignSystem, DocPage, HealthCheckResult, Milestone,
-    PrReview, ProjectState, Reaction, Spend, Sprint, GENERAL_CHANNEL, SCHEMA_VERSION,
+    Attachment, Channel, ChatMsg, Comment, DesignSystem, DocPage, GoalOutcome, GoalOutcomeReport,
+    HealthCheckResult, Milestone, OutboxEntry, OutboxStatus, OutcomeLedgerEntry, PrReview,
+    ProjectState, Reaction, Spend, Sprint, UnattributedOutcome, GENERAL_CHANNEL, SCHEMA_VERSION,
 };
 pub use system_chat::{ChatContext, ProjectRef, SystemChat, UserRef, Webhook};
 

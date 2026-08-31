@@ -140,6 +140,7 @@ async fn worker_registry_carries_machine_capabilities(
                 // The machine's OS, which the hub cannot infer: asking itself
                 // would answer with the container's.
                 tooling: Some(serde_json::json!({ "os": "macos", "has_brew": true })),
+                version: env!("CARGO_PKG_VERSION").to_owned(),
             },
             now,
         )

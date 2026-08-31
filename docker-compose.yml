@@ -6,8 +6,19 @@
 # Both variables are REQUIRED — compose fails fast with a clear message if
 # either is unset. Never start without setting them.
 #
-# Host port is fixed at 8101 (this project's assigned deploy.host_port) so it
-# never collides with a live hub bound to 4000 on the same docker host.
+# Volume note (CXA-B115): POSTGRES_PASSWORD is applied only when the pgdata
+# volume is FIRST initialized. If you change PG_PASSWORD later, the password
+# stored inside the volume stays the OLD one — db turns unhealthy (the
+# healthcheck below logs in with psql) and coxagent never starts. That is the
+# fail-fast signal, not a crash. Recover without data loss:
+#   docker compose exec db psql -U postgres -c "ALTER USER postgres PASSWORD '<new>'"
+# or delete the pgdata volume to re-initialize (wipes stored state).
+# See DEPLOYMENT.md ("Password rotation & the pgdata volume").
+#
+# The app's host port defaults to 8101 (this project's assigned deploy.host_port)
+# so it never collides with a live hub bound to 4000 on the same docker host.
+# Override with APP_PORT when another stack already holds the default — every
+# published port is env-driven, never a hardcoded shared value (CXA-B069).
 #
 # Note: real LLM agents need a CLI (claude/opencode) on PATH inside the
 # container; the base image ships scripted/mock (offline). Install a CLI in a
@@ -21,10 +32,20 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      # Must AUTHENTICATE (CXA-B115): pg_isready never sends credentials, so a
+      # pgdata volume initialized with an older PG_PASSWORD used to deploy
+      # "healthy" while every app login failed. Dialing the container's own
+      # docker-network IP (hostname -i) is what forces the password check: the
+      # image's pg_hba keeps the unix socket AND 127.0.0.1/32 on `trust` —
+      # only the entrypoint's `host all all all scram-sha-256` catch-all,
+      # matching exactly the non-loopback address the app itself dials,
+      # requires the stored password. `$$` defers expansion to check time so
+      # the password is read from the container env, never baked in.
+      test: ["CMD-SHELL", "PGPASSWORD=\"$${POSTGRES_PASSWORD}\" psql -h \"$$(hostname -i)\" -U postgres -c 'select 1'"]
       interval: 3s
       timeout: 3s
       retries: 15
+    restart: unless-stopped
 
   coxagent:
     build: .
@@ -37,9 +58,10 @@ services:
       COXAGENT_ADMIN_PASSWORD: ${COXAGENT_ADMIN_PASSWORD:?COXAGENT_ADMIN_PASSWORD is required — set it before running docker compose up}
       COXAGENT_AUDIT_RETENTION_DAYS: "90"
     ports:
-      - "8101:4000"
+      - "${APP_PORT:-8101}:4000"
     volumes:
       - workspace:/workspace
+    restart: unless-stopped
 
 volumes:
   pgdata:

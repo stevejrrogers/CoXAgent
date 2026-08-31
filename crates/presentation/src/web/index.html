@@ -6,7 +6,7 @@
 <title>CoXAgent</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-<link href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.24.0/dist/tabler-icons.min.css" rel="stylesheet">
+<link href="/assets/tabler-icons.min.css" rel="stylesheet">
 <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body>
@@ -39,9 +39,9 @@
       <div class="frm">
         <div class="fr"><span class="lbl">Name</span><input id="spm-name" placeholder="e.g. Product Team A" maxlength="60"></div>
         <div class="fr"><span class="lbl">Tagline</span><input id="spm-tag" placeholder="what this space builds" maxlength="160"></div>
-        <div class="fr" id="spm-budget-row"><span class="lbl">Budget/mo</span><input id="spm-budget" type="number" min="0" step="10" placeholder="USD — 0 = không giới hạn" style="width:180px"><span class="hint" style="font-size:11px;color:var(--dim)">cảnh báo khi space đốt vượt mức</span></div>
+        <div class="fr" id="spm-budget-row"><span class="lbl">Budget/mo</span><input id="spm-budget" type="number" min="0" step="10" placeholder="USD — 0 = unlimited" style="width:180px"><span class="hint" style="font-size:11px;color:var(--dim)">warns when the space burns past this</span></div>
         <div class="fr" style="align-items:flex-start"><span class="lbl">Admins</span><div id="spm-admins-box" style="flex:1"></div></div>
-        <div class="fr" style="align-items:flex-start" id="spm-members-row"><span class="lbl">Members</span><div style="flex:1"><div id="spm-members-box"></div><div class="hint" style="font-size:11px;color:var(--dim);margin-top:5px">member được tự gán vào mọi project của space</div></div></div>
+        <div class="fr" style="align-items:flex-start" id="spm-members-row"><span class="lbl">Members</span><div style="flex:1"><div id="spm-members-box"></div><div class="hint" style="font-size:11px;color:var(--dim);margin-top:5px">members are auto-assigned to every project in the space</div></div></div>
         <div class="fr" style="align-items:flex-start"><span class="lbl">Projects</span><div id="spm-projects-box" style="flex:1"></div></div>
       </div>
       <div class="coxmodal-acts" style="margin-top:14px">
@@ -94,13 +94,13 @@
     </div>
     <nav class="nav" id="ws-nav">
       <a data-v="home" id="nav-home" onclick="nav('home')"><i class="ti ti-home"></i> Home</a>
+      <a data-v="river" onclick="nav('river')"><i class="ti ti-ripple"></i> Fleet river</a>
       <a data-v="overview" class="on" onclick="nav('overview')"><i class="ti ti-layout-dashboard"></i> Overview</a>
       <a data-v="team" onclick="nav('team')"><i class="ti ti-robot"></i> Agents</a>
       <a data-v="inbox" onclick="nav('inbox')"><i class="ti ti-inbox"></i> Inbox <span id="inbox-badge" style="display:none;margin-left:auto;background:var(--red);color:#fff;border-radius:9px;font-size:10px;font-weight:700;padding:1px 6px;line-height:14px">0</span></a>
       <a data-v="board" onclick="nav('board')"><i class="ti ti-columns"></i> Work</a>
       <a data-v="roadmap" onclick="nav('roadmap')"><i class="ti ti-timeline"></i> Roadmap</a>
       <a data-v="review" onclick="nav('review')"><i class="ti ti-git-pull-request"></i> Review</a>
-      <a data-v="activity" onclick="nav('activity')"><i class="ti ti-activity"></i> Activity</a>
       <a data-v="discuss" onclick="nav('discuss')"><i class="ti ti-messages"></i> Scrum</a>
       <a data-v="docs" onclick="nav('docs')"><i class="ti ti-book-2"></i> Wiki</a>
       <a data-v="codemap" onclick="nav('codemap')"><i class="ti ti-sitemap"></i> Code map</a>
@@ -192,12 +192,17 @@
           </aside>
         </div>
       </div>
+      <div class="view" id="view-river"><div id="river-body" style="max-width:900px"></div></div>
       <div class="view on" id="view-overview">
         <div id="ov-drain"></div>
         <div id="ov-alerts"></div>
+        <div id="ov-drift"></div>
+        <div id="ov-preflight"></div>
         <div id="ov-goal"></div>
         <div class="kpis" id="kpis"></div>
         <div id="ov-health"></div>
+        <div id="ov-cycle-perf"></div>
+        <div id="ov-attention"></div>
         <div id="ov-deploy"></div>
         <div class="row2" id="ov-charts"></div>
         <div id="ov-design"></div>
@@ -233,6 +238,7 @@
         </div>
         <div id="work-board">
           <div class="filters" id="board-filters" style="margin:0 0 10px"></div>
+          <div id="board-reverts"></div>
           <div class="cols" id="board-cols"></div>
         </div>
         <div id="work-sprint" style="display:none"><div id="sprint-body"></div></div>
@@ -242,6 +248,8 @@
         <div class="filters"><span style="font-size:12px;color:var(--muted)">Filter</span><select class="sel" id="act-filter" onchange="renderActive()"><option value="">all agents</option></select>
           <div style="flex:1"></div><a onclick="window.open(api('/audit'))" class="fchip" style="text-decoration:none;cursor:pointer"><i class="ti ti-download" style="font-size:14px"></i> Export audit</a></div>
         <div class="panel"><div id="activity-full"></div></div>
+        <div class="sec" style="margin-top:20px">Outbound alerts <span style="font-size:11px;color:var(--dim);font-weight:400">· webhook delivery history — retried with backoff until acknowledged or failed</span></div>
+        <div class="panel"><div id="alerts-body"><div class="empty">loading…</div></div></div>
         <div class="sec" style="margin-top:20px">Agent transcripts <span style="font-size:11px;color:var(--dim);font-weight:400">· full prompt + output per run</span></div>
         <div class="panel"><div id="transcript-list"></div></div>
       </div>
@@ -252,7 +260,7 @@
         <div id="agent-picker" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"></div>
         <div class="sec" style="margin-top:10px">Recent actions</div>
         <div id="agent-acts" class="panel" style="max-height:16vh;overflow:auto"></div>
-        <div class="sec" style="margin-top:12px;display:flex;align-items:center;gap:8px">Work log <span id="agent-live-badge" style="font-size:10px;font-weight:700;padding:1px 7px;border-radius:5px;background:color-mix(in srgb,var(--green) 22%,transparent);color:var(--green);display:none">● LIVE</span> <span style="font-size:11px;color:var(--dim);font-weight:400">· what the agent is doing, step by step</span></div>
+        <div class="sec" style="margin-top:12px;display:flex;align-items:center;gap:8px">Work log <span id="agent-live-badge" style="font-size:10px;font-weight:700;padding:1px 7px;border-radius:5px;background:color-mix(in srgb,var(--green) 22%,transparent);color:var(--green);display:none">● LIVE</span> <span id="agent-err-badge" style="font-size:10px;font-weight:700;padding:1px 7px;border-radius:5px;background:color-mix(in srgb,var(--red) 22%,transparent);color:var(--red);display:none"></span> <span style="font-size:11px;color:var(--dim);font-weight:400">· what the agent is doing, step by step</span></div>
         <div id="agent-transcript" class="worklog"><div class="wl-empty"><i class="ti ti-loader-2"></i> loading…</div></div>
       </div></div>
       <div class="ov" id="ov-transcript" onclick="if(event.target===this)close_('ov-transcript')"><div class="modal" style="max-width:760px">
@@ -400,7 +408,7 @@
             <div class="chatcompose">
               <input type="file" id="disc-file" multiple style="display:none" onchange="pickFiles('disc',this)">
               <button class="att-btn" onclick="document.getElementById('disc-file').click()" title="Attach files"><i class="ti ti-paperclip"></i></button>
-              <span id="disc-toolbar"></span><input id="disc-input" placeholder="Message the team…  (type / for commands · Enter to send)" oninput="slashMenu()" onkeydown="if(!imeEnter(event)&&event.key==='Enter')sendComment()">
+              <span id="disc-toolbar"></span><input id="disc-input" placeholder="Message the team…  (type / for commands · Enter to send)" oninput="slashMenu()" onkeydown="if(!imeEnter(event)&&event.key==='Enter')sendComment()" onpaste="pasteFiles('disc',event)">
               <button class="pri" onclick="sendComment()"><i class="ti ti-send"></i></button>
             </div>
           </div>
@@ -466,7 +474,7 @@
               <button class="att-btn" onmousedown="event.preventDefault()" onclick="chatWrap('**')" title="Bold (**text**)"><i class="ti ti-bold"></i></button>
               <button class="att-btn" onmousedown="event.preventDefault()" onclick="chatWrap('*')" title="Italic (*text*)"><i class="ti ti-italic"></i></button>
               <button class="att-btn" onmousedown="event.preventDefault()" onclick="chatWrap('\`')" title="Code (\`code\`)"><i class="ti ti-code"></i></button>
-              <input id="chat-input" placeholder="Message your team…  (Enter to send · @ to mention · **bold** *italic* \`code\`)" autocomplete="off" oninput="mentionOnInput(this);startTyping()" onkeydown="chatInputKey(event)" onblur="setTimeout(closeMention,150)">
+              <input id="chat-input" placeholder="Message your team…  (Enter to send · @ to mention · **bold** *italic* \`code\`)" autocomplete="off" oninput="mentionOnInput(this);startTyping()" onkeydown="chatInputKey(event)" onblur="setTimeout(closeMention,150)" onpaste="pasteFiles('chat',event)">
               <button class="pri" onclick="sendChat()"><i class="ti ti-send"></i></button>
             </div>
           </div>
@@ -707,6 +715,8 @@
       <div id="nt-desc" class="rt-edit" contenteditable="true" data-empty="A rough note is enough — click ✨ and the team will refine it." style="min-height:96px;border-radius:0 0 8px 8px;border-top:none"></div>
     </div>
     <button id="nt-analyze" class="pri" onclick="teamAnalyze()" style="width:100%;justify-content:center"><i class="ti ti-sparkles"></i> <span id="nt-analyze-label">Let the team analyze &amp; refine</span></button>
+    <button id="nt-feas-btn" class="gc-btn" onclick="checkFeasibility()" style="width:100%;justify-content:center;margin-top:8px"><i class="ti ti-gauge"></i> <span id="nt-feas-label">Check feasibility</span></button>
+    <div id="nt-feas" class="tk-notes" style="display:none;margin-top:8px"></div>
     <div id="nt-notes" class="tk-notes" style="display:none"></div>
     <div class="mrow" style="gap:8px;flex-wrap:wrap">
       <div style="flex:1;min-width:90px;display:flex;flex-direction:column;gap:5px"><span class="lbl">Type</span><select id="nt-type" class="sel"><option value="feature">feature</option><option value="bug">bug</option><option value="chore">chore</option></select></div>
@@ -727,7 +737,7 @@
     <span class="x" onclick="close_('ov-newproj')"><i class="ti ti-x"></i></span>
     <div class="np-head">
       <div class="np-mark"><i class="ti ti-folder-plus"></i></div>
-      <div><h3>New project</h3><div class="np-sub">Team agents nhận việc ngay khi project sẵn sàng.</div></div>
+      <div><h3>New project</h3><div class="np-sub">Team agents pick up work as soon as the project is ready.</div></div>
     </div>
     <div style="display:flex;gap:4px;background:var(--card2);border:1px solid var(--border2);border-radius:11px;padding:3px;margin-bottom:16px">
       <button id="npm-new" class="npmode on" onclick="setProjMode('new')"><i class="ti ti-sparkles"></i> Start fresh</button>
@@ -780,6 +790,9 @@
 <script src="/assets/js/mcp.js"></script>
 <script src="/assets/js/docs.js"></script>
 <script src="/assets/js/inbox.js"></script>
+<script src="/assets/js/drift.js"></script>
+<script src="/assets/js/alerts.js"></script>
+<script src="/assets/js/river.js"></script>
 <script src="/assets/js/shell.js"></script>
 </body>
 </html>

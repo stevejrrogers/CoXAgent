@@ -4,10 +4,44 @@
 //! Split out of the cycle so the rhythm of the team lives in one place and a
 //! ticket about a ceremony stops colliding with a ticket about a deploy.
 
-use super::{prune_memory_index, CycleReport, RunCycleUseCase, ARCH_REVIEW_EVERY_SPRINTS};
+use super::{prune_memory_index, CycleReport, RunCycleUseCase};
 use crate::ports::outbound::{AgentEnginePort, AgentRequest, StateStorePort};
+use crate::state::{BrakeHold, ProjectState};
 use std::fmt::Write as _;
 use std::sync::Arc;
+
+/// Record one brake's value change for the daily pass: audit the flip
+/// (attributed to `expiry` when the hold that was pinning it just lapsed,
+/// `self_tune` otherwise) and return the SM announcement line. A no-op —
+/// and no entry — when the value did not move. Pure.
+fn audit_brake_write(
+    s: &mut ProjectState,
+    brake: &str,
+    effective: bool,
+    was: bool,
+    wording: impl FnOnce() -> String,
+    expired_hold: Option<&BrakeHold>,
+) -> Option<String> {
+    if effective == was {
+        return None;
+    }
+    let reason = wording();
+    let entry = crate::metrics_brakes::audited_entry(
+        "SM",
+        if expired_hold.is_some() {
+            "expiry"
+        } else {
+            "self_tune"
+        },
+        brake,
+        was,
+        effective,
+        &reason,
+        expired_hold.map(|h| h.expires_at.clone()),
+    );
+    s.record_tuning_change(entry);
+    Some(reason)
+}
 
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Scrum only: open/roll over the sprint at the start of a cycle, with an SM
@@ -43,7 +77,30 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let closing = state.sprint.clone();
         let _ = len;
         let Some(n) = crate::sprint::advance(&mut state, sc, policy) else {
-            // No roll this cycle — still persist the bumped counter.
+            // No roll this cycle. An open sprint with an EMPTY committed set is
+            // silent DEV starvation under the sprint-scope gate (tickets going
+            // Ready mid-sprint are out of scope until rollover) — the PO
+            // commits the open backlog now and announces, instead of the team
+            // idling for days with a full queue.
+            // Park exhausted tickets FIRST so the refill below never re-commits
+            // work that already burned its retries against an outside blocker.
+            for id in crate::sprint::auto_hold_exhausted(&mut state) {
+                let msg = format!(
+                    "⏸ {id} was auto-held after repeated failures — resume it                      from the ticket dialog once the blocker is cleared."
+                );
+                state.post_comment("SM", &msg, None);
+            }
+            let refilled = crate::sprint::refill_empty_scope(&mut state)
+                + crate::sprint::top_up_scope(&mut state, self.config.workflow.dev_scope_floor);
+            if refilled > 0 {
+                let msg = format!(
+                    "📋 Sprint scope held no ready feature work while {refilled} \
+                     ticket(s) sat ready — PO committed them to the current \
+                     sprint so DEV can pull work."
+                );
+                state.log_activity("PO", "committed backlog to an empty sprint", None);
+                state.post_comment("PO", &msg, None);
+            }
             let _ = self.store.save(&state).await;
             return;
         };
@@ -73,7 +130,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // Every few sprints the SA steps back and reviews the whole architecture,
         // filing refactor tickets and asking the PO to prioritise a hardening
         // sprint before tech debt compounds.
-        if n % ARCH_REVIEW_EVERY_SPRINTS == 0 {
+        if n % self.config.workflow.cadence.arch_review_every_sprints() == 0 {
             self.architecture_audit(n).await;
             self.docs_audit(n).await;
         }
@@ -292,6 +349,29 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             ),
             None,
         );
+        // CXA-F047: approved reverted work is part of the sprint's real story.
+        // Name it in the retro so the same approach is not re-filed next
+        // sprint — and only APPROVED events speak here, same as in planning.
+        let reverted: Vec<String> = state
+            .reverted_work
+            .iter()
+            .filter(|e| e.decision == crate::state::RevertDecision::Approved)
+            .map(|e| {
+                let subject: String = e.subject.chars().take(80).collect();
+                format!("{} (`{}`)", e.ticket, subject)
+            })
+            .collect();
+        if !reverted.is_empty() {
+            state.post_comment(
+                "SM",
+                &format!(
+                    "↩️ Reverted work acknowledged: {}. Planning discounts these next cycle \
+                     — the same approach should not be re-filed as-is.",
+                    reverted.join(", ")
+                ),
+                None,
+            );
+        }
         state.log_activity(
             "SM",
             &format!("sprint {} review & retro", closing.number),
@@ -349,16 +429,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return;
         }
         let evals = crate::metrics::agent_evals(&state);
-        let backlog = state
-            .tickets
-            .iter()
-            .filter(|t| {
-                use coxagent_domain::ticket::Status;
-                matches!(t.status(), Status::Pending | Status::Ready | Status::Open)
-            })
-            .count();
-        let next = crate::metrics::decide_tuning(&evals, backlog, &state.tuning);
-        let was = state.tuning.clone();
+        let backlog = crate::metrics::brake_backlog(&state);
+        // Net open-bug change across the last two RECORDED days (negative =
+        // backlog grew) — the burn-down escalation input for the quality
+        // brake. The full dashboard window (not just yesterday) is scanned so
+        // one missed day — leader down, fresh deploy — degrades to a wider
+        // gap instead of silently reporting no delta.
+        let bug_delta =
+            crate::metrics::compute_burndown(&state, &today, crate::metrics::BURNDOWN_WINDOW_DAYS)
+                .delta_24h;
+        let next = crate::metrics::decide_tuning(&evals, backlog, bug_delta, &state.tuning);
         drop(state);
         // Read the hub lessons OUTSIDE the state closure: the closure is sync.
         let hub_lessons = match &self.files {
@@ -372,28 +452,55 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             if s.tuning.last_eval_day == today {
                 return Ok(());
             }
+            // Operator holds (CXA-F238) ride ABOVE the autonomous decision:
+            // compose `next` through the still-active holds, releasing any
+            // whose bound elapsed. `decide_tuning` above stayed untouched —
+            // holds never feed back into its hysteresis math, so expiry hands
+            // the brake straight back to the loop with no flapping.
+            let now = crate::state::now_rfc3339();
+            let (holds, expired) = crate::metrics::split_expired_holds(&s.tuning_overrides, &now);
+            let effective = crate::metrics::apply_brake_holds(&next, &holds, &s.tuning);
             let mut announce: Vec<String> = Vec::new();
-            if next.bugs_first != was.bugs_first {
-                announce.push(if next.bugs_first {
-                    format!(
-                        "quality brake ON — retry churn {:.2}/ship; features pause, bugs first",
-                        evals.churn_per_ship
-                    )
-                } else {
-                    "quality brake OFF — churn recovered, features resume".to_owned()
-                });
+            if let Some(msg) = audit_brake_write(
+                s,
+                "bugs_first",
+                effective.bugs_first,
+                s.tuning.bugs_first,
+                || {
+                    if effective.bugs_first {
+                        format!(
+                            "quality brake ON — retry churn {:.2}/ship; features pause, bugs first",
+                            evals.churn_per_ship
+                        )
+                    } else {
+                        "quality brake OFF — churn recovered, features resume".to_owned()
+                    }
+                },
+                expired.get("bugs_first"),
+            ) {
+                announce.push(msg);
             }
-            if next.skip_ba != was.skip_ba {
-                announce.push(if next.skip_ba {
-                    format!(
-                        "intake brake ON — backlog {backlog} tickets; BA pauses until it drains"
-                    )
-                } else {
-                    "intake brake OFF — backlog drained, BA resumes".to_owned()
-                });
+            if let Some(msg) = audit_brake_write(
+                s,
+                "skip_ba",
+                effective.skip_ba,
+                s.tuning.skip_ba,
+                || {
+                    if effective.skip_ba {
+                        format!(
+                            "intake brake ON — backlog {backlog} tickets; BA pauses until it drains"
+                        )
+                    } else {
+                        "intake brake OFF — backlog drained, BA resumes".to_owned()
+                    }
+                },
+                expired.get("skip_ba"),
+            ) {
+                announce.push(msg);
             }
-            s.tuning = next.clone();
+            s.tuning = effective;
             s.tuning.last_eval_day.clone_from(&today);
+            s.tuning_overrides = holds;
             // Mirror the hub-wide lessons into this project's Wiki (daily),
             // so cross-project knowledge is readable where people read —
             // not only injected into prompts.
@@ -417,6 +524,27 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 s.post_comment("SM", &msg, None);
                 s.post_chat_in("SM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
             }
+            Ok(())
+        })
+        .await;
+    }
+
+    /// Every-cycle brake-hold reconciliation (CXA-F238): expired operator
+    /// holds release IMMEDIATELY, before this cycle's phases read
+    /// `tuning.skip_ba` / `tuning.bugs_first` — a bound must not be outrun by
+    /// the daily pass cadence. A no-op for projects without override state:
+    /// no store write at all, so untouched projects keep byte-identical
+    /// cycle behaviour.
+    pub(super) async fn reconcile_brake_holds(&self) {
+        let Ok(state) = self.store.load().await else {
+            return;
+        };
+        if state.tuning_overrides.is_empty() {
+            return;
+        }
+        let now = crate::state::now_rfc3339();
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+            crate::metrics::reconcile_brake_holds(s, &now);
             Ok(())
         })
         .await;
@@ -578,10 +706,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let mut items: Vec<String> = Vec::new();
         // Only post-ladder states reach the human report: a stuck PR the SA
         // already rescued once, a parked ticket the SA already re-designed.
+        // Cross-check both against the live mirrors — attempt counters left by
+        // PRs long closed, or by tickets that later shipped or were rejected,
+        // are zombies from before pruning existed, not actionable impediments.
         let stuck: Vec<String> = state
             .pr_fix_attempts
             .iter()
-            .filter(|(pr, n)| **n >= 3 && state.pr_rescues.contains_key(pr))
+            .filter(|(pr, n)| {
+                **n >= 3
+                    && state.pr_rescues.contains_key(pr)
+                    && state.open_prs.iter().any(|o| o.number == **pr)
+            })
             .map(|(pr, _)| format!("#{pr}"))
             .collect();
         if !stuck.is_empty() {
@@ -590,10 +725,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 stuck.join(", ")
             ));
         }
+        let active_ticket = |id: &str| {
+            state.tickets.iter().any(|t| {
+                t.id().as_str() == id
+                    && !matches!(
+                        t.status(),
+                        coxagent_domain::Status::Done
+                            | coxagent_domain::Status::Documented
+                            | coxagent_domain::Status::Rejected
+                            | coxagent_domain::Status::Verified
+                    )
+            })
+        };
         let parked: Vec<String> = state
             .ticket_fail_attempts
             .iter()
-            .filter(|(_, n)| **n >= 3)
+            .filter(|(id, n)| **n >= 3 && active_ticket(id))
             .map(|(id, _)| id.clone())
             .collect();
         if !parked.is_empty() {
@@ -692,6 +839,25 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             tracing::info!("posted daily digest for {today}");
         }
     }
+    /// Record the day's open/fixed/verified bug counts, once per UTC day — the
+    /// persisted burn-down history (CXA-F032). Same dedup discipline as the
+    /// digest: pre-check outside the mutate to skip needless writes, re-check
+    /// inside so a second operator or a restart can never double-record.
+    pub(super) async fn record_daily_bug_snapshot(&self) {
+        let today = crate::state::now_rfc3339()[..10].to_owned();
+        let Ok(state) = self.store.load().await else {
+            return;
+        };
+        if state.bug_snapshots.contains_key(&today) {
+            return;
+        }
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            crate::metrics::record_burndown_snapshot(s, &today);
+            Ok(())
+        })
+        .await;
+    }
+
     /// Run the daily standup: the SM opens, each active agent posts a grounded
     /// update (done/next/blockers), and the SM highlights blockers + focus.
     pub(super) async fn scrum_standup(&self) {

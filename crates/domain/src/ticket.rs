@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 // Value objects live in `kinds`; re-exported here so existing paths like
 // `crate::ticket::{Status, TicketType}` keep resolving without a cycle.
 pub use crate::kinds::{Complexity, Priority, Role, Status, TicketType};
+// Test cases split into their own seam (test_case.rs); re-exported so
+// `crate::ticket::TestCase` keeps resolving.
+pub use crate::test_case::{CaseEvidence, TestCase, TestCaseStatus};
 
 /// Technical design authored by SA. Presence gates `Pending -> Ready`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,6 +65,11 @@ pub struct Ticket {
     /// Up to 5 acceptance criteria — the checklist that defines "done".
     #[serde(default)]
     acceptance_criteria: Vec<String>,
+    /// The ticket's test cases — one per acceptance criterion (kept in sync by
+    /// the agents), each carrying its own pass/fail verdict and per-case
+    /// evidence. Persisted with `serde(default)` so old tickets load clean.
+    #[serde(default)]
+    test_cases: Vec<TestCase>,
     /// Worker that holds the in-progress claim (`account@host`), or `None` when
     /// unclaimed. Set atomically when the ticket enters `InProgress`; cleared on
     /// completion or release. Lets concurrent runners on a shared backlog avoid
@@ -78,6 +86,19 @@ pub struct Ticket {
     /// clearing the assignment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     assignee: Option<String>,
+    /// The declared product goal this ticket advances (the PO's goal gate).
+    /// Bound to a stable [`GoalId`], never to the goal's wording, so renaming
+    /// a goal never severs attribution of the work done for it. `None` for
+    /// tickets filed before goal-line tracking (or with no declared goal) —
+    /// those surface as "unattributed" in the outcome ledger until backfilled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    goal_id: Option<crate::ids::GoalId>,
+    /// RFC3339 time the ticket was filed. Stamped by the application at
+    /// creation (the domain owns no clock); `None` on tickets that predate
+    /// the field — age-based views must treat those as "age unknown", never
+    /// as brand new or ancient.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    created_at: Option<String>,
 }
 
 impl Ticket {
@@ -116,9 +137,12 @@ impl Ticket {
             parent_id: None,
             depends_on: Vec::new(),
             acceptance_criteria: Vec::new(),
+            test_cases: Vec::new(),
             claimed_by: None,
             claimed_at: None,
             assignee: None,
+            goal_id: None,
+            created_at: None,
         })
     }
 
@@ -142,6 +166,46 @@ impl Ticket {
             .filter(|c| !c.is_empty())
             .take(5)
             .collect();
+    }
+
+    /// The declared product goal this ticket advances, or `None` when no goal
+    /// was declared (pre-tracking tickets, or no resolvable association).
+    #[must_use]
+    pub fn goal_id(&self) -> Option<&crate::ids::GoalId> {
+        self.goal_id.as_ref()
+    }
+
+    /// Declare (or re-point) the product goal this ticket advances. The PO's
+    /// goal gate owns goal associations — the same scope authority as
+    /// priority — so agents cannot quietly attach themselves to a goal line.
+    ///
+    /// # Errors
+    /// [`DomainError::FieldNotPermitted`] if `actor` lacks goal authority.
+    pub fn set_goal_id(
+        &mut self,
+        actor: Role,
+        goal_id: crate::ids::GoalId,
+    ) -> Result<(), DomainError> {
+        if !field_permitted(actor, "goal_id") {
+            return Err(DomainError::FieldNotPermitted {
+                role: actor,
+                field: "goal_id",
+            });
+        }
+        self.goal_id = Some(goal_id);
+        Ok(())
+    }
+
+    /// Crate-internal handles for the test-case seam (`test_case.rs`) to read
+    /// and reconcile the case list against the acceptance criteria.
+    /// Deliberately not `pub`: outside the domain crate the aggregate stays
+    /// opaque.
+    pub(crate) fn test_case_list(&self) -> &[TestCase] {
+        &self.test_cases
+    }
+
+    pub(crate) fn test_case_list_mut(&mut self) -> &mut Vec<TestCase> {
+        &mut self.test_cases
     }
 
     // --- Accessors ---
@@ -217,6 +281,19 @@ impl Ticket {
     #[must_use]
     pub fn claimed_at(&self) -> Option<&str> {
         self.claimed_at.as_deref()
+    }
+
+    #[must_use]
+    pub fn created_at(&self) -> Option<&str> {
+        self.created_at.as_deref()
+    }
+
+    /// Stamp the filing time once; later calls are no-ops so a re-save can
+    /// never rewrite history.
+    pub fn stamp_created_at(&mut self, at: impl Into<String>) {
+        if self.created_at.is_none() {
+            self.created_at = Some(at.into());
+        }
     }
 
     // --- Guarded mutations ---
@@ -371,6 +448,8 @@ impl Ticket {
     /// - [`DomainError::InvalidTransition`] — not a legal edge for this type.
     /// - [`DomainError::TransitionNotPermitted`] — role not allowed.
     /// - [`DomainError::NotReady`] — precondition for the target status unmet.
+    /// - [`DomainError::CoverageIncomplete`] — `Verified` with an acceptance
+    ///   criterion no passing test case demonstrates (CXA-F024).
     pub fn transition_to(&mut self, actor: Role, to: Status) -> Result<(), DomainError> {
         let from = self.status;
         if !transition_allowed(self.kind, from, to) {
@@ -390,11 +469,29 @@ impl Ticket {
         if to == Status::Ready {
             self.check_ready()?;
         }
+        if to == Status::Verified {
+            self.check_covered()?;
+        }
         self.status = to;
         // Leaving InProgress (completion or reject) frees the claim.
         if to != Status::InProgress {
             self.claimed_by = None;
             self.claimed_at = None;
+        }
+        Ok(())
+    }
+
+    /// Definition of Verified: every acceptance criterion is demonstrated by a
+    /// PASSING test case (CXA-F024). Deliberately emptied criteria (the BA
+    /// clarification path) leave nothing to cover and verify freely. The check
+    /// is a pure read — a blocked transition leaves the ticket untouched.
+    fn check_covered(&self) -> Result<(), DomainError> {
+        let missing = crate::coverage::uncovered(&self.acceptance_criteria, &self.test_cases);
+        if let Some(first) = missing.first() {
+            return Err(DomainError::CoverageIncomplete {
+                uncovered: missing.len(),
+                first: first.clone(),
+            });
         }
         Ok(())
     }
@@ -619,5 +716,31 @@ mod tests {
             t.clarify(Role::Ba, "   ").is_err(),
             "blank is not a clarification"
         );
+    }
+
+    #[test]
+    fn goal_association_is_the_pos_scope_authority() {
+        use crate::ids::GoalId;
+        let mut t = feature(false);
+        // Agents declare work for goals at creation only (via the shared
+        // creation path); re-pointing an association is PO/super-PO scope.
+        assert!(matches!(
+            t.set_goal_id(Role::DevFeature, GoalId::new("G001").expect("gid")),
+            Err(DomainError::FieldNotPermitted {
+                field: "goal_id",
+                ..
+            })
+        ));
+        t.set_goal_id(Role::Po, GoalId::new("G001").expect("gid"))
+            .expect("po may bind");
+        assert_eq!(t.goal_id().map(GoalId::as_str), Some("G001"));
+        t.set_goal_id(Role::User, GoalId::new("G002").expect("gid"))
+            .expect("super-PO may re-point");
+        assert_eq!(t.goal_id().map(GoalId::as_str), Some("G002"));
+    }
+
+    #[test]
+    fn new_tickets_start_without_a_goal_association() {
+        assert!(feature(false).goal_id().is_none());
     }
 }
