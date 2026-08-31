@@ -15,7 +15,7 @@
 use super::*;
 use coxagent_application::ports::outbound::deploy::COMPOSE_FILES;
 use coxagent_application::use_cases::readiness_preflight::{
-    run_preflight, DockerTooling, PreflightSnapshot, PreflightProbe, PublishPortProbe,
+    run_preflight, DockerTooling, PreflightProbe, PreflightSnapshot, PublishPortProbe,
 };
 
 /// How long the preflight will wait for a deploy daemon that has to be

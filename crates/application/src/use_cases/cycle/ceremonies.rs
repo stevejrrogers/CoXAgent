@@ -43,6 +43,78 @@ fn audit_brake_write(
     Some(reason)
 }
 
+/// The deterministic sources of flow-blockage the SM digest reports: stuck
+/// PRs (fix-attempt brake tripped), parked tickets (3 failed builds), a red
+/// deploy, and active queue recovery. Only post-ladder states reach the human
+/// report — a stuck PR the SA already rescued once, a parked ticket the SA
+/// already re-designed — and both are cross-checked against the live mirrors:
+/// attempt counters left by PRs long closed, or by tickets that later shipped
+/// or were rejected, are zombies from before pruning existed, not actionable
+/// impediments. Pure read over loaded state; `vi` picks the digest language.
+fn impediment_items(state: &ProjectState, vi: bool) -> Vec<String> {
+    // One digest line, in the workspace language.
+    let bi = |v: String, e: String| if vi { v } else { e };
+    let mut items: Vec<String> = Vec::new();
+    let stuck: Vec<String> = state
+        .pr_fix_attempts
+        .iter()
+        .filter(|(pr, n)| {
+            **n >= 3
+                && state.pr_rescues.contains_key(pr)
+                && state.open_prs.iter().any(|o| o.number == **pr)
+        })
+        .map(|(pr, _)| format!("#{pr}"))
+        .collect();
+    if !stuck.is_empty() {
+        items.push(bi(
+            format!(
+                "PR kẹt SAU khi SA đã rescue (cần người quyết): {}",
+                stuck.join(", ")
+            ),
+            format!(
+                "PRs still stuck AFTER an SA rescue (a person must decide): {}",
+                stuck.join(", ")
+            ),
+        ));
+    }
+    let active_ticket = |id: &str| {
+        state.tickets.iter().any(|t| {
+            t.id().as_str() == id
+                && !matches!(
+                    t.status(),
+                    coxagent_domain::Status::Done
+                        | coxagent_domain::Status::Documented
+                        | coxagent_domain::Status::Rejected
+                        | coxagent_domain::Status::Verified
+                )
+        })
+    };
+    let parked: Vec<String> = state
+        .ticket_fail_attempts
+        .iter()
+        .filter(|(id, n)| **n >= 3 && active_ticket(id))
+        .map(|(id, _)| id.clone())
+        .collect();
+    if !parked.is_empty() {
+        items.push(bi(
+            format!("Ticket bị PARK sau 3 lần build đỏ: {}", parked.join(", ")),
+            format!("Tickets PARKED after 3 red builds: {}", parked.join(", ")),
+        ));
+    }
+    if let Some(d) = &state.deploy {
+        if !d.ok {
+            items.push(bi(
+                format!("Deploy đang ĐỎ: {}", d.summary.lines().next().unwrap_or("")),
+                format!("Deploy is RED: {}", d.summary.lines().next().unwrap_or("")),
+            ));
+        }
+    }
+    if state.queue_recovery {
+        items.push("Merge queue đang trong RECOVERY — chỉ merge, không code mới".to_owned());
+    }
+    items
+}
+
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Scrum only: open/roll over the sprint at the start of a cycle, with an SM
     /// retro line when a previous sprint closes and a standup comment on open.
@@ -693,12 +765,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// SM impediment watch: the Scrum Master's real job — surface everything
     /// blocking flow as ONE daily picture instead of scattered noise, and keep
     /// surfacing it until it's gone. Sources are deterministic state, not LLM
-    /// judgement: stuck PRs (fix-attempt brake tripped), parked tickets
-    /// (3 failed builds), a red deploy, and active queue recovery.
+    /// judgement (see [`impediment_items`]).
     pub(super) async fn impediment_watch(&self) {
         let vi = self.config.workflow.language.is_vi();
-        // One digest line, in the workspace language.
-        let bi = |v: String, e: String| if vi { v } else { e };
         let today = crate::state::now_rfc3339()[..10].to_owned();
         let Ok(state) = self.store.load().await else {
             return;
@@ -706,63 +775,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if state.last_impediment_day == today {
             return;
         }
-        let mut items: Vec<String> = Vec::new();
-        // Only post-ladder states reach the human report: a stuck PR the SA
-        // already rescued once, a parked ticket the SA already re-designed.
-        // Cross-check both against the live mirrors — attempt counters left by
-        // PRs long closed, or by tickets that later shipped or were rejected,
-        // are zombies from before pruning existed, not actionable impediments.
-        let stuck: Vec<String> = state
-            .pr_fix_attempts
-            .iter()
-            .filter(|(pr, n)| {
-                **n >= 3
-                    && state.pr_rescues.contains_key(pr)
-                    && state.open_prs.iter().any(|o| o.number == **pr)
-            })
-            .map(|(pr, _)| format!("#{pr}"))
-            .collect();
-        if !stuck.is_empty() {
-            items.push(bi(
-                format!("PR kẹt SAU khi SA đã rescue (cần người quyết): {}", stuck.join(", ")),
-                format!("PRs still stuck AFTER an SA rescue (a person must decide): {}", stuck.join(", ")),
-            ));
-        }
-        let active_ticket = |id: &str| {
-            state.tickets.iter().any(|t| {
-                t.id().as_str() == id
-                    && !matches!(
-                        t.status(),
-                        coxagent_domain::Status::Done
-                            | coxagent_domain::Status::Documented
-                            | coxagent_domain::Status::Rejected
-                            | coxagent_domain::Status::Verified
-                    )
-            })
-        };
-        let parked: Vec<String> = state
-            .ticket_fail_attempts
-            .iter()
-            .filter(|(id, n)| **n >= 3 && active_ticket(id))
-            .map(|(id, _)| id.clone())
-            .collect();
-        if !parked.is_empty() {
-            items.push(bi(
-                format!("Ticket bị PARK sau 3 lần build đỏ: {}", parked.join(", ")),
-                format!("Tickets PARKED after 3 red builds: {}", parked.join(", ")),
-            ));
-        }
-        if let Some(d) = &state.deploy {
-            if !d.ok {
-                items.push(bi(
-                    format!("Deploy đang ĐỎ: {}", d.summary.lines().next().unwrap_or("")),
-                    format!("Deploy is RED: {}", d.summary.lines().next().unwrap_or("")),
-                ));
-            }
-        }
-        if state.queue_recovery {
-            items.push("Merge queue đang trong RECOVERY — chỉ merge, không code mới".to_owned());
-        }
+        let items = impediment_items(&state, vi);
         drop(state);
         if items.is_empty() {
             // Still stamp the day so we don't re-scan every cycle.

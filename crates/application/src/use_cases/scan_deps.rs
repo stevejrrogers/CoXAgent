@@ -65,7 +65,8 @@ pub struct ScanDepsOutcome {
 }
 
 /// Runs one dependency-health pass over a project's workspace.
-pub struct ScanDependenciesUseCase<S: StateStorePort + ?Sized, D: DependencyDiscoveryPort + ?Sized> {
+pub struct ScanDependenciesUseCase<S: StateStorePort + ?Sized, D: DependencyDiscoveryPort + ?Sized>
+{
     store: Arc<S>,
     discovery: Arc<D>,
     work_dir: PathBuf,
@@ -225,7 +226,10 @@ mod tests {
         let store = Arc::new(MemStore::default());
         let uc = ScanDependenciesUseCase::new(
             Arc::clone(&store) as Arc<dyn StateStorePort>,
-            Arc::new(discovery_with("Cargo.lock", cargo_lock(&[("alpha", "1.2.3")]))),
+            Arc::new(discovery_with(
+                "Cargo.lock",
+                cargo_lock(&[("alpha", "1.2.3")]),
+            )),
             PathBuf::from("/work"),
         );
 
@@ -269,7 +273,10 @@ mod tests {
         let store = Arc::new(MemStore::default());
         let uc = ScanDependenciesUseCase::new(
             Arc::clone(&store) as Arc<dyn StateStorePort>,
-            Arc::new(discovery_with("Cargo.lock", cargo_lock(&[("alpha", "1.2.3")]))),
+            Arc::new(discovery_with(
+                "Cargo.lock",
+                cargo_lock(&[("alpha", "1.2.3")]),
+            )),
             PathBuf::from("/work"),
         );
         let input = ScanDepsInput {
@@ -317,12 +324,12 @@ mod tests {
 
         assert_eq!(
             out.scanned_files,
-            vec![
-                "Cargo.lock".to_owned(),
-                "e2e/package-lock.json".to_owned()
-            ]
+            vec!["Cargo.lock".to_owned(), "e2e/package-lock.json".to_owned()]
         );
-        assert!(out.findings.is_empty(), "nothing flagged without a registry");
+        assert!(
+            out.findings.is_empty(),
+            "nothing flagged without a registry"
+        );
         assert!(out.filed.is_empty());
 
         // CXA-B116: `filed:[]` must mean nothing was written — the zero-finding
@@ -341,7 +348,10 @@ mod tests {
         let store = Arc::new(MemStore::default());
         let uc = ScanDependenciesUseCase::new(
             Arc::clone(&store) as Arc<dyn StateStorePort>,
-            Arc::new(discovery_with("Cargo.lock", cargo_lock(&[("alpha", "1.2.3")]))),
+            Arc::new(discovery_with(
+                "Cargo.lock",
+                cargo_lock(&[("alpha", "1.2.3")]),
+            )),
             PathBuf::from("/work"),
         );
         let mut cves = BTreeMap::new();

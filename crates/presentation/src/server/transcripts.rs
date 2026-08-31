@@ -284,9 +284,9 @@ pub(super) async fn agent_log_stream_ep(
             if has_snapshot
                 && send(
                     &tx,
-                    axum::response::sse::Event::default()
-                        .event("line")
-                        .data(serde_json::json!({ "text": std::mem::take(&mut pending) }).to_string()),
+                    axum::response::sse::Event::default().event("line").data(
+                        serde_json::json!({ "text": std::mem::take(&mut pending) }).to_string(),
+                    ),
                 )
             {
                 return;

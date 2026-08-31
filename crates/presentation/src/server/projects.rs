@@ -324,7 +324,10 @@ pub(super) async fn delete_project_ep(
                 // that reads like something broke.
                 let err = String::from_utf8_lossy(&out.stderr);
                 if !out.status.success() && !err.contains("No such container") {
-                    tracing::warn!("delete_project: docker stop {container_name} failed: {}", err.trim());
+                    tracing::warn!(
+                        "delete_project: docker stop {container_name} failed: {}",
+                        err.trim()
+                    );
                 }
             }
             let _ = std::process::Command::new("docker")
@@ -408,6 +411,5 @@ pub(super) async fn milestones_projection_ep(
     let Ok(state) = p.store.load().await else {
         return internal_error("load failed");
     };
-    Json(coxagent_application::milestone_projection::projection_report(&state))
-        .into_response()
+    Json(coxagent_application::milestone_projection::projection_report(&state)).into_response()
 }

@@ -221,7 +221,10 @@ mod tests {
         let ledger = QuarantineLedger::in_dir(dir.path());
         gate_save(&mut bad, &ledger).expect("healed and saved");
         assert!(bad.ticket_evidence.is_empty(), "dangling entry dropped");
-        assert!(ledger.recent().is_empty(), "healed saves are not quarantined");
+        assert!(
+            ledger.recent().is_empty(),
+            "healed saves are not quarantined"
+        );
     }
 
     #[test]

@@ -275,10 +275,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // "Open the PNG with your file tools" asked a text engine to read
         // pixels — it hallucinated. What is ON the screen, as text, it can
         // genuinely judge (empty views, error strings, placeholder junk).
-        let dom_extract = match shot
-            .capture_dom(&format!("http://127.0.0.1:{port}/"))
-            .await
-        {
+        let dom_extract = match shot.capture_dom(&format!("http://127.0.0.1:{port}/")).await {
             Some(html) => {
                 let text = html_to_text(&html);
                 let extract: String = text.chars().take(2500).collect();
