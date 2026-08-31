@@ -787,12 +787,18 @@ mod tests {
     #[test]
     fn service_tag_is_requirement_scope_ba_stamps_po_amends() {
         let mut t = feature(false);
-        assert!(t.service_tag().is_none(), "no tag until the BA declares one");
+        assert!(
+            t.service_tag().is_none(),
+            "no tag until the BA declares one"
+        );
         // Agents and DEV roles must not be able to relabel work as shared
         // infrastructure to slip past the duplicate radar.
         assert!(matches!(
             t.set_service_tag(Role::DevFeature, "infra"),
-            Err(DomainError::FieldNotPermitted { field: "service_tag", .. })
+            Err(DomainError::FieldNotPermitted {
+                field: "service_tag",
+                ..
+            })
         ));
         assert!(matches!(
             t.set_service_tag(Role::Sa, "infra"),
@@ -802,7 +808,8 @@ mod tests {
         assert_eq!(t.service_tag(), Some("infra"), "value is trimmed");
         t.set_service_tag(Role::Po, "ci").expect("PO may amend");
         assert_eq!(t.service_tag(), Some("ci"));
-        t.set_service_tag(Role::User, "").expect("super-PO may clear");
+        t.set_service_tag(Role::User, "")
+            .expect("super-PO may clear");
         assert_eq!(t.service_tag(), None, "a blank tag clears the field");
     }
 }

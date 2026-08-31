@@ -141,7 +141,10 @@ async fn fixture(events: EventLog, fail_delete: bool) -> Fixture {
 /// `serve_full` layers it.
 fn delete_router(state: AppState) -> Router {
     Router::new()
-        .route("/api/projects/:pid", axum::routing::delete(delete_project_ep))
+        .route(
+            "/api/projects/:pid",
+            axum::routing::delete(delete_project_ep),
+        )
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth_mw))
         .with_state(state)
 }

@@ -299,7 +299,10 @@ mod tests {
         );
         assert_eq!(out.len(), 1, "one unique normalized title, one entry");
         let e = &out[0];
-        assert_eq!((e.home.project_id.as_str(), e.home.ticket_id.as_str()), ("p1", "T-9"));
+        assert_eq!(
+            (e.home.project_id.as_str(), e.home.ticket_id.as_str()),
+            ("p1", "T-9")
+        );
         assert_eq!(e.dups.len(), 1);
         assert_eq!(e.dups[0].project_id, "p2");
         assert_eq!(e.dups[0].score, Some(1.0), "identical normalized titles");
@@ -340,7 +343,10 @@ mod tests {
             ],
             &[],
         );
-        assert!(out.is_empty(), "noise titles never match, not even each other");
+        assert!(
+            out.is_empty(),
+            "noise titles never match, not even each other"
+        );
     }
 
     #[test]
@@ -367,7 +373,12 @@ mod tests {
                 "infra",
             ),
             tagged(
-                snap("p2", "Beta", "T-1", "Add cycle performance dashboard with alerts"),
+                snap(
+                    "p2",
+                    "Beta",
+                    "T-1",
+                    "Add cycle performance dashboard with alerts",
+                ),
                 "infra",
             ),
         ];
@@ -380,7 +391,10 @@ mod tests {
         // …but the SAME paraphrase without tags is a normal radar match.
         let untagged: Vec<TicketSnapshot> = pair
             .iter()
-            .map(|s| TicketSnapshot { service_tag: None, ..s.clone() })
+            .map(|s| TicketSnapshot {
+                service_tag: None,
+                ..s.clone()
+            })
             .collect();
         assert_eq!(find_cross_project_duplicates(&untagged, &[]).len(), 1);
         // …and DIFFERENT tags do not void the match either.
@@ -390,7 +404,12 @@ mod tests {
                 "infra",
             ),
             tagged(
-                snap("p2", "Beta", "T-1", "Add cycle performance dashboard with alerts"),
+                snap(
+                    "p2",
+                    "Beta",
+                    "T-1",
+                    "Add cycle performance dashboard with alerts",
+                ),
                 "ci",
             ),
         ];
@@ -443,7 +462,11 @@ mod tests {
         assert_eq!(out.len(), 1);
         // Home is the stable-lowest member by project name.
         assert_eq!(out[0].home.project_name, "Alpha");
-        let dup_projects: Vec<&str> = out[0].dups.iter().map(|d| d.project_name.as_str()).collect();
+        let dup_projects: Vec<&str> = out[0]
+            .dups
+            .iter()
+            .map(|d| d.project_name.as_str())
+            .collect();
         assert_eq!(dup_projects, vec!["Beta", "Gamma"]);
     }
 
@@ -454,7 +477,12 @@ mod tests {
         let out = find_cross_project_duplicates(
             &[
                 snap("p1", "Alpha", "T-1", "Add cycle performance dashboard"),
-                snap("p2", "Beta", "T-1", "Add cycle performance dashboard with alerts"),
+                snap(
+                    "p2",
+                    "Beta",
+                    "T-1",
+                    "Add cycle performance dashboard with alerts",
+                ),
             ],
             &[],
         );

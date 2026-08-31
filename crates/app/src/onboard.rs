@@ -436,11 +436,13 @@ fn refuse_agent_scaffold() -> Result<(), Box<dyn std::error::Error>> {
             .to_string_lossy()
             .starts_with(".coxagent-worktrees")
     }) {
-        return Err("refusing to scaffold a project from inside an agent worktree — \
+        return Err(
+            "refusing to scaffold a project from inside an agent worktree — \
                     this would register a live project in the operator's hub. Use a \
                     plain temp directory (outside .coxagent-worktrees) for cleanroom \
                     tests."
-            .into());
+                .into(),
+        );
     }
     Ok(())
 }

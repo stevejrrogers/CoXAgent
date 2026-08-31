@@ -97,8 +97,11 @@ fn db_healthcheck_command(compose_src: &str) -> Result<String, String> {
 fn dials_a_trust_path(test: &str) -> bool {
     let mut rest = test;
     while let Some(at) = rest.find("-h") {
-        let starts_token =
-            at == 0 || rest[..at].chars().last().is_some_and(|c| c.is_ascii_whitespace());
+        let starts_token = at == 0
+            || rest[..at]
+                .chars()
+                .last()
+                .is_some_and(|c| c.is_ascii_whitespace());
         let after = &rest[at + 2..];
         // split_whitespace already ignores leading whitespace.
         let arg = after.split_whitespace().next().unwrap_or("");
@@ -226,7 +229,10 @@ fn bare_pg_isready_is_caught() {
     let why =
         mismatch_is_detectable(&compose_with_healthcheck("pg_isready -U postgres")).unwrap_err();
     assert!(why.contains("pg_isready"), "unhelpful message: {why}");
-    assert!(why.contains("CXA-B115"), "message must cite the ticket: {why}");
+    assert!(
+        why.contains("CXA-B115"),
+        "message must cite the ticket: {why}"
+    );
 }
 
 /// A healthcheck dropped entirely is structural blindness, not a pass.
@@ -244,10 +250,8 @@ fn dropped_healthcheck_is_caught() {
 /// psql over the socket without a password: authenticates nothing twice over.
 #[test]
 fn socket_psql_without_password_is_caught() {
-    let why = mismatch_is_detectable(&compose_with_healthcheck(
-        "psql -U postgres -c 'select 1'",
-    ))
-    .unwrap_err();
+    let why = mismatch_is_detectable(&compose_with_healthcheck("psql -U postgres -c 'select 1'"))
+        .unwrap_err();
     assert!(
         why.contains("POSTGRES_PASSWORD"),
         "unhelpful message: {why}"

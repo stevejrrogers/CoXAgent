@@ -122,11 +122,7 @@ fn onclick_handler(tag: &str) -> Option<&str> {
     let call = &rest[..end];
     let name_end = call.find('(')?;
     let name = call[..name_end].trim();
-    if name.is_empty()
-        || !name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-    {
+    if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
         return None;
     }
     Some(name)
@@ -285,9 +281,8 @@ fn ac1_check_feasibility_renders_a_verdict_panel_with_rationale_and_never_saves(
         let inner = handler.find("innerHTML=");
         inner.is_some_and(|i| {
             let rhs = &handler[i + "innerHTML=".len()..];
-            rhs.find('+').is_some_and(|p| {
-                !rhs[..p].ends_with('\"') && !rhs[..p].ends_with('\'')
-            })
+            rhs.find('+')
+                .is_some_and(|p| !rhs[..p].ends_with('\"') && !rhs[..p].ends_with('\''))
         })
     };
     assert!(
@@ -320,9 +315,8 @@ fn ac2_empty_dialog_shows_write_the_idea_first_and_fires_no_request() {
                  has nothing to gate"
             )
         });
-    let handler = js_fn(SHELL, name).unwrap_or_else(|| {
-        panic!("{name}() (the '{BUTTON_LABEL}' handler) is not in shell.js")
-    });
+    let handler = js_fn(SHELL, name)
+        .unwrap_or_else(|| panic!("{name}() (the '{BUTTON_LABEL}' handler) is not in shell.js"));
     // The guard must consult BOTH fields the AC names — the description via
     // its existing accessor and the title input — and it must speak before
     // any fetch happens: with both empty, no network request fires at all.
@@ -371,9 +365,8 @@ fn ac3_preview_and_cancel_leave_the_backlog_untouched_until_explicit_save() {
                  zero-side-effects preview (CXA-F250) has nothing to gate"
             )
         });
-    let handler = js_fn(SHELL, name).unwrap_or_else(|| {
-        panic!("{name}() (the '{BUTTON_LABEL}' handler) is not in shell.js")
-    });
+    let handler = js_fn(SHELL, name)
+        .unwrap_or_else(|| panic!("{name}() (the '{BUTTON_LABEL}' handler) is not in shell.js"));
     assert!(
         !handler.contains("saveTicket") && !handler.contains("\"/tickets\""),
         "generating or viewing a feasibility preview writes to the backlog \
@@ -426,9 +419,8 @@ fn ac4_without_a_configured_engine_the_preview_fails_gracefully_keeping_the_form
                  no-engine failure path (CXA-F250) has nothing to gate"
             )
         });
-    let handler = js_fn(SHELL, name).unwrap_or_else(|| {
-        panic!("{name}() (the '{BUTTON_LABEL}' handler) is not in shell.js")
-    });
+    let handler = js_fn(SHELL, name)
+        .unwrap_or_else(|| panic!("{name}() (the '{BUTTON_LABEL}' handler) is not in shell.js"));
     assert!(
         handler.contains(NO_ENGINE_MSG),
         "the feasibility handler never reports '{NO_ENGINE_MSG}' inline in \
@@ -472,9 +464,8 @@ fn ac5_network_failure_keeps_the_form_and_reports_inline() {
                  error path (CXA-F250) has nothing to gate"
             )
         });
-    let handler = js_fn(SHELL, name).unwrap_or_else(|| {
-        panic!("{name}() (the '{BUTTON_LABEL}' handler) is not in shell.js")
-    });
+    let handler = js_fn(SHELL, name)
+        .unwrap_or_else(|| panic!("{name}() (the '{BUTTON_LABEL}' handler) is not in shell.js"));
     // The request is guarded by try/catch — a rejected fetch or bad response
     // lands in the catch, reports inline in #nt-err, and throws nothing
     // uncaught (an uncaught throw would hit the window.onerror console gate

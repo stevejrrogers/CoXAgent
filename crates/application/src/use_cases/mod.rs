@@ -56,7 +56,7 @@ pub use merge_policy::{
 pub use merge_sweep::{merge_sweep, SweepOutcome};
 pub use question_batching::{flush_batches, select_deferred, should_defer};
 pub use readiness_preflight::{
-    run_preflight, PreflightItem, PreflightReport, PreflightSnapshot, PreflightProbe,
+    run_preflight, PreflightItem, PreflightProbe, PreflightReport, PreflightSnapshot,
 };
 pub use recover::RecoverUseCase;
 pub use refine_ticket::{FeasLane, Feasibility, RefineTicketUseCase, RefinedTicket, TeamNote};

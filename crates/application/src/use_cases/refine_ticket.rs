@@ -296,9 +296,25 @@ const ASK_PAST_SCORE: i32 = 35;
 /// accessibility) rather than pure behaviour — the signal that PD has
 /// something to design against when the idea claims UI.
 const UX_WORDS: &[&str] = &[
-    "ui", "ux", "screen", "click", "tap", "keyboard", "focus", "accessible", "a11y",
-    "contrast", "responsive", "layout", "mobile", "hover", "scroll", "viewport", "menu",
-    "state", "empty",
+    "ui",
+    "ux",
+    "screen",
+    "click",
+    "tap",
+    "keyboard",
+    "focus",
+    "accessible",
+    "a11y",
+    "contrast",
+    "responsive",
+    "layout",
+    "mobile",
+    "hover",
+    "scroll",
+    "viewport",
+    "menu",
+    "state",
+    "empty",
 ];
 
 /// Score the idea AS FILED (CXA-F250). PURE: a function of the refined ticket
@@ -459,9 +475,12 @@ mod tests {
                 Status::Ready => &[Status::Ready],
                 Status::InProgress => &[Status::Ready, Status::InProgress],
                 Status::Done => &[Status::Ready, Status::InProgress, Status::Done],
-                Status::Documented => {
-                    &[Status::Ready, Status::InProgress, Status::Done, Status::Documented]
-                }
+                Status::Documented => &[
+                    Status::Ready,
+                    Status::InProgress,
+                    Status::Done,
+                    Status::Documented,
+                ],
                 _ => &[],
             };
             for to in steps {
@@ -473,19 +492,30 @@ mod tests {
 
     #[test]
     fn large_scope_scores_riskier_than_small() {
-        let small = assess_feasibility(&idea("Tighten a log line", "small", false, &["log says x"]), 0);
-        let large = assess_feasibility(&idea("Rewrite the scheduler", "large", false, &["it schedules"]), 0);
-        assert!(large.score > small.score, "small {small:?} vs large {large:?}");
+        let small = assess_feasibility(
+            &idea("Tighten a log line", "small", false, &["log says x"]),
+            0,
+        );
+        let large = assess_feasibility(
+            &idea("Rewrite the scheduler", "large", false, &["it schedules"]),
+            0,
+        );
+        assert!(
+            large.score > small.score,
+            "small {small:?} vs large {large:?}"
+        );
         assert!(large.gaps.iter().any(|g| g.contains("large scope")));
     }
 
     #[test]
     fn missing_criteria_surface_as_a_gap() {
         let bare = assess_feasibility(&idea("Add a widget", "medium", false, &[]), 0);
-        assert!(bare
-            .gaps
-            .iter()
-            .any(|g| g.contains("no acceptance criteria")), "{bare:?}");
+        assert!(
+            bare.gaps
+                .iter()
+                .any(|g| g.contains("no acceptance criteria")),
+            "{bare:?}"
+        );
         let with = assess_feasibility(&idea("Add a widget", "medium", false, &["it works"]), 0);
         assert!(!with.gaps.iter().any(|g| g.contains("acceptance criteria")));
     }
@@ -493,12 +523,25 @@ mod tests {
     #[test]
     fn ui_without_ux_criteria_surfaces_as_a_gap() {
         let blind = assess_feasibility(
-            &idea("Redesign the settings page", "medium", true, &["settings persist"]),
+            &idea(
+                "Redesign the settings page",
+                "medium",
+                true,
+                &["settings persist"],
+            ),
             0,
         );
-        assert!(blind.gaps.iter().any(|g| g.contains("UX criterion")), "{blind:?}");
+        assert!(
+            blind.gaps.iter().any(|g| g.contains("UX criterion")),
+            "{blind:?}"
+        );
         let designed = assess_feasibility(
-            &idea("Redesign the settings page", "medium", true, &["Empty state renders a helper line"]),
+            &idea(
+                "Redesign the settings page",
+                "medium",
+                true,
+                &["Empty state renders a helper line"],
+            ),
             0,
         );
         assert!(!designed.gaps.iter().any(|g| g.contains("UX criterion")));
@@ -515,7 +558,10 @@ mod tests {
             prev = f.score;
         }
         // The cap holds: history can never outvote the live signals entirely.
-        assert_eq!(assess_feasibility(&t, 6).score, assess_feasibility(&t, 500).score);
+        assert_eq!(
+            assess_feasibility(&t, 6).score,
+            assess_feasibility(&t, 500).score
+        );
     }
 
     #[test]
@@ -524,20 +570,58 @@ mod tests {
         assert_eq!(routine.lane, FeasLane::Auto, "{routine:?}");
         let unclear = assess_feasibility(&idea("Add a widget", "medium", false, &[]), 0);
         assert_eq!(unclear.lane, FeasLane::Ask, "{unclear:?}");
-        let big = assess_feasibility(&idea("Rewrite the scheduler", "large", false, &["it schedules"]), 6);
+        let big = assess_feasibility(
+            &idea("Rewrite the scheduler", "large", false, &["it schedules"]),
+            6,
+        );
         assert_eq!(big.lane, FeasLane::Ask, "{big:?}");
     }
 
     #[test]
     fn prior_art_counts_only_terminal_same_shape_tickets() {
-        let t = idea("Add a password reset screen", "medium", true, &["reset email sends"]);
+        let t = idea(
+            "Add a password reset screen",
+            "medium",
+            true,
+            &["reset email sends"],
+        );
         let history = [
-            shipped("Add a password reset screen", TicketType::Feature, Complexity::Medium, Status::Done),
-            shipped("Add a login screen", TicketType::Feature, Complexity::Medium, Status::Documented),
-            shipped("Add a password reset screen", TicketType::Feature, Complexity::Small, Status::Done),
-            shipped("Add a password reset screen", TicketType::Feature, Complexity::Medium, Status::Ready),
-            shipped("Test coverage: reset screen", TicketType::Feature, Complexity::Medium, Status::Done),
-            shipped("Add a password reset screen", TicketType::Bug, Complexity::Medium, Status::Verified),
+            shipped(
+                "Add a password reset screen",
+                TicketType::Feature,
+                Complexity::Medium,
+                Status::Done,
+            ),
+            shipped(
+                "Add a login screen",
+                TicketType::Feature,
+                Complexity::Medium,
+                Status::Documented,
+            ),
+            shipped(
+                "Add a password reset screen",
+                TicketType::Feature,
+                Complexity::Small,
+                Status::Done,
+            ),
+            shipped(
+                "Add a password reset screen",
+                TicketType::Feature,
+                Complexity::Medium,
+                Status::Ready,
+            ),
+            shipped(
+                "Test coverage: reset screen",
+                TicketType::Feature,
+                Complexity::Medium,
+                Status::Done,
+            ),
+            shipped(
+                "Add a password reset screen",
+                TicketType::Bug,
+                Complexity::Medium,
+                Status::Verified,
+            ),
         ];
         // Done + Documented of the same shape count. A feature idea never
         // matches a bug's Verified (different type in the shape key), a Ready
@@ -637,9 +721,12 @@ mod tests {
     #[tokio::test]
     async fn execute_attaches_a_feasibility_verdict_from_store_prior_art() {
         let mut state = ProjectState::default();
-        state
-            .tickets
-            .push(shipped("Add a login screen", TicketType::Feature, Complexity::Medium, Status::Done));
+        state.tickets.push(shipped(
+            "Add a login screen",
+            TicketType::Feature,
+            Complexity::Medium,
+            Status::Done,
+        ));
         let store = Arc::new(MemStore {
             state: Mutex::new(state),
         });
@@ -649,8 +736,15 @@ mod tests {
         let uc = RefineTicketUseCase::new(store, engine, PathBuf::from("/tmp"));
         let t = uc.execute("users locked out", "").await.expect("refine");
         let f = t.feasibility.expect("preview attached");
-        assert_eq!(f.prior_art, 1, "the Done feature/medium ticket is prior art");
-        assert_eq!(f.lane, FeasLane::Ask, "medium UI idea with one criterion still asks");
+        assert_eq!(
+            f.prior_art, 1,
+            "the Done feature/medium ticket is prior art"
+        );
+        assert_eq!(
+            f.lane,
+            FeasLane::Ask,
+            "medium UI idea with one criterion still asks"
+        );
         assert!(f.score > 0 && f.score <= 100);
     }
 

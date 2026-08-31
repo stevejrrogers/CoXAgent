@@ -156,7 +156,10 @@ async fn delete_sweeps_the_project_redis_keyspace_including_desired_state() {
     store.delete().await.expect("delete");
 
     assert_eq!(
-        store.get_desired("op@host").await.expect("desired after delete"),
+        store
+            .get_desired("op@host")
+            .await
+            .expect("desired after delete"),
         None,
         "the deleted project's persistent Redis keys must be swept, or a \
          recreated id auto-resumes its runner"

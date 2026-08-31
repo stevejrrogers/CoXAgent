@@ -724,8 +724,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .collect();
         if !stuck.is_empty() {
             items.push(bi(
-                format!("PR kẹt SAU khi SA đã rescue (cần người quyết): {}", stuck.join(", ")),
-                format!("PRs still stuck AFTER an SA rescue (a person must decide): {}", stuck.join(", ")),
+                format!(
+                    "PR kẹt SAU khi SA đã rescue (cần người quyết): {}",
+                    stuck.join(", ")
+                ),
+                format!(
+                    "PRs still stuck AFTER an SA rescue (a person must decide): {}",
+                    stuck.join(", ")
+                ),
             ));
         }
         let active_ticket = |id: &str| {

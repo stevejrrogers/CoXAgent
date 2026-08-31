@@ -1,8 +1,8 @@
 //! Outbound ports — interfaces the application needs the outside world to fulfil.
 
 pub mod audit;
-pub mod deps;
 pub mod deploy;
+pub mod deps;
 pub mod doc_store;
 pub mod engine;
 pub mod forge;

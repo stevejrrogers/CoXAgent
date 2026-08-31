@@ -597,7 +597,10 @@ mod coord_tests {
             .unwrap();
         assert!(s.state_path().exists(), "fixture: state file written");
         assert!(s.coord_path().exists(), "fixture: coord file written");
-        assert!(s.root.join(BACKUP_DIR).exists(), "fixture: backup set written");
+        assert!(
+            s.root.join(BACKUP_DIR).exists(),
+            "fixture: backup set written"
+        );
 
         s.delete().await.unwrap();
 

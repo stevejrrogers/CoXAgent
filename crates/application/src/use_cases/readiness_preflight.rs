@@ -208,13 +208,20 @@ fn role_label(role: Role) -> &'static str {
 /// One item per engine/model selection the runner will actually use: the
 /// default mapping plus every per-role override, sorted for stable output.
 fn engine_items(config: &Config, detected: &[String]) -> Vec<PreflightItem> {
-    let mut choices: Vec<(String, String, &EngineChoice)> =
-        vec![("engine.default".to_owned(), "default".to_owned(), &config.engine.default)];
+    let mut choices: Vec<(String, String, &EngineChoice)> = vec![(
+        "engine.default".to_owned(),
+        "default".to_owned(),
+        &config.engine.default,
+    )];
     let mut per_role: Vec<_> = config.engine.per_role.iter().collect();
     per_role.sort_by_key(|(role, _)| role_label(**role));
     choices.extend(per_role.into_iter().map(|(role, choice)| {
         let name = role_label(*role);
-        (format!("engine.role.{name}"), format!("role {name}"), choice)
+        (
+            format!("engine.role.{name}"),
+            format!("role {name}"),
+            choice,
+        )
     }));
     choices
         .into_iter()
@@ -236,9 +243,12 @@ fn engine_item(
     let model_ok = model_allowed(policy, &choice.model);
     let subject = format!("Engine · {label}");
     match (engine_ok, model_ok) {
-        (true, true) => {
-            PreflightItem::new(id, &subject, "ok", format!("{binary} · {} ready", choice.model))
-        }
+        (true, true) => PreflightItem::new(
+            id,
+            &subject,
+            "ok",
+            format!("{binary} · {} ready", choice.model),
+        ),
         (false, true) => PreflightItem::new(
             id,
             &subject,
@@ -322,7 +332,10 @@ fn host_items(config_port: Option<u16>, snapshot: &PreflightSnapshot) -> Vec<Pre
                     "publish",
                     "Publish port",
                     "warn",
-                    format!("{} is free, but no parseable config assigns it yet", probe.port),
+                    format!(
+                        "{} is free, but no parseable config assigns it yet",
+                        probe.port
+                    ),
                 ),
                 None => PreflightItem::new(
                     "publish",
@@ -519,13 +532,25 @@ mod tests {
 
         let report = run_preflight(&s);
 
-        let config = report.items.iter().find(|i| i.id == "config").expect("config line");
+        let config = report
+            .items
+            .iter()
+            .find(|i| i.id == "config")
+            .expect("config line");
         assert_eq!(config.status, "blocked");
         assert_eq!(config.field.as_deref(), Some("policy.daily_budget_usd"));
-        assert!(config.detail.contains("policy.daily_budget_usd"), "{}", config.detail);
+        assert!(
+            config.detail.contains("policy.daily_budget_usd"),
+            "{}",
+            config.detail
+        );
         // No default-guessing: the engine line refuses to evaluate, and the
         // report is not ready.
-        let engine = report.items.iter().find(|i| i.id == "engine").expect("engine line");
+        let engine = report
+            .items
+            .iter()
+            .find(|i| i.id == "engine")
+            .expect("engine line");
         assert_eq!(engine.status, "blocked");
         assert!(!report.ready);
         assert!(!report.blocking.is_empty());
@@ -540,10 +565,18 @@ mod tests {
 
         let report = run_preflight(&s);
 
-        let auth = report.items.iter().find(|i| i.id == "auth").expect("auth line");
+        let auth = report
+            .items
+            .iter()
+            .find(|i| i.id == "auth")
+            .expect("auth line");
         assert_eq!(auth.status, "warn");
         assert!(auth.detail.contains("running open"), "{}", auth.detail);
-        assert!(report.ready, "a warning informs; it does not block: {:?}", report.blocking);
+        assert!(
+            report.ready,
+            "a warning informs; it does not block: {:?}",
+            report.blocking
+        );
     }
 
     /// AC4: a model selected for a role that the allowlist forbids flags that
@@ -600,7 +633,14 @@ mod tests {
         let report = run_preflight(&s);
 
         assert!(report.ready, "blockers: {:?}", report.blocking);
-        for id in ["config", "engine.default", "host_port", "publish", "docker", "compose"] {
+        for id in [
+            "config",
+            "engine.default",
+            "host_port",
+            "publish",
+            "docker",
+            "compose",
+        ] {
             let item = report.items.iter().find(|i| i.id == id).expect(id);
             assert_eq!(item.status, "ok", "{id}: {}", item.detail);
         }
@@ -620,7 +660,11 @@ mod tests {
 
         let report = run_preflight(&s);
 
-        let publish = report.items.iter().find(|i| i.id == "publish").expect("publish line");
+        let publish = report
+            .items
+            .iter()
+            .find(|i| i.id == "publish")
+            .expect("publish line");
         assert_eq!(publish.status, "blocked");
         assert!(publish.detail.contains("8101"), "{}", publish.detail);
         assert!(!report.ready);
@@ -640,9 +684,17 @@ mod tests {
 
         let report = run_preflight(&s);
 
-        let publish = report.items.iter().find(|i| i.id == "publish").expect("publish line");
+        let publish = report
+            .items
+            .iter()
+            .find(|i| i.id == "publish")
+            .expect("publish line");
         assert_eq!(publish.status, "blocked");
-        let config = report.items.iter().find(|i| i.id == "config").expect("config line");
+        let config = report
+            .items
+            .iter()
+            .find(|i| i.id == "config")
+            .expect("config line");
         assert_eq!(config.status, "blocked");
         assert!(!report.ready);
     }
@@ -661,9 +713,17 @@ mod tests {
 
         let report = run_preflight(&s);
 
-        let publish = report.items.iter().find(|i| i.id == "publish").expect("publish line");
+        let publish = report
+            .items
+            .iter()
+            .find(|i| i.id == "publish")
+            .expect("publish line");
         assert_eq!(publish.status, "warn");
-        assert!(publish.detail.contains("was not probed"), "{}", publish.detail);
+        assert!(
+            publish.detail.contains("was not probed"),
+            "{}",
+            publish.detail
+        );
         assert!(report.ready, "blockers: {:?}", report.blocking);
     }
 
@@ -696,7 +756,11 @@ mod tests {
 
         let report = run_preflight(&s);
 
-        let config = report.items.iter().find(|i| i.id == "config").expect("config line");
+        let config = report
+            .items
+            .iter()
+            .find(|i| i.id == "config")
+            .expect("config line");
         assert_eq!(config.status, "warn");
         let engine = report
             .items

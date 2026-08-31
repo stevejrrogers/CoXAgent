@@ -512,9 +512,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 })
                 .await;
                 say(if vi {
-                    format!("🧯 SM→SA rescue PR #{}: SA kết luận ĐÓNG (đã bị thay thế/sai hướng).", pr.number)
+                    format!(
+                        "🧯 SM→SA rescue PR #{}: SA kết luận ĐÓNG (đã bị thay thế/sai hướng).",
+                        pr.number
+                    )
                 } else {
-                    format!("🧯 SM→SA rescue PR #{}: SA ruled CLOSE (superseded / wrong direction).", pr.number)
+                    format!(
+                        "🧯 SM→SA rescue PR #{}: SA ruled CLOSE (superseded / wrong direction).",
+                        pr.number
+                    )
                 })
                 .await;
             }
@@ -598,9 +604,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     // hosted CI dead (billing), SA prose review was the ONLY
                     // gate between a broken screen and main. Golden
                     // screenshots + the console-error gate run here instead.
-                    let (ok_diff, names) = git
-                        .raw(&dir, &["diff", "--name-only", &sha, "HEAD"])
-                        .await;
+                    let (ok_diff, names) =
+                        git.raw(&dir, &["diff", "--name-only", &sha, "HEAD"]).await;
                     let touches_ui = ok_diff
                         && names.lines().any(|l| {
                             l.starts_with("crates/presentation/src/web/") || l.starts_with("e2e/")
@@ -669,9 +674,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         };
         if !pr.mergeable {
             say(if vi {
-                format!("⚡ Force-merge #{num} ({by}): runner đang gỡ conflict trên `{}`…", pr.head)
+                format!(
+                    "⚡ Force-merge #{num} ({by}): runner đang gỡ conflict trên `{}`…",
+                    pr.head
+                )
             } else {
-                format!("⚡ Force-merge #{num} ({by}): the runner is resolving conflicts on `{}`…", pr.head)
+                format!(
+                    "⚡ Force-merge #{num} ({by}): the runner is resolving conflicts on `{}`…",
+                    pr.head
+                )
             })
             .await;
             let request = crate::ports::outbound::AgentRequest {
@@ -709,26 +720,37 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
             if let Err(why) = self.verify_conflict_resolution(num).await {
                 say(if vi {
-                    format!("⚡ Force-merge #{num}: verification từ chối ({why}) — KHÔNG merge: {}", pr.url)
+                    format!(
+                        "⚡ Force-merge #{num}: verification từ chối ({why}) — KHÔNG merge: {}",
+                        pr.url
+                    )
                 } else {
-                    format!("⚡ Force-merge #{num}: verification refused ({why}) — NOT merging: {}", pr.url)
+                    format!(
+                        "⚡ Force-merge #{num}: verification refused ({why}) — NOT merging: {}",
+                        pr.url
+                    )
                 })
                 .await;
                 return;
             }
         }
         match forge.merge_pr(num).await {
-            Ok(()) => say(if vi {
-                format!("⚡ Force-merge #{num} ({by}): ✅ đã merge.")
-            } else {
-                format!("⚡ Force-merge #{num} ({by}): ✅ merged.")
-            })
-            .await,
+            Ok(()) => {
+                say(if vi {
+                    format!("⚡ Force-merge #{num} ({by}): ✅ đã merge.")
+                } else {
+                    format!("⚡ Force-merge #{num} ({by}): ✅ merged.")
+                })
+                .await
+            }
             Err(e) => {
                 say(if vi {
                     format!("⚡ Force-merge #{num}: merge bị từ chối — {e}: {}", pr.url)
                 } else {
-                    format!("⚡ Force-merge #{num}: the merge was refused — {e}: {}", pr.url)
+                    format!(
+                        "⚡ Force-merge #{num}: the merge was refused — {e}: {}",
+                        pr.url
+                    )
                 })
                 .await;
             }

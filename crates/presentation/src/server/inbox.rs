@@ -683,9 +683,7 @@ async fn human_transition(
     // written since F022.
     if to == coxagent_domain::Status::Verified {
         coxagent_application::use_cases::run_test::record_human_verify_evidence(
-            &mut state,
-            id,
-            &me,
+            &mut state, id, &me,
         );
         // Goal-line outcome ledger (CXA-F228): a human verdict is a delivered
         // outcome like the agent path's.

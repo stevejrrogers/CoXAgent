@@ -126,7 +126,8 @@ fn may_see_broken(user: Option<&coxagent_application::AuthUser>, id: &str) -> bo
         Some(u) => {
             matches!(
                 u.role,
-                coxagent_application::auth::AuthRole::Super | coxagent_application::auth::AuthRole::Admin
+                coxagent_application::auth::AuthRole::Super
+                    | coxagent_application::auth::AuthRole::Admin
             ) || u.projects.iter().any(|p| p == id)
         }
     }
@@ -330,8 +331,7 @@ async fn river_boot(
                 insufficient_data(&state),
             ));
         }
-        sh.seen
-            .insert(p.id.clone(), state.activity.last().cloned());
+        sh.seen.insert(p.id.clone(), state.activity.last().cloned());
         let snap = p.runner.snapshot();
         if runner_in_phase(phase, &snap) {
             out.push(project_state_payload(&p, &state, viewers, online));
@@ -388,8 +388,7 @@ async fn river_tick(
         }
         // The seen marker advances regardless of the phase filter, so a row
         // hidden now is never replayed when the filter is lifted.
-        sh.seen
-            .insert(p.id.clone(), state.activity.last().cloned());
+        sh.seen.insert(p.id.clone(), state.activity.last().cloned());
     }
     out
 }
@@ -410,8 +409,9 @@ pub(super) async fn fleet_river_ep(
         None => None,
     };
     // Identify the viewer so distinct-user counts (not tab counts) are reported.
-    let viewer =
-        principal.as_ref().map_or_else(|| "local".to_owned(), |u| u.username.clone());
+    let viewer = principal
+        .as_ref()
+        .map_or_else(|| "local".to_owned(), |u| u.username.clone());
     let phase = phase_norm(q.phase.as_deref());
     // Registry order is the display order; the read lock is held only here.
     let (registered, space_projects) = {
@@ -445,14 +445,13 @@ pub(super) async fn fleet_river_ep(
         (registered, space_projects)
     };
     let visible = river_scope(principal.as_ref(), &registered);
-    let included = filter_projects(
-        &visible,
-        q.project_id.as_deref(),
-        space_projects.as_deref(),
-    );
+    let included = filter_projects(&visible, q.project_id.as_deref(), space_projects.as_deref());
     let projects: Vec<RiverProject> = {
         let map = app.projects.read().await;
-        included.iter().filter_map(|id| map.get(id).map(RiverProject::of)).collect()
+        included
+            .iter()
+            .filter_map(|id| map.get(id).map(RiverProject::of))
+            .collect()
     };
     // A project filter also narrows the broken markers: naming a live project
     // hides unrelated broken ones; no filter shows every visible registration.
@@ -552,16 +551,29 @@ mod fleet_river_tests {
     }
 
     #[test]
-    fn project_and_space_filters_intersect_visibility() {        let allowed = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+    fn project_and_space_filters_intersect_visibility() {
+        let allowed = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
         assert_eq!(ids(&filter_projects(&allowed, Some("b"), None)), vec!["b"]);
         // A filter naming an invisible project yields an empty set — the
         // friendly empty-state payload, never another project's data.
         assert!(filter_projects(&allowed, Some("z"), None).is_empty());
         let space = vec!["c".to_owned(), "a".to_owned()];
-        assert_eq!(ids(&filter_projects(&allowed, None, Some(&space))), vec!["a", "c"]);
-        assert_eq!(ids(&filter_projects(&allowed, Some("a"), Some(&space))), vec!["a"]);
-        assert_eq!(ids(&filter_projects(&allowed, Some("b"), Some(&space))), Vec::<String>::new());
-        assert_eq!(ids(&filter_projects(&allowed, None, None)), vec!["a", "b", "c"]);
+        assert_eq!(
+            ids(&filter_projects(&allowed, None, Some(&space))),
+            vec!["a", "c"]
+        );
+        assert_eq!(
+            ids(&filter_projects(&allowed, Some("a"), Some(&space))),
+            vec!["a"]
+        );
+        assert_eq!(
+            ids(&filter_projects(&allowed, Some("b"), Some(&space))),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            ids(&filter_projects(&allowed, None, None)),
+            vec!["a", "b", "c"]
+        );
     }
 
     #[test]
@@ -594,7 +606,13 @@ mod fleet_river_tests {
 
     fn feed() -> Vec<ActivityEntry> {
         (0..8)
-            .map(|i| entry(&format!("2026-08-29T00:0{i}:00Z"), "DEV", &format!("act {i}")))
+            .map(|i| {
+                entry(
+                    &format!("2026-08-29T00:0{i}:00Z"),
+                    "DEV",
+                    &format!("act {i}"),
+                )
+            })
             .collect()
     }
 
@@ -603,7 +621,11 @@ mod fleet_river_tests {
         let f = feed();
         assert_eq!(delta(None, &f, 20).len(), 8);
         assert_eq!(delta(None, &f, 3).len(), 3);
-        assert_eq!(delta(None, &f, 3)[0].action, "act 5", "newest tail, oldest-first");
+        assert_eq!(
+            delta(None, &f, 3)[0].action,
+            "act 5",
+            "newest tail, oldest-first"
+        );
     }
 
     #[test]
@@ -612,7 +634,10 @@ mod fleet_river_tests {
         let seen = f[5].clone();
         assert_eq!(delta(Some(&seen), &f, 20).len(), 2);
         assert_eq!(delta(Some(&seen), &f, 20)[0].action, "act 6");
-        assert!(delta(Some(f[7].clone()).as_ref(), &f, 20).is_empty(), "no news is empty");
+        assert!(
+            delta(Some(f[7].clone()).as_ref(), &f, 20).is_empty(),
+            "no news is empty"
+        );
     }
 
     #[test]
@@ -634,7 +659,10 @@ mod fleet_river_tests {
         let mut s = ProjectState::default();
         assert!(!human_action_needed(&s));
         s.human_holds.insert(7, "needs human eyes".to_owned());
-        assert!(human_action_needed(&s), "held-for-a-person work IS the flag");
+        assert!(
+            human_action_needed(&s),
+            "held-for-a-person work IS the flag"
+        );
     }
 
     fn state_with_cycles(n: usize) -> ProjectState {
@@ -684,8 +712,8 @@ mod fleet_river_stream_tests {
     use super::*;
     use async_trait::async_trait;
     use coxagent_application::auth::{AuthRole, AuthUser};
-    use coxagent_application::PortError;
     use coxagent_application::use_cases::RunnerHandle;
+    use coxagent_application::PortError;
 
     struct MemStore {
         state: std::sync::Mutex<ProjectState>,
@@ -767,17 +795,37 @@ mod fleet_river_stream_tests {
 
     #[tokio::test]
     async fn boot_streams_hello_then_bounded_backlog_then_one_heartbeat() {
-        let store = MemStore::with((0..3)
-            .map(|i| entry(&format!("2026-08-29T00:0{i}:00Z"), "DEV", &format!("act {i}")))
-            .collect());
+        let store = MemStore::with(
+            (0..3)
+                .map(|i| {
+                    entry(
+                        &format!("2026-08-29T00:0{i}:00Z"),
+                        "DEV",
+                        &format!("act {i}"),
+                    )
+                })
+                .collect(),
+        );
         let mut sh = river_state(
             vec![river_project("p", store, Arc::new(RunnerHandle::new()))],
             Vec::new(),
         );
         let events = river_boot(&mut sh, "", 2, &["op".to_owned()]).await;
 
-        assert_eq!(types(&events), vec!["hello", "agent_activity", "agent_activity", "agent_activity", "project_state"]);
-        assert_eq!(events[0]["viewers"], 2, "hello carries the distinct-user count");
+        assert_eq!(
+            types(&events),
+            vec![
+                "hello",
+                "agent_activity",
+                "agent_activity",
+                "agent_activity",
+                "project_state"
+            ]
+        );
+        assert_eq!(
+            events[0]["viewers"], 2,
+            "hello carries the distinct-user count"
+        );
         assert_eq!(events[0]["online"], serde_json::json!(["op"]));
         // Backlog is oldest-first with a fresh per-project sequence.
         assert_eq!(events[1]["seq"], 1);
@@ -786,21 +834,35 @@ mod fleet_river_stream_tests {
         // One cycle completed → the heartbeat says so explicitly (AC5).
         assert_eq!(events[4]["insufficient_data"], true);
         assert_eq!(events[4]["runner"]["mode"], "paused");
-        assert!(events[4]["state"].is_object(), "state rides in lite_state_value shape");
+        assert!(
+            events[4]["state"].is_object(),
+            "state rides in lite_state_value shape"
+        );
     }
 
     #[tokio::test]
     async fn a_tick_with_no_news_emits_only_the_heartbeat() {
         let store = MemStore::with(vec![entry("2026-08-29T00:00:00Z", "DEV", "act 0")]);
         let shared = Arc::new(tokio::sync::Mutex::new(river_state(
-            vec![river_project("p", Arc::clone(&store), Arc::new(RunnerHandle::new()))],
+            vec![river_project(
+                "p",
+                Arc::clone(&store),
+                Arc::new(RunnerHandle::new()),
+            )],
             Vec::new(),
         )));
         let boot = river_tick(&shared, "", 1, &[]).await;
-        assert_eq!(types(&boot), vec!["hello", "agent_activity", "project_state"]);
+        assert_eq!(
+            types(&boot),
+            vec!["hello", "agent_activity", "project_state"]
+        );
 
         let tick = river_tick(&shared, "", 1, &[]).await;
-        assert_eq!(types(&tick), vec!["project_state"], "no news: heartbeat only, no replay");
+        assert_eq!(
+            types(&tick),
+            vec!["project_state"],
+            "no news: heartbeat only, no replay"
+        );
 
         store.push("DEV", "act 1");
         let tick = river_tick(&shared, "", 1, &[]).await;
@@ -873,11 +935,19 @@ mod fleet_river_stream_tests {
     async fn a_failing_store_is_skipped_and_recovers_with_a_bounded_backlog() {
         let store = MemStore::failing();
         let shared = Arc::new(tokio::sync::Mutex::new(river_state(
-            vec![river_project("p", Arc::clone(&store), Arc::new(RunnerHandle::new()))],
+            vec![river_project(
+                "p",
+                Arc::clone(&store),
+                Arc::new(RunnerHandle::new()),
+            )],
             Vec::new(),
         )));
         let boot = river_tick(&shared, "", 1, &[]).await;
-        assert_eq!(types(&boot), vec!["hello"], "an unreadable project contributes nothing");
+        assert_eq!(
+            types(&boot),
+            vec!["hello"],
+            "an unreadable project contributes nothing"
+        );
 
         // Heals: the catch-up is the bounded newest tail, not a replay-from-zero.
         store.fail.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -885,7 +955,15 @@ mod fleet_river_stream_tests {
             store.push("DEV", &format!("late {i}"));
         }
         let tick = river_tick(&shared, "", 1, &[]).await;
-        assert_eq!(types(&tick), vec!["agent_activity", "agent_activity", "agent_activity", "project_state"]);
+        assert_eq!(
+            types(&tick),
+            vec![
+                "agent_activity",
+                "agent_activity",
+                "agent_activity",
+                "project_state"
+            ]
+        );
         assert_eq!(tick[0]["entry"]["action"], "late 0");
     }
 

@@ -297,8 +297,10 @@ fn ac5_the_dashboard_fetches_preflight_and_renders_per_item_status() {
 #[test]
 fn ac5_render_runner_gates_the_primary_affordance_on_the_preflight_verdict() {
     let Some(runner) = js_fn(RUN_CONTROL, "renderRunner") else {
-        panic!("renderRunner vanished from the run-control script — the \
-                fixture sanity test should have caught this first");
+        panic!(
+            "renderRunner vanished from the run-control script — the \
+                fixture sanity test should have caught this first"
+        );
     };
     assert!(
         runner.to_ascii_lowercase().contains("preflight"),

@@ -75,10 +75,7 @@ pub(super) async fn brakes_ep(
     }
     match p.store.load().await {
         Ok(state) => {
-            let cockpit = coxagent_application::metrics::brake_cockpit(
-                &state,
-                &now_rfc3339(),
-            );
+            let cockpit = coxagent_application::metrics::brake_cockpit(&state, &now_rfc3339());
             Json(cockpit).into_response()
         }
         Err(e) => internal_error(&e.to_string()),

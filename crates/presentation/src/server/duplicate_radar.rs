@@ -187,7 +187,9 @@ pub(super) async fn duplicates_action_ep(
     let response = match req.action.as_str() {
         "allow" => allow_pair(&app, &req, &me).await,
         "redirect" | "reject" => retire_duplicate(&app, &req, &me, &req.action).await,
-        other => return (StatusCode::BAD_REQUEST, format!("unknown action: {other}")).into_response(),
+        other => {
+            return (StatusCode::BAD_REQUEST, format!("unknown action: {other}")).into_response()
+        }
     };
     response
 }
@@ -253,8 +255,10 @@ async fn retire_duplicate(
     };
     // The aggregate enforces who may reject from which status — a duplicate
     // already InProgress is a 409 here, not a silent force-close.
-    if let Err(e) = t.transition_to(coxagent_domain::Role::User, coxagent_domain::Status::Rejected)
-    {
+    if let Err(e) = t.transition_to(
+        coxagent_domain::Role::User,
+        coxagent_domain::Status::Rejected,
+    ) {
         return (StatusCode::CONFLICT, e.to_string()).into_response();
     }
     let home = format!("{}/{}", req.home_project_id, req.home_ticket_id);
@@ -267,7 +271,10 @@ async fn retire_duplicate(
     audit_push(
         &app.audit,
         by,
-        format!("dupe-radar {action} {}/{}", req.dup_project_id, req.dup_ticket_id),
+        format!(
+            "dupe-radar {action} {}/{}",
+            req.dup_project_id, req.dup_ticket_id
+        ),
         200,
     )
     .await;
@@ -342,14 +349,16 @@ mod tests {
                 scope: "s".to_owned(),
                 score: None,
             },
-            dups: vec![coxagent_application::use_cases::duplicate_radar::RadarTicket {
-                project_id: "p2".to_owned(),
-                project_name: "Beta".to_owned(),
-                ticket_id: "T-2".to_owned(),
-                title: "fix flaky login".to_owned(),
-                scope: "s2".to_owned(),
-                score: Some(1.0),
-            }],
+            dups: vec![
+                coxagent_application::use_cases::duplicate_radar::RadarTicket {
+                    project_id: "p2".to_owned(),
+                    project_name: "Beta".to_owned(),
+                    ticket_id: "T-2".to_owned(),
+                    title: "fix flaky login".to_owned(),
+                    scope: "s2".to_owned(),
+                    score: Some(1.0),
+                },
+            ],
             normalized_title: "fix flaky login".to_owned(),
         };
         let v = pair_json(&e);
