@@ -281,8 +281,8 @@ mod tests {
         );
         assert_eq!(
             *git.tags.lock().expect("lock"),
-            vec!["Alpha".to_owned()],
-            "Git tag created with milestone name"
+            vec!["milestone/alpha".to_owned()],
+            "Git tag created with the slugged milestone name"
         );
     }
 
@@ -395,7 +395,7 @@ mod tests {
         git.existing_tags
             .lock()
             .expect("lock")
-            .insert("Alpha".to_owned());
+            .insert("milestone/alpha".to_owned());
         let initial = store.state.lock().expect("lock").tickets.len();
         uc(&store, &git)
             .execute()
@@ -464,8 +464,8 @@ mod tests {
         );
         assert_eq!(
             *git.tags.lock().expect("lock"),
-            vec!["Alpha".to_owned()],
-            "git tag created with milestone name"
+            vec!["milestone/alpha".to_owned()],
+            "git tag created with the slugged milestone name"
         );
     }
 
@@ -641,7 +641,7 @@ mod tests {
         );
         assert_eq!(
             *git.tags.lock().expect("lock"),
-            vec!["Gamma-Exact".to_owned()],
+            vec!["milestone/gamma-exact".to_owned()],
             "git tag created at exact target version"
         );
     }
@@ -786,7 +786,7 @@ mod tests {
         git.existing_tags
             .lock()
             .expect("lock")
-            .insert("LogTest".to_owned());
+            .insert("milestone/logtest".to_owned());
 
         // Pipeline should NOT fail — just log and skip.
         let released = uc(&store, &git)
@@ -961,7 +961,7 @@ mod tests {
         git.existing_tags
             .lock()
             .expect("lock")
-            .insert(milestone_name.to_owned());
+            .insert(format!("milestone/{}", milestone_name.to_lowercase()));
         let _ = uc(&store, &git)
             .execute()
             .await
@@ -1119,11 +1119,11 @@ mod tests {
         {
             let tags = git.tags.lock().expect("lock");
             assert!(
-                tags.contains(&"Milestone-A".to_owned()),
+                tags.contains(&"milestone/milestone-a".to_owned()),
                 "tag for milestone A missing"
             );
             assert!(
-                tags.contains(&"Milestone-B".to_owned()),
+                tags.contains(&"milestone/milestone-b".to_owned()),
                 "tag for milestone B missing"
             );
         }
@@ -1199,7 +1199,7 @@ mod tests {
         git.existing_tags
             .lock()
             .expect("lock")
-            .insert("DupChore".to_owned());
+            .insert("milestone/dupchore".to_owned());
 
         let initial_chore_count = store
             .state
@@ -1345,7 +1345,7 @@ mod tests {
         );
         assert_eq!(
             *git.tags.lock().expect("lock"),
-            vec!["MajorRelease".to_owned()],
+            vec!["milestone/majorrelease".to_owned()],
             "tag created for major version"
         );
     }
@@ -1708,8 +1708,8 @@ mod tests {
             head_sha: Mutex::new(Some("sha".to_owned())),
             existing_tags: Mutex::new({
                 let mut s = BTreeSet::new();
-                s.insert("Exist-A".to_owned());
-                s.insert("Exist-B".to_owned());
+                s.insert("milestone/exist-a".to_owned());
+                s.insert("milestone/exist-b".to_owned());
                 s
             }),
         });
@@ -1924,8 +1924,8 @@ mod tests {
             let tags = git.tags.lock().expect("lock");
             assert_eq!(
                 *tags,
-                vec![milestone_name.to_owned()],
-                "exactly one tag with milestone name"
+                vec![format!("milestone/{}", milestone_name.to_lowercase())],
+                "exactly one tag with the slugged milestone name"
             );
         }
 
@@ -2045,7 +2045,7 @@ mod tests {
         git.existing_tags
             .lock()
             .expect("lock")
-            .insert(milestone_name.to_owned());
+            .insert(format!("milestone/{}", milestone_name.to_lowercase()));
 
         let initial_ticket_count = store.state.lock().expect("lock").tickets.len();
 
