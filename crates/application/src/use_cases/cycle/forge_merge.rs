@@ -274,8 +274,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         return Ok(());
                     }
                     // Stamp the merge time — the fix-on-fix brake reads it.
-                    s.ticket_last_merge
-                        .insert(ticket.clone(), crate::state::now_rfc3339());
+                    // Only for branches that NAME A REAL TICKET: an operator
+                    // or infra branch ("fix/heal-names-refs") minted a
+                    // dangling ticket_last_merge orphan on every merge, which
+                    // the write-boundary healer then scrubbed every 20 min.
+                    if s.tickets.iter().any(|t| t.id().to_string() == ticket) {
+                        s.ticket_last_merge
+                            .insert(ticket.clone(), crate::state::now_rfc3339());
+                    }
                     s.ticket_fail_attempts.remove(&ticket);
                     s.ticket_journal.remove(&ticket);
                     // Merged into main — the DEV work-session for this ticket is
