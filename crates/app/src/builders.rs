@@ -1272,10 +1272,7 @@ mod builders_tests {
         for (_, env_key, _) in &cases {
             std::env::remove_var(env_key);
         }
-        load_coordination_in(
-            &base,
-            Path::new("/Users/x/.coxagent-worktrees/cxa-slot-9"),
-        );
+        load_coordination_in(&base, Path::new("/Users/x/.coxagent-worktrees/cxa-slot-9"));
         for (_, env_key, _) in &cases {
             assert_eq!(
                 std::env::var_os(env_key),

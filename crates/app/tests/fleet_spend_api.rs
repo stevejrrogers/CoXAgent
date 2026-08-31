@@ -263,7 +263,8 @@ async fn boot(auth: Option<Arc<dyn AuthPort>>, port: u16) -> tempfile::TempDir {
 /// GET the fleet payload as `role` (`None` = anonymous), returning
 /// `(status, body)`.
 async fn get_fleet(port: u16, role: Option<AuthRole>) -> (u16, serde_json::Value) {
-    let mut builder = reqwest::Client::new().get(format!("http://127.0.0.1:{port}/api/fleet/spend"));
+    let mut builder =
+        reqwest::Client::new().get(format!("http://127.0.0.1:{port}/api/fleet/spend"));
     if let Some(role) = role {
         builder = builder.header(
             reqwest::header::COOKIE,
@@ -275,7 +276,11 @@ async fn get_fleet(port: u16, role: Option<AuthRole>) -> (u16, serde_json::Value
     (status, resp.json().await.unwrap_or_default())
 }
 
-async fn put_ceiling(port: u16, role: Option<AuthRole>, ceiling: serde_json::Value) -> (u16, serde_json::Value) {
+async fn put_ceiling(
+    port: u16,
+    role: Option<AuthRole>,
+    ceiling: serde_json::Value,
+) -> (u16, serde_json::Value) {
     let mut builder = reqwest::Client::new()
         .put(format!("http://127.0.0.1:{port}/api/fleet/ceiling"))
         .json(&ceiling);
@@ -300,17 +305,32 @@ fn row<'v>(v: &'v serde_json::Value, id: &str) -> &'v serde_json::Value {
 }
 
 /// One test per hub instance: the assertions share a process-wide TCP bind, so
-/// they live in a single `#[tokio::test]` rather than racing each other.
+/// they live in a single `#[tokio::test]` rather than racing each other. The
+/// phases are extracted into helpers purely to keep each function readable.
 #[tokio::test]
 async fn fleet_spend_aggregates_flags_and_reconciles_for_a_super_admin() {
     let hub = boot(Some(Arc::new(StubAuth)), PORT).await;
+    assert_gate_admits_only_the_super_admin(PORT).await;
+    let body = assert_fleet_shape_totals_rows_and_spaces(PORT).await;
+    assert_rows_reconcile_with_project_state(PORT, &body).await;
+    assert_ceiling_round_trips_and_persists(PORT, hub.path()).await;
+}
 
-    // Gate: super admin passes, ordinary roles and anonymous do not.
-    let (status, _) = get_fleet(PORT, Some(AuthRole::Fe)).await;
+/// Gate: ordinary roles and anonymous do not get past the fleet endpoint.
+async fn assert_gate_admits_only_the_super_admin(port: u16) {
+    let (status, _) = get_fleet(port, Some(AuthRole::Fe)).await;
     assert_eq!(status, 403, "member-tier must be refused");
-    let (status, _) = get_fleet(PORT, None).await;
-    assert_eq!(status, 401, "anonymous must be refused by the auth middleware");
-    let (status, body) = get_fleet(PORT, Some(AuthRole::Super)).await;
+    let (status, _) = get_fleet(port, None).await;
+    assert_eq!(
+        status, 401,
+        "anonymous must be refused by the auth middleware"
+    );
+}
+
+/// Wire shape, totals, per-project rows and the space rollup for a super
+/// admin's GET. Returns the body so the reconciliation phase can reuse it.
+async fn assert_fleet_shape_totals_rows_and_spaces(port: u16) -> serde_json::Value {
+    let (status, body) = get_fleet(port, Some(AuthRole::Super)).await;
     assert_eq!(status, 200);
 
     // Wire shape: warn pct + uncapped-by-default ceiling.
@@ -327,7 +347,10 @@ async fn fleet_spend_aggregates_flags_and_reconciles_for_a_super_admin() {
     assert_eq!(body["totals"]["projects"], 4);
     assert_eq!(body["totals"]["over"], 1);
     assert_eq!(body["totals"]["approaching"], 1);
-    assert_eq!(body["totals"]["broken"], 1, "the broken registration is flagged, not dropped");
+    assert_eq!(
+        body["totals"]["broken"], 1,
+        "the broken registration is flagged, not dropped"
+    );
 
     // Sorted by burn, highest first.
     let ids: Vec<&str> = body["projects"]
@@ -376,12 +399,16 @@ async fn fleet_spend_aggregates_flags_and_reconciles_for_a_super_admin() {
     assert_eq!(body["spaces"][0]["budget_usd"], 9.0);
     assert_eq!(body["spaces"][0]["status"], "over");
 
-    // AC5 — reconciliation: every fleet row number equals the SAME fields the
-    // per-project state endpoint publishes for the same saved state.
+    body
+}
+
+/// AC5 — reconciliation: every fleet row number equals the SAME fields the
+/// per-project state endpoint publishes for the same saved state.
+async fn assert_rows_reconcile_with_project_state(port: u16, body: &serde_json::Value) {
     let client = reqwest::Client::new();
     for pid in ["over", "approaching", "uncapped"] {
         let state: serde_json::Value = client
-            .get(format!("http://127.0.0.1:{PORT}/api/projects/{pid}/state"))
+            .get(format!("http://127.0.0.1:{port}/api/projects/{pid}/state"))
             .header(
                 reqwest::header::COOKIE,
                 format!("cox_session={}", StubAuth::token(AuthRole::Super)),
@@ -392,40 +419,63 @@ async fn fleet_spend_aggregates_flags_and_reconciles_for_a_super_admin() {
             .json()
             .await
             .unwrap();
-        let r = row(&body, pid);
+        let r = row(body, pid);
         assert_eq!(
-            r["spend_usd"],
-            state["spend"]["total_cost_usd"],
+            r["spend_usd"], state["spend"]["total_cost_usd"],
             "{pid}: fleet total must equal the project's own meter"
         );
-        assert_eq!(r["today_usd"], state["spend_today_usd"], "{pid}: today's burn must match");
+        assert_eq!(
+            r["today_usd"], state["spend_today_usd"],
+            "{pid}: today's burn must match"
+        );
     }
+}
 
+/// Ceiling round-trip: the gate refuses a member, a negative ceiling is
+/// refused, the super admin's PUT persists into the hub workspace file and
+/// clearing (null) returns to uncapped.
+async fn assert_ceiling_round_trips_and_persists(port: u16, hub_dir: &std::path::Path) {
     // Ceiling round-trip: a member cannot set it…
-    let (status, _) = put_ceiling(PORT, Some(AuthRole::Fe), serde_json::json!({"ceiling_usd": 50.0})).await;
+    let (status, _) = put_ceiling(
+        port,
+        Some(AuthRole::Fe),
+        serde_json::json!({"ceiling_usd": 50.0}),
+    )
+    .await;
     assert_eq!(status, 403);
     // …a negative ceiling is refused…
-    let (status, _) = put_ceiling(PORT, Some(AuthRole::Super), serde_json::json!({"ceiling_usd": -1.0})).await;
+    let (status, _) = put_ceiling(
+        port,
+        Some(AuthRole::Super),
+        serde_json::json!({"ceiling_usd": -1.0}),
+    )
+    .await;
     assert_eq!(status, 400);
     // …and the super admin's PUT persists and shows up in GET.
-    let (status, set) =
-        put_ceiling(PORT, Some(AuthRole::Super), serde_json::json!({"ceiling_usd": 50.0})).await;
+    let (status, set) = put_ceiling(
+        port,
+        Some(AuthRole::Super),
+        serde_json::json!({"ceiling_usd": 50.0}),
+    )
+    .await;
     assert_eq!(status, 200);
     assert_eq!(set["ceiling_usd"], 50.0);
-    let (_, body) = get_fleet(PORT, Some(AuthRole::Super)).await;
+    let (_, body) = get_fleet(port, Some(AuthRole::Super)).await;
     assert_eq!(body["hub_ceiling_usd"], 50.0);
-    assert_eq!(
-        body["totals"]["hub_headroom_usd"], 44.5,
-        "50 - today's 5.5"
-    );
+    assert_eq!(body["totals"]["hub_headroom_usd"], 44.5, "50 - today's 5.5");
     // Persisted to the hub-dir workspace file (survives restarts).
-    let ws = std::fs::read_to_string(hub.path().join("workspace.json")).unwrap();
+    let ws = std::fs::read_to_string(hub_dir.join("workspace.json")).unwrap();
     let ws: serde_json::Value = serde_json::from_str(&ws).unwrap();
     assert_eq!(ws["fleet_ceiling_usd"], 50.0);
     // Clearing (null) returns to uncapped.
-    let (status, _) = put_ceiling(PORT, Some(AuthRole::Super), serde_json::json!({"ceiling_usd": null})).await;
+    let (status, _) = put_ceiling(
+        port,
+        Some(AuthRole::Super),
+        serde_json::json!({"ceiling_usd": null}),
+    )
+    .await;
     assert_eq!(status, 200);
-    let (_, body) = get_fleet(PORT, Some(AuthRole::Super)).await;
+    let (_, body) = get_fleet(port, Some(AuthRole::Super)).await;
     assert_eq!(body["hub_ceiling_usd"], 0.0);
     assert!(body["totals"]["hub_headroom_usd"].is_null());
 }
@@ -438,8 +488,7 @@ async fn open_mode_sees_the_fleet_and_sets_the_ceiling() {
     let (status, body) = get_fleet(OPEN_PORT, None).await;
     assert_eq!(status, 200);
     assert_eq!(body["totals"]["projects"], 4);
-    let (status, set) =
-        put_ceiling(OPEN_PORT, None, serde_json::json!({"ceiling_usd": 6.0})).await;
+    let (status, set) = put_ceiling(OPEN_PORT, None, serde_json::json!({"ceiling_usd": 6.0})).await;
     assert_eq!(status, 200);
     assert_eq!(set["ceiling_usd"], 6.0);
     let (_, body) = get_fleet(OPEN_PORT, None).await;
