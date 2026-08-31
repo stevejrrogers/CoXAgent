@@ -92,7 +92,12 @@ struct RiverState {
 /// only its assigned projects — the SAME per-project membership `auth_mw`
 /// enforces on `/api/projects/:pid/*`, so a hub-level stream never becomes a
 /// cross-project leak.
-fn river_scope(user: Option<&coxagent_application::AuthUser>, registered: &[String]) -> Vec<String> {
+/// `pub(super)`: the duplicate radar (CXA-F253) scopes its pairs by the same
+/// rule — a security decision gets ONE definition, not a drifting copy.
+pub(super) fn river_scope(
+    user: Option<&coxagent_application::AuthUser>,
+    registered: &[String],
+) -> Vec<String> {
     let Some(u) = user else {
         return registered.to_vec();
     };

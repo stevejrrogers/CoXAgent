@@ -526,6 +526,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     "The app is reachable and serving a known-good build".to_owned()
                 ],
                 goal: None,
+                service_tag: None,
             })
             .await
             .ok()
@@ -593,6 +594,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 has_ui: false,
                 acceptance_criteria: acceptance,
                 goal: None,
+                service_tag: None,
             })
             .await
             .ok()

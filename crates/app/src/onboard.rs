@@ -346,6 +346,7 @@ async fn seed_smart_tickets<S: StateStorePort + 'static>(
                 has_ui: false,
                 acceptance_criteria: Vec::new(),
                 goal: None,
+                service_tag: None,
             })
             .await?;
         seeded.push(format!("{id} (dockerize)"));
@@ -391,6 +392,7 @@ async fn seed_smart_tickets<S: StateStorePort + 'static>(
                     "App connects to existing running infrastructure".to_owned(),
                 ],
                 goal: None,
+                service_tag: None,
             })
             .await?;
         seeded.push(format!("{id} (fix-compose)"));
@@ -411,6 +413,7 @@ async fn seed_smart_tickets<S: StateStorePort + 'static>(
                 has_ui: false,
                 acceptance_criteria: Vec::new(),
                 goal: None,
+                service_tag: None,
             })
             .await?;
         seeded.push(format!("{id} (dockerfile)"));
@@ -519,6 +522,7 @@ pub async fn greenfield<S: StateStorePort + 'static>(
             has_ui: false,
             acceptance_criteria: Vec::new(),
             goal: None,
+            service_tag: None,
         })
         .await?;
 

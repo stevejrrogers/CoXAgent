@@ -241,6 +241,8 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/token-saver", &["get"]),
     route("/api/tooling", &["get"]),
     route("/api/workspace", &["get", "put"]),
+    route("/api/workspace/duplicates", &["get"]),
+    route("/api/workspace/duplicates/action", &["post"]),
     route("/api/workspace/invites", &["get", "post"]),
     route("/api/workspace/invites/:token", &["delete"]),
     route("/api/workspace/join", &["post"]),

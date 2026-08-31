@@ -17,6 +17,11 @@ pub struct ProposedItem {
     /// Up to 5 acceptance criteria the agent proposes as the "definition of done".
     #[serde(default)]
     pub acceptance_criteria: Vec<String>,
+    /// Optional bounded-context service tag (CXA-F253): set only when the
+    /// proposal is shared infrastructure that may legitimately exist in
+    /// several projects at once. The BA authors it; older outputs omit it.
+    #[serde(default)]
+    pub service_tag: Option<String>,
 }
 
 /// Extract the outermost JSON array from engine output, tolerating surrounding

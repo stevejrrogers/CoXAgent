@@ -8,6 +8,7 @@ pub mod ceremony;
 pub mod conformance_check;
 pub mod coverage;
 pub mod cycle;
+pub mod duplicate_radar;
 pub mod generate_docs;
 pub mod json_repair;
 pub mod manual_rollback;
@@ -42,6 +43,9 @@ pub use analyze_attachment::{AnalyzeAttachmentUseCase, ReadableAttachment};
 pub use conformance_check::RunConformanceUseCase;
 pub use coverage::{match_score, matches_criterion, record_verdicts};
 pub use cycle::{CycleReport, RunCycleUseCase};
+pub use duplicate_radar::{
+    find_cross_project_duplicates, pair_key, DuplicatePair, RadarTicket, TicketSnapshot,
+};
 pub use generate_docs::GenerateDocsUseCase;
 pub use json_repair::repair_json;
 pub use manual_rollback::{known_good_target, ManualRollbackInput, RollbackOutcome};

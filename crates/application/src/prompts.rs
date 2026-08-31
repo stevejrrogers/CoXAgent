@@ -170,9 +170,13 @@ PO's goal gate.\n\n\
 Respond with ONLY a JSON array, no prose, each item exactly:\n\
 {\"title\": string, \"description\": string, \"priority\": \"low\"|\"medium\"|\"high\", \
 \"complexity\": \"small\"|\"medium\"|\"large\", \"has_ui\": boolean, \
-\"acceptance_criteria\": [string, ...]}\n\
+\"acceptance_criteria\": [string, ...], \"service_tag\": string}\n\
 acceptance_criteria: 2-5 concrete, testable statements (incl. key edge cases) that \
-define when the feature is done — user-visible behaviour, not implementation.";
+define when the feature is done — user-visible behaviour, not implementation.\n\
+service_tag: OPTIONAL — omit the field unless the feature is shared infrastructure \
+or a shared service that EVERY project on this hub legitimately needs (e.g. \"infra\", \
+\"ci\", \"platform\"); a short lowercase tag, no spaces. Ordinary project-local \
+features must NOT carry one.";
 
 /// Solution Architect — produces the technical design for one feature. UX is
 /// owned by the PD in a separate pass.

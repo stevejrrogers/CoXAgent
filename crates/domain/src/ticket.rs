@@ -99,6 +99,14 @@ pub struct Ticket {
     /// as brand new or ancient.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     created_at: Option<String>,
+    /// Optional bounded-context service tag (CXA-F253): the BA stamps it when
+    /// filing shared-infrastructure work (e.g. `"infra"`, `"ci"`) that may
+    /// legitimately exist in several projects at once. `None` for ordinary
+    /// project-local work — the cross-project duplicate radar applies its
+    /// same-tag carve-out only when BOTH sides carry the same tag. Persisted
+    /// with `serde(default)` so pre-F253 tickets load clean.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    service_tag: Option<String>,
 }
 
 impl Ticket {
@@ -143,6 +151,7 @@ impl Ticket {
             assignee: None,
             goal_id: None,
             created_at: None,
+            service_tag: None,
         })
     }
 
@@ -193,6 +202,37 @@ impl Ticket {
             });
         }
         self.goal_id = Some(goal_id);
+        Ok(())
+    }
+
+    /// The bounded-context service tag the BA stamped at filing, or `None`
+    /// for ordinary project-local work.
+    #[must_use]
+    pub fn service_tag(&self) -> Option<&str> {
+        self.service_tag.as_deref()
+    }
+
+    /// Declare (or clear, with a blank tag) the bounded-context service tag.
+    /// Requirements-scoped like [`Ticket::clarify`]: the BA authors the value
+    /// when filing, the PO (or a `User` acting as super-PO) may amend it —
+    /// agents and DEV roles cannot relabel work as shared infrastructure to
+    /// slip past the cross-project duplicate radar.
+    ///
+    /// # Errors
+    /// [`DomainError::FieldNotPermitted`] if `actor` lacks requirement scope.
+    pub fn set_service_tag(&mut self, actor: Role, tag: &str) -> Result<(), DomainError> {
+        if !field_permitted(actor, "service_tag") {
+            return Err(DomainError::FieldNotPermitted {
+                role: actor,
+                field: "service_tag",
+            });
+        }
+        let tag = tag.trim();
+        self.service_tag = if tag.is_empty() {
+            None
+        } else {
+            Some(tag.to_owned())
+        };
         Ok(())
     }
 
@@ -742,5 +782,27 @@ mod tests {
     #[test]
     fn new_tickets_start_without_a_goal_association() {
         assert!(feature(false).goal_id().is_none());
+    }
+
+    #[test]
+    fn service_tag_is_requirement_scope_ba_stamps_po_amends() {
+        let mut t = feature(false);
+        assert!(t.service_tag().is_none(), "no tag until the BA declares one");
+        // Agents and DEV roles must not be able to relabel work as shared
+        // infrastructure to slip past the duplicate radar.
+        assert!(matches!(
+            t.set_service_tag(Role::DevFeature, "infra"),
+            Err(DomainError::FieldNotPermitted { field: "service_tag", .. })
+        ));
+        assert!(matches!(
+            t.set_service_tag(Role::Sa, "infra"),
+            Err(DomainError::FieldNotPermitted { .. })
+        ));
+        t.set_service_tag(Role::Ba, "  infra  ").expect("BA stamps");
+        assert_eq!(t.service_tag(), Some("infra"), "value is trimmed");
+        t.set_service_tag(Role::Po, "ci").expect("PO may amend");
+        assert_eq!(t.service_tag(), Some("ci"));
+        t.set_service_tag(Role::User, "").expect("super-PO may clear");
+        assert_eq!(t.service_tag(), None, "a blank tag clears the field");
     }
 }

@@ -714,6 +714,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                                     .unwrap_or(false),
                                 acceptance_criteria: vec![],
                                 goal: None,
+                                service_tag: None,
                             })
                             .await
                             .ok();
@@ -1024,6 +1025,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                     .map(|r| r.acceptance_criteria.clone())
                     .unwrap_or_default(),
                 goal: None,
+                service_tag: None,
             })
             .await
         {

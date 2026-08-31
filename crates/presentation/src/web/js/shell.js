@@ -2315,3 +2315,75 @@ function applyFontSize(s){
 })();
 
 boot();
+
+// Cross-project duplicate radar (CXA-F253): pairs of active tickets in
+// DIFFERENT projects that match under the same similarity rule the BA insert
+// loop uses. Each project's BA dedupes only against its own board, so the
+// same generic feature gets independently invented everywhere — this view is
+// where a human redirects, rejects, or explicitly allows a pair. Nothing is
+// auto-suppressed: a legitimately-shared infrastructure ticket stays allowed.
+let DUPES=null;
+async function renderDupes(){
+  const el=document.getElementById("dupes-body");if(!el)return;
+  el.innerHTML='<div class="empty">scanning the fleet…</div>';
+  try{
+    const r=await fetch("/api/workspace/duplicates");
+    if(!r.ok){el.innerHTML='<div class="empty">unable to load the duplicate radar ('+r.status+')</div>';return;}
+    DUPES=await r.json();
+  }catch(_){el.innerHTML='<div class="empty">unable to load the duplicate radar</div>';return;}
+  const pairs=(DUPES&&DUPES.crossProjectDuplicates)||[];
+  if(!pairs.length){
+    el.innerHTML=`<div class="panel"><div class="dupe-empty"><i class="ti ti-copy"></i>
+      <div class="dupe-empty-t">No cross-project duplicates</div>
+      <div class="dupe-empty-s">Every project is building its own thing. Pairs of tickets across projects with matching titles show up here for a human decision.</div></div></div>`;
+    return;
+  }
+  el.innerHTML=`<div class="panel" style="display:flex;gap:10px;align-items:center;margin-bottom:12px">
+      <i class="ti ti-copy" style="color:var(--amber)"></i>
+      <b style="font-size:13px">${pairs.length} duplicated ask${pairs.length===1?"":"s"} across projects</b>
+      <span style="flex:1"></span>
+      <span style="font-size:11px;color:var(--dim)">redirect or reject the copy · allow a legitimately-shared ticket</span>
+    </div>`+pairs.map(dupesCard).join("");
+}
+function dupesCard(e){
+  const rows=(e.duplicates||[]).map(d=>`
+    <div class="dupe-row">
+      <div class="dupe-main">
+        <div class="dupe-title">${esc(d.title)} <span class="dupe-proj">${esc(d.projectName||d.projectId)}</span></div>
+        <div class="dupe-scope">${esc(d.scope||"—")}</div>
+        <div class="dupe-meta"><span class="dupe-tid">${esc(d.ticketId)}</span><span class="dupe-proj">${esc(d.projectId)}</span><span class="dupe-score">similarity ${(Number(d.score)||0).toFixed(2)}</span></div>
+      </div>
+      <div class="dupe-actions">
+        <button class="tk-btn go" onclick="dupeAction('redirect','${esc(e.homeProjectId)}','${esc(e.homeTicketId)}','${esc(d.projectId)}','${esc(d.ticketId)}')"><i class="ti ti-arrow-right"></i> Redirect</button>
+        <button class="tk-btn danger" onclick="dupeAction('reject','${esc(e.homeProjectId)}','${esc(e.homeTicketId)}','${esc(d.projectId)}','${esc(d.ticketId)}')"><i class="ti ti-x"></i> Reject</button>
+        <button class="tk-btn" onclick="dupeAction('allow','${esc(e.homeProjectId)}','${esc(e.homeTicketId)}','${esc(d.projectId)}','${esc(d.ticketId)}')"><i class="ti ti-check"></i> Allow both</button>
+      </div>
+    </div>`).join("");
+  return `<div class="panel dupe-card">
+    <div class="dupe-head">
+      <span class="dupe-badge">duplicate</span>
+      <div class="dupe-main">
+        <div class="dupe-title">${esc(e.homeTicketTitle)} <span class="dupe-proj">${esc(e.homeProjectName||e.homeProjectId)}</span></div>
+        <div class="dupe-scope">${esc(e.homeTicketScope||"—")}</div>
+        <div class="dupe-meta"><span class="dupe-tid">${esc(e.homeTicketId)}</span><span class="dupe-proj">${esc(e.homeProjectId)}</span><span style="color:var(--dim);font-size:11px">home — the keeper</span></div>
+      </div>
+    </div>
+    ${rows}
+  </div>`;
+}
+async function dupeAction(action,homeProjectId,homeTicketId,dupProjectId,dupTicketId){
+  if(action!=="allow"){
+    const verb=action==="redirect"?"redirect":"reject";
+    const ok=await coxModal({title:verb[0].toUpperCase()+verb.slice(1)+" the duplicate",
+      message:`${verb[0].toUpperCase()+verb.slice(1)} ${dupProjectId}/${dupTicketId} — the ask stays tracked by ${homeProjectId}/${homeTicketId}.`,
+      confirmText:"Confirm",cancelText:"Cancel",danger:action==="reject"});
+    if(!ok)return;
+  }
+  try{
+    const r=await fetch("/api/workspace/duplicates/action",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({action,home_project_id:homeProjectId,home_ticket_id:homeTicketId,dup_project_id:dupProjectId,dup_ticket_id:dupTicketId})});
+    if(!r.ok){const t=await r.text().catch(()=>(""));toast(t||("action failed ("+r.status+")"),"err");return;}
+    toast(action==="allow"?"Pair allowed — it will not surface again":(action==="redirect"?"Duplicate redirected to the home ticket":"Duplicate rejected"),"ok");
+    renderDupes();
+  }catch(_){toast("action failed","err");}
+}

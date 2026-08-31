@@ -422,6 +422,9 @@ pub(super) async fn create_ticket(
         has_ui: req.has_ui,
         acceptance_criteria: req.acceptance_criteria.clone(),
         goal,
+        // The dashboard's hand-filed tickets are project-local work; the BA
+        // (not the human form) authors shared-infrastructure tags.
+        service_tag: None,
     };
     match AddTicketUseCase::new(Arc::clone(&p.store))
         .execute(input)
