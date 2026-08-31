@@ -88,6 +88,10 @@ function setWorkTab(w){WORKTAB=w;
   renderActive();}
 
 function nav(v){
+  // An unknown view (stale hash, typo, removed screen) used to blank the
+  // whole pane: every view lost `on` and THEN getElementById(null) threw.
+  // Fall back to overview instead of dying mid-switch.
+  if(!document.getElementById("view-"+v))v="overview";
   // Manage views live in manage mode; everything else in workspace mode.
   if(String(v).startsWith("mg-")&&MODE!=="manage"){MODE="manage";localStorage.setItem("cox_mode",MODE);document.body.classList.add("mode-manage");document.body.classList.remove("mode-chat");}
   if(!String(v).startsWith("mg-")&&MODE==="manage"){MODE="workspace";localStorage.setItem("cox_mode",MODE);document.body.classList.remove("mode-manage");}
