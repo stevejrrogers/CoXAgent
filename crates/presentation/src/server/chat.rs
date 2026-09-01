@@ -101,6 +101,7 @@ pub(super) async fn chat_post_ep(
     let channel = req
         .channel
         .unwrap_or_else(|| coxagent_application::GENERAL_CHANNEL.to_owned());
+    let atts_for_engine = req.attachments.clone();
     if deliver_chat(&app, &p, &user, body, &channel, req.attachments).await {
         // A human asking the TEAM in a channel deserves an answer there —
         // until now only the Scrum box had a listener, so channel questions
@@ -133,7 +134,8 @@ pub(super) async fn chat_post_ep(
                 )
                 .with_files(p2.files.clone())
                 .with_reply_channel(Some(reply_channel))
-                .with_actor_role(actor_role);
+                .with_actor_role(actor_role)
+                .with_attachments(atts_for_engine);
                 // Box::pin: the use-case future grew past clippy's 16 KB
                 // large-future limit when the governance ledger joined
                 // ProjectState (CXA-F230) — same future, just heap-pinned.
