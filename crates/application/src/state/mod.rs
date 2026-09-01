@@ -1589,6 +1589,20 @@ pub fn derive_alias(name: &str) -> String {
         .to_uppercase()
 }
 
+/// CXA-B138: a project alias becomes a workspace directory id under the hub's
+/// workspace base (`base.join(id)`), so any path separator or dot component
+/// lets an alias like `../name` scaffold — and DELETE `rm -rf` — OUTSIDE the
+/// base. A safe id is a single non-hidden path component: never empty, no '/',
+/// no '\', no ".." anywhere, no leading dot.
+#[must_use]
+pub fn is_safe_workspace_id(id: &str) -> bool {
+    !id.is_empty()
+        && !id.contains('/')
+        && !id.contains('\\')
+        && !id.contains("..")
+        && !id.starts_with('.')
+}
+
 impl ProjectState {
     /// Find a ticket by id.
     #[must_use]
@@ -1752,12 +1766,38 @@ mod dependency_tests {
 
 #[cfg(test)]
 mod alias_tests {
-    use super::derive_alias;
+    use super::{derive_alias, is_safe_workspace_id};
 
     #[test]
     fn derives_from_capitals() {
         assert_eq!(derive_alias("CoXChat"), "CXC");
         assert_eq!(derive_alias("CoXAgent"), "CXA");
+    }
+
+    /// CXA-B138: every traversal shape the ticket names must be refused —
+    /// an unsafe id would be `base.join`-ed outside the workspace base.
+    #[test]
+    fn path_traversing_ids_are_never_safe() {
+        for id in [
+            "../qatrav-esc",
+            "..\\qatrav",
+            "qa/../x",
+            "a\\b",
+            "..",
+            ".",
+            ".hidden",
+            "",
+        ] {
+            assert!(!is_safe_workspace_id(id), "{id:?} must be refused");
+        }
+    }
+
+    /// Ordinary single-component ids — the only kind onboarding may use.
+    #[test]
+    fn plain_component_ids_are_safe() {
+        for id in ["qatrav", "QATRAV", "qa-trav_2", "cxa"] {
+            assert!(is_safe_workspace_id(id), "{id:?} must be accepted");
+        }
     }
 
     #[test]

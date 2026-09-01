@@ -1328,6 +1328,16 @@ fn conflict_error(msg: &str) -> axum::response::Response {
         .into_response()
 }
 
+/// A refused client request (CXA-B138): the same JSON error shape, but 400 —
+/// the caller sent something the factory must never act on.
+fn bad_request_error(msg: &str) -> axum::response::Response {
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": msg })),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod alerts_tests;
 #[cfg(test)]
