@@ -394,13 +394,19 @@ fn ac3_non_verify_cards_keep_their_existing_actions_and_data() {
     let inbox = read("crates/presentation/src/web/js/inbox.js");
     let unchanged: &[(&str, &[&str])] = &[
         ("approve_ready", &["Review", "Reject", "Approve"]),
-        ("cost_approve", &["Review", "Reject", "Approve spend", "estimate_usd"]),
+        (
+            "cost_approve",
+            &["Review", "Reject", "Approve spend", "estimate_usd"],
+        ),
         ("assigned", &["Return to agents", "status"]),
         ("question", &["Answer in Scrum", "asked_at", "deferred"]),
         ("auto_approved", &["Review", "Undo", "minutes_left"]),
         ("review_pr", &["Open review", "number"]),
         ("human_eyes", &["Open PR", "Dismiss", "Land it", "reason"]),
-        ("reverted_work", &["Open ticket", "Dismiss", "Confirm revert", "sha"]),
+        (
+            "reverted_work",
+            &["Open ticket", "Dismiss", "Confirm revert", "sha"],
+        ),
         ("pr_stuck", &["Open on GitHub", "Review queue", "mergeable"]),
     ];
     for (kind, tokens) in unchanged {

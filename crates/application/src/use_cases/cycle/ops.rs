@@ -36,12 +36,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         .await;
     }
     /// Record a deploy outcome (activity + dashboard status). Best-effort.
+    /// `failure_bundle` (CXA-F289) rides only failed attempts: the size-capped
+    /// forensics the adapter captured at the failure site, persisted WITH the
+    /// attempt's record so the evidence survives the one-line summary.
     pub(super) async fn record_deploy(
         &self,
         ok: bool,
         summary: &str,
         commit_sha: Option<String>,
         health_check: Option<crate::state::HealthCheckResult>,
+        failure_bundle: Option<crate::state::DeployFailureBundle>,
     ) {
         if let Ok(mut state) = self.store.load().await {
             let at = crate::state::now_rfc3339();
@@ -54,6 +58,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 summary: summary.to_owned(),
                 commit_sha,
                 health_check,
+                failure_bundle,
             });
             let _ = self.store.save(&state).await;
         }
@@ -248,35 +253,57 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // The rollback IS the one retry of the failed forward deploy: attempt
         // it exactly once — worktree always freshly created (remove + add) —
         // and if it also fails, stop here and escalate rather than loop.
+        // `own_bundle` (CXA-F289) is the rollback redeploy's own forensics
+        // when IT failed at the compose level.
+        // CXA-F289: the failed attempt's forensics triggered this rollback.
+        // A SUCCESSFUL rollback overwrites the deploy record below, so the
+        // bundle must ride the rollback record to stay visible.
+        let trigger_bundle = state.deploy.as_ref().and_then(|d| d.failure_bundle.clone());
         let path = self.rollback_worktree_path();
         let _ = git.worktree_remove(&self.work_dir, &path).await;
-        let (ok, summary) = match git.worktree_add(&self.work_dir, &path, &good.sha).await {
-            Err(e) => (false, format!("rollback worktree failed: {e}")),
-            Ok(()) => match deploy.deploy(&path).await {
-                // Same mandatory health gate as a forward deploy: a rollback
-                // that starts a container but never binds the port must not
-                // be reported as a successful recovery.
-                Ok(r) if r.success => {
-                    if self.verify_health_after_deploy().await {
-                        (true, r.summary)
-                    } else {
-                        (
-                            false,
-                            format!(
-                                "{} (containers started but the app never bound its port — \
+        let (ok, summary, own_bundle) =
+            match git.worktree_add(&self.work_dir, &path, &good.sha).await {
+                Err(e) => (false, format!("rollback worktree failed: {e}"), None),
+                Ok(()) => match deploy.deploy(&path).await {
+                    // Same mandatory health gate as a forward deploy: a rollback
+                    // that starts a container but never binds the port must not
+                    // be reported as a successful recovery.
+                    Ok(r) if r.success => {
+                        if self.verify_health_after_deploy().await {
+                            (true, r.summary, None)
+                        } else {
+                            (
+                                false,
+                                format!(
+                                    "{} (containers started but the app never bound its port — \
                                  health check failed)",
-                                r.summary
-                            ),
-                        )
+                                    r.summary
+                                ),
+                                None,
+                            )
+                        }
                     }
-                }
-                Ok(r) => (false, r.summary),
-                Err(e) => (false, format!("rollback deploy failed: {e}")),
-            },
-        };
+                    Ok(r) => (false, r.summary, r.failure_bundle),
+                    Err(e) => (false, format!("rollback deploy failed: {e}"), None),
+                },
+            };
 
-        self.finish_rollback(reason, failed_sha, &good.sha, ok, summary, report)
-            .await;
+        // Which bundle the rollback RECORD carries: on success the deploy
+        // record is about to be overwritten, so the triggering failure's
+        // bundle moves here; on failure the deploy record keeps it and the
+        // rollback record carries its own attempt's forensics — both bundles
+        // stay separately inspectable (CXA-F289).
+        let record_bundle = if ok { trigger_bundle } else { own_bundle };
+        self.finish_rollback(
+            reason,
+            failed_sha,
+            &good.sha,
+            ok,
+            summary,
+            record_bundle,
+            report,
+        )
+        .await;
     }
     /// Whether any file under `config.deploy.migration_detection_paths`
     /// changed between the known-good sha and the failing one.
@@ -305,6 +332,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// successful rollback it also runs the incident post-mortem loop
     /// (CXA-F012): blacklist the broken sha, write a docs post-mortem, file or
     /// link a root-cause prevention ticket and record a team lesson.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn finish_rollback(
         &self,
         reason: &str,
@@ -312,6 +340,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         good_sha: &str,
         ok: bool,
         summary: String,
+        failure_bundle: Option<crate::state::DeployFailureBundle>,
         report: &mut CycleReport,
     ) {
         let at = crate::state::now_rfc3339();
@@ -331,6 +360,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 summary: summary.clone(),
                 stale: false,
                 migration_blocked: false,
+                failure_bundle: failure_bundle.clone(),
             });
             if ok {
                 s.in_rollback = true;
@@ -345,6 +375,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     summary: format!("rolled back to {short}: {summary}"),
                     commit_sha: Some(good_sha.to_owned()),
                     health_check,
+                    failure_bundle: None,
                 });
             }
             Ok(())
@@ -395,6 +426,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 summary: summary.to_owned(),
                 stale,
                 migration_blocked,
+                // No rollback attempt ran, so this record carries no forensics
+                // of its own — the failed deploy's bundle stays on the deploy
+                // record (CXA-F289).
+                failure_bundle: None,
             });
             Ok(())
         })

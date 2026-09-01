@@ -596,6 +596,7 @@ mod tests {
             summary: "boom".to_owned(),
             commit_sha: None,
             health_check: None,
+            failure_bundle: None,
         });
         let warnings = degraded_warnings(&state, Some(Heartbeat::Fresh(10)), NOW);
         assert!(

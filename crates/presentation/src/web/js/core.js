@@ -70,7 +70,7 @@ const fmtK=n=>{n=Number(n)||0;return n>=1e9?(n/1e9).toFixed(1)+"B":n>=1e6?(n/1e6
 const AC={BA:"--blue","DEV-FEATURE":"--green","DEV-BUG":"--red",SA:"--purple",TEST:"--teal",DOCS:"--blue",PO:"--amber",SM:"--teal",PD:"--purple",USER:"--accent"};
 // Stable nicknames so each role reads as one consistent person, not a label.
 const AGENT_NICK={BA:"Bella",PO:"Pola",SM:"Sam",SA:"Aria","DEV-FEATURE":"Finn","DEV-BUG":"Bex",TEST:"Quinn",DOCS:"Dana",PD:"Piper"};
-const TITLES={"mg-spaces":["Spaces","every team space in the hub"],"mg-space":["Space","deep dive"],"mg-users":["Users","everyone across the hub"],"mg-usage":["Usage","who burns what"],"mg-audit":["Audit","every action across the hub"],home:["Home","your company · projects · your agents"],river:["Fleet river","every agent, every project — one live stream"],overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],inbox:["Inbox","everything waiting on YOU — approve · verify · answer"],activity:["Transcripts & alerts","per-run transcripts · outbound alerts · audit export — this project"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Scrum","standups, sprint events & team threads"],docs:["Wiki","product & technical knowledge base"],codemap:["Code map","files · symbols · dependencies the agents navigate"],calendar:["Calendar","meetings · schedule"],terminal:["Terminal","real shell in the project codebase — admin only"],chat:["Chat","talk with your teammates"],review:["Review","open pull requests — approve & merge"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
+const TITLES={"mg-spaces":["Spaces","every team space in the hub"],"mg-space":["Space","deep dive"],"mg-users":["Users","everyone across the hub"],"mg-usage":["Usage","who burns what"],"mg-fleet":["Fleet spend","every project's burn · hub ceiling"],"mg-audit":["Audit","every action across the hub"],home:["Home","your company · projects · your agents"],river:["Fleet river","every agent, every project — one live stream"],overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],inbox:["Inbox","everything waiting on YOU — approve · verify · answer"],activity:["Transcripts & alerts","per-run transcripts · outbound alerts · audit export — this project"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Scrum","standups, sprint events & team threads"],docs:["Wiki","product & technical knowledge base"],codemap:["Code map","files · symbols · dependencies the agents navigate"],calendar:["Calendar","meetings · schedule"],terminal:["Terminal","real shell in the project codebase — admin only"],chat:["Chat","talk with your teammates"],review:["Review","open pull requests — approve & merge"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 // Engine/model provenance (CXA-F257): one attempt as the verify surfaces
 // render it — JS mirror of application::engine_provenance::attempt_label, so
@@ -396,12 +396,29 @@ function renderRoadmap(){
   // Delivery timeline from release history.
   let timeline='';
   if(hist.length){const recent=hist.slice(-8);
+    // A ship record stamps the version that was LIVE when it merged, but the
+    // change itself LANDS in the next cut release — labelling five items
+    // "v2.30.0" when they all ship inside v2.31.0 reads as a broken version
+    // counter. Label each node with the release that contains it: the first
+    // higher version seen later in history, else the running current version,
+    // else "next release".
+    const all=(s.history||[]).slice();
+    const landsIn=(rec)=>{
+      const n=vnum(rec.version);const t=Date.parse(rec.at)||0;
+      for(const h of all){const hv=vnum(h.version);
+        if(hv>n&&(Date.parse(h.at)||0)>=t)return h.version;}
+      const cur=String(s.current_version||"");
+      if(cur&&vnum(cur)>n)return cur;
+      return null;
+    };
     timeline=`<div class="sec" style="margin-top:22px">Delivery timeline</div><div class="panel" style="overflow-x:auto" data-keepscroll="rm-timeline" data-scrollend="1">
       <div style="display:flex;align-items:flex-start;min-width:min-content;padding:6px 0">${recent.map((r,i)=>`
         <div style="flex:1 1 0;min-width:118px;max-width:190px;position:relative;text-align:center;padding:0 4px">
           ${i<recent.length-1?'<div style="position:absolute;top:8px;left:50%;width:100%;height:2px;background:var(--border2);pointer-events:none"></div>':''}
           <div style="width:16px;height:16px;border-radius:50%;background:transparent;border:3px solid var(--green);margin:0 auto;position:relative;z-index:1"></div>
-          <div style="font-size:13px;font-weight:700;margin-top:7px;color:var(--accent2)">v${esc(r.version)}</div>
+          ${(()=>{const l=landsIn(r);return l
+            ?`<div style="font-size:13px;font-weight:700;margin-top:7px;color:var(--accent2)" title="merged while v${esc(r.version)} was live — shipped in the v${esc(l)} release">v${esc(l)}</div>`
+            :`<div style="font-size:13px;font-weight:700;margin-top:7px;color:var(--accent2)">v${esc(r.version)} <span style="font-size:10px;color:var(--dim);font-weight:400" title="merged after v${esc(r.version)} — ships in the next release">· next release</span></div>`;})()}
           <div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.title)}">${esc(r.title)}</div>
           <div style="font-size:10px;color:var(--dim)">${esc((r.at||'').slice(0,10))}</div></div>`).join("")}</div></div>`;
   }
@@ -533,8 +550,17 @@ function card(t){const a={high:"var(--red)",medium:"var(--amber)",low:"var(--dim
   const blockers=(t.depends_on||[]).filter(d=>{const dt=(STATE.tickets||[]).find(x=>x.id===d);return dt&&!doneSet.includes(dt.status);});
   const blocked=blockers.length?`<span class="b" style="background:color-mix(in srgb,var(--red) 16%,transparent);color:var(--red)" title="blocked by ${esc(blockers.join(', '))}"><i class="ti ti-lock" style="font-size:10px"></i> blocked</span>`:'';
   const hold=t.status==="on_hold"?`<span class="b" style="background:color-mix(in srgb,var(--amber) 18%,transparent);color:var(--amber)" title="${esc((STATE.hold_reasons||{})[t.id]||'on hold')}"><i class="ti ti-player-pause" style="font-size:10px"></i> on hold</span>`:'';
+  // Age heat: how long a ticket has WAITED. Only pre-work statuses — a card
+  // being built isn't stale — and only tickets that carry created_at (older
+  // ones have unknown age and stay quiet). Amber at 3 days, red at 7.
+  let age='';
+  if(t.created_at&&(t.status==="pending"||t.status==="open")){
+    const days=Math.floor((Date.now()-Date.parse(t.created_at))/86400000);
+    if(days>=3){const c=days>=7?"var(--red)":"var(--amber)";
+      age=`<span class="b" style="background:color-mix(in srgb,${c} 14%,transparent);color:${c}" title="filed ${esc(t.created_at.slice(0,10))}"><i class="ti ti-hourglass" style="font-size:10px"></i> ${days}d</span>`;}
+  }
   return `<div class="card-t" onclick="showTicket('${t.id}')" ${t.status==="on_hold"?'style="opacity:.65"':''}><div class="cid">${esc(t.id)}</div>
-    <div class="ct">${esc(t.title)}</div><div class="badges"><span class="b ${t.priority}">${t.priority}</span>${hold}${blocked}${ui}${bug}${who}</div></div>`;}
+    <div class="ct">${esc(t.title)}</div><div class="badges"><span class="b ${t.priority}">${t.priority}</span>${hold}${blocked}${age}${ui}${bug}${who}</div></div>`;}
 function column([k,l,c],ts){const items=ts.filter(t=>t.status===k);
   return `<div class="col"><h3><span class="dot" style="background:var(${c})"></span>${l}<span class="n">${items.length}</span></h3>${items.length?items.map(card).join(""):'<div class="empty">—</div>'}</div>`;}
 // Unified column: collects both features and bugs whose status maps to this stage.
@@ -570,6 +596,56 @@ function renderSidebar(s){
   document.getElementById("ver").textContent=s.current_version||"0.0.0";
   document.getElementById("pn-tickets").textContent=(s.tickets||[]).length+" tickets";
   document.title="CoXAgent · "+(document.getElementById("proj-name").textContent||"");}
+// CXA-F289 — deploy failure forensics. The persisted bundle is already masked
+// at capture; this masks AGAIN before render/copy (defence in depth: state may
+// carry a legacy unmasked bundle). Same secret-shaped rule as the Rust side:
+// KEY=value (or KEY: value when the line has no `=`), non-empty values only.
+function maskSecrets(t){return (t||"").split("\n").map(l=>{
+  const eq=l.indexOf("="),i=eq>=0?eq:l.indexOf(":");
+  if(i<0)return l;
+  const v=l.slice(i+1).trim().replace(/^["']+|["']+$/g,"");
+  if(!v||!/password|passwd|pwd|secret|token|api_key|apikey|credential|private_key/i.test(l.slice(0,i)))return l;
+  return l.slice(0,i)+(l[i]===":"?": ":"=")+"***";}).join("\n");}
+// The full masked bundle text behind the Copy affordance — set on every render
+// of the forensics section so the clipboard always carries the WHOLE bundle.
+let _fbText="";
+function failureBundleText(dp){
+  const b=dp&&dp.failure_bundle;if(!b)return"";
+  const logs=b.container_logs||[];
+  const out=["Deploy failure forensics","","== compose stderr (tail) ==",maskSecrets(b.stderr_tail||""),"","== container logs =="];
+  if(b.no_container_logs||!logs.length)out.push("No container logs available — compose failed before any container started.");
+  else for(const c of logs)out.push(`--- ${c.service} ---`,maskSecrets(c.tail));
+  return out.join("\n");
+}
+function failureForensicsHtml(dp){
+  const b=dp&&dp.failure_bundle;if(!b)return"";
+  _fbText=failureBundleText(dp);
+  const logs=b.container_logs||[];
+  const logsHtml=logs.length?logs.map(c=>`<div style="margin-top:12px">
+    <div style="font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--dim)">container · ${esc(c.service)}</div>
+    <pre style="margin:4px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11.5px;line-height:1.55;color:var(--text);background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:8px 11px;white-space:pre-wrap;word-break:break-word">${esc(maskSecrets(c.tail))}</pre></div>`).join("")
+    :`<div style="margin-top:12px;font-size:12.5px;color:var(--muted)">No container logs available — compose failed before any container started.</div>`;
+  return `<div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
+    <div style="display:flex;align-items:center;gap:8px">
+      <div style="font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--dim)">Failure forensics</div>
+      <button type="button" onclick="copyFailureBundle(this)" style="margin-left:auto;background:var(--card2);border:1px solid var(--border2);color:var(--muted);border-radius:9px;padding:4px 13px;font-size:12.5px;font-weight:600;cursor:pointer;transition:all .15s">Copy</button>
+    </div>
+    <pre style="margin:8px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11.5px;line-height:1.55;color:var(--text);background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:8px 11px;white-space:pre-wrap;word-break:break-word">${esc(maskSecrets(b.stderr_tail||""))}</pre>
+    ${logsHtml}</div>`;
+}
+function copyFailureBundle(btn){
+  if(!(_fbText&&navigator.clipboard&&navigator.clipboard.writeText))return;
+  navigator.clipboard.writeText(_fbText).then(()=>{btn.textContent="Copied";
+    setTimeout(()=>{btn.textContent="Copy";},1500);},()=>{});
+}
+function rollbackOutcomeHtml(rb){
+  if(!rb)return"";
+  const ok=rb.ok!==false,col=ok?"var(--green)":"var(--red)";
+  return `<div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;display:flex;align-items:center;gap:8px">
+    <span style="flex:none;border-radius:20px;padding:2px 8px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;background:${col}22;color:${col}">${ok?"Rolled back":"Rollback failed"}</span>
+    <div style="flex:1;font-size:12px;color:var(--muted)">${esc(rb.summary||rb.reason||"")}</div>
+    <div style="flex:none;font-size:11px;color:var(--dim)">${esc((rb.at||"").slice(0,16).replace("T"," "))}</div></div>`;
+}
 function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overview")return;
   if(CUR==="overview"){
     renderDriftAlerts(s);
@@ -591,12 +667,16 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
     document.getElementById("ov-alerts").innerHTML=alertsHtml(s,m,spend);
     drainBanner("ov-drain");
     document.getElementById("kpis").innerHTML=[kpi("Shipped",m.shipped),kpi("In flight",m.inflight),kpi("Documented",m.docd),kpi("Releases",m.releases),kpi("Cost",money(spend.total_cost_usd))].join("");
+    const ovv=document.getElementById("ov-velocity");if(ovv)ovv.innerHTML=velocityHtml(s);
     renderHealth(s);
     const dp=s.deploy;
-    document.getElementById("ov-deploy").innerHTML=dp?`<div class="panel" style="margin-top:16px;display:flex;align-items:center;gap:13px">
-      <div class="av" style="width:36px;height:36px;background:${dp.ok?'var(--green)':'var(--red)'}22;color:${dp.ok?'var(--green)':'var(--red)'}"><i class="ti ti-${dp.ok?'cloud-check':'cloud-x'}"></i></div>
-      <div style="flex:1"><div style="font-size:13px;font-weight:600">Deployment ${dp.ok?'healthy':'failed'}</div><div style="font-size:12px;color:var(--muted)">${esc(dp.summary)}</div></div>
-      <div style="font-size:11px;color:var(--dim)">${esc((dp.at||"").slice(0,16).replace("T"," "))}</div></div>`:"";
+    document.getElementById("ov-deploy").innerHTML=dp?`<div class="panel" style="margin-top:16px">
+      <div style="display:flex;align-items:center;gap:13px">
+        <div class="av" style="width:36px;height:36px;background:${dp.ok?'var(--green)':'var(--red)'}22;color:${dp.ok?'var(--green)':'var(--red)'}"><i class="ti ti-${dp.ok?'cloud-check':'cloud-x'}"></i></div>
+        <div style="flex:1"><div style="font-size:13px;font-weight:600">Deployment ${dp.ok?'healthy':'failed'}</div><div style="font-size:12px;color:var(--muted)">${esc(dp.summary)}</div></div>
+        <div style="font-size:11px;color:var(--dim)">${esc((dp.at||"").slice(0,16).replace("T"," "))}</div></div>
+      ${failureForensicsHtml(dp)}
+      ${rollbackOutcomeHtml(s.last_rollback)}</div>`:"";
     document.getElementById("ov-charts").innerHTML=chartsHtml(s);
     loadGovernanceAttention();
     document.getElementById("ov-design").innerHTML=designSystemHtml(s.design_system);
@@ -678,6 +758,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
         <div class="agstats"><span title="actions"><i class="ti ti-bolt"></i> ${st.n}</span><span title="tickets touched"><i class="ti ti-ticket"></i> ${st.tk.size}</span>${cost>0?`<span title="cost"><i class="ti ti-coin"></i> ${money(cost)}</span>`:''}</div>
         <div class="ag-status">${statusHtml}</div>${healthHtml}</div>`;}).join("");
     renderDupWarn(s);
+    renderLiveness(s);
     renderCycleScores(s);
     renderTeamsOnline();
     renderSessions();
@@ -754,5 +835,27 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
         <div style="background:var(--card2);border-radius:6px;height:10px;overflow:hidden"><div style="width:${used}%;height:100%;background:${used>=90?'var(--red)':used>=70?'var(--amber)':'var(--accent2)'}"></div></div>
         <div style="color:var(--dim);font-size:11px;margin-top:8px">Loop auto-pauses when the cap is reached.</div>`);
     }else{setHTML(document.getElementById("cost-budget"),'<div class="empty">no budget cap set — add "budget_usd" in coxagent.json</div>');}
+    // Daily spend trend: closed UTC days from spend_history plus the running
+    // "today" bar (accent). Bars, not a line — a single day is the unit the
+    // daily budget cap reasons about, so days should read individually.
+    const shist=(s.spend_history||[]).slice(-30)
+      .concat(s.spend_day?[{day:s.spend_day,usd:s.spend_today_usd||0,today:true}]:[]);
+    const smax=Math.max(...shist.map(d=>d.usd||0),0.01);
+    setHTML(document.getElementById("cost-trend"),shist.length?`<div style="display:flex;gap:4px;align-items:flex-end;height:92px">${shist.map(d=>{
+      const h=Math.max(3,Math.round((d.usd||0)/smax*80));
+      return `<div title="${escAttr(d.day+": "+money(d.usd||0))}" style="flex:1;max-width:26px;height:${h}px;background:${d.today?"var(--accent)":"var(--accent2)"};border-radius:3px 3px 0 0"></div>`;}).join("")}</div>
+      <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--dim);margin-top:6px"><span>${esc(shist[0].day||"")}</span><span>today ${money(s.spend_today_usd||0)}</span></div>`:'<div class="empty">no spend recorded yet</div>');
+    // Engine reliability: the question "is GLM healthy today?" answered
+    // where cost already lives, instead of only in hub.log greps.
+    const rh=Object.entries(s.role_health||{}).sort((a,b)=>((b[1].errors||0)+(b[1].timeouts||0))-((a[1].errors||0)+(a[1].timeouts||0)));
+    setHTML(document.getElementById("cost-engines"),rh.length?rh.map(([r,h])=>{
+      const total=(h.errors||0)+(h.timeouts||0);
+      const today=(h.last_error_at||"").slice(0,10)===new Date().toISOString().slice(0,10);
+      const col=today?"var(--red)":(total?"var(--amber)":"var(--green)");
+      return `<div style="display:flex;align-items:center;gap:12px;padding:7px 0">
+        <span style="min-width:110px;font-size:12px">${esc(r)}</span>
+        <span style="font-size:12px;color:${col};min-width:150px">${h.errors||0} error(s) &middot; ${h.timeouts||0} timeout(s)</span>
+        <span style="flex:1;font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escAttr(h.last_error||"")}">${today?"today: ":""}${esc((h.last_error||"").slice(0,90))}</span></div>`;
+    }).join(""):'<div class="empty">no engine failures recorded — all roles healthy</div>');
     renderTokenSaver();
-  }else if(CUR==="discuss"){renderDiscuss();}else if(CUR==="roadmap"){renderRoadmap();}else if(CUR==="home"){renderHome();}else if(CUR==="mg-spaces"){renderManage();}else if(CUR==="mg-users"){renderManage();}else if(CUR==="mg-usage"){renderManage();}else if(CUR==="mg-audit"){renderManage();}}
+  }else if(CUR==="discuss"){renderDiscuss();}else if(CUR==="roadmap"){renderRoadmap();}else if(CUR==="home"){renderHome();}else if(CUR==="mg-spaces"){renderManage();}else if(CUR==="mg-users"){renderManage();}else if(CUR==="mg-usage"){renderManage();}else if(CUR==="mg-fleet"){renderManage();}else if(CUR==="mg-audit"){renderManage();}}

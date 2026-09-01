@@ -190,7 +190,14 @@ fn feature_at_ready(id: &str) -> Ticket {
 
 /// An extended evidence record — the shape the design mandates going forward
 /// (`source_gates` + `actor` beside today's four fields).
-fn evidence(kind: &str, label: &str, detail: &str, at: &str, gates: &[&str], actor: &str) -> Evidence {
+fn evidence(
+    kind: &str,
+    label: &str,
+    detail: &str,
+    at: &str,
+    gates: &[&str],
+    actor: &str,
+) -> Evidence {
     Evidence {
         kind: kind.to_owned(),
         label: label.to_owned(),
@@ -321,8 +328,10 @@ fn verified_bug_after_a_send_back() -> ProjectState {
         "2026-08-01T11:00:00Z",
     ));
     // The evidence the gate captured (linked to its gate going forward).
-    s.ticket_evidence.entry(ID.to_owned()).or_default().push(
-        evidence(
+    s.ticket_evidence
+        .entry(ID.to_owned())
+        .or_default()
+        .push(evidence(
             "test",
             "REGRESSION TEST",
             "PASS on current master, verdict rendered by human QA; regression test \
@@ -330,8 +339,7 @@ fn verified_bug_after_a_send_back() -> ProjectState {
             "2026-08-01T11:00:01Z",
             &["verify"],
             "rev",
-        ),
-    );
+        ));
     s
 }
 
@@ -388,7 +396,10 @@ fn ac1_gate_spine_reconstructs_verify_gate_decisions_chronologically() {
     let spine = gate_spine(&s, &tid("CXA-B241"));
 
     assert_eq!(spine.len(), 2, "two verify-gate decisions were recorded");
-    assert_eq!(spine[0].gate_id, "verify", "send-back is a verify-gate event");
+    assert_eq!(
+        spine[0].gate_id, "verify",
+        "send-back is a verify-gate event"
+    );
     assert_eq!(spine[0].status_from, "fixed", "the fix was on the table");
     assert_eq!(spine[0].status_to, "open", "send-back reopens the bug");
     assert_eq!(spine[0].decided_at_ms, epoch_ms("2026-08-01T10:00:00Z"));
@@ -486,8 +497,22 @@ fn ac1_an_item_linked_to_verify_never_groups_under_a_ready_gate() {
         },
     ];
     let evidence_list = vec![
-        evidence("api", "live request/response", "GET /api/health\nHTTP 200", "2026-08-01T10:59:00Z", &["verify"], "TEST"),
-        evidence("waived", "screenshot unavailable", "no headless browser/storage on this host", "2026-08-01T08:59:00Z", &["ready"], "TEST"),
+        evidence(
+            "api",
+            "live request/response",
+            "GET /api/health\nHTTP 200",
+            "2026-08-01T10:59:00Z",
+            &["verify"],
+            "TEST",
+        ),
+        evidence(
+            "waived",
+            "screenshot unavailable",
+            "no headless browser/storage on this host",
+            "2026-08-01T08:59:00Z",
+            &["ready"],
+            "TEST",
+        ),
     ];
 
     let groups = group_by_gate(&spine, &evidence_list);
@@ -522,7 +547,14 @@ fn ac2_api_and_test_items_expose_their_full_captured_request_response_text() {
     let captured = "GET http://127.0.0.1:4123/api/health\nHTTP 200\n{\"ok\":true,\
                     \"version\":\"2.28.0\",\"uptime_s\":812}\n--\nGET \
                     http://127.0.0.1:4123/\nHTTP 200\n<!doctype html>…";
-    let api = evidence("api", "live request/response", captured, "2026-08-01T11:00:01Z", &["verify"], "TEST");
+    let api = evidence(
+        "api",
+        "live request/response",
+        captured,
+        "2026-08-01T11:00:01Z",
+        &["verify"],
+        "TEST",
+    );
     let test = evidence(
         "test",
         "REGRESSION TEST",
@@ -543,8 +575,22 @@ fn ac2_api_and_test_items_expose_their_full_captured_request_response_text() {
         "a test item's inline body is its full captured text"
     );
     // The kinds that render as image or waiver carry no inline text body.
-    let shot = evidence("screenshot", "deployed UI screenshot", "/api/projects/TL/media/evidence-CXA-B241.png", "2026-08-01T11:00:03Z", &["verify"], "TEST");
-    let waived = evidence("waived", "screenshot unavailable", "no headless browser/storage on this host", "2026-08-01T11:00:04Z", &["verify"], "TEST");
+    let shot = evidence(
+        "screenshot",
+        "deployed UI screenshot",
+        "/api/projects/TL/media/evidence-CXA-B241.png",
+        "2026-08-01T11:00:03Z",
+        &["verify"],
+        "TEST",
+    );
+    let waived = evidence(
+        "waived",
+        "screenshot unavailable",
+        "no headless browser/storage on this host",
+        "2026-08-01T11:00:04Z",
+        &["verify"],
+        "TEST",
+    );
     assert_eq!(inline_text(&shot), None, "a screenshot renders as an image");
     assert_eq!(inline_text(&waived), None, "a waiver renders as a waiver");
 }
@@ -631,12 +677,18 @@ fn ac5_a_waived_item_renders_an_explicit_waiver_naming_who_and_why() {
     let w = waiver(&rec).expect("a waived record IS a waiver");
     assert_eq!(w.granted_by, "TEST", "the waiver names who granted it");
     assert_eq!(
-        w.reason,
-        "no headless browser/storage on this host, or the app did not render",
+        w.reason, "no headless browser/storage on this host, or the app did not render",
         "the waiver states why"
     );
     // Explicit means ONLY waived records are waivers.
-    let api = evidence("api", "live request/response", "GET /api/health\nHTTP 200", "2026-08-01T11:00:01Z", &["verify"], "TEST");
+    let api = evidence(
+        "api",
+        "live request/response",
+        "GET /api/health\nHTTP 200",
+        "2026-08-01T11:00:01Z",
+        &["verify"],
+        "TEST",
+    );
     assert!(waiver(&api).is_none(), "a captured record is not a waiver");
 }
 
@@ -645,14 +697,43 @@ fn ac5_an_item_lacking_a_capture_commit_renders_provenance_unknown() {
     // No evidence record in this model carries a capture commit, so every
     // real record's provenance is the explicit unknown — never a guess.
     for rec in [
-        evidence("api", "live request/response", "GET /api/health\nHTTP 200", "2026-08-01T11:00:01Z", &["verify"], "TEST"),
-        evidence("test", "REGRESSION TEST", "PASS on current master", "2026-08-01T11:00:02Z", &["verify"], "rev"),
-        evidence("screenshot", "deployed UI screenshot", "/api/projects/TL/media/evidence-CXA-B241.png", "2026-08-01T11:00:03Z", &["verify"], "TEST"),
-        evidence("waived", "screenshot unavailable", "no headless browser/storage on this host", "2026-08-01T11:00:05Z", &["verify"], "TEST"),
+        evidence(
+            "api",
+            "live request/response",
+            "GET /api/health\nHTTP 200",
+            "2026-08-01T11:00:01Z",
+            &["verify"],
+            "TEST",
+        ),
+        evidence(
+            "test",
+            "REGRESSION TEST",
+            "PASS on current master",
+            "2026-08-01T11:00:02Z",
+            &["verify"],
+            "rev",
+        ),
+        evidence(
+            "screenshot",
+            "deployed UI screenshot",
+            "/api/projects/TL/media/evidence-CXA-B241.png",
+            "2026-08-01T11:00:03Z",
+            &["verify"],
+            "TEST",
+        ),
+        evidence(
+            "waived",
+            "screenshot unavailable",
+            "no headless browser/storage on this host",
+            "2026-08-01T11:00:05Z",
+            &["verify"],
+            "TEST",
+        ),
     ] {
         assert!(
             matches!(provenance(&rec), Provenance::Unknown),
-            "a record without a capture commit has unknown provenance ({})", rec.label
+            "a record without a capture commit has unknown provenance ({})",
+            rec.label
         );
         assert_eq!(
             provenance_label(&provenance(&rec)),
@@ -682,7 +763,14 @@ fn guard_legacy_evidence_without_source_gates_or_actor_loads_losslessly() {
 
     // The extended record keeps its new fields on the wire (the endpoint's
     // additive contract: source_gates + actor travel with the item).
-    let enriched = evidence("api", "live request/response", "GET /api/health\nHTTP 200", "2026-08-01T11:00:01Z", &["verify"], "TEST");
+    let enriched = evidence(
+        "api",
+        "live request/response",
+        "GET /api/health\nHTTP 200",
+        "2026-08-01T11:00:01Z",
+        &["verify"],
+        "TEST",
+    );
     let json = serde_json::to_value(&enriched).expect("evidence serializes");
     assert_eq!(json["source_gates"], serde_json::json!(["verify"]));
     assert_eq!(json["actor"], "TEST");

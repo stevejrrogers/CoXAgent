@@ -192,7 +192,12 @@ fn read_dot_env(path: &std::path::Path) -> std::collections::HashSet<String> {
 /// where agents read diffs from and commit from (CXA-B028). Defaults to a
 /// per-user data dir, overridable with `COXAGENT_DEPLOY_SECRETS_DIR` so tests
 /// and sandboxes can point it at an isolated location.
-fn deploy_secrets_root() -> std::path::PathBuf {
+///
+/// Public since CXA-F262: the backup/restore commands need the SAME root to
+/// capture (`--include-secrets`) and to restore secret files onto the CURRENT
+/// machine — resolving it anywhere else would desynchronize the two.
+#[must_use]
+pub fn deploy_secrets_root() -> std::path::PathBuf {
     if let Some(dir) = std::env::var_os("COXAGENT_DEPLOY_SECRETS_DIR") {
         return std::path::PathBuf::from(dir);
     }
@@ -720,6 +725,86 @@ async fn running_services(work_dir: &Path) -> Vec<String> {
         .collect()
 }
 
+/// CXA-F289: resolved `${VAR}` secret values must never survive into a
+/// forensics bundle — replace every configured value with a marker before the
+/// text reaches the bundle (which masks secret-SHAPED `KEY=value` lines again
+/// at persistence). Values shorter than 8 chars are skipped: masking a short
+/// common word would mangle unrelated log lines without buying protection.
+fn mask_resolved_secrets(text: &str, secrets: &[(String, String)]) -> String {
+    let mut out = text.to_owned();
+    for (_, value) in secrets {
+        if value.len() >= 8 {
+            out = out.replace(value.as_str(), "***");
+        }
+    }
+    out
+}
+
+/// CXA-F289: the recent log tail of every container the compose project
+/// managed at failure time (`docker compose logs --tail 200` per service).
+/// An empty result — a validation failure, or no container ever started — is
+/// the caller's explicit "no container logs" signal: the bundle records that
+/// fact rather than rendering an empty log section.
+async fn capture_container_logs(proj: &str) -> Vec<coxagent_application::state::ContainerLogTail> {
+    // Which services does this compose project manage? `-a` so stopped/errored
+    // containers are listed too — they are exactly the interesting ones after
+    // a failed `up`. A non-zero exit here (invalid compose file, daemon down)
+    // means there is nothing to collect, same as an empty list.
+    let Ok(listed) = Command::new("docker")
+        .args([
+            "compose",
+            "-p",
+            proj,
+            "ps",
+            "-a",
+            "--format",
+            "{{.Service}}",
+        ])
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+    else {
+        return Vec::new();
+    };
+    if !listed.status.success() {
+        return Vec::new();
+    }
+    let services: Vec<String> = String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|service| !service.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    let mut logs = Vec::new();
+    for service in services {
+        // Recent tail of THIS service's output; `--no-log-prefix` so the
+        // service attribution comes from the listing above, not the line.
+        if let Ok(tailed) = Command::new("docker")
+            .args([
+                "compose",
+                "-p",
+                proj,
+                "logs",
+                "--no-log-prefix",
+                "--tail",
+                "200",
+                &service,
+            ])
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output()
+            .await
+        {
+            let tail = String::from_utf8_lossy(&tailed.stdout).to_string();
+            if !tail.trim().is_empty() {
+                logs.push(coxagent_application::state::ContainerLogTail { service, tail });
+            }
+        }
+    }
+    logs
+}
+
 /// Deploys via the `docker` CLI.
 #[derive(Default)]
 pub struct DockerComposeDeploy;
@@ -1047,6 +1132,7 @@ impl DeployPort for DockerComposeDeploy {
         let e2e = work_dir.join("e2e");
         if !e2e.join("playwright.config.ts").exists() {
             return Ok(DeployReport {
+                failure_bundle: None,
                 success: true,
                 deployed: false,
                 summary: "no e2e suite".to_owned(),
@@ -1066,6 +1152,7 @@ impl DeployPort for DockerComposeDeploy {
                  install Node and `cd e2e && npm ci && npx playwright install` to enable it"
             );
             return Ok(DeployReport {
+                failure_bundle: None,
                 success: true,
                 deployed: false,
                 summary: "e2e runner unavailable (Node/Playwright not installed) — gate skipped"
@@ -1089,6 +1176,7 @@ impl DeployPort for DockerComposeDeploy {
                 .is_ok_and(|s| s.success());
             if !ok {
                 return Ok(DeployReport {
+                    failure_bundle: None,
                     success: false,
                     deployed: true,
                     summary: "e2e: npm ci failed".to_owned(),
@@ -1106,6 +1194,7 @@ impl DeployPort for DockerComposeDeploy {
                  run `cd e2e && npx playwright install`"
             );
             return Ok(DeployReport {
+                failure_bundle: None,
                 success: true,
                 deployed: false,
                 summary: "e2e browsers not installed — gate skipped".to_owned(),
@@ -1117,6 +1206,7 @@ impl DeployPort for DockerComposeDeploy {
     async fn run_tests(&self, work_dir: &Path) -> Result<DeployReport, PortError> {
         let Some((cmd, args)) = test_command(work_dir) else {
             return Ok(DeployReport {
+                failure_bundle: None,
                 success: true,
                 deployed: false,
                 summary: "no recognised test runner".to_owned(),
@@ -1227,6 +1317,7 @@ impl DeployPort for DockerComposeDeploy {
     async fn deploy(&self, work_dir: &Path) -> Result<DeployReport, PortError> {
         if !COMPOSE_FILES.iter().any(|f| work_dir.join(f).exists()) {
             return Ok(DeployReport {
+                failure_bundle: None,
                 success: true,
                 deployed: false,
                 summary: "no compose file — deploy skipped".to_owned(),
@@ -1369,6 +1460,7 @@ impl DeployPort for DockerComposeDeploy {
         if success {
             apply_resource_limits(&proj).await;
         }
+        let mut failure_bundle = None;
         let summary = if success {
             let note = evicted
                 .map(|p| format!(" (evicted stale {p} off the port)"))
@@ -1397,9 +1489,27 @@ impl DeployPort for DockerComposeDeploy {
                 .unwrap_or_else(|| {
                     format!("exit {} (no output)", output.status.code().unwrap_or(-1))
                 });
+            // CXA-F289: a failed deploy must not destroy its own evidence.
+            // Capture the stderr tail plus the recent per-container logs while
+            // this process still holds them, mask the resolved secret values,
+            // and let the bundle type bound + re-mask before anything
+            // persists. No container ever listed = the explicit AC3 marker.
+            let raw = if err.trim().is_empty() {
+                out.as_ref()
+            } else {
+                err.as_ref()
+            };
+            let logs = capture_container_logs(&proj).await;
+            let no_container_logs = logs.is_empty();
+            failure_bundle = Some(coxagent_application::state::DeployFailureBundle::new(
+                &mask_resolved_secrets(raw, &secrets),
+                logs,
+                no_container_logs,
+            ));
             format!("docker compose failed: {detail}")
         };
         Ok(DeployReport {
+            failure_bundle,
             success,
             deployed: true,
             summary,
@@ -2646,6 +2756,7 @@ impl DockerComposeDeploy {
             format!("{cmd} tests failed:\n{err}\n{out}")
         };
         Ok(DeployReport {
+            failure_bundle: None,
             success,
             deployed: true,
             summary,

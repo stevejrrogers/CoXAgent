@@ -78,7 +78,9 @@ pub struct Waiver {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Provenance {
     /// A capture commit is on record (future: when the model grows one).
-    Captured { commit: String },
+    Captured {
+        commit: String,
+    },
     Unknown,
 }
 
@@ -111,12 +113,7 @@ pub fn gate_spine(state: &ProjectState, ticket: &TicketId) -> Vec<GateTransition
                 | InterventionKind::HumanPrDismissed
                 | InterventionKind::UndoAutoApprove => return None,
             };
-            Some((
-                gate_id,
-                from,
-                to,
-                rec.at.clone(),
-            ))
+            Some((gate_id, from, to, rec.at.clone()))
         })
         .filter_map(|(gate_id, from, to, at)| {
             Some(GateTransition {
@@ -138,10 +135,7 @@ pub fn gate_spine(state: &ProjectState, ticket: &TicketId) -> Vec<GateTransition
 /// Items with no link to any spine gate are NOT grouped — see
 /// [`unlinked_evidence`].
 #[must_use]
-pub fn group_by_gate(
-    spine: &[GateTransition],
-    evidence: &[Evidence],
-) -> Vec<GateEvidenceGroup> {
+pub fn group_by_gate(spine: &[GateTransition], evidence: &[Evidence]) -> Vec<GateEvidenceGroup> {
     let mut groups: Vec<GateEvidenceGroup> = spine
         .iter()
         .map(|gate| GateEvidenceGroup {
@@ -308,13 +302,15 @@ mod tests {
         // A corrupt `at` cannot be placed on the timeline; inventing epoch 0
         // would misorder every real decision around it.
         let mut state = ProjectState::default();
-        state.governance_interventions.push(crate::state::InterventionRecord {
-            kind: InterventionKind::VerifyPass,
-            ticket: "CXA-F001".to_owned(),
-            area: None,
-            by: "rev".to_owned(),
-            at: "not-a-stamp".to_owned(),
-        });
+        state
+            .governance_interventions
+            .push(crate::state::InterventionRecord {
+                kind: InterventionKind::VerifyPass,
+                ticket: "CXA-F001".to_owned(),
+                area: None,
+                by: "rev".to_owned(),
+                at: "not-a-stamp".to_owned(),
+            });
         assert!(gate_spine(&state, &TicketId::new("CXA-F001").expect("id")).is_empty());
     }
 

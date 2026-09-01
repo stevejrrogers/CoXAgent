@@ -158,6 +158,12 @@ impl CountingStore {
     pub(super) fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
     }
+
+    /// The state as the last save left it — lets a test assert what a
+    /// handler actually persisted, not just what it answered.
+    pub(super) fn snapshot(&self) -> ProjectState {
+        self.state.lock().expect("lock").clone()
+    }
 }
 
 #[async_trait::async_trait]
@@ -255,6 +261,11 @@ impl StateStorePort for CountingStore {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(true)
     }
+
+    async fn delete(&self) -> Result<(), PortError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 /// Never invoked by the store RPC path under test.
@@ -308,6 +319,49 @@ pub(super) async fn app_with(
         },
     )
     .await
+}
+
+/// Like [`app_with`], but the project's `coxagent.json` is seeded with
+/// `config_json` — for handlers that read project config from disk
+/// (approval-policy, inbox). One tempdir backs both the hub dir and the
+/// project workspace; the caller MUST keep the returned TempDir alive,
+/// because dropping it deletes the config file out from under the handle.
+pub(super) async fn app_with_config(
+    auth: Option<Arc<dyn AuthPort>>,
+    store: Arc<dyn StateStorePort>,
+    config_json: &str,
+) -> (tempfile::TempDir, AppState) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("coxagent.json"), config_json).expect("write project config");
+    let handle = ProjectHandle {
+        id: PID.to_owned(),
+        name: "Demo".to_owned(),
+        alias: "demo".to_owned(),
+        store,
+        runner: Arc::new(RunnerHandle::default()),
+        config_path: dir.path().join("coxagent.json"),
+        engine: Arc::new(UnusedEngine),
+        work_dir: dir.path().to_path_buf(),
+        outbox: None,
+        budget: Arc::new(Mutex::new(BudgetCaps::default())),
+        context_path: dir.path().join("project_context.md"),
+        forge: None,
+        deploy: None,
+        storage: None,
+        files: None,
+        deps_discovery: None,
+    };
+    let state = build_state(
+        vec![handle],
+        Arc::new(MemoryAuditSink::default()),
+        HubExtras {
+            auth,
+            hub_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        },
+    )
+    .await;
+    (dir, state)
 }
 
 /// The deployed shape of the route: the handler behind `auth_mw`, exactly as
@@ -450,5 +504,8 @@ pub(super) fn all_ops() -> Vec<(&'static str, serde_json::Value)> {
             "acquire_operator",
             serde_json::json!({ "worker": "operator", "now": "instance-1" }),
         ),
+        // CXA-B130: the REST counterpart of deregistering a project. No args;
+        // the RBAC gate must treat it like every other state write.
+        ("delete", serde_json::json!({})),
     ]
 }

@@ -105,7 +105,9 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/chat/ws", &["get"]),
     route("/api/engines", &["get"]),
     route("/api/engines/opencode/models", &["get"]),
+    route("/api/fleet/ceiling", &["put"]),
     route("/api/fleet/river", &["get"]),
+    route("/api/fleet/spend", &["get"]),
     route("/api/health", &["get"]),
     route("/api/manage/overview", &["get"]),
     route("/api/manage/spaces/:sid", &["get"]),
@@ -129,6 +131,9 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/agent-log/stream", &["get"]),
     route("/api/projects/:pid/alerts", &["get"]),
     route("/api/projects/:pid/alerts/:id/replay", &["post"]),
+    route("/api/projects/:pid/approval-policy", &["get"]),
+    route("/api/projects/:pid/approval-policy/ask-again", &["post"]),
+    route("/api/projects/:pid/approval-policy/release", &["post"]),
     route("/api/projects/:pid/architecture-review", &["post"]),
     route("/api/projects/:pid/attachment", &["get"]),
     route("/api/projects/:pid/audit", &["get"]),
@@ -235,6 +240,9 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/upload", &["post"]),
     route("/api/projects/:pid/workers", &["get"]),
     route("/api/projects/:pid/workspace", &["get"]),
+    // Global search (CXA-F275): labeled hits from tickets (open + closed),
+    // wiki pages and chat threads, server-ranked and capped (8/kind, 30 total).
+    route("/api/search", &["get"]),
     route("/api/spaces", &["get", "post"]),
     route("/api/spaces/:sid", &["delete", "put"]),
     route("/s/:token", &["get"]),
@@ -298,6 +306,19 @@ fn build_document() -> serde_json::Value {
 /// `route(...)` item: the CXA-B051 drift guard parses the table by that shape,
 /// and a multi-line struct literal would be invisible to it.
 const SUMMARY_OVERRIDES: &[(&str, &str)] = &[
+    (
+        "/api/search",
+        // CXA-F275: the global search box's contract — scope, kinds and caps.
+        "Global search across tickets (open and closed), wiki pages, ticket comment \
+         threads and team-chat messages. `q` is required (shorter than 2 characters \
+         returns an empty array, longer than 200 is truncated); optional `pid` scopes \
+         to one project, omitting it sweeps every project the caller is a member of \
+         (Super/Admin bypass applies). Returns a bare array of hits \
+         `{kind, id, ref, label, snippet, sub, at, link}` — server-ranked (title > id \
+         > body, prefix > substring, recency tiebreak), capped at 8 per kind and 30 \
+         total, so responses stay O(1). Chat hits respect channel visibility; a \
+         non-member pid answers 403, exactly like the per-project routes",
+    ),
     (
         "/api/projects/:pid/inbox",
         // Verify cards carry the optional reproduce_url (CXA-F244): the live

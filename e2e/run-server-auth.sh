@@ -24,6 +24,13 @@ BIN="$HERE/../target/debug/coxagent"
 # account file under .state-auth/serve, never the ambient live Postgres DSN a
 # dev shell may export. Without this, build_auth() connects to shared state.
 unset COXAGENT_DB_DSN COXAGENT_AUTH_DSN COXAGENT_REDIS_URL COXAGENT_REMOTE_STORE_URL 2>/dev/null || true
+# The whole suite is many independent test clients behind one loopback IP,
+# which is exactly the shared-IP topology COXAGENT_TRUST_PROXY exists for:
+# with it, a client that sends X-Forwarded-For is limited as itself instead
+# of starving in the one 127.0.0.1 bucket (store-auth.spec.ts holds its own
+# XFF identity; every other spec sends no XFF and keeps the shared
+# socket-IP bucket, unchanged). No spec pins the 429 itself.
+export COXAGENT_TRUST_PROXY=1
 export COXAGENT_PORT="$PORT"
 export COXAGENT_ADMIN_USER="${COXAGENT_ADMIN_USER:-adminos}"
 export COXAGENT_ADMIN_PASSWORD="${COXAGENT_ADMIN_PASSWORD:-ChangeMe_12345}"

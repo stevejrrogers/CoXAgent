@@ -57,8 +57,9 @@ async fn get_repro(
     ticket: &str,
     session: Option<&str>,
 ) -> axum::response::Response {
-    let mut builder = Request::builder()
-        .uri(format!("/api/projects/{pid}/ticket/{ticket}/reproduction-url"));
+    let mut builder = Request::builder().uri(format!(
+        "/api/projects/{pid}/ticket/{ticket}/reproduction-url"
+    ));
     if let Some(token) = session {
         builder = builder.header(header::COOKIE, format!("{SESSION_COOKIE}={token}"));
     }
@@ -78,8 +79,7 @@ async fn an_open_mode_hub_answers_the_contract_body_for_a_fixed_bug() {
     let resp = get_repro(repro_router(state), PID, "CXA-B001", None).await;
 
     assert_eq!(resp.status(), StatusCode::OK);
-    let doc: serde_json::Value =
-        serde_json::from_str(&body_text(resp).await).expect("json body");
+    let doc: serde_json::Value = serde_json::from_str(&body_text(resp).await).expect("json body");
     assert_eq!(doc, serde_json::json!({ "url": null, "reason": "none" }));
 }
 
@@ -109,13 +109,7 @@ async fn a_signed_in_principal_passes_the_gate() {
     )
     .await;
 
-    let resp = get_repro(
-        repro_router(state),
-        PID,
-        "CXA-B001",
-        Some(INSIDE_SESSION),
-    )
-    .await;
+    let resp = get_repro(repro_router(state), PID, "CXA-B001", Some(INSIDE_SESSION)).await;
 
     assert_eq!(resp.status(), StatusCode::OK);
 }

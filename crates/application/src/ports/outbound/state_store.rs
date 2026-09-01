@@ -198,6 +198,23 @@ pub trait StateStorePort: Send + Sync {
         Ok(None)
     }
 
+    /// Delete this project's ENTIRE persisted footprint from the backend: the
+    /// aggregate row plus every coordination row (leases, worker registry,
+    /// desired-run state) scoped to this project id. After a successful delete
+    /// the store must behave as never-written — `load` yields the default and
+    /// `current_version` the baseline — so a later project recreated under the
+    /// same id starts fresh instead of silently adopting the deleted team's
+    /// tickets, spend and claims (CXA-B130).
+    ///
+    /// The default is a no-op for backends that keep no external footprint and
+    /// for single-runner test fakes; every adapter with real persistence
+    /// (file or shared database) MUST override it. A deregistering caller
+    /// treats an error as fatal: returning success from the delete flow while
+    /// the persisted state survives is exactly the resurrection bug.
+    async fn delete(&self) -> Result<(), PortError> {
+        Ok(())
+    }
+
     /// Recent quarantine ledger entries: payloads the structural-integrity
     /// audit refused at write-back, kept so a refused corruption is
     /// inspectable instead of only a failed HTTP call. Default: an empty

@@ -15,7 +15,9 @@ pub mod deps_scan;
 pub mod engine_provenance;
 pub mod error;
 pub mod faults;
+pub mod fleet;
 pub mod forensics;
+pub mod liveness;
 pub mod metrics;
 pub mod metrics_brakes;
 pub mod metrics_burndown;
@@ -78,6 +80,9 @@ pub(crate) mod test_fs {
     impl WorkspaceFilesPort for StdFsFiles {
         async fn read(&self, path: &Path) -> Option<String> {
             std::fs::read_to_string(path).ok()
+        }
+        async fn read_bytes(&self, path: &Path) -> Option<Vec<u8>> {
+            std::fs::read(path).ok()
         }
         async fn write(&self, path: &Path, content: &str) -> bool {
             if let Some(dir) = path.parent() {

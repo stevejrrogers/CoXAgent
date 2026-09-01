@@ -79,6 +79,19 @@ pub const STANDARD_DOC_FOLDERS: &[&str] = &[
     "Team",          // SM — retros, decisions, ways of working
 ];
 
+/// How many closed days of spend history to retain.
+pub const MAX_SPEND_HISTORY: usize = 60;
+
+/// One closed UTC day's total engine spend, kept so the Cost view can chart
+/// a trend instead of only "today".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpendDay {
+    /// UTC date, `YYYY-MM-DD`.
+    pub day: String,
+    /// Total spend recorded on that day.
+    pub usd: f64,
+}
+
 /// The whole state of one managed project.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)] // a persisted data aggregate, not a state machine
@@ -426,6 +439,11 @@ pub struct ProjectState {
     /// The UTC date (`YYYY-MM-DD`) `spend_today_usd` is counting.
     #[serde(default)]
     pub spend_day: String,
+    /// Closed daily spend totals, appended by [`ProjectState::add_daily_spend`]
+    /// when the UTC day rolls over. Bounded to [`MAX_SPEND_HISTORY`] days so
+    /// the state row cannot grow without limit.
+    #[serde(default)]
+    pub spend_history: Vec<SpendDay>,
     /// Whether the lifetime `budget_usd` early-warning (`budget_warning`,
     /// [`crate::policy::approaching_cap`]) has already fired for the current
     /// approach toward the cap. Cleared once spend is no longer approaching
@@ -487,6 +505,11 @@ pub struct ProjectState {
     /// — the dashboard's zero indicator must read 0, never absence.
     #[serde(default)]
     pub drift_alerts: Vec<DriftAlert>,
+    /// Open loop-liveness stall episode (CXA-F259): `Some` while the hub-side
+    /// watchdog has an unresolved stall alert (dedupe key + the chip's data).
+    /// serde-defaulted so state written before this existed loads untouched.
+    #[serde(default)]
+    pub liveness: Option<StallEpisode>,
 }
 
 /// One day's open/fixed/verified bug counts — the persisted burn-down point
@@ -594,6 +617,7 @@ impl Default for ProjectState {
             ops_down_streak: 0,
             spend_today_usd: 0.0,
             spend_day: String::new(),
+            spend_history: Vec::new(),
             budget_warned_lifetime: false,
             budget_warned_daily: false,
             deploy_index: 0,
@@ -605,6 +629,7 @@ impl Default for ProjectState {
             bug_snapshots: std::collections::BTreeMap::new(),
             governance_interventions: Vec::new(),
             drift_alerts: Vec::new(),
+            liveness: None,
         }
     }
 }
@@ -871,6 +896,19 @@ impl ProjectState {
     pub fn add_daily_spend(&mut self, usd: f64) -> f64 {
         let today = now_rfc3339().get(..10).unwrap_or_default().to_owned();
         if self.spend_day != today {
+            // Close out the day that just ended before the counter resets, so
+            // the Cost view can chart a per-day trend. Zero-spend days are
+            // kept too: a gap and a quiet day look different on purpose.
+            if !self.spend_day.is_empty() {
+                self.spend_history.push(SpendDay {
+                    day: std::mem::take(&mut self.spend_day),
+                    usd: self.spend_today_usd,
+                });
+                if self.spend_history.len() > MAX_SPEND_HISTORY {
+                    let excess = self.spend_history.len() - MAX_SPEND_HISTORY;
+                    self.spend_history.drain(..excess);
+                }
+            }
             self.spend_day = today;
             self.spend_today_usd = 0.0;
             // A new day resets the cap itself, so a stale "already warned"
@@ -1551,6 +1589,20 @@ pub fn derive_alias(name: &str) -> String {
         .to_uppercase()
 }
 
+/// CXA-B138: a project alias becomes a workspace directory id under the hub's
+/// workspace base (`base.join(id)`), so any path separator or dot component
+/// lets an alias like `../name` scaffold — and DELETE `rm -rf` — OUTSIDE the
+/// base. A safe id is a single non-hidden path component: never empty, no '/',
+/// no '\', no ".." anywhere, no leading dot.
+#[must_use]
+pub fn is_safe_workspace_id(id: &str) -> bool {
+    !id.is_empty()
+        && !id.contains('/')
+        && !id.contains('\\')
+        && !id.contains("..")
+        && !id.starts_with('.')
+}
+
 impl ProjectState {
     /// Find a ticket by id.
     #[must_use]
@@ -1714,12 +1766,38 @@ mod dependency_tests {
 
 #[cfg(test)]
 mod alias_tests {
-    use super::derive_alias;
+    use super::{derive_alias, is_safe_workspace_id};
 
     #[test]
     fn derives_from_capitals() {
         assert_eq!(derive_alias("CoXChat"), "CXC");
         assert_eq!(derive_alias("CoXAgent"), "CXA");
+    }
+
+    /// CXA-B138: every traversal shape the ticket names must be refused —
+    /// an unsafe id would be `base.join`-ed outside the workspace base.
+    #[test]
+    fn path_traversing_ids_are_never_safe() {
+        for id in [
+            "../qatrav-esc",
+            "..\\qatrav",
+            "qa/../x",
+            "a\\b",
+            "..",
+            ".",
+            ".hidden",
+            "",
+        ] {
+            assert!(!is_safe_workspace_id(id), "{id:?} must be refused");
+        }
+    }
+
+    /// Ordinary single-component ids — the only kind onboarding may use.
+    #[test]
+    fn plain_component_ids_are_safe() {
+        for id in ["qatrav", "QATRAV", "qa-trav_2", "cxa"] {
+            assert!(is_safe_workspace_id(id), "{id:?} must be accepted");
+        }
     }
 
     #[test]
@@ -1786,5 +1864,31 @@ mod alias_tests {
             st.add_evidence_for("T-1", "test", &format!("r{i}"), "d", &["verify"], "rev");
         }
         assert_eq!(st.ticket_evidence["T-1"].len(), 6);
+    }
+
+    #[test]
+    fn day_rollover_closes_the_previous_day_into_spend_history() {
+        // First-ever spend: no previous day exists, so nothing is closed out.
+        let mut st = super::ProjectState {
+            spend_day: String::new(),
+            ..Default::default()
+        };
+        st.add_daily_spend(1.5);
+        assert!(st.spend_history.is_empty());
+        // Force a rollover: the finished day lands in history with its total,
+        // and the counter restarts for the new day.
+        st.spend_day = "2000-01-01".to_owned();
+        st.spend_today_usd = 3.25;
+        let today_total = st.add_daily_spend(0.75);
+        assert!((today_total - 0.75).abs() < f64::EPSILON);
+        assert_eq!(st.spend_history.len(), 1);
+        assert_eq!(st.spend_history[0].day, "2000-01-01");
+        assert!((st.spend_history[0].usd - 3.25).abs() < f64::EPSILON);
+        // The history is bounded: only the newest MAX_SPEND_HISTORY days stay.
+        for i in 0..super::MAX_SPEND_HISTORY + 5 {
+            st.spend_day = format!("1999-{:02}-{:02}", i / 28 + 1, i % 28 + 1);
+            st.add_daily_spend(0.0);
+        }
+        assert_eq!(st.spend_history.len(), super::MAX_SPEND_HISTORY);
     }
 }

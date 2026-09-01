@@ -261,8 +261,8 @@ pub fn record_verdicts(
 
 #[cfg(test)]
 mod tests {
-    use coxagent_domain::{Complexity, Priority, TicketId, TicketType};
     use super::*;
+    use coxagent_domain::{Complexity, Priority, TicketId, TicketType};
 
     #[test]
     fn levenshtein_counts_edits() {
@@ -366,9 +366,17 @@ mod tests {
             "surrounding whitespace is trimmed, the route kept verbatim"
         );
         // The omission half — every unmappable shape stays absent.
-        assert_eq!(live_repro_url("/settings", None), None, "no deploy base, no link");
+        assert_eq!(
+            live_repro_url("/settings", None),
+            None,
+            "no deploy base, no link"
+        );
         assert_eq!(live_repro_url("", Some(8101)), None, "no route, no link");
-        assert_eq!(live_repro_url("   ", Some(8101)), None, "blank route, no link");
+        assert_eq!(
+            live_repro_url("   ", Some(8101)),
+            None,
+            "blank route, no link"
+        );
         assert_eq!(
             live_repro_url("settings", Some(8101)),
             None,
@@ -387,7 +395,11 @@ mod tests {
             None,
             "a quote cannot break out of the rendered href attribute"
         );
-        assert_eq!(live_repro_url("/a<b>c", Some(8101)), None, "no angle brackets");
+        assert_eq!(
+            live_repro_url("/a<b>c", Some(8101)),
+            None,
+            "no angle brackets"
+        );
         assert_eq!(live_repro_url("/a b", Some(8101)), None, "no whitespace");
         assert_eq!(
             live_repro_url("/a?b=1&c=%20#anchor", Some(8101)).as_deref(),
@@ -410,7 +422,12 @@ mod tests {
         };
         let mut state = feature_state("F248", "settings persist");
 
-        assert!(record_verdicts(&mut state, std::slice::from_ref(&verdict), "t1", Some(8101)));
+        assert!(record_verdicts(
+            &mut state,
+            std::slice::from_ref(&verdict),
+            "t1",
+            Some(8101)
+        ));
         let ev = state.tickets[0].test_cases()[0]
             .evidence
             .as_ref()

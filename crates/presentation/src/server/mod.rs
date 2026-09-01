@@ -22,10 +22,8 @@ use coxagent_application::DocPage;
 use serde_json::json;
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -37,6 +35,7 @@ use crate::middleware::{
 };
 
 mod alerts;
+mod approval_policy;
 mod assets;
 mod auth;
 mod background;
@@ -48,7 +47,9 @@ mod deps;
 mod docs;
 mod downloads;
 mod engines;
+mod factory;
 mod fleet;
+mod fleet_spend;
 mod forge;
 mod goals;
 mod guards;
@@ -65,6 +66,7 @@ mod projects;
 mod realtime;
 mod repro_url;
 mod requests;
+mod search;
 mod security;
 mod share_link;
 mod share_page;
@@ -75,6 +77,7 @@ mod tunecockpit;
 mod work;
 
 use alerts::*;
+use approval_policy::*;
 use assets::*;
 use auth::*;
 use background::*;
@@ -87,6 +90,7 @@ use docs::*;
 use downloads::*;
 use engines::*;
 use fleet::*;
+use fleet_spend::*;
 use forge::*;
 use guards::*;
 use hub_docs::*;
@@ -102,6 +106,7 @@ use projects::*;
 use realtime::*;
 use repro_url::*;
 use requests::*;
+use search::*;
 use security::*;
 use share_link::*;
 use share_page::*;
@@ -136,11 +141,20 @@ const APP_JS: &[(&str, &str)] = &[
     ("home.js", include_str!("../web/js/home.js")),
     ("river.js", include_str!("../web/js/river.js")),
     ("chat.js", include_str!("../web/js/chat.js")),
+    // Global search palette (CXA-F275) — extracted from chat.js so the box
+    // used from every view has one home. Load after chat.js (runtime refs).
+    ("search.js", include_str!("../web/js/search.js")),
     ("mcp.js", include_str!("../web/js/mcp.js")),
     ("docs.js", include_str!("../web/js/docs.js")),
     ("inbox.js", include_str!("../web/js/inbox.js")),
     ("drift.js", include_str!("../web/js/drift.js")),
     ("alerts.js", include_str!("../web/js/alerts.js")),
+    // Approval-policy transparency panel (CXA-F303) — extends the Settings
+    // Workflow tab; loads before shell.js like every view helper.
+    (
+        "approval_policy.js",
+        include_str!("../web/js/approval_policy.js"),
+    ),
     ("shell.js", include_str!("../web/js/shell.js")),
 ];
 
@@ -200,31 +214,9 @@ pub struct ProjectHandle {
 
 /// Builds a fresh project on demand (scaffold + register), injected by the
 /// composition root so the presentation layer stays free of infrastructure.
-/// Takes `(name, alias)`, returns a ready [`ProjectHandle`] or an error message.
-pub type ProjectFactory = Arc<
-    dyn Fn(NewProjectReq) -> Pin<Box<dyn Future<Output = Result<ProjectHandle, String>> + Send>>
-        + Send
-        + Sync,
->;
-
-/// A request to create a project. `existing` adopts a codebase (brownfield);
-/// `goal` seeds the project context (from AI-assisted goal drafting).
-#[derive(Clone, Default)]
-pub struct NewProjectReq {
-    pub name: String,
-    pub alias: Option<String>,
-    pub existing: Option<PathBuf>,
-    /// Import straight from a git URL: the factory clones it into the
-    /// project workspace, then adopts it like any existing codebase (remote
-    /// auto-detected, config pre-filled).
-    pub git_url: Option<String>,
-    pub goal: Option<String>,
-}
-
-/// Deregisters a project (removes it from the hub registry), injected by the
-/// composition root. Returns an error message on failure.
-pub type ProjectRemover =
-    Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>;
+/// The contract lives in [`factory`]; re-exported here because every
+/// submodule globs `super::*` and `lib.rs` re-exports the names.
+pub use factory::{FactoryError, FactoryErrorKind, NewProjectReq, ProjectFactory, ProjectRemover};
 
 /// Extract the project ID from a URL path like `/api/projects/:pid/...`.
 fn extract_pid_from_path(path: &str) -> Option<&str> {
@@ -613,12 +605,19 @@ pub async fn serve_full(
     if matches!(hub_role(), HubRole::All | HubRole::Knowledge) {
         // Space budget enforcement runs for the life of the hub.
         tokio::spawn(space_budget_watchdog(state.clone()));
+        // Hub-level daily soft-ceiling alert (CXA-F278): notify-only, ever.
+        tokio::spawn(fleet_ceiling_watchdog(state.clone()));
         // Meeting reminders, start announcements, and absent-participant rings.
         tokio::spawn(meeting_watchdog(state.clone()));
         // Nightly snapshots of the hub-level documents (workspace, spaces, chat).
         tokio::spawn(nightly_backup(state.clone(), backup_dir));
         // App-release watcher: new tagged builds surface as update notices.
         tokio::spawn(releases_watchdog(state.clone()));
+        // Loop-liveness watchdog (CXA-F259): alerts when a running loop goes
+        // silently stale — the blind spot a hung cycle leaves (the worker
+        // keeps beating its registry heartbeat while nothing progresses), and
+        // the checker runs HERE, outside the unit that can hang.
+        tokio::spawn(liveness_watchdog(state.clone()));
         // Keep the docker host clean of dead agent deploys.
         tokio::spawn(docker_janitor());
     }
@@ -782,7 +781,19 @@ pub async fn serve_full(
         // project's runner phase + activity in ONE SSE stream, filterable by
         // project id and agent phase (see fleet.rs).
         .route("/api/fleet/river", get(fleet_river_ep))
+        // Fleet spend cockpit (CXA-F278): hub-level cross-project cost
+        // aggregation with cap headroom + the soft-ceiling setting (see
+        // fleet_spend.rs). Super admin; visibility-only by design.
+        .route("/api/fleet/spend", get(fleet_spend_ep))
+        .route(
+            "/api/fleet/ceiling",
+            axum::routing::put(fleet_ceiling_put_ep),
+        )
         .route("/api/tooling", get(tooling_ep))
+        // Global search (CXA-F275): one box across tickets, wiki pages and
+        // chat threads. No :pid in the path — the handler enforces project
+        // scope itself (see server/search.rs).
+        .route("/api/search", get(global_search_ep))
         .route("/api/analyze-goal", post(analyze_goal_ep))
         .route("/api/projects", get(list_projects).post(create_project))
         .route(
@@ -831,6 +842,18 @@ pub async fn serve_full(
         .route(
             "/api/projects/:pid/brakes/:brake/hold",
             post(brake_hold_ep).delete(brake_hold_clear_ep),
+        )
+        .route(
+            "/api/projects/:pid/approval-policy",
+            get(approval_policy_ep),
+        )
+        .route(
+            "/api/projects/:pid/approval-policy/ask-again",
+            post(approval_policy_ask_again_ep),
+        )
+        .route(
+            "/api/projects/:pid/approval-policy/release",
+            post(approval_policy_release_ep),
         )
         .route("/api/projects/:pid/sprint/goal", post(set_sprint_goal_ep))
         .route("/api/projects/:pid/sprint/close", post(sprint_close_ep))
@@ -1314,16 +1337,44 @@ fn internal_error(msg: &str) -> axum::response::Response {
         .into_response()
 }
 
+/// An expected client conflict (CXA-B129): the same JSON error shape as
+/// [`internal_error`], but 409 so a client can react instead of retry-blind
+/// against what looks like a server fault.
+fn conflict_error(msg: &str) -> axum::response::Response {
+    (
+        axum::http::StatusCode::CONFLICT,
+        Json(serde_json::json!({ "error": msg })),
+    )
+        .into_response()
+}
+
+/// Invalid client input (CXA-B138, CXA-B139): the same JSON error shape, but
+/// 400 so the client learns the request itself was bad — retrying can never
+/// succeed.
+fn bad_request_error(msg: &str) -> axum::response::Response {
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": msg })),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod alerts_tests;
+#[cfg(test)]
+mod approval_policy_tests;
 #[cfg(test)]
 mod avatar_media_security_tests;
 #[cfg(test)]
 mod cors_rate_limit_tests;
 #[cfg(test)]
+mod delete_project_tests;
+#[cfg(test)]
 mod pr_preview_tests;
 #[cfg(test)]
 mod pr_review_gate_tests;
+#[cfg(test)]
+mod project_create_tests;
 #[cfg(test)]
 mod repro_url_tests;
 #[cfg(test)]

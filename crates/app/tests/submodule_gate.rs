@@ -259,7 +259,11 @@ fn entry(mode: &str, path: &str) -> Entry {
 #[test]
 fn the_ticket_a_stray_mergetest_gitlink_is_caught() {
     let findings = scan(&[entry("160000", "mergetest")], &BTreeSet::new());
-    assert_eq!(findings.len(), 1, "expected exactly one finding: {findings:?}");
+    assert_eq!(
+        findings.len(),
+        1,
+        "expected exactly one finding: {findings:?}"
+    );
     assert_eq!(findings[0].path, "mergetest");
 }
 
@@ -267,20 +271,29 @@ fn the_ticket_a_stray_mergetest_gitlink_is_caught() {
 #[test]
 fn a_leaked_worktree_gitlink_is_caught() {
     let findings = scan(
-        &[entry("160000", "e2e/.coxagent-worktrees/default-feedback-449c37b4")],
+        &[entry(
+            "160000",
+            "e2e/.coxagent-worktrees/default-feedback-449c37b4",
+        )],
         &BTreeSet::new(),
     );
-    assert_eq!(findings.len(), 1, "expected exactly one finding: {findings:?}");
+    assert_eq!(
+        findings.len(),
+        1,
+        "expected exactly one finding: {findings:?}"
+    );
 }
 
 /// A declared submodule is the legitimate shape and passes untouched.
 #[test]
 fn a_declared_submodule_passes() {
-    let declared = parse_gitmodules(
-        "[submodule \"vendor/lib\"]\n\tpath = vendor/lib\n\turl = ../lib\n",
-    );
+    let declared =
+        parse_gitmodules("[submodule \"vendor/lib\"]\n\tpath = vendor/lib\n\turl = ../lib\n");
     let findings = scan(
-        &[entry("160000", "vendor/lib"), entry("100644", "vendor/lib/README")],
+        &[
+            entry("160000", "vendor/lib"),
+            entry("100644", "vendor/lib/README"),
+        ],
         &declared,
     );
     assert_eq!(findings, vec![], "a mapped submodule is not debris");

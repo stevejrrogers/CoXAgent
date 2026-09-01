@@ -639,10 +639,7 @@ mod tests {
             ..ProjectState::default()
         };
         let rows = work_blockers(&state);
-        let reasons: Vec<_> = rows
-            .iter()
-            .map(|b| (b.id.as_str(), b.reason))
-            .collect();
+        let reasons: Vec<_> = rows.iter().map(|b| (b.id.as_str(), b.reason)).collect();
         assert_eq!(
             reasons,
             vec![("FEAT-1", BlockedReason::DependencyUnsatisfied)],
@@ -698,7 +695,9 @@ mod tests {
             vec!["FEAT-P", "FEAT-I"],
             "pending and in-progress work both surface, declared order: {named:?}"
         );
-        assert!(rows.iter().all(|b| b.reason == BlockedReason::OutOfDevScope));
+        assert!(rows
+            .iter()
+            .all(|b| b.reason == BlockedReason::OutOfDevScope));
     }
 
     // --- CXA-F030: the human burn mode and the burn-down scope ---

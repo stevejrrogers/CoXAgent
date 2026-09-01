@@ -153,6 +153,7 @@ impl crate::ports::outbound::DeployPort for SpyDeploy {
     ) -> Result<crate::ports::outbound::DeployReport, PortError> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "spy deployed".to_owned(),
@@ -768,6 +769,7 @@ impl crate::ports::outbound::DeployPort for ScriptedDeploy {
         self.deploy_calls.fetch_add(1, Ordering::SeqCst);
         let next = self.script.lock().expect("lock").pop_front();
         next.unwrap_or(Ok(crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "UNSCRIPTED EXTRA DEPLOY CALL".to_owned(),
@@ -778,6 +780,7 @@ impl crate::ports::outbound::DeployPort for ScriptedDeploy {
         _work_dir: &std::path::Path,
     ) -> Result<crate::ports::outbound::DeployReport, PortError> {
         Ok(crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "tests ok".to_owned(),
@@ -946,11 +949,13 @@ fn deploy_bug_tickets(state: &ProjectState) -> Vec<&coxagent_domain::Ticket> {
 async fn deploy_failure_auto_rolls_back_to_last_known_good() {
     let deploy = Arc::new(ScriptedDeploy::new(vec![
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: false,
             deployed: true,
             summary: "deploy failed: container exited 1".to_owned(),
         },
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "rollback redeploy ok".to_owned(),
@@ -1000,11 +1005,13 @@ async fn deploy_failure_auto_rolls_back_to_last_known_good() {
 async fn rollback_is_logged_and_notified_distinctly_from_a_normal_deploy() {
     let deploy = Arc::new(ScriptedDeploy::new(vec![
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: false,
             deployed: true,
             summary: "deploy failed: container exited 1".to_owned(),
         },
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "rollback redeploy ok".to_owned(),
@@ -1047,11 +1054,13 @@ async fn rollback_is_logged_and_notified_distinctly_from_a_normal_deploy() {
 async fn triggering_failure_still_files_exactly_one_deduped_high_bug() {
     let deploy = Arc::new(ScriptedDeploy::new(vec![
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: false,
             deployed: true,
             summary: "deploy failed: container exited 1".to_owned(),
         },
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "rollback redeploy ok".to_owned(),
@@ -1076,6 +1085,7 @@ async fn triggering_failure_still_files_exactly_one_deduped_high_bug() {
 async fn no_rollback_without_a_prior_successful_deploy() {
     let deploy = Arc::new(ScriptedDeploy::new(vec![
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: false,
             deployed: true,
             summary: "deploy failed: container exited 1".to_owned(),
@@ -1114,11 +1124,13 @@ async fn no_rollback_without_a_prior_successful_deploy() {
 async fn rollback_failure_stops_after_one_retry_and_escalates() {
     let deploy = Arc::new(ScriptedDeploy::new(vec![
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: false,
             deployed: true,
             summary: "deploy failed: container exited 1".to_owned(),
         },
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: false,
             deployed: true,
             summary: "rollback redeploy ALSO failed".to_owned(),
@@ -1164,6 +1176,7 @@ impl crate::ports::outbound::DeployPort for DeployWithDeadPort {
     ) -> Result<crate::ports::outbound::DeployReport, PortError> {
         self.deploy_calls.fetch_add(1, Ordering::SeqCst);
         Ok(crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "docker compose up -d --build succeeded".to_owned(),
@@ -1174,6 +1187,7 @@ impl crate::ports::outbound::DeployPort for DeployWithDeadPort {
         _work_dir: &std::path::Path,
     ) -> Result<crate::ports::outbound::DeployReport, PortError> {
         Ok(crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "tests ok".to_owned(),
@@ -1309,6 +1323,7 @@ async fn a_deploy_spawn_error_rolls_back_to_the_last_known_good_deploy() {
     let deploy = Arc::new(ScriptedDeploy::scripted(vec![
         Err(PortError::Backend("docker compose timed out".to_owned())),
         Ok(crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "rollback redeploy ok".to_owned(),
@@ -1352,6 +1367,117 @@ async fn a_deploy_spawn_error_rolls_back_to_the_last_known_good_deploy() {
     );
 }
 
+/// CXA-F289 AC1: a failed deploy persists the adapter's forensics bundle on
+/// THAT attempt's record — not just the one-line summary. The bundle travels
+/// `DeployReport` (adapter) → `record_deploy` (application) → `DeployStatus`
+/// (persisted state) without being reduced on the way.
+#[tokio::test]
+async fn a_failed_deploy_persists_the_adapters_forensics_bundle_on_its_record() {
+    let bundle = crate::state::DeployFailureBundle::new(
+        "validating docker-compose.yml: service \"web\" has neither an image nor a build \
+         context specified",
+        vec![crate::state::ContainerLogTail {
+            service: "db".to_owned(),
+            tail: "pg_ctl: could not start server".to_owned(),
+        }],
+        false,
+    );
+    let deploy = Arc::new(ScriptedDeploy::scripted(vec![Ok(
+        crate::ports::outbound::DeployReport {
+            failure_bundle: Some(bundle),
+            success: false,
+            deployed: true,
+            summary: "docker compose failed: exit 1".to_owned(),
+        },
+    )]));
+    let store = Arc::new(MemStore::default());
+    let mut cfg = Config::default();
+    cfg.deploy.host_port = Some(8101);
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(RoleAwareEngine),
+        cfg,
+        PathBuf::from("/tmp/proj"),
+        "goal".to_owned(),
+    )
+    .with_deploy(Arc::clone(&deploy) as Arc<dyn crate::ports::outbound::DeployPort>);
+
+    Box::pin(uc.run_cycle(1)).await;
+
+    let state = store.load().await.expect("load");
+    let record = state.deploy.as_ref().expect("the failed attempt recorded");
+    assert!(!record.ok);
+    let persisted = record
+        .failure_bundle
+        .as_ref()
+        .expect("the forensics bundle must persist on the attempt's record");
+    assert!(
+        persisted
+            .stderr_tail
+            .contains("neither an image nor a build context"),
+        "the compose stderr tail rides the record: {persisted:?}"
+    );
+    assert_eq!(
+        persisted.container_logs.first().map(|c| c.service.as_str()),
+        Some("db"),
+        "per-container logs are attributed to their service: {persisted:?}"
+    );
+}
+
+/// CXA-F289 edge case: a failed deploy whose rollback ALSO fails keeps BOTH
+/// bundles as separate attempt records — the forward attempt's bundle on
+/// `state.deploy`, the failed rollback redeploy's own bundle on
+/// `state.last_rollback` — and neither overwrites the other.
+#[tokio::test]
+async fn a_failed_rollback_keeps_both_failure_bundles_as_separate_attempt_records() {
+    let forward = crate::state::DeployFailureBundle::new(
+        "docker compose failed: forward attempt broke",
+        Vec::new(),
+        true,
+    );
+    let rollback = crate::state::DeployFailureBundle::new(
+        "docker compose failed: rollback redeploy broke too",
+        Vec::new(),
+        true,
+    );
+    let deploy = Arc::new(ScriptedDeploy::scripted(vec![
+        Ok(crate::ports::outbound::DeployReport {
+            failure_bundle: Some(forward),
+            success: false,
+            deployed: true,
+            summary: "docker compose failed: forward".to_owned(),
+        }),
+        Ok(crate::ports::outbound::DeployReport {
+            failure_bundle: Some(rollback),
+            success: false,
+            deployed: true,
+            summary: "docker compose failed: rollback".to_owned(),
+        }),
+    ]));
+    let notifier = Arc::new(SpyNotifier::default());
+    let (store, _git, uc) = rollback_uc(true, &deploy, &notifier);
+
+    Box::pin(uc.run_cycle(1)).await;
+    let state = store.load().await.expect("load");
+
+    let deploy_record = state.deploy.as_ref().expect("failed deploy recorded");
+    assert!(
+        deploy_record
+            .failure_bundle
+            .as_ref()
+            .is_some_and(|b| b.stderr_tail.contains("forward attempt broke")),
+        "the forward attempt keeps ITS bundle on the deploy record: {deploy_record:?}"
+    );
+    let rb = state.last_rollback.as_ref().expect("rollback recorded");
+    assert!(!rb.ok, "the rollback itself failed");
+    assert!(
+        rb.failure_bundle
+            .as_ref()
+            .is_some_and(|b| b.stderr_tail.contains("rollback redeploy broke too")),
+        "the failed rollback record carries its OWN bundle: {rb:?}"
+    );
+}
+
 // --- CXA-F240: live-health auto-rollback after merge -------------------
 //
 // The deploy that shipped the code passed CI and its own post-deploy health
@@ -1389,6 +1515,7 @@ fn live_health_uc(
         summary: "live deploy".to_owned(),
         commit_sha: Some(HEAD_SHA.to_owned()),
         health_check: None,
+        failure_bundle: None,
     });
     initial.last_good_deploy = Some(crate::state::KnownGoodDeploy {
         sha: GOOD_SHA.to_owned(),
@@ -1440,6 +1567,7 @@ fn ops_down_tickets(state: &ProjectState) -> usize {
 async fn live_app_down_for_n_consecutive_checks_rolls_back_to_last_known_good() {
     let deploy = Arc::new(
         ScriptedDeploy::new(vec![crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "rollback redeploy ok".to_owned(),
@@ -1612,6 +1740,7 @@ async fn a_migration_since_capture_blocks_the_live_health_revert_and_asks_the_op
 async fn the_live_health_opt_in_does_not_enable_the_deploy_failure_rollback() {
     let deploy = Arc::new(ScriptedDeploy::new(vec![
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "rollback redeploy ok".to_owned(),
@@ -1699,6 +1828,7 @@ async fn a_live_health_revert_never_targets_a_stale_known_good() {
 async fn every_healthy_deploy_becomes_the_known_good_rollback_target() {
     let deploy = Arc::new(ScriptedDeploy::new(vec![
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "docker compose up -d --build succeeded".to_owned(),
@@ -1749,6 +1879,7 @@ impl crate::ports::outbound::DeployPort for HealthOnSecondDeployOnly {
         self.deploy_calls.fetch_add(1, Ordering::SeqCst);
         let next = self.deploy_script.lock().expect("lock").pop_front();
         Ok(next.unwrap_or(crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "UNSCRIPTED EXTRA DEPLOY CALL".to_owned(),
@@ -1759,6 +1890,7 @@ impl crate::ports::outbound::DeployPort for HealthOnSecondDeployOnly {
         _work_dir: &std::path::Path,
     ) -> Result<crate::ports::outbound::DeployReport, PortError> {
         Ok(crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "tests ok".to_owned(),
@@ -1777,11 +1909,13 @@ impl crate::ports::outbound::DeployPort for HealthOnSecondDeployOnly {
 async fn health_check_failure_triggers_rollback_like_any_other_deploy_failure() {
     let deploy = Arc::new(HealthOnSecondDeployOnly::new(vec![
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "docker compose up -d --build succeeded".to_owned(),
         },
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "rollback redeploy ok".to_owned(),
@@ -1872,6 +2006,7 @@ impl crate::ports::outbound::DeployPort for ScriptedHealthCheckDeploy {
     ) -> Result<crate::ports::outbound::DeployReport, PortError> {
         self.deploy_calls.fetch_add(1, Ordering::SeqCst);
         Ok(crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "docker compose up -d --build succeeded".to_owned(),
@@ -1882,6 +2017,7 @@ impl crate::ports::outbound::DeployPort for ScriptedHealthCheckDeploy {
         _work_dir: &std::path::Path,
     ) -> Result<crate::ports::outbound::DeployReport, PortError> {
         Ok(crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "tests ok".to_owned(),
@@ -2919,11 +3055,13 @@ fn prevention_tickets(state: &ProjectState) -> Vec<String> {
 async fn successful_rollback_produces_a_post_mortem_in_the_incidents_channel() {
     let deploy = Arc::new(ScriptedDeploy::new(vec![
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: false,
             deployed: true,
             summary: "deploy failed: container exited 1".to_owned(),
         },
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "rollback redeploy ok".to_owned(),
@@ -2960,11 +3098,13 @@ async fn successful_rollback_produces_a_post_mortem_in_the_incidents_channel() {
 async fn rollbacks_post_mortems_target_the_incidents_channel_and_notify_distinctly() {
     let deploy = Arc::new(ScriptedDeploy::new(vec![
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: false,
             deployed: true,
             summary: "deploy failed: container exited 1".to_owned(),
         },
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "rollback redeploy ok".to_owned(),
@@ -3014,5 +3154,74 @@ async fn merge_sweep_never_merges_a_human_held_pr() {
             .any(|(n, r)| *n == 7 && r.contains("human hold")),
         "the held PR is reported as skipped with its hold reason: {:?}",
         out.skipped
+    );
+}
+
+// --- CXA-C016: pin the re-enabled force-merge control plane (drain_jobs →
+// force_merge_job) — the machinery the human "force-merge" button drives. ---
+
+/// Queue a force_merge job for PR #7 the way the API does, then drain it.
+async fn queue_and_drain_force_merge(
+    uc: &RunCycleUseCase<MemStore, impl AgentEnginePort>,
+    store: &MemStore,
+) {
+    let _ = crate::ports::outbound::mutate_state(store, |s| {
+        s.jobs.push(crate::state::PendingJob {
+            id: crate::state::mint_id(),
+            kind: "force_merge".to_owned(),
+            args: serde_json::json!({ "pr": 7 }),
+            queued_at: crate::state::now_rfc3339(),
+            queued_by: "human".to_owned(),
+        });
+        Ok(())
+    })
+    .await;
+    uc.drain_jobs().await;
+}
+
+/// A human force-merges an UNCONFLICTED PR: the runner skips the
+/// conflict-resolution leg entirely and the merge lands.
+#[tokio::test]
+async fn force_merge_of_a_mergeable_pr_skips_resolution_and_merges() {
+    let forge = Arc::new(SpyForge {
+        mergeable: true,
+        ..SpyForge::default()
+    });
+    let store = Arc::new(MemStore::default());
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(ReviewEngine {
+            decision: "approve",
+        }),
+        Config::default(),
+        PathBuf::from("/tmp"),
+        "goal".to_owned(),
+    )
+    .with_forge(Arc::clone(&forge) as Arc<dyn ForgePort>);
+    queue_and_drain_force_merge(&uc, store.as_ref()).await;
+    assert_eq!(*forge.merged.lock().expect("lock"), vec![7]);
+}
+
+/// A human force-merges a CONFLICTED PR but the runner's agent fails to
+/// resolve it: the hard gate holds — no merge is ever attempted.
+#[tokio::test]
+async fn force_merge_of_a_conflicted_pr_whose_resolution_fails_never_merges() {
+    let forge = Arc::new(SpyForge {
+        mergeable: false,
+        ..SpyForge::default()
+    });
+    let store = Arc::new(MemStore::default());
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(FailEngine),
+        Config::default(),
+        PathBuf::from("/tmp"),
+        "goal".to_owned(),
+    )
+    .with_forge(Arc::clone(&forge) as Arc<dyn ForgePort>);
+    queue_and_drain_force_merge(&uc, store.as_ref()).await;
+    assert!(
+        forge.merged.lock().expect("lock").is_empty(),
+        "a conflicted PR whose resolution failed must not be merged"
     );
 }

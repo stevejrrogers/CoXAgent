@@ -223,7 +223,11 @@ mod tz_serde {
         } else {
             ('+', minutes)
         };
-        serializer.collect_str(&format_args!("{sign}{:02}:{:02}", minutes / 60, minutes % 60))
+        serializer.collect_str(&format_args!(
+            "{sign}{:02}:{:02}",
+            minutes / 60,
+            minutes % 60
+        ))
     }
 
     pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
@@ -385,7 +389,10 @@ mod tests {
         tz: UtcOffset,
         windows: Vec<WorkingWindow>,
     ) -> OperatorWorkingHours {
-        OperatorWorkingHours { tz_offset: tz, windows }
+        OperatorWorkingHours {
+            tz_offset: tz,
+            windows,
+        }
     }
 
     fn local_weekday_and_minutes(
@@ -393,7 +400,10 @@ mod tests {
         now: OffsetDateTime,
     ) -> (Weekday, u32) {
         let local = now.to_offset(decl.tz_offset);
-        (local.weekday(), u32::from(local.hour()) * 60 + u32::from(local.minute()))
+        (
+            local.weekday(),
+            u32::from(local.hour()) * 60 + u32::from(local.minute()),
+        )
     }
 
     // --- AC2: the actionable truth table over real timestamps --------------
@@ -452,13 +462,17 @@ mod tests {
             winter,
             vec![serde_json::from_value(json!({
                 "weekday": "sunday", "start": "02:00", "end": "04:00"
-            })).expect("valid window")],
+            }))
+            .expect("valid window")],
         );
         let window = &decl.windows[0];
         for candidate in [winter, summer] {
             let (weekday, minutes) = {
                 let local = spring.to_offset(candidate);
-                (local.weekday(), u32::from(local.hour()) * 60 + u32::from(local.minute()))
+                (
+                    local.weekday(),
+                    u32::from(local.hour()) * 60 + u32::from(local.minute()),
+                )
             };
             assert_eq!(weekday, Weekday::Sunday);
             assert!(
@@ -490,7 +504,8 @@ mod tests {
             winter,
             vec![serde_json::from_value(json!({
                 "weekday": "sunday", "start": "02:00", "end": "04:00"
-            })).expect("valid window")],
+            }))
+            .expect("valid window")],
         );
         assert_eq!(resolve_windows(&decl, fall, &[summer, winter]).len(), 1);
     }
@@ -551,12 +566,10 @@ mod tests {
     fn a_missing_tz_offset_is_refused_not_defaulted_to_utc() {
         // The offset is the declaration's load-bearing axis — an absent one
         // must be a save error, never a silent "assume UTC".
-        assert!(
-            serde_json::from_value::<OperatorWorkingHours>(json!({
-                "windows": [{ "weekday": "monday", "start": "09:00", "end": "17:30" }]
-            }))
-            .is_err()
-        );
+        assert!(serde_json::from_value::<OperatorWorkingHours>(json!({
+            "windows": [{ "weekday": "monday", "start": "09:00", "end": "17:30" }]
+        }))
+        .is_err());
     }
 
     #[test]
@@ -564,9 +577,8 @@ mod tests {
         // `windows` may be omitted (#[serde(default)]): the operator declared
         // an offset but no working day — nothing is actionable, exactly as if
         // every weekday had been left undeclared.
-        let decl: OperatorWorkingHours =
-            serde_json::from_value(json!({ "tz_offset": "+02:00" }))
-                .expect("an offset with no windows is a valid, empty declaration");
+        let decl: OperatorWorkingHours = serde_json::from_value(json!({ "tz_offset": "+02:00" }))
+            .expect("an offset with no windows is a valid, empty declaration");
         assert!(decl.windows.is_empty());
         assert!(!is_actionable(&decl, datetime!(2026-08-24 07:30 UTC)));
     }

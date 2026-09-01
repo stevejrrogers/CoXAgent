@@ -102,6 +102,12 @@ pub(super) struct WorkspaceDoc {
     /// `releases_repo` is set (manual URLs act as overrides).
     #[serde(default)]
     pub(super) downloads: DownloadsCfg,
+    /// Hub-level daily soft ceiling for the fleet spend cockpit (CXA-F278),
+    /// in USD; `0` = uncapped. Additive with a serde default, so old
+    /// workspace docs deserialize unchanged and a DOWNGRADED hub (plain
+    /// `Deserialize`, no `deny_unknown_fields`) tolerates the extra key.
+    #[serde(default)]
+    pub(super) fleet_ceiling_usd: f64,
 }
 
 /// Per-platform download links + the release source of truth.

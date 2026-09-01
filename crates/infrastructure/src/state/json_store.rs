@@ -337,6 +337,34 @@ impl JsonStateStore {
         prune_backups(&dir, MAX_BACKUPS);
         Ok(())
     }
+
+    /// Blocking counterpart of [`JsonStateStore::delete`] — see that method.
+    fn delete_blocking(&self) -> Result<(), PortError> {
+        for path in [
+            self.state_path(),
+            self.coord_path(),
+            self.lock_path(),
+            self.root.join(BACKUP_DIR),
+        ] {
+            let removed = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            match removed {
+                Ok(()) => {}
+                // Already gone is the goal state (idempotent delete).
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(PortError::Backend(format!(
+                        "remove {}: {e}",
+                        path.display()
+                    )))
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -436,6 +464,18 @@ impl StateStorePort for JsonStateStore {
 
     async fn quarantined(&self) -> Vec<QuarantineEntry> {
         self.quarantine.recent()
+    }
+
+    /// Remove the persisted aggregate (`state.json`), its coordination file,
+    /// lock and rolling backups (CXA-B130): the desktop/JSON build's delete
+    /// must leave a store that behaves as never-written, or a recreated
+    /// project under the same id inherits the deleted team's state from disk.
+    /// Best-effort per file — a missing file is already the goal state.
+    async fn delete(&self) -> Result<(), PortError> {
+        let store = self.for_blocking();
+        tokio::task::spawn_blocking(move || store.delete_blocking())
+            .await
+            .map_err(|e| PortError::Backend(e.to_string()))?
     }
 }
 
@@ -539,5 +579,36 @@ mod coord_tests {
         // A different ticket's same stage is independent.
         let id2 = TicketId::new("CXC-F002").expect("id");
         assert!(s.claim_stage(&id2, "sa", "luffy@mac", now).await.unwrap());
+    }
+
+    /// CXA-B130: delete removes the persisted aggregate, coordination file and
+    /// backups, leaving a store that behaves as never-written — a project
+    /// recreated on the same state dir must not inherit the deleted team's
+    /// state from disk. Idempotent: deleting an already-deleted store is Ok.
+    #[tokio::test]
+    async fn delete_purges_state_coord_and_backups() {
+        let s = store();
+        let state = ProjectState::default();
+        s.save(&state).await.unwrap();
+        // A backup snapshot is taken on every OVERWRITE of an existing file.
+        s.save(&state).await.unwrap();
+        s.acquire_leader("chopper@mac", "2026-07-15T00:00:00Z")
+            .await
+            .unwrap();
+        assert!(s.state_path().exists(), "fixture: state file written");
+        assert!(s.coord_path().exists(), "fixture: coord file written");
+        assert!(
+            s.root.join(BACKUP_DIR).exists(),
+            "fixture: backup set written"
+        );
+
+        s.delete().await.unwrap();
+
+        assert_eq!(s.load().await.unwrap(), ProjectState::default());
+        assert!(!s.state_path().exists());
+        assert!(!s.coord_path().exists());
+        assert!(!s.root.join(BACKUP_DIR).exists());
+        // Idempotent.
+        s.delete().await.unwrap();
     }
 }

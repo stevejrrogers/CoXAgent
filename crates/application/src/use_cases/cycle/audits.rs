@@ -128,8 +128,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let cap = cfg.adaptive.max_auto_per_cycle();
         let learn_after = cfg.adaptive.learn_after_samples();
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
-            use crate::use_cases::approval_memory::{announce, rule_for, Rule};
-            use crate::use_cases::approval_risk::{assess, shape_key, Lane};
+            use crate::use_cases::approval_memory::{announce, rule_for};
+            use crate::use_cases::approval_risk::{assess, shape_key};
             use coxagent_domain::Status;
 
             // Prior art per shape: what already reached a good terminal state.
@@ -175,24 +175,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     parked.contains(&id.to_string()),
                 );
                 let learned = rule_for(&shape, &samples, learn_after);
-                let allow = match (&verdict.lane, &learned) {
-                    // Risk says routine; or risk says ask but this team
-                    // approves the shape every time — trust the humans over
-                    // the heuristic.
-                    (Lane::Auto, Rule::KeepAsking | Rule::AutoApprove { .. })
-                    | (Lane::Ask, Rule::AutoApprove { .. }) => true,
-                    // A shape rejected twice for the same reason waits for that
-                    // reason to be ADDRESSED — not forever. The rule used to
-                    // block the shape permanently: two rejections for "no
-                    // acceptance criteria" kept every later ticket of that
-                    // shape queued in front of a person even after the BA had
-                    // written the criteria. The pre-flight we actually run is
-                    // the acceptance criteria, so that is what re-opens it.
-                    (Lane::Auto, Rule::PreflightFix { .. }) => {
-                        !ticket.acceptance_criteria().is_empty()
-                    }
-                    _ => false,
-                };
+                // The one shared allow/deny decision (approval_policy.rs) —
+                // the policy panel reads the same function, so what it shows
+                // can never drift from what this loop does.
+                let allow = crate::use_cases::approval_policy::gate_allows(
+                    verdict.lane,
+                    &learned,
+                    !ticket.acceptance_criteria().is_empty(),
+                );
                 if !allow {
                     continue;
                 }

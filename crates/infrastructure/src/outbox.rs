@@ -187,7 +187,13 @@ impl OutboxStorePort for FileOutboxStore {
                         if claimed.len() >= batch as usize {
                             break;
                         }
-                        e.next_attempt_at = now + lease_ttl; // the in-flight lease
+                        // The in-flight lease. The clock is whole seconds, so
+                        // a plain `now + ttl` taken late in second X expires at
+                        // X+ttl.000 — up to a full second EARLY, re-claiming an
+                        // entry whose flusher is still mid-POST (at-least-once
+                        // duplicate). The +1 floors the effective lease at the
+                        // requested TTL: re-claim no earlier than ttl + 1ms.
+                        e.next_attempt_at = now + lease_ttl + 1;
                         claimed.push(e.clone());
                     }
                     claimed
@@ -367,9 +373,11 @@ mod tests {
             store.claim_due(10).await.is_empty(),
             "in flight: not re-claimed inside the lease"
         );
-        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
         // A flusher that died mid-POST loses only the lease — the entry
-        // resumes, at-least-once.
+        // resumes, at-least-once. The lease floors at the requested TTL
+        // (second-granularity clock: +1s ceiling), so sleep past its worst
+        // case before expecting the re-claim.
         assert_eq!(store.claim_due(10).await.len(), 1);
     }
 
