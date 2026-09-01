@@ -120,7 +120,8 @@ pub struct ContainerLogTail {
 /// be able to bloat it (bounded-state house rule).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeployFailureBundle {
-    /// Tail of the failed `docker compose` invocation's own output.
+    /// Tail of the failed `docker compose` invocation's own output — stderr,
+    /// falling back to stdout when stderr came back empty.
     pub stderr_tail: String,
     /// Recent per-container logs, when any container existed.
     #[serde(default)]
@@ -161,16 +162,35 @@ fn is_secret_key(key: &str) -> bool {
     .any(|needle| key.contains(needle))
 }
 
-/// CXA-F289 AC4: mask the VALUES of secret-shaped `KEY=value` assignments so
-/// a credential never persists or renders inside a forensics bundle. Pure —
-/// the adapter, the persist path and the dashboard renderer share this one
-/// rule instead of each re-deriving it.
+/// CXA-F289 AC4: mask the VALUES of secret-shaped `KEY=value` assignments —
+/// and YAML-style `KEY: value` dumps (e.g. `docker compose config` output
+/// echoed into a log) when the line carries no `=` — so a credential never
+/// persists or renders inside a forensics bundle. Only non-empty values are
+/// masked: an empty assignment is not a secret, and masking it would imply
+/// one existed. Lines that carry BOTH separators take the `=` reading (a
+/// timestamped `… PG_PASSWORD=x` assignment is the dominant leak shape).
+/// Pure — the adapter, the persist path and the dashboard renderer share
+/// this one rule instead of each re-deriving it.
 #[must_use]
 pub fn redact_secret_shaped(text: &str) -> String {
     text.lines()
-        .map(|line| match line.find('=') {
-            Some(eq) if is_secret_key(&line[..eq]) => format!("{}=***", &line[..eq]),
-            _ => line.to_owned(),
+        .map(|line| {
+            let (key, at) = match line.find('=') {
+                Some(eq) => (&line[..eq], eq),
+                None => match line.find(':') {
+                    Some(colon) => (&line[..colon], colon),
+                    None => return line.to_owned(),
+                },
+            };
+            let value = line[at + 1..].trim().trim_matches(['"', '\'']);
+            if value.is_empty() || !is_secret_key(key) {
+                return line.to_owned();
+            }
+            if line.as_bytes()[at] == b':' {
+                format!("{key}: ***")
+            } else {
+                format!("{key}=***")
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -413,12 +433,36 @@ mod failure_bundle_tests {
     }
 
     #[test]
+    fn yaml_colon_dumps_and_timestamped_assignments_are_masked_too() {
+        // `docker compose config` output echoed into a log: YAML colon form.
+        assert_eq!(
+            redact_secret_shaped("POSTGRES_PASSWORD: hunter2"),
+            "POSTGRES_PASSWORD: ***",
+            "the colon form compose config prints is masked when the line has no `=`"
+        );
+        // A timestamped assignment: the `=` reading must win over the colon
+        // in the RFC3339 prefix, or the secret would survive.
+        assert_eq!(
+            redact_secret_shaped("2026-09-01T10:00:00Z PG_PASSWORD=hunter2"),
+            "2026-09-01T10:00:00Z PG_PASSWORD=***",
+        );
+    }
+
+    #[test]
+    fn empty_values_and_quoted_empties_are_not_masked_into_existence() {
+        assert_eq!(
+            redact_secret_shaped("PG_PASSWORD=\nPG_PASSWORD=\"\"\nTOKEN=   "),
+            "PG_PASSWORD=\nPG_PASSWORD=\"\"\nTOKEN=   ",
+            "an empty assignment is not a secret — masking it would imply one existed"
+        );
+    }
+
+    #[test]
     fn masking_runs_before_capping_so_a_cut_never_exposes_a_secret() {
         // A 10 MiB single secret line: the cap must cut the MASKED text, and
         // no slice of the raw value may survive anywhere in the bundle.
         let value = "z".repeat(10 * 1024 * 1024);
-        let bundle =
-            DeployFailureBundle::new(&format!("PG_PASSWORD={value}"), Vec::new(), true);
+        let bundle = DeployFailureBundle::new(&format!("PG_PASSWORD={value}"), Vec::new(), true);
         assert!(
             !bundle.stderr_tail.contains('z'),
             "the raw secret value must not survive masking + capping"
@@ -440,6 +484,17 @@ mod failure_bundle_tests {
         assert!(
             size <= MAX_FAILURE_BUNDLE_BYTES,
             "a chatty build must not bloat the persisted state: {size} > {MAX_FAILURE_BUNDLE_BYTES}"
+        );
+        assert!(
+            (1..40).contains(&bundle.container_logs.len()),
+            "overflowing container tails drop the OLDEST logs until the bundle fits, \
+             but the newest survive: {} remain",
+            bundle.container_logs.len()
+        );
+        assert!(
+            bundle.stderr_tail.contains("build line"),
+            "the stderr tail survives the cap: {:?}",
+            bundle.stderr_tail
         );
         assert!(
             !bundle.no_container_logs,

@@ -598,10 +598,14 @@ function renderSidebar(s){
   document.title="CoXAgent · "+(document.getElementById("proj-name").textContent||"");}
 // CXA-F289 — deploy failure forensics. The persisted bundle is already masked
 // at capture; this masks AGAIN before render/copy (defence in depth: state may
-// carry a legacy unmasked bundle). Same secret-shaped rule as the Rust side.
-function maskSecrets(t){return (t||"").split("\n").map(l=>{const i=l.indexOf("=");
-  if(i<0)return l;const k=l.slice(0,i);
-  return /password|passwd|pwd|secret|token|api_key|apikey|credential|private_key/i.test(k)?k+"=***":l;}).join("\n");}
+// carry a legacy unmasked bundle). Same secret-shaped rule as the Rust side:
+// KEY=value (or KEY: value when the line has no `=`), non-empty values only.
+function maskSecrets(t){return (t||"").split("\n").map(l=>{
+  const eq=l.indexOf("="),i=eq>=0?eq:l.indexOf(":");
+  if(i<0)return l;
+  const v=l.slice(i+1).trim().replace(/^["']+|["']+$/g,"");
+  if(!v||!/password|passwd|pwd|secret|token|api_key|apikey|credential|private_key/i.test(l.slice(0,i)))return l;
+  return l.slice(0,i)+(l[i]===":"?": ":"=")+"***";}).join("\n");}
 // The full masked bundle text behind the Copy affordance — set on every render
 // of the forensics section so the clipboard always carries the WHOLE bundle.
 let _fbText="";

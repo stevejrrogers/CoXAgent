@@ -212,10 +212,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if failed_sha.as_deref() == Some(good.sha.as_str()) {
             return;
         }
-        // CXA-F289: the failed attempt's forensics triggered this rollback.
-        // A SUCCESSFUL rollback overwrites the deploy record below, so the
-        // bundle must ride the rollback record to stay visible.
-        let trigger_bundle = state.deploy.as_ref().and_then(|d| d.failure_bundle.clone());
 
         let too_old = match seconds_since(&good.at) {
             Some(age) => age > self.config.deploy.max_rollback_age_secs,
@@ -259,6 +255,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // and if it also fails, stop here and escalate rather than loop.
         // `own_bundle` (CXA-F289) is the rollback redeploy's own forensics
         // when IT failed at the compose level.
+        // CXA-F289: the failed attempt's forensics triggered this rollback.
+        // A SUCCESSFUL rollback overwrites the deploy record below, so the
+        // bundle must ride the rollback record to stay visible.
+        let trigger_bundle = state.deploy.as_ref().and_then(|d| d.failure_bundle.clone());
         let path = self.rollback_worktree_path();
         let _ = git.worktree_remove(&self.work_dir, &path).await;
         let (ok, summary, own_bundle) =
