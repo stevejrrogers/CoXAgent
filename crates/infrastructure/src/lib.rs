@@ -6,9 +6,10 @@
 
 pub mod audit_sink;
 pub mod auth;
+pub mod backup_archive;
 pub mod cleanup;
-pub mod deps_discovery;
 pub mod deploy;
+pub mod deps_discovery;
 pub mod docs_store;
 pub mod engine;
 pub mod forge;
@@ -28,9 +29,10 @@ pub mod workspace_files;
 
 pub use audit_sink::{MemoryAuditSink, SqlAuditSink};
 pub use auth::FileAuthService;
+pub use backup_archive::JsonHubArchive;
 pub use cleanup::OsProcessJanitor;
-pub use deps_discovery::FsLockfileDiscovery;
 pub use deploy::DockerComposeDeploy;
+pub use deps_discovery::FsLockfileDiscovery;
 pub use docs_store::MongoDocStore;
 pub use engine::{
     discover, discover_opencode_models, discover_tooling, AnyEngine, ClaudeEngine, DetectedEngine,

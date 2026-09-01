@@ -117,6 +117,7 @@
       <a data-v="mg-spaces" onclick="nav('mg-spaces')"><i class="ti ti-building-community"></i> Spaces</a>
       <a data-v="mg-users" onclick="nav('mg-users')"><i class="ti ti-users"></i> Users</a>
       <a data-v="mg-usage" onclick="nav('mg-usage')"><i class="ti ti-chart-bar"></i> Usage</a>
+      <a data-v="mg-fleet" onclick="nav('mg-fleet')"><i class="ti ti-report-money"></i> Fleet spend</a>
       <a data-v="mg-audit" onclick="nav('mg-audit')"><i class="ti ti-shield-search"></i> Audit</a>
     </nav>
     <div id="user-badge" class="userbox">
@@ -158,7 +159,7 @@
         <button class="rp-ctl" id="ctl-step" onclick="ctl('step')" title="Step one cycle"><i class="ti ti-player-track-next"></i></button>
       </div>
       <div class="tb-div"></div>
-      <button class="iconbtn" onclick="openCmdk()" title="Search &amp; jump — ⌘K"><i class="ti ti-search"></i></button>
+      <button class="iconbtn" onclick="openCmdk()" title="Search &amp; jump — ⌘/"><i class="ti ti-search"></i></button>
       <span class="iconbtn viewers-pill" id="viewers-chip" title="distinct users viewing" style="display:none"><i class="ti ti-eye"></i> <span id="viewers-n">1</span></span>
       <div class="tb-div"></div>
       <div style="position:relative;display:flex;align-items:center">
@@ -176,6 +177,7 @@
       <div class="view" id="view-mg-space"><div id="mg-space-body"></div></div>
       <div class="view" id="view-mg-users"><div id="mg-people-body"></div></div>
       <div class="view" id="view-mg-usage"><div id="mg-usage-body"></div></div>
+      <div class="view" id="view-mg-fleet"><div id="mg-fleet-body"></div></div>
       <div class="view" id="view-mg-audit"><div id="mg-audit-body"></div></div>
       <div class="view" id="view-home">
         <div id="ws-hero"></div>
@@ -200,6 +202,7 @@
         <div id="ov-preflight"></div>
         <div id="ov-goal"></div>
         <div class="kpis" id="kpis"></div>
+        <div id="ov-velocity"></div>
         <div id="ov-health"></div>
         <div id="ov-cycle-perf"></div>
         <div id="ov-attention"></div>
@@ -213,6 +216,7 @@
       </div>
       <div class="view" id="view-team">
         <div class="kpis" id="team-summary"></div>
+        <div id="team-liveness"></div>
         <div id="team-online"></div>
         <div id="team-dupwarn"></div>
         <div id="team-sessions"></div>
@@ -261,7 +265,7 @@
         <div class="sec" style="margin-top:10px">Recent actions</div>
         <div id="agent-acts" class="panel" style="max-height:16vh;overflow:auto"></div>
         <div class="sec" style="margin-top:12px;display:flex;align-items:center;gap:8px">Work log <span id="agent-live-badge" style="font-size:10px;font-weight:700;padding:1px 7px;border-radius:5px;background:color-mix(in srgb,var(--green) 22%,transparent);color:var(--green);display:none">● LIVE</span> <span id="agent-err-badge" style="font-size:10px;font-weight:700;padding:1px 7px;border-radius:5px;background:color-mix(in srgb,var(--red) 22%,transparent);color:var(--red);display:none"></span> <span style="font-size:11px;color:var(--dim);font-weight:400">· what the agent is doing, step by step</span></div>
-        <div id="agent-transcript" class="worklog"><div class="wl-empty"><i class="ti ti-loader-2"></i> loading…</div></div>
+        <div id="agent-transcript" class="worklog"><div class="wl-empty"><i class="ti ti-moon-stars"></i> this agent hasn't run yet</div></div>
       </div></div>
       <div class="ov" id="ov-transcript" onclick="if(event.target===this)close_('ov-transcript')"><div class="modal" style="max-width:760px">
         <span class="x" onclick="close_('ov-transcript')"><i class="ti ti-x"></i></span>
@@ -418,6 +422,8 @@
         <div class="sec">Cost by agent</div><div class="panel" id="cost-roles"></div>
         <div class="sec">Cost by user <span style="font-size:11px;color:var(--dim);font-weight:400">· token spend per operator (account@host)</span></div><div class="panel" id="cost-operators"></div>
         <div class="sec">Budget</div><div class="panel" id="cost-budget"></div>
+        <div class="sec">Daily spend <span style="font-size:11px;color:var(--dim);font-weight:400">&middot; closed UTC days + today</span></div><div class="panel" id="cost-trend"></div>
+        <div class="sec">Engine reliability <span style="font-size:11px;color:var(--dim);font-weight:400">&middot; errors &amp; timeouts per role, from role_health</span></div><div class="panel" id="cost-engines"></div>
         <div class="sec">Token-saver <span style="font-size:11px;color:var(--dim);font-weight:400">· rtk-style compression on tool output before agents read it</span></div>
         <div class="panel" id="cost-tokensaver"></div></div>
       <div class="view" id="view-settings"><div id="settings-body"></div></div>
@@ -674,11 +680,12 @@
       <div class="pfpane" id="chset-body"></div>
     </div>
   </div></div>
-  <!-- Chat search: channels, people and messages in one palette. -->
+  <!-- Global search (CXA-F275): tickets, wiki and chat in one palette. -->
   <div class="ov" id="ov-chatsearch" onclick="if(event.target===this)closeChatSearch()"><div class="modal" style="max-width:620px;padding:0;overflow:hidden">
     <div class="cmdk-inp" style="border-radius:0"><i class="ti ti-search"></i>
-      <input id="chatsearch-input" placeholder="Search channels, people, messages, tickets, pages…" autocomplete="off"
+      <input id="chatsearch-input" placeholder="Search tickets, wiki, chat, people…" autocomplete="off"
         oninput="chatSearchRun()" onkeydown="if(event.key==='Escape')closeChatSearch()"><kbd>esc</kbd></div>
+    <div class="cs-chips" id="cs-chips"></div>
     <div class="cmdk-list" id="chatsearch-list" style="max-height:60vh"></div>
   </div></div>
   <div class="toasts" id="toasts"></div>
@@ -787,6 +794,7 @@
 <script src="/assets/js/manage.js"></script>
 <script src="/assets/js/home.js"></script>
 <script src="/assets/js/chat.js"></script>
+<script src="/assets/js/search.js"></script>
 <script src="/assets/js/mcp.js"></script>
 <script src="/assets/js/docs.js"></script>
 <script src="/assets/js/inbox.js"></script>

@@ -182,10 +182,9 @@ pub(super) async fn ticket_detail_ep(
                         // (AC3). Pure derivation over the same loaded snapshot.
                         obj.insert(
                             "blocked_by".into(),
-                            serde_json::to_value(coxagent_application::dependency_radar::blocked_by(
-                                &state,
-                                t.id(),
-                            ))
+                            serde_json::to_value(
+                                coxagent_application::dependency_radar::blocked_by(&state, t.id()),
+                            )
                             .unwrap_or_default(),
                         );
                         let unknown_pairs =
@@ -1295,6 +1294,55 @@ pub(super) struct RejectReq {
 /// The reproduce-link gate (CXA-F244) is a business rule, not a formatting
 /// detail — pinned here as behaviour over the real domain type, the same way
 /// `server/openapi.rs` tests its document builder in-crate.
+/// POST `/api/projects/:pid/milestone-complete/:name` — a person (or PO-role
+/// account) declares a milestone's scope done. The stepper shows "reached"
+/// from the version alone, but the release pipeline waits on this explicit
+/// call — which used to require editing state by hand; the PO daily kept
+/// flagging the same two drifted milestones with no button to act on.
+pub(super) async fn milestone_complete_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path((pid, name)): Path<(String, String)>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Some(_me) = super::inbox::gate_principal(
+        &app,
+        &headers,
+        coxagent_application::AuthRole::can_approve_ready,
+    )
+    .await
+    else {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "your role may not take this decision",
+        )
+            .into_response();
+    };
+    let mut hit = false;
+    let res = coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        if let Some(m) = s.milestones.iter_mut().find(|m| m.name == name) {
+            if !m.goal_complete {
+                m.goal_complete = true;
+                s.log_activity(
+                    "PO",
+                    &format!("milestone '{name}' marked complete by a person"),
+                    None,
+                );
+            }
+            hit = true;
+        }
+        Ok(())
+    })
+    .await;
+    match res {
+        Ok(()) if hit => Json(serde_json::json!({ "ok": true })).into_response(),
+        Ok(()) => (axum::http::StatusCode::NOT_FOUND, "no such milestone").into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod repro_link_gate_tests {
     use super::detail_awaits_verification;

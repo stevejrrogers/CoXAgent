@@ -28,8 +28,8 @@
 
 use async_trait::async_trait;
 use coxagent_application::config::{Config, GitConfig};
-use coxagent_application::metrics::{agent_evals, compute_burndown, decide_tuning};
 use coxagent_application::metrics::BURNDOWN_WINDOW_DAYS;
+use coxagent_application::metrics::{agent_evals, compute_burndown, decide_tuning};
 use coxagent_application::ports::outbound::{
     AgentEnginePort, AgentOutcome, AgentRequest, GitAuthor, GitPort, SandboxStatus, StateStorePort,
     SyncBase,
@@ -235,8 +235,7 @@ fn autonomous_decision(pre: &ProjectState) -> Tuning {
         .filter(|t| matches!(t.status(), Status::Pending | Status::Ready | Status::Open))
         .count();
     let today = now_rfc3339()[..10].to_owned();
-    let delta =
-        compute_burndown(pre, &today, BURNDOWN_WINDOW_DAYS).delta_24h;
+    let delta = compute_burndown(pre, &today, BURNDOWN_WINDOW_DAYS).delta_24h;
     decide_tuning(&evals, backlog, delta, &pre.tuning)
 }
 
@@ -396,7 +395,8 @@ async fn ac5_a_state_document_predating_the_field_loads_without_migration_failur
         });
     let mut doc = serde_json::to_value(&engaged).expect("serialize state");
     let obj = doc.as_object_mut().expect("object");
-    obj.remove("tuning_overrides").expect("overrides key present");
+    obj.remove("tuning_overrides")
+        .expect("overrides key present");
     obj.remove("tuning_history").expect("history key present");
     let back: ProjectState = serde_json::from_value(doc).expect("load stripped state");
     assert!(
@@ -484,7 +484,10 @@ async fn ac5_cycle_behaviour_for_untouched_projects_is_bit_for_bit_identical() {
     );
     let mut expected = expected_base;
     expected.last_eval_day = now_rfc3339()[..10].to_owned();
-    assert_eq!(a.tuning, expected, "and identical to the autonomous decision");
+    assert_eq!(
+        a.tuning, expected,
+        "and identical to the autonomous decision"
+    );
     assert!(
         a.tuning.bugs_first,
         "non-vacuous: the brake actually flipped in both worlds"

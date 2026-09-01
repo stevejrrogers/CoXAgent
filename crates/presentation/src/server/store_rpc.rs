@@ -373,6 +373,18 @@ async fn op_heal(p: &ProjectHandle) -> Response {
     }
 }
 
+/// Purge this project's persisted state on the control plane — the REST
+/// counterpart of deregistering a project (CXA-B130). Sits behind the same
+/// manage-tier + membership gate as every other store write, and the hub's
+/// own delete flow calls the adapter directly, so no runner invokes this
+/// today; it exists so a REST-fronted `delete()` can never silently no-op.
+async fn op_delete(p: &ProjectHandle) -> Response {
+    match p.store.delete().await {
+        Ok(()) => ok(serde_json::json!({ "ok": true })),
+        Err(e) => err(e),
+    }
+}
+
 /// Entry point routing every runner operation onto this project's store.
 pub(super) async fn store_rpc_ep(
     axum::extract::State(app): axum::extract::State<super::AppState>,
@@ -402,6 +414,7 @@ pub(super) async fn store_rpc_ep(
         "acquire_operator" => op_acquire_operator(&p, &args).await,
         "audit" => op_audit(&p).await,
         "heal" => op_heal(&p).await,
+        "delete" => op_delete(&p).await,
         other => err(coxagent_application::PortError::Backend(format!(
             "unknown store op: {other}"
         ))),

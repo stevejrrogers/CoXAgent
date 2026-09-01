@@ -229,4 +229,43 @@ impl RedisCoord {
             .filter_map(|s| serde_json::from_str(&s).ok())
             .collect())
     }
+
+    /// Drop every key this project owns (`cox:<pid>:*`): leases and worker
+    /// presence are TTL'd and would expire anyway, but the operator's
+    /// desired-run state is a persistent key — leaving it behind would
+    /// auto-resume a DELETED project's runner the moment a new project
+    /// reuses the id (CXA-B130). Best-effort: a Redis outage here must not
+    /// block the durable Postgres purge, so connection errors surface but
+    /// the caller decides how fatal they are.
+    ///
+    /// # Errors
+    /// [`PortError`] on a Redis failure.
+    pub async fn forget_project(&self) -> Result<(), PortError> {
+        let mut c = self.conn().await?;
+        let pattern = format!("cox:{}:*", self.project_id);
+        let mut cursor = 0u64;
+        loop {
+            let (next, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(100)
+                .query_async(&mut c)
+                .await
+                .map_err(|e| PortError::Backend(format!("redis scan: {e}")))?;
+            if !batch.is_empty() {
+                redis::cmd("DEL")
+                    .arg(&batch)
+                    .query_async::<()>(&mut c)
+                    .await
+                    .map_err(|e| PortError::Backend(format!("redis del: {e}")))?;
+            }
+            cursor = next;
+            if cursor == 0 {
+                break;
+            }
+        }
+        Ok(())
+    }
 }

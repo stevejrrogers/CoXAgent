@@ -15,6 +15,7 @@ async function renderManage(){
   if(CUR==="mg-spaces")renderMgSpaces();
   else if(CUR==="mg-users")renderMgPeople();
   else if(CUR==="mg-usage")renderMgUsage();
+  else if(CUR==="mg-fleet")renderMgFleet();
   else if(CUR==="mg-audit")renderMgAudit();
 }
 // Hub-wide audit trail (Admin/Super): every authenticated mutation, newest first.
@@ -224,4 +225,70 @@ function renderMgUsage(){
     <div class="panel" style="margin-bottom:18px">${sp.map(([n,c])=>bar(n,c,spMax,"var(--accent2)")).join("")||'<div class="empty">no spend yet</div>'}</div>
     <div class="wssec">Top burners 🔥</div>
     <div class="panel">${us.map(([n,c])=>bar(n,c,usMax,"var(--amber)")).join("")||'<div class="empty">no per-user spend yet</div>'}</div>`;
+}
+// ---- Fleet spend cockpit (CXA-F278): cross-project burn · cap headroom · hub
+// soft ceiling. Visibility-only: the endpoint pauses nothing, and the ceiling
+// merely raises one deduplicated #general alert per day.
+const FLEET_STATUS={over:["OVER","var(--red)"],approaching:["80%+","var(--amber)"],ok:["OK","var(--muted)"]};
+function fleetBadge(s){const b=FLEET_STATUS[s]||FLEET_STATUS.ok;return `<span style="font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:${b[1]}">${b[0]}</span>`;}
+async function renderMgFleet(){
+  const el=document.getElementById("mg-fleet-body");if(!el)return;
+  let fleet;
+  try{
+    const r=await fetch("/api/fleet/spend");
+    if(r.status===403){el.innerHTML='<div class="empty">super admin only</div>';return;}
+    fleet=await r.json();
+  }catch(e){return;}
+  const t=fleet.totals||{},ps=fleet.projects||[],sps=fleet.spaces||[];
+  const stat=(v,l)=>`<div class="wsstat"><b>${v}</b><span>${l}</span></div>`;
+  const head=(v)=>v===null||v===undefined?"—":money(v);
+  const row=p=>{
+    const cap=p.lifetime_cap_usd==null?"uncapped":money(p.lifetime_cap_usd);
+    const dcap=p.daily_cap_usd==null?"uncapped":money(p.daily_cap_usd);
+    return `<div class="wsrow" style="border:none;border-bottom:1px solid var(--border);border-radius:0;background:transparent;padding:7px 4px;gap:12px">
+      <span style="min-width:170px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.name)}${p.broken?' <span title="failed to load" style="color:var(--red);font-size:10px;font-weight:700;letter-spacing:.04em">BROKEN</span>':""}</span>
+      <span style="min-width:86px;color:var(--dim);font-size:12px">${esc(p.space_id||"—")}</span>
+      <span style="min-width:72px;text-align:right;font-family:ui-monospace,monospace;font-size:11.5px">${money(p.today_usd||0)}</span>
+      <span style="min-width:72px;text-align:right;font-family:ui-monospace,monospace;font-size:11.5px">${money(p.spend_7d_usd||0)}</span>
+      <span style="min-width:80px;text-align:right;font-family:ui-monospace,monospace;font-size:11.5px;font-weight:700">${money(p.spend_usd||0)}</span>
+      <span style="min-width:86px;text-align:right;color:var(--dim);font-size:12px">${esc(cap)}</span>
+      <span style="min-width:72px;text-align:right;font-family:ui-monospace,monospace;font-size:11.5px">${head(p.headroom_usd)}</span>
+      <span style="min-width:80px;text-align:right;color:var(--dim);font-size:12px">${esc(dcap)}</span>
+      <span style="min-width:72px;text-align:right;font-family:ui-monospace,monospace;font-size:11.5px">${head(p.headroom_today_usd)}</span>
+      <span style="min-width:64px;text-align:right">${fleetBadge(p.status)}</span></div>`;
+  };
+  const header=`<div class="wsrow" style="border:none;border-bottom:1px solid var(--border2);border-radius:0;background:transparent;padding:0 4px 6px;gap:12px;color:var(--dim);font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase">
+    <span style="min-width:170px">Project</span><span style="min-width:86px">Space</span>
+    <span style="min-width:72px;text-align:right">Today</span><span style="min-width:72px;text-align:right">7 days</span>
+    <span style="min-width:80px;text-align:right">Total</span><span style="min-width:86px;text-align:right">Cap</span>
+    <span style="min-width:72px;text-align:right">Headroom</span><span style="min-width:80px;text-align:right">Daily cap</span>
+    <span style="min-width:72px;text-align:right">Today left</span><span style="min-width:64px;text-align:right">Status</span></div>`;
+  const ceil=fleet.hub_ceiling_usd>0?fleet.hub_ceiling_usd:"";
+  el.innerHTML=`
+    <div class="wshero" style="margin-bottom:18px"><div class="wsmark"><i class="ti ti-report-money"></i></div>
+      <div><div class="wsname">Fleet spend</div><div class="wstag">every project · one ledger</div></div>
+      <div class="wsstats">${stat(money(t.today_usd||0),"Today")}${stat(money(t.spend_7d_usd||0),"7 days")}${stat(money(t.spend_usd||0),"All time")}${stat(t.projects||0,"Projects")}${stat(t.over||0,"Over cap")}${stat(t.approaching||0,"80%+")}${(t.broken||0)>0?stat(t.broken,"⚠ Broken"):""}</div></div>
+    <div class="panel" style="margin-bottom:18px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <span style="font-size:12.5px;font-weight:600">Hub daily soft ceiling</span>
+      <input id="fleet-ceiling" type="number" min="0" step="1" placeholder="uncapped" value="${ceil}" style="width:130px;background:var(--card2);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:8px 11px;font-family:ui-monospace,monospace;font-size:11.5px">
+      <button class="pri" onclick="saveFleetCeiling()"><i class="ti ti-check"></i> Save</button>
+      <span style="color:var(--dim);font-size:12px">USD per day, hub-wide · 0/empty = uncapped · soft: one #general alert per day when today's burn crosses ${Math.round((fleet.hub_warn_pct||0.8)*100)}% — pauses nothing.${t.hub_headroom_usd!=null?` Headroom today: <b style="font-family:ui-monospace,monospace">${money(t.hub_headroom_usd)}</b>.`:""}</span></div>
+    <div class="wssec">Projects by burn</div>
+    <div class="panel" style="margin-bottom:18px">${header}${ps.map(row).join("")||'<div class="empty">no projects registered yet</div>'}</div>
+    <div class="wssec">Spaces</div>
+    <div class="panel">${sps.map(s=>`<div class="wsrow" style="border:none;border-bottom:1px solid var(--border);border-radius:0;background:transparent;padding:7px 4px;gap:12px">
+      <span style="min-width:170px;font-weight:600">${esc(s.name)}</span>
+      <span style="min-width:80px;text-align:right;font-family:ui-monospace,monospace;font-size:11.5px">${money(s.spend_usd||0)}</span>
+      <span style="min-width:110px;text-align:right;color:var(--dim);font-size:12px">${s.budget_usd>0?("cap "+money(s.budget_usd)):"uncapped"}</span>
+      <span style="min-width:64px;text-align:right">${fleetBadge(s.status)}</span></div>`).join("")||'<div class="empty">no spaces defined</div>'}</div>`;
+}
+async function saveFleetCeiling(){
+  const inp=document.getElementById("fleet-ceiling");if(!inp)return;
+  const raw=inp.value.trim();
+  const body={ceiling_usd:raw===""?null:Number(raw)};
+  try{
+    const r=await fetch("/api/fleet/ceiling",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(r.ok){toasty(body.ceiling_usd?"Hub ceiling saved":"Hub ceiling cleared","ok");renderMgFleet();}
+    else toasty("Failed: "+await r.text(),"err");
+  }catch(e){toasty("Failed: network error","err");}
 }

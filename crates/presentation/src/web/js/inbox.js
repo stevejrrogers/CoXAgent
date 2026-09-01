@@ -29,7 +29,7 @@ const INBOX_KIND={
 function inboxCard(kind,meta,title,actions,ticket){
   const k=INBOX_KIND[kind]||{label:kind,ic:"ti-inbox",col:"var(--muted)"};
   const open=ticket?`onclick="showTicket('${esc(ticket)}')"`:"";
-  return `<div class="panel" ${open} style="margin-bottom:12px;display:flex;gap:14px;align-items:center;${ticket?'cursor:pointer;':''}transition:border-color .15s" onmouseover="this.style.borderColor='${k.col}'" onmouseout="this.style.borderColor='var(--border)'">
+  return `<div class="panel ibx-card" ${open} style="margin-bottom:12px;display:flex;gap:14px;align-items:center;${ticket?'cursor:pointer;':''}transition:border-color .15s" onmouseover="this.style.borderColor='${k.col}'" onmouseout="this.style.borderColor='var(--border)'">
     <div style="width:38px;height:38px;border-radius:10px;background:color-mix(in srgb,${k.col} 14%,transparent);display:flex;align-items:center;justify-content:center;flex-shrink:0">
       <i class="ti ${k.ic}" style="font-size:18px;color:${k.col}"></i></div>
     <div style="min-width:0;flex:1">
@@ -262,3 +262,32 @@ async function inboxUnassign(id){
 // Keep the badge honest even when the user lives in other tabs. Held-for-
 // digest questions (CXA-F176) do not count — they batch into one flush.
 setInterval(async()=>{try{if(typeof PID!=="undefined"&&PID){const d=await loadInbox();inboxBadge((d.items||[]).filter(i=>i.can_act&&!i.deferred).length);}}catch(e){}},60000);
+
+
+// ---- Inbox keyboard shortcuts: j/k move the selection, Enter opens the
+// ticket, a fires the card's PRIMARY action, d its dismiss/reject-style
+// secondary. Active only while the Inbox view is on screen and no input has
+// focus, so typing elsewhere never triggers approvals.
+let IBX_SEL=-1;
+function ibxCards(){return Array.from(document.querySelectorAll('#view-inbox .ibx-card'));}
+function ibxPaint(){
+  ibxCards().forEach((c,i)=>{c.style.outline=i===IBX_SEL?'2px solid var(--accent2)':'none';
+    if(i===IBX_SEL)c.scrollIntoView({block:'nearest'});});
+}
+document.addEventListener('keydown',e=>{
+  if(typeof CUR==='undefined'||CUR!=='inbox')return;
+  const t=e.target;
+  if(t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable))return;
+  if(e.metaKey||e.ctrlKey||e.altKey)return;
+  const cards=ibxCards();if(!cards.length)return;
+  if(e.key==='j'){IBX_SEL=Math.min(cards.length-1,IBX_SEL+1);ibxPaint();e.preventDefault();}
+  else if(e.key==='k'){IBX_SEL=Math.max(0,IBX_SEL-1);ibxPaint();e.preventDefault();}
+  else if(IBX_SEL>=0&&IBX_SEL<cards.length){
+    const card=cards[IBX_SEL];
+    if(e.key==='Enter'){card.click();e.preventDefault();}
+    else if(e.key==='a'){const b=card.querySelector('.ibx-pri');if(b){b.click();e.preventDefault();}}
+    else if(e.key==='d'){const bs=Array.from(card.querySelectorAll('.ibx-btn:not(.ibx-pri)'));
+      const d=bs.find(x=>/dismiss|reject|hold|defer/i.test(x.textContent))||bs[0];
+      if(d){d.click();e.preventDefault();}}
+  }
+});

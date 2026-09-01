@@ -181,6 +181,9 @@ mod tests {
         async fn read(&self, _: &std::path::Path) -> Option<String> {
             None
         }
+        async fn read_bytes(&self, _: &std::path::Path) -> Option<Vec<u8>> {
+            None
+        }
         async fn write(&self, _: &std::path::Path, _: &str) -> bool {
             false
         }

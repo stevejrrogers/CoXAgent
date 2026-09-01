@@ -81,8 +81,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn read(rel: &str) -> String {
-    std::fs::read_to_string(repo_root().join(rel))
-        .unwrap_or_else(|e| panic!("read {rel}: {e}"))
+    std::fs::read_to_string(repo_root().join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"))
 }
 
 /// `(file name, source)` for every file with `ext` in `dir_rel`, sorted for
@@ -214,9 +213,8 @@ fn ac1_fleet_river_is_a_registered_get_route() {
     );
 
     let openapi = read("crates/presentation/src/server/openapi.rs");
-    let methods = openapi_route_methods(&openapi, RIVER_ROUTE).unwrap_or_else(|| {
-        panic!("{RIVER_ROUTE} must be documented in the openapi ROUTES table")
-    });
+    let methods = openapi_route_methods(&openapi, RIVER_ROUTE)
+        .unwrap_or_else(|| panic!("{RIVER_ROUTE} must be documented in the openapi ROUTES table"));
     assert!(
         methods.contains("\"get\""),
         "the river must answer GET, found [{methods}]"
@@ -363,9 +361,9 @@ fn ac5_the_view_renders_insufficient_data_below_two_completed_cycles() {
     });
 
     let sources = server_sources();
-    let from_server = sources.iter().any(|(_, src)| {
-        is_river_source(src) && src.to_lowercase().contains("insufficient data")
-    });
+    let from_server = sources
+        .iter()
+        .any(|(_, src)| is_river_source(src) && src.to_lowercase().contains("insufficient data"));
 
     assert!(
         in_view || from_server,

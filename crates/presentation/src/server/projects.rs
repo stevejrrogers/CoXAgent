@@ -61,6 +61,71 @@ pub(super) async fn list_projects(State(app): State<AppState>) -> impl IntoRespo
     Json(out)
 }
 
+/// Map a classified factory failure onto its HTTP response (CXA-B129/CXA-B139):
+/// an expected client conflict (the target workspace already holds tickets) is
+/// 409, invalid input (a path-traversing alias, an unsupported git URL scheme)
+/// is 400, and only a genuine fault stays a 500.
+fn factory_error_response(e: &FactoryError) -> axum::response::Response {
+    match e.kind {
+        FactoryErrorKind::Conflict => conflict_error(&e.message),
+        FactoryErrorKind::BadRequest => bad_request_error(&e.message),
+        FactoryErrorKind::Internal => internal_error(&e.message),
+    }
+}
+
+/// CXA-B138: the alias becomes the workspace directory id (`base.join(id)`),
+/// so a path-traversing alias would scaffold — and DELETE rm -rf — outside
+/// the workspace base. Refuse it HERE, before the factory touches the
+/// filesystem. (Empty/absent keeps the derive-from-name fallback.)
+fn refused_alias(alias: Option<&String>) -> Option<axum::response::Response> {
+    let alias = alias.map(String::as_str).filter(|a| !a.is_empty())?;
+    (!coxagent_application::state::is_safe_workspace_id(alias))
+        .then(|| bad_request_error("alias must not contain '/', '\\', '..' or leading dots"))
+}
+
+/// Validate brownfield import path: must be under the hub's workspace root
+/// or under /tmp (safe sandbox). Reject paths pointing to system directories.
+fn refused_import_path(existing: Option<&String>) -> Option<axum::response::Response> {
+    let existing = existing?;
+    if existing.trim().is_empty() {
+        return None;
+    }
+    let p = std::path::Path::new(existing.trim());
+    // Resolve to absolute canonical path to prevent symlink tricks.
+    let real = p.canonicalize().ok()?;
+    // Allow under /tmp or under $HOME (typical user repos).
+    // Block system directories.
+    let path_str = real.to_string_lossy();
+    // Block if path equals a blocked directory, or if it starts with
+    // a blocked directory plus '/', to catch `/private/etc/foo` etc.
+    let blocked_prefixes = [
+        "/etc",
+        "/private/etc",
+        "/root",
+        "/var/run",
+        "/var/log",
+        "/usr/lib",
+        "/usr/sbin",
+        "/bin",
+        "/sbin",
+        "/dev",
+        "/proc",
+        "/sys",
+    ];
+    let blocked = blocked_prefixes.iter().any(|pfx| {
+        path_str == *pfx
+            || path_str.starts_with(pfx)
+                && path_str.as_bytes().get(pfx.len()).copied() == Some(b'/')
+    });
+    blocked.then(|| {
+        (
+            StatusCode::FORBIDDEN,
+            "cannot import from this path".to_owned(),
+        )
+            .into_response()
+    })
+}
+
 /// Onboard a new project from the dashboard (greenfield, or brownfield import
 /// with `existing`, optionally seeded with a `goal`) via the injected factory.
 pub(super) async fn create_project(
@@ -101,42 +166,11 @@ pub(super) async fn create_project(
     if name.is_empty() {
         return (StatusCode::BAD_REQUEST, "name is required").into_response();
     }
-    // Validate brownfield import path: must be under the hub's workspace root
-    // or under /tmp (safe sandbox). Reject paths pointing to system directories.
-    if let Some(ref existing) = req.existing {
-        if !existing.trim().is_empty() {
-            let p = std::path::Path::new(existing.trim());
-            // Resolve to absolute canonical path to prevent symlink tricks.
-            if let Ok(real) = p.canonicalize() {
-                // Allow under /tmp or under $HOME (typical user repos).
-                // Block system directories.
-                let path_str = real.to_string_lossy();
-                // Block if path equals a blocked directory, or if it starts with
-                // a blocked directory plus '/', to catch `/private/etc/foo` etc.
-                let blocked_prefixes = [
-                    "/etc",
-                    "/private/etc",
-                    "/root",
-                    "/var/run",
-                    "/var/log",
-                    "/usr/lib",
-                    "/usr/sbin",
-                    "/bin",
-                    "/sbin",
-                    "/dev",
-                    "/proc",
-                    "/sys",
-                ];
-                let blocked = blocked_prefixes.iter().any(|pfx| {
-                    path_str == *pfx
-                        || path_str.starts_with(pfx)
-                            && path_str.as_bytes().get(pfx.len()).copied() == Some(b'/')
-                });
-                if blocked {
-                    return (StatusCode::FORBIDDEN, "cannot import from this path").into_response();
-                }
-            }
-        }
+    if let Some(refusal) = refused_alias(req.alias.as_ref()) {
+        return refusal;
+    }
+    if let Some(refusal) = refused_import_path(req.existing.as_ref()) {
+        return refusal;
     }
     let handle = match factory(NewProjectReq {
         name,
@@ -151,7 +185,11 @@ pub(super) async fn create_project(
     .await
     {
         Ok(h) => h,
-        Err(e) => return internal_error(&e),
+        // CXA-B129/CXA-B138/CXA-B139: the factory classifies its failures —
+        // an expected client conflict (the target workspace already holds
+        // tickets) reaches the client as 409, invalid input as 400, and only
+        // a genuine fault stays a 500.
+        Err(e) => return factory_error_response(&e),
     };
     let id = handle.id.clone();
     {
@@ -204,8 +242,16 @@ pub(super) async fn rename_project_ep(
     Json(serde_json::json!({ "ok": true, "name": name })).into_response()
 }
 
-/// Delete (deregister) a project: stop its runner, remove it from the hub, and
-/// deregister it from the registry. The workspace files are left on disk.
+/// Delete (deregister) a project: stop its runner, purge its persisted state
+/// from the store (shared Postgres row + coordination rows, CXA-B130), remove
+/// it from the hub and the registry, and remove the workspace scaffolding from
+/// disk. Every step that could resurrect the project under a recreated id is
+/// fatal (500); a 200 therefore means the stored state is really gone.
+///
+/// CXA-B138: onboarding refuses path-traversing ids, so a separator-carrying
+/// pid can only get here from a hand-edited registry — and deletion must keep
+/// working for exactly that cleanup. Do NOT 400-guard this route on the id
+/// shape; that would strand the escaped workspace it exists to remove.
 pub(super) async fn delete_project_ep(
     State(app): State<AppState>,
     Path(pid): Path<String>,
@@ -242,6 +288,16 @@ pub(super) async fn delete_project_ep(
         drop(sp);
         app.spaces.save().await;
     }
+    // Purge the project's persisted footprint BEFORE the registry removal:
+    // this is the row that resurrected deleted projects (recreating a name
+    // whose derived id collided adopted the stale tickets/spend and hit the
+    // onboarding "already has tickets" refusal, CXA-B126). A failed purge
+    // must NOT answer 200 — the project stays in the registry file, so a
+    // restart (or a retry once the store recovers) re-registers it intact
+    // and the delete can be attempted again.
+    if let Err(e) = p.store.delete().await {
+        return internal_error(&e.to_string());
+    }
     if let Some(remover) = &app.remover {
         if let Err(e) = remover(pid.clone()).await {
             return internal_error(&e);
@@ -249,17 +305,20 @@ pub(super) async fn delete_project_ep(
     }
     // Clean up the project directory on disk. For imported projects this only
     // removes the CoXAgent workspace scaffolding (state/, coxagent.json, etc.)
-    // — never the original imported codebase.
+    // — never the original imported codebase. Awaited (not fire-and-forget) so
+    // a 200 means the scaffolding is actually gone: a surviving directory
+    // keeps the derived id occupied and forces `-2` suffixed recreations.
     if let Some(root) = p.config_path.parent() {
         let project_dir = root.to_path_buf();
         let codebase_linked = project_dir.join("codebase.lnk").exists();
-        // Spawn cleanup in the background — errors are logged, never surfaced.
-        tokio::spawn(async move {
+        let fs_result = tokio::task::spawn_blocking(move || {
             if codebase_linked {
                 // Imported project: only delete CoXAgent scaffolding, not the code.
                 let _ = std::fs::remove_file(project_dir.join("codebase.lnk"));
                 if let Err(e) = std::fs::remove_dir_all(project_dir.join("state")) {
-                    tracing::warn!("delete_project: cannot remove state dir: {e}");
+                    if project_dir.join("state").exists() {
+                        return Err(format!("state dir: {e}"));
+                    }
                 }
                 let _ = std::fs::remove_file(project_dir.join("coxagent.json"));
                 if let Ok(entries) = std::fs::read_dir(&project_dir) {
@@ -270,10 +329,30 @@ pub(super) async fn delete_project_ep(
             } else {
                 // Greenfield: remove the entire project workspace.
                 if let Err(e) = std::fs::remove_dir_all(&project_dir) {
-                    tracing::warn!("delete_project: cannot remove project dir: {e}");
+                    if project_dir.exists() {
+                        return Err(format!("project dir: {e}"));
+                    }
                 }
             }
-            // Also clean up the Docker compose project if it was deployed.
+            Ok(())
+        })
+        .await;
+        match fs_result {
+            Ok(Ok(())) => {}
+            Ok(Err(what)) => {
+                // The dangerous footprint (the stored state + its mirror) is
+                // already purged above; a leftover directory is cosmetically
+                // annoying, never a resurrection. Say so loudly anyway.
+                tracing::warn!("delete_project {pid}: workspace cleanup failed ({what})");
+            }
+            Err(e) => {
+                tracing::warn!("delete_project {pid}: workspace cleanup task failed: {e}");
+            }
+        }
+        // Also stop + remove the project's Docker compose app, if it was
+        // deployed. Detached and best-effort: `docker stop` waits out a grace
+        // period we must not spend inside the HTTP request.
+        tokio::spawn(async move {
             let container_name = format!("cox-{pid}-codebase-app-1");
             if let Ok(out) = std::process::Command::new("docker")
                 .args(["stop", &container_name])
@@ -284,7 +363,10 @@ pub(super) async fn delete_project_ep(
                 // that reads like something broke.
                 let err = String::from_utf8_lossy(&out.stderr);
                 if !out.status.success() && !err.contains("No such container") {
-                    tracing::warn!("delete_project: docker stop {container_name} failed: {}", err.trim());
+                    tracing::warn!(
+                        "delete_project: docker stop {container_name} failed: {}",
+                        err.trim()
+                    );
                 }
             }
             let _ = std::process::Command::new("docker")
@@ -368,6 +450,5 @@ pub(super) async fn milestones_projection_ep(
     let Ok(state) = p.store.load().await else {
         return internal_error("load failed");
     };
-    Json(coxagent_application::milestone_projection::projection_report(&state))
-        .into_response()
+    Json(coxagent_application::milestone_projection::projection_report(&state)).into_response()
 }

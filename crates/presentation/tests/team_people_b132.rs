@@ -42,9 +42,12 @@ fn line_containing<'a>(src: &'a str, needle: &str) -> Option<&'a str> {
 /// below can never silently pass against a panel that no longer exists.
 #[test]
 fn team_people_panel_is_an_admin_only_surface_on_the_team_view() {
-    let card = line_containing(INDEX_HTML, "id=\"team-people\"")
-        .expect("the #team-people card vanished from index.html — the Team \
-                view's people panel moved; re-point the CXA-B132 gates");
+    let card = line_containing(INDEX_HTML, "id=\"team-people\"").unwrap_or_else(|| {
+        panic!(
+            "the #team-people card vanished from index.html — the Team \
+                view's people panel moved; re-point the CXA-B132 gates"
+        )
+    });
     assert!(
         card.contains("admin-only"),
         "#team-people must stay an admin-only surface — its visibility is \
@@ -63,17 +66,23 @@ fn team_people_panel_is_an_admin_only_surface_on_the_team_view() {
 /// conscious re-decision of who sees admin surfaces, not drift.
 #[test]
 fn the_hub_admin_predicate_admits_super_admin_and_open_mode() {
-    let role = line_containing(SHELL_JS, "function roleIsHubAdmin(r)")
-        .expect("roleIsHubAdmin vanished from shell.js — the hub-admin tier \
-                predicate that CXA-B132 introduced is gone");
+    let role = line_containing(SHELL_JS, "function roleIsHubAdmin(r)").unwrap_or_else(|| {
+        panic!(
+            "roleIsHubAdmin vanished from shell.js — the hub-admin tier \
+                predicate that CXA-B132 introduced is gone"
+        )
+    });
     assert!(
         role.contains("\"super\"") && role.contains("\"admin\""),
         "roleIsHubAdmin must admit BOTH hub-admin roles — dropping \"super\" \
          re-strands the hub owner (CXA-B132): {role}"
     );
-    let wrapper = line_containing(SHELL_JS, "function isHubAdmin()")
-        .expect("isHubAdmin vanished from shell.js — the open-mode-aware \
-                wrapper the call sites delegate to is gone");
+    let wrapper = line_containing(SHELL_JS, "function isHubAdmin()").unwrap_or_else(|| {
+        panic!(
+            "isHubAdmin vanished from shell.js — the open-mode-aware \
+                wrapper the call sites delegate to is gone"
+        )
+    });
     assert!(
         wrapper.contains("!ME||!ME.auth"),
         "isHubAdmin must keep the open/local-mode clause (no auth sees admin \
@@ -86,10 +95,13 @@ fn the_hub_admin_predicate_admits_super_admin_and_open_mode() {
 /// disappear for `super` even when every other link was fixed.
 #[test]
 fn apply_role_derives_admin_surface_visibility_from_the_predicate() {
-    let gate = line_containing(SHELL_JS, "const isAdmin=isHubAdmin();")
-        .expect("applyRole no longer derives isAdmin from isHubAdmin() — \
+    let gate = line_containing(SHELL_JS, "const isAdmin=isHubAdmin();").unwrap_or_else(|| {
+        panic!(
+            "applyRole no longer derives isAdmin from isHubAdmin() — \
                 admin-surface visibility drifted back to a role literal \
-                (the CXA-B132 half that hid the panel from the hub owner)");
+                (the CXA-B132 half that hid the panel from the hub owner)"
+        )
+    });
     assert!(
         gate.contains("isHubAdmin()"),
         "applyRole must consult the shared hub-admin predicate: {gate}"
@@ -106,10 +118,14 @@ fn the_team_branch_populates_the_people_panel_via_the_predicate() {
         "renderTeamPeople() is never called from core.js — the panel has no \
          renderer to gate at all"
     );
-    let gate = line_containing(CORE_JS, "if(isHubAdmin())renderTeamPeople();")
-        .expect("the team branch no longer gates renderTeamPeople() behind \
+    let gate =
+        line_containing(CORE_JS, "if(isHubAdmin())renderTeamPeople();").unwrap_or_else(|| {
+            panic!(
+                "the team branch no longer gates renderTeamPeople() behind \
                 isHubAdmin() — role \"super\" (the hub owner, CXA-B132) is \
-                back to a permanently stuck panel");
+                back to a permanently stuck panel"
+            )
+        });
     assert!(
         !gate.contains("ME.role"),
         "the gate must delegate to the shared predicate, not re-match roles \
@@ -123,11 +139,14 @@ fn the_team_branch_populates_the_people_panel_via_the_predicate() {
 /// deliberately does not gain palette entries (pre-existing behavior).
 #[test]
 fn the_command_palette_filters_admin_views_through_the_predicate() {
-    let gate =
-        line_containing(SHELL_JS, "const isAdmin=!!ME&&roleIsHubAdmin(ME.role);")
-            .expect("cmdkBuild no longer filters admin views through \
+    let gate = line_containing(SHELL_JS, "const isAdmin=!!ME&&roleIsHubAdmin(ME.role);")
+        .unwrap_or_else(|| {
+            panic!(
+                "cmdkBuild no longer filters admin views through \
                     roleIsHubAdmin — the palette drifted back to an exact \
-                    role match (the CXA-B132 ⌘K half)");
+                    role match (the CXA-B132 ⌘K half)"
+            )
+        });
     assert!(
         gate.contains("!!ME"),
         "the palette gate must stay authed-only (open mode never had palette \

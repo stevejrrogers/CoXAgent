@@ -57,6 +57,14 @@ impl StateStorePort for AnyStateStore {
         }
     }
 
+    async fn delete(&self) -> Result<(), PortError> {
+        match self {
+            Self::Json(s) => s.delete().await,
+            Self::Sql(s) => s.delete().await,
+            Self::Rest(s) => s.delete().await,
+        }
+    }
+
     async fn claim_ticket(
         &self,
         id: &TicketId,
