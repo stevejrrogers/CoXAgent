@@ -263,8 +263,10 @@ test('AC2: an authenticated write-tier member is refused 403 and no op reaches t
     headers: CLIENT_XFF,
   });
   if (vlogin.status() !== 200) {
-    // The shared fixture's password drifted from the constant this file
-    // carries (create_user upserts hash/role): re-assert OURS, then sign in.
+    // Usually the shared fixture's password drifted from the constant this
+    // file carries (create_user upserts hash/role): re-assert OURS, then
+    // sign in again. A throttled window also lands here — the recovery is
+    // bounded to one re-assert, not a loop.
     const made = await page.request.post('/api/auth/users', {
       data: {
         username: VIEWER_USER,
@@ -288,8 +290,9 @@ test('AC2: an authenticated write-tier member is refused 403 and no op reaches t
     expect(refused.status, `write-tier member op=${op}`).toBe(403);
   }
 
-  // The store stayed untouched: the admin still reads exactly the state the
-  // previous tests left (proven stable by the AC1 equality).
+  // The gate did not wedge: after the refused ops the admin bearer still
+  // reads the project. (The untouched-state PROOF is the AC1 equality; this
+  // is only the liveness check.)
   expect((await storeOp(page.request, 'load', admin)).status).toBe(200);
 });
 

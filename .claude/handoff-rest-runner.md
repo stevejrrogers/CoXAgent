@@ -107,16 +107,16 @@ reference to the store route — all /store traffic is runner/CLI processes
    (:246-280) may have hydrated from the login-written operator.token file,
    owner-only-checked). REMOTE wins over a DB DSN if both are set.
 3. Runner cycle ops through the same adapter — crates/app/src/lib.rs:
-   worker-registry heartbeats (idle/45s loop :1237-1261, per-phase reporter
-   :1263-1278) and the single-instance operator lock (:1287-1292,
+   worker-registry heartbeats (idle/45s keepalive loop :1418-1446, per-phase
+   reporter :1447-1462) and the single-instance operator lock (:1466-1492,
    acquire_operator). Credential class identical to (1): whatever
    make_store built for the process.
 4. CLI engine probe — `coxagent probe --hub <url> --project <pid>`
    (crates/presentation/src/cli.rs:27-34 -> run_probe,
-   crates/app/src/lib.rs:1811-1850): one-shot RestStateStore heartbeat that
+   crates/app/src/lib.rs:1998-2037): one-shot RestStateStore heartbeat that
    advertises this machine's agent engines to the hub so /api/engines
    populates without a runner cycle. Token from `COXAGENT_REMOTE_TOKEN` or
-   the operator.token file (:1820-1829). This is the "cli.rs engine
+   the operator.token file (:2007-2016). This is the "cli.rs engine
    heartbeat" caller class.
 5. deploy/watchdog-cxa.sh — the one non-Rust caller. Logs in, caches the
    `cox_session` cookie, then drives `POST /api/projects/cxa/store` op=load /
