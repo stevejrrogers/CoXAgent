@@ -91,13 +91,13 @@ const F248_FOOTPRINT: &[(&str, &str)] = &[
         "crates/application/src/use_cases/run_test.rs",
         "config.deploy.host_port",
     ),
-    ("crates/presentation/src/web/js/chat.js", "class=\"tcrepro\""),
+    (
+        "crates/presentation/src/web/js/chat.js",
+        "class=\"tcrepro\"",
+    ),
     ("crates/presentation/src/web/app.css", "tcrepro"),
     ("e2e/specs/evidence-repro.spec.ts", FIELD),
-    (
-        "crates/app/tests/evidence_repro_routes_f248_tdd.rs",
-        TICKET,
-    ),
+    ("crates/app/tests/evidence_repro_routes_f248_tdd.rs", TICKET),
 ];
 
 /// The documented pre-existing red list (AC5): the CXA-B037 engine-spawn
@@ -156,8 +156,7 @@ fn git_ok(args: &[&str]) -> bool {
         .args(args)
         .current_dir(repo_root())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 /// One merge commit reachable from HEAD.
@@ -208,7 +207,8 @@ fn merges() -> Vec<Landing> {
 /// (`config.deploy.host_port`). Each criterion's evidence must end up with
 /// its OWN resolved repro on the deployed app's base.
 #[test]
-fn ac1_api_and_screenshot_evidence_with_a_verdict_route_show_the_clickable_repro_link_per_criterion() {
+fn ac1_api_and_screenshot_evidence_with_a_verdict_route_show_the_clickable_repro_link_per_criterion(
+) {
     const AC_API: &str = "Toggling autosave shows a saved indicator";
     const AC_SHOT: &str = "Reloading keeps the toggle state";
     const AC_NEITHER: &str = "Autosave survives a slow network";
@@ -257,12 +257,7 @@ fn ac1_api_and_screenshot_evidence_with_a_verdict_route_show_the_clickable_repro
     );
 
     let cases = state.tickets[0].test_cases();
-    let repro_of = |i: usize| {
-        cases[i]
-            .evidence
-            .as_ref()
-            .and_then(|e| e.repro.as_deref())
-    };
+    let repro_of = |i: usize| cases[i].evidence.as_ref().and_then(|e| e.repro.as_deref());
     assert_eq!(
         repro_of(0),
         Some("http://127.0.0.1:8101/settings"),
@@ -290,11 +285,13 @@ fn ac1_api_and_screenshot_evidence_with_a_verdict_route_show_the_clickable_repro
 #[test]
 fn ac1_the_reviewer_panel_anchor_opens_the_recorded_reproduction() {
     let chat = flat(&read("crates/presentation/src/web/js/chat.js"));
-    let at = chat
-        .find("class=\"tcrepro\"")
-        .unwrap_or_else(|| panic!("the reviewer panel no longer renders the evidence \
+    let at = chat.find("class=\"tcrepro\"").unwrap_or_else(|| {
+        panic!(
+            "the reviewer panel no longer renders the evidence \
              reproduction link as a `tcrepro` anchor — point this guard at the \
-             review panel's test-case render"));
+             review panel's test-case render"
+        )
+    });
     let anchor = &chat[at.saturating_sub(200)..at.saturating_add(400)];
     assert!(
         anchor.contains("tc.evidence&&tc.evidence.repro?"),
@@ -322,6 +319,8 @@ fn ac1_the_reviewer_panel_anchor_opens_the_recorded_reproduction() {
 /// domain refuses a blank write outright.
 #[test]
 fn ac2_an_unresolvable_route_is_omitted_never_a_guessed_or_dead_link() {
+    const AC: &str = "Toggling autosave shows a saved indicator";
+
     // The resolver: no base, no path, no link. Never a guess.
     assert_eq!(
         live_repro_url("/settings", None),
@@ -352,7 +351,6 @@ fn ac2_an_unresolvable_route_is_omitted_never_a_guessed_or_dead_link() {
 
     // The record: a verdict whose route cannot be mapped leaves the case's
     // evidence link-free — omitted, not fabricated.
-    const AC: &str = "Toggling autosave shows a saved indicator";
     let mut state = ProjectState::default();
     let mut ticket = Ticket::new(
         TicketId::new("F248").expect("id"),
@@ -410,7 +408,7 @@ fn ac2_an_unresolvable_route_is_omitted_never_a_guessed_or_dead_link() {
         ticket.test_cases()[0]
             .evidence
             .as_ref()
-            .map_or(true, |e| e.repro.is_none()),
+            .is_none_or(|e| e.repro.is_none()),
         "a refused blank write leaves the field absent — no placeholder link"
     );
 }
@@ -430,21 +428,19 @@ fn ac2_opening_a_ticket_with_an_unresolvable_route_emits_no_anchor() {
         .expect("the e2e state fixture is valid JSON")
         .get("tickets")
         .and_then(|t| t.as_array())
-        .map(|tickets| {
+        .is_some_and(|tickets| {
             tickets.iter().any(|t| {
                 t.get("test_cases")
                     .and_then(|c| c.as_array())
-                    .map(|cases| {
+                    .is_some_and(|cases| {
                         cases.iter().any(|c| {
                             c.get("evidence")
                                 .and_then(|e| e.as_object())
-                                .map_or(false, |ev| ev.get(FIELD).is_none())
+                                .is_some_and(|ev| ev.get(FIELD).is_none())
                         })
                     })
-                    .unwrap_or(false)
             })
-        })
-        .unwrap_or(false);
+        });
     assert!(
         shape_exists,
         "no fixture ticket carries evidence WITHOUT a resolved `{FIELD}` — the \
@@ -596,7 +592,10 @@ fn ac4_the_complete_f248_delta_lands_as_exactly_one_truthful_merge_off_feat_cxa_
         landing.subject
     );
     assert!(
-        !landing.subject.to_lowercase().contains(MISLABELED_TITLE_FRAGMENT),
+        !landing
+            .subject
+            .to_lowercase()
+            .contains(MISLABELED_TITLE_FRAGMENT),
         "the landed merge's subject must not carry the unrelated 'loading \
              skeletons' title — subject: {}",
         landing.subject
@@ -607,7 +606,8 @@ fn ac4_the_complete_f248_delta_lands_as_exactly_one_truthful_merge_off_feat_cxa_
     let base_tip = git(&["rev-parse", BASE_BRANCH]);
     let base_tip = base_tip.trim();
     assert!(
-        !base_tip.is_empty() && git_ok(&["rev-parse", "--verify", &format!("{base_tip}^{{commit}}")]),
+        !base_tip.is_empty()
+            && git_ok(&["rev-parse", "--verify", &format!("{base_tip}^{{commit}}")]),
         "{BASE_BRANCH} must resolve — point this guard at the branch the slice is cut from"
     );
     assert!(
