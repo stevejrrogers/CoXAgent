@@ -1523,6 +1523,7 @@ mod tests {
             _work_dir: &std::path::Path,
         ) -> Result<crate::ports::outbound::DeployReport, PortError> {
             Ok(crate::ports::outbound::DeployReport {
+                failure_bundle: None,
                 success: true,
                 deployed: false,
                 summary: String::new(),
@@ -1537,6 +1538,7 @@ mod tests {
                 .scoped_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(crate::ports::outbound::DeployReport {
+                failure_bundle: None,
                 success: call == 0,
                 deployed: true,
                 summary: if call == 0 {

@@ -245,6 +245,7 @@ mod tests {
             summary: "deployed".to_owned(),
             commit_sha: Some("abc123".to_owned()),
             health_check: None,
+            failure_bundle: None,
         });
         assert!(s.record_verified_outcome("CXC-B001"));
         let e = s.outcome_ledger.first().expect("entry");
