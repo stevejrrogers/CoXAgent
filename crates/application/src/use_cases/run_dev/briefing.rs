@@ -4,6 +4,7 @@
 //! knowledge the rest of the team already wrote down.
 
 use super::*;
+use crate::brief_screening::{self, Origin};
 
 impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
     /// Everything already written down about this ticket's subject: the team's
@@ -110,16 +111,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             Self::knowledge_brief(self.files.as_deref(), state, id, ticket, &self.work_dir).await;
         // Ask the BA rather than invent a requirement (and read any answer).
         let asking = prompts::ask_protocol_block(state, &id.to_string());
+        // The subject every relevance-ranked block scores against.
+        let subject = format!(
+            "{title} {}",
+            ticket
+                .and_then(|t| t.design().technical.as_ref())
+                .map_or("", |d| d.approach.as_str())
+        );
         let history = prompts::history_block(
             self.files.as_deref(),
             self.git.as_deref(),
             &self.work_dir,
-            &format!(
-                "{title} {}",
-                ticket
-                    .and_then(|t| t.design().technical.as_ref())
-                    .map_or("", |d| d.approach.as_str())
-            ),
+            &subject,
         )
         .await;
         // Tickets designed before a refactor can name files that no longer
@@ -206,6 +209,73 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             .and_then(|t| t.design().technical.as_ref())
             .is_some_and(|d| d.files.iter().any(|f| !f.trim().is_empty()))
             && stale_design.is_empty();
+        // CXA-F305: provenance tags + injection screening — TASK prompt only
+        // (the system prompt above stays byte-identical for the provider
+        // cache). Every block is tagged with its origin; untrusted text is
+        // screened before it enters the prompt. Rollback switch:
+        // workflow.brief_screening:false restores today's untagged brief.
+        let screening = self.config.workflow.brief_screening;
+        let tag = |origin: Origin, block: &str| -> String {
+            if screening {
+                brief_screening::tag_only(origin, block)
+            } else {
+                block.to_owned()
+            }
+        };
+        let deliver = |origin: Origin, block: &str| -> brief_screening::ScreenedBlock {
+            if screening {
+                brief_screening::deliver(origin, block)
+            } else {
+                brief_screening::ScreenedBlock {
+                    text: block.to_owned(),
+                    trips: Vec::new(),
+                }
+            }
+        };
+        // The blocks the relevance ports return, hoisted so they can be
+        // tagged/screened before assembly (same order as the format below).
+        let focus = prompts::focus_block(self.files.as_deref(), &self.work_dir, &subject).await;
+        let repo_map = if design_names_real_files {
+            String::new()
+        } else {
+            prompts::repo_map_block(
+                self.files.as_deref(),
+                &self.work_dir,
+                self.config.workflow.token_saver,
+            )
+            .await
+        };
+        let memory =
+            prompts::team_memory_block_relevant(&state.decisions, &state.lessons, &subject);
+        let hub = prompts::hub_lessons_block(self.files.as_deref(), screening).await;
+        // Screened blocks: knowledge (external), steering (human), journal
+        // (agent). Their trips feed the run's screening summary.
+        let knowledge_s = deliver(Origin::External, &knowledge);
+        let steering_s = deliver(Origin::Human, &steering);
+        let journal_s = deliver(Origin::Agent, &journal);
+        let preamble = if screening {
+            let blocks = [
+                ("knowledge", Origin::External, knowledge_s.trips.as_slice()),
+                ("steering", Origin::Human, steering_s.trips.as_slice()),
+                ("journal", Origin::Agent, journal_s.trips.as_slice()),
+            ];
+            brief_screening::provenance_preamble(&blocks)
+        } else {
+            String::new()
+        };
+        // Tagged pass-through blocks, and the screened texts shadowing their
+        // raw inputs — every format placeholder below is named, so a block can
+        // never silently leak its untagged twin.
+        let brief = tag(Origin::Human, &ticket_brief(ticket));
+        let focus_t = tag(Origin::External, &focus);
+        let repo_map_t = tag(Origin::External, &repo_map);
+        let memory_t = tag(Origin::Agent, &memory);
+        let hub_t = tag(Origin::External, &hub);
+        let asking_t = tag(Origin::Agent, &asking);
+        let protocol_t = tag(Origin::Human, prompts::BRIEF_PROTOCOL);
+        let knowledge = knowledge_s.text;
+        let steering = steering_s.text;
+        let journal = journal_s.text;
         AgentRequest {
             role: self.mode.role(),
             // The system prompt stays BYTE-IDENTICAL across every DEV run of a
@@ -215,41 +285,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             // exists only for UI tickets) belongs in the task prompt below.
             system_prompt: prompts::system_prompt(prompts::DEV),
             task_prompt: format!(
-                "Ticket {id}: {title}\n{}{stale_design}{orientation}\nImplement it now.{stack}{deploy}{design}{context_block}{}{history}{knowledge}{}{}{}{steering}{journal}{asking}{}",
-                ticket_brief(ticket),
-                prompts::focus_block(
-                    self.files.as_deref(),
-                    &self.work_dir,
-                    &format!(
-                        "{title} {}",
-                        ticket
-                            .and_then(|t| t.design().technical.as_ref())
-                            .map_or("", |d| d.approach.as_str())
-                    ),
-                )
-                .await,
-                if design_names_real_files {
-                    String::new()
-                } else {
-                    prompts::repo_map_block(
-                        self.files.as_deref(),
-                        &self.work_dir,
-                        self.config.workflow.token_saver,
-                    )
-                    .await
-                },
-                prompts::team_memory_block_relevant(
-                    &state.decisions,
-                    &state.lessons,
-                    &format!(
-                        "{title} {}",
-                        ticket
-                            .and_then(|t| t.design().technical.as_ref())
-                            .map_or("", |d| d.approach.as_str())
-                    ),
-                ),
-                prompts::hub_lessons_block(self.files.as_deref()).await,
-                prompts::BRIEF_PROTOCOL,
+                "Ticket {id}: {title}\n{brief}{stale_design}{orientation}\nImplement it \
+                 now.{preamble}{stack}{deploy}{design}{context_block}{focus_t}{history}{knowledge}{repo_map_t}{memory_t}{hub_t}{steering}{journal}{asking_t}{protocol_t}"
             ),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(3600),
