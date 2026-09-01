@@ -10,6 +10,7 @@ pub mod conformance_check;
 pub mod coverage;
 pub mod cycle;
 pub mod generate_docs;
+pub mod global_search;
 pub mod json_repair;
 pub mod manual_rollback;
 pub mod merge_policy;
@@ -49,6 +50,10 @@ pub use conformance_check::RunConformanceUseCase;
 pub use coverage::{match_score, matches_criterion, record_verdicts};
 pub use cycle::{CycleReport, RunCycleUseCase};
 pub use generate_docs::GenerateDocsUseCase;
+pub use global_search::{
+    global_search, global_search_many, GroupedSearch, SearchGroup, SearchHit, SearchKind,
+    MAX_PER_KIND, MAX_QUERY_LEN, MAX_TOTAL, MIN_QUERY_LEN,
+};
 pub use json_repair::repair_json;
 pub use manual_rollback::{known_good_target, ManualRollbackInput, RollbackOutcome};
 pub use merge_policy::{

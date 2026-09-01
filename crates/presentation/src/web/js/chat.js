@@ -89,15 +89,23 @@ function renderChannels(){
 // Keyboard activation for role="button" list rows (channels, DMs).
 function rowKey(e){if(e.key==="Enter"||e.key===" "){e.preventDefault();e.currentTarget.click();}}
 // Jump to a message, switching channels first when the hit is elsewhere. The
-// target only exists after the new history renders, so poll briefly for it.
+// target only exists after the history renders, so ALWAYS poll briefly for it
+// — even in the current channel its window may not be loaded yet (a search
+// deep-link lands here from any view, not just with chat warm).
 function gotoMsg(id,channel){
   closeThread();
   const scroll=()=>{const el=document.getElementById("msg-"+id);if(!el)return false;
     el.scrollIntoView({behavior:"smooth",block:"center"});
     el.classList.add("msg-flash");setTimeout(()=>el.classList.remove("msg-flash"),1600);return true;};
-  if(channel&&channel!==CURCHAN){selectChannel(channel);let n=0;
-    const t=setInterval(()=>{if(scroll()||++n>20)clearInterval(t);},100);}
-  else scroll();
+  if(channel&&channel!==CURCHAN)selectChannel(channel);
+  let n=0;
+  const t=setInterval(()=>{
+    if(scroll()||++n>20){clearInterval(t);return;}
+    // A hit older than the newest 50 only exists once "load older" has pulled
+    // its page in — nudge the loader while polling (bounded by the same 2s
+    // window; each pass prepends at most one 50-message page).
+    if(CHAT_MORE&&!CHAT_LOADING_MORE&&n%3===2)loadOlderChat();
+  },100);
 }
 function getActiveChannel(){return CURCHAN||"general";}
 function currentChannel(){return CHANNELS.find(c=>c.id===CURCHAN)||{id:"general",name:"general",owner:""};}
@@ -344,88 +352,6 @@ async function inviteToSettingsChannel(){
   }catch(e){toasty("could not invite","err");}
 }
 
-// ── Chat search: channels, people, messages, in one palette ─────────────────
-function openChatSearch(){
-  const ov=document.getElementById("ov-chatsearch");
-  document.getElementById("chatsearch-input").value="";
-  const sc=searchScope();
-  document.getElementById("chatsearch-input").placeholder=`Search ${sc.label}…`;
-  document.getElementById("chatsearch-list").innerHTML=`<div class="empty">Type to search ${sc.label}.</div>`;
-  ov.classList.add("open");
-  setTimeout(()=>document.getElementById("chatsearch-input").focus(),40);
-}
-// The rail's single search. In chat it looks at rooms, people and messages;
-// everywhere else it looks at the work — tickets and wiki pages — so the same
-// box is useful in all three modes instead of being a chat-only feature that
-// happens to sit above the switch.
-function openGlobalSearch(){ openChatSearch(); }
-
-// What the palette searches depends on where you are: rooms and messages in
-// Chat, work in Space, people and projects in Manage. One box, the answers of
-// the room you are standing in.
-function searchScope(){
-  if(MODE==="chat")return {kinds:["channel","person","message"],label:"channels, people, messages"};
-  if(MODE==="manage")return {kinds:["person","project"],label:"people and projects"};
-  return {kinds:["ticket","page","person"],label:"tickets, pages, people"};
-}
-
-function searchWorkItems(q){
-  const hit=[];
-  const s=STATE||{};
-  for(const t of (s.tickets||[])){
-    const hay=`${t.id} ${t.title} ${t.description||""}`.toLowerCase();
-    if(hay.includes(q)) hit.push({t:"ticket",label:`${t.id} · ${t.title}`,sub:t.status,act:`showTicket('${esc(t.id)}')`});
-    if(hit.length>=12)break;
-  }
-  for(const d of (s.docs||[])){
-    if(`${d.title} ${d.body||""}`.toLowerCase().includes(q))
-      hit.push({t:"page",label:d.title,sub:d.folder||"wiki",act:`nav('docs')`});
-    if(hit.length>=20)break;
-  }
-  return hit;
-}
-
-function chatSearchRun(){
-  const q=document.getElementById("chatsearch-input").value.trim().toLowerCase();
-  const list=document.getElementById("chatsearch-list");
-  const scope=searchScope();
-  if(!q){list.innerHTML=`<div class="empty">Type to search ${scope.label}.</div>`;return;}
-  let hit=[];
-  for(const c of CHANNELS){
-    if((c.name||"").toLowerCase().includes(q)||(c.topic||"").toLowerCase().includes(q))
-      hit.push({t:"channel",label:"#"+chanDisplay(c),sub:c.topic||((c.kind==="public")?"public channel":"private channel"),act:`selectChannel('${esc(c.id)}')`});
-  }
-  for(const m of (MEMBERS||[])){
-    const n=m.username||m.name||"";
-    if(n.toLowerCase().includes(q)) hit.push({t:"person",label:n,sub:m.role||"",act:`openDM('${esc(n)}')`});
-  }
-  for(const h of searchWorkItems(q)) hit.push(h);
-  for(const p of (PROJECTS||[])){
-    if(`${p.id} ${p.name||""}`.toLowerCase().includes(q))
-      hit.push({t:"project",label:p.name||p.id,sub:`${p.tickets||0} tickets · v${p.version||"0.0.0"}`,act:`switchProject('${esc(p.id)}')`});
-  }
-  for(const msg of (CHAT||[]).slice(-800).reverse()){
-    const b=(msg.body||"");
-    if(b.toLowerCase().includes(q)){
-      hit.push({t:"message",label:b.slice(0,90),sub:`${msg.user||""} · #${msg.channel||"general"}`,act:`selectChannel('${esc(msg.channel||"general")}')`});
-      if(hit.filter(h=>h.t==="message").length>=12)break;
-    }
-  }
-  const icon={channel:"hash",person:"user",message:"message-2",ticket:"ticket",page:"file-text",project:"folder"};
-  // Keep only what this tab is about; everything else is noise here.
-  hit=hit.filter(h=>scope.kinds.includes(h.t));
-  list.innerHTML=hit.length?hit.slice(0,30).map(h=>`
-    <div class="cs-item" onclick="closeChatSearch();${h.act}">
-      <i class="ti ti-${icon[h.t]}"></i>
-      <div class="cs-txt"><b>${esc(h.label)}</b>${h.sub?`<span>${esc(h.sub)}</span>`:''}</div>
-      <span class="cs-kind">${h.t}</span></div>`).join("")
-    :'<div class="empty">Nothing matched.</div>';
-}
-function closeChatSearch(){document.getElementById("ov-chatsearch").classList.remove("open");}
-document.addEventListener("keydown",e=>{
-  if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==="k"){e.preventDefault();openGlobalSearch();}
-});
-
 // Enterprise modal replacing browser prompt()/confirm(): returns a Promise —
 // resolves the input string (or true) on confirm, null on cancel.
 let _cmResolve=null;
@@ -590,7 +516,7 @@ function renderDMList(){
     return `<div class="chanitem dmitem${active?' on':''}${un?' unread':''}" role="button" tabindex="0" aria-label="Direct message ${esc(u.name||u.username)}${un?', '+un+' unread':''}" onkeydown="rowKey(event)" onclick="openDM('${esc(u.username)}')" title="@${esc(u.username)}${p.status_text?' · '+esc(p.status_text):''}">
       ${av}<span class="channm">${esc(u.name||u.username)}</span>${sub}${statusChip(u.username)}${un?`<span class="chanbadge">${un>99?'99+':un}</span>`:''}
       <button class="chansub" title="${pinned.has(dmChanId(u))?'Unpin':'Pin to top'}" onclick="event.stopPropagation();togglePin_('${esc(dmChanId(u))}')"><i class="ti ti-pin${pinned.has(dmChanId(u))?'-filled':''}"></i></button></div>`;
-  }).join("")+(hidden>0?`<div class="chanitem" role="button" tabindex="0" style="color:var(--dim);font-size:12px" onclick="openChatSearch()">+${hidden} more — search people</div>`:""):'<div class="dm-empty">No teammates yet</div>';
+  }).join("")+(hidden>0?`<div class="chanitem" role="button" tabindex="0" style="color:var(--dim);font-size:12px" onclick="openGlobalSearch()">+${hidden} more — search people</div>`:""):'<div class="dm-empty">No teammates yet</div>';
   railCount("count-dm",users.length);
   applyRailFold();
 }
