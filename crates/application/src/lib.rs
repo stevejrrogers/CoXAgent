@@ -80,6 +80,9 @@ pub(crate) mod test_fs {
         async fn read(&self, path: &Path) -> Option<String> {
             std::fs::read_to_string(path).ok()
         }
+        async fn read_bytes(&self, path: &Path) -> Option<Vec<u8>> {
+            std::fs::read(path).ok()
+        }
         async fn write(&self, path: &Path, content: &str) -> bool {
             if let Some(dir) = path.parent() {
                 let _ = std::fs::create_dir_all(dir);
