@@ -48,6 +48,36 @@ pub struct RunChatReplyUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + 
     /// obeys the same role map as the Inbox buttons. `None` = open mode (no
     /// auth), where the sole operator may do everything.
     actor_role: Option<crate::auth::AuthRole>,
+    /// Attachments on the inbound message (CXA-F331). The engine is told about
+    /// every one of them; a text-only engine must acknowledge an image instead
+    /// of silently ignoring it.
+    attachments: Vec<crate::state::Attachment>,
+}
+
+/// CXA-F331: a prompt block describing the inbound message's attachments so
+/// the engine can reason about them. Empty when there are none. The engine
+/// running today is text-only, so for images the block demands an explicit
+/// acknowledgement and ONE targeted clarifying question — never silence.
+fn attachments_prompt_block(atts: &[crate::state::Attachment]) -> String {
+    use std::fmt::Write as _;
+    if atts.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n[Attachments on this message — you MUST address them]\n");
+    let mut has_image = false;
+    for a in atts {
+        has_image |= a.mime.starts_with("image/");
+        let _ = writeln!(out, "- {} ({}, {} bytes) at {}", a.name, a.mime, a.size, a.url);
+    }
+    if has_image {
+        out.push_str(
+            "Your engine is text-only and cannot see image pixels. Explicitly acknowledge \
+             each image by name, use the filename and the message text as context, and ask \
+             exactly ONE targeted question about what the image shows if that detail matters \
+             to your answer. Never ignore an attachment.\n",
+        );
+    }
+    out
 }
 
 /// Common docker-compose filenames we treat as "already has a deploy setup".
@@ -81,6 +111,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             files: None,
             reply_channel: None,
             actor_role: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -88,6 +119,13 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
     #[must_use]
     pub fn with_actor_role(mut self, role: Option<crate::auth::AuthRole>) -> Self {
         self.actor_role = role;
+        self
+    }
+
+    /// Attach the inbound message's files so the engine knows they exist.
+    #[must_use]
+    pub fn with_attachments(mut self, attachments: Vec<crate::state::Attachment>) -> Self {
+        self.attachments = attachments;
         self
     }
 
@@ -176,6 +214,16 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         // doing the work never looks.
         self.journal_ticket_mentions("CHAT", msg).await;
         let persona = route_persona(&msg.to_lowercase());
+        // CXA-F331: the engine must KNOW about every attachment. Text-only
+        // engines cannot see pixels, so the block instructs an explicit
+        // acknowledgement plus one targeted question instead of silence.
+        let att_block = attachments_prompt_block(&self.attachments);
+        let msg_for_engine = if att_block.is_empty() {
+            msg.to_owned()
+        } else {
+            format!("{msg}\n{att_block}")
+        };
+        let msg = msg_for_engine.as_str();
         let context = self.context().await;
         // A broad or strategic question deserves the TEAM, not one voice:
         // PO/SA/SM think in parallel, then one synthesis answers with the
@@ -1749,5 +1797,32 @@ mod tests {
             !body.contains("Deploy OK"),
             "a malformed host_port must not skip the health gate: {body}"
         );
+    }
+
+    #[test]
+    fn attachments_block_names_files_and_demands_image_acknowledgement() {
+        use crate::state::Attachment;
+        assert!(super::attachments_prompt_block(&[]).is_empty());
+        let atts = vec![
+            Attachment {
+                name: "bug.png".into(),
+                url: "/api/projects/cxa/media/bug.png".into(),
+                mime: "image/png".into(),
+                size: 12345,
+            },
+            Attachment {
+                name: "notes.txt".into(),
+                url: "/api/projects/cxa/media/notes.txt".into(),
+                mime: "text/plain".into(),
+                size: 42,
+            },
+        ];
+        let block = super::attachments_prompt_block(&atts);
+        assert!(block.contains("bug.png (image/png, 12345 bytes)"));
+        assert!(block.contains("notes.txt (text/plain, 42 bytes)"));
+        assert!(block.contains("text-only"), "image demands acknowledgement text");
+        // No image -> no text-only lecture.
+        let block2 = super::attachments_prompt_block(&atts[1..]);
+        assert!(!block2.contains("text-only"));
     }
 }
