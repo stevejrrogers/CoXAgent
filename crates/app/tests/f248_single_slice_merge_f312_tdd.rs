@@ -292,7 +292,19 @@ fn ac1_the_reviewer_panel_anchor_opens_the_recorded_reproduction() {
              review panel's test-case render"
         )
     });
-    let anchor = &chat[at.saturating_sub(200)..at.saturating_add(400)];
+    // A context window for the assert messages, byte-sliced safely: clamp to
+    // the end and walk both offsets onto char boundaries (the flat source may
+    // contain multi-byte characters), or the guard itself panics before it can
+    // report the drift it exists to catch.
+    let mut start = at.saturating_sub(200);
+    while !chat.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut end = at.saturating_add(400).min(chat.len());
+    while !chat.is_char_boundary(end) {
+        end -= 1;
+    }
+    let anchor = &chat[start..end];
     assert!(
         anchor.contains("tc.evidence&&tc.evidence.repro?"),
         "the reproduction link must be driven per criterion by the evidence's \
