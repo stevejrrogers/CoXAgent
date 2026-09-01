@@ -146,7 +146,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
              COMPLETE revised page: keep what is still true, correct what changed, delete what is \
              now wrong.\n\nOn the FIRST line output exactly `FOLDER: -` to keep its current \
              home. Then the full page in Markdown following the required skeleton — including a \
-             `**Keywords:**` line and a `## Code map` with the real file paths.\n\n\
+             `**Keywords:**` line and a `## Code map` with the real file paths. VERIFY every Code-map path before writing it: run `ls <path>` (or `git log --name-only`) in the repo and list ONLY paths that exist in this working tree — a planned-but-never-built filename fails the gate.\n\n\
              === PAGE: {} ===\n{excerpt}",
             page.title
         );
@@ -173,7 +173,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
             let fixup = format!(
                 "Your revision of \"{}\" is missing: {missing}.\n\nOutput the COMPLETE page \
                  again — `FOLDER: -` first line, then every required heading verbatim, the \
-                 `**Keywords:**` line, and a `## Code map` with real file paths. Keep everything \
+                 `**Keywords:**` line, and a `## Code map` with real file paths. VERIFY every Code-map path before writing it: run `ls <path>` (or `git log --name-only`) in the repo and list ONLY paths that exist in this working tree — a planned-but-never-built filename fails the gate. Keep everything \
                  you already wrote.",
                 page.title
             );
@@ -356,7 +356,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
                 "Your page for {id} is missing required parts: {missing}.\n\nOutput the COMPLETE \
                  page again with the full skeleton — same `FOLDER:` first line, every required \
                  heading verbatim, a `**Keywords:**` line, and a `## Code map` listing the real \
-                 files. Do not drop anything you already wrote."
+                 files. VERIFY every Code-map path before writing it: run `ls <path>` (or `git log --name-only`) in the repo and list ONLY paths that exist in this working tree — a planned-but-never-built filename fails the gate. Do not drop anything you already wrote."
             );
             let repair = self
                 .engine
