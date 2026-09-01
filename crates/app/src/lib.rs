@@ -1797,7 +1797,7 @@ pub(crate) fn worktree_at(work_dir: PathBuf, slug: &str) -> PathBuf {
 ///   1. deletes stray files dumped in the worktrees root (agent scratch);
 ///   2. removes husk dirs git no longer lists as worktrees;
 ///   3. `git worktree remove --force`s registered trees idle > 48 h;
-///   4. deletes the `target/` of trees idle > 6 h (rebuilt on next use).
+///   4. deletes the `target/` of trees idle > 2 h (rebuilt on next use).
 ///
 /// Best-effort throughout: a busy tree just gets skipped this round.
 pub(crate) fn spawn_worktree_janitor(work_dir: std::path::PathBuf) {
@@ -1810,7 +1810,10 @@ pub(crate) fn spawn_worktree_janitor(work_dir: std::path::PathBuf) {
                     reclaimed / (1024 * 1024)
                 );
             }
-            tokio::time::sleep(std::time::Duration::from_secs(6 * 3600)).await;
+            // Hourly, not 6-hourly: a busy night refills ~40 GB of worktree
+            // targets in under two hours — a 6 h cadence let free space fall
+            // to 56 GB four times in one night of manual cleanups.
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
         }
     });
 }
@@ -1906,7 +1909,7 @@ fn worktree_janitor_sweep(work_dir: &std::path::Path) -> u64 {
         }
         // Idle trees lose their target outright; a busy tree is size-capped
         // or stale-trimmed (cargo never garbage-collects; 65 GB seen).
-        reclaimed += sweep_target_dir(&path.join("target"), now, idle >= 6);
+        reclaimed += sweep_target_dir(&path.join("target"), now, idle >= 2);
     }
     let _ = std::process::Command::new("git")
         .arg("-C")
