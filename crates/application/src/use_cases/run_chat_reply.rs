@@ -1622,6 +1622,7 @@ mod tests {
     impl DeployPort for DeployWithDeadPort {
         async fn deploy(&self, _work_dir: &std::path::Path) -> Result<DeployReport, PortError> {
             Ok(DeployReport {
+                failure_bundle: None,
                 success: true,
                 deployed: true,
                 summary: "docker compose up -d --build succeeded".to_owned(),
@@ -1637,6 +1638,7 @@ mod tests {
     impl DeployPort for HealthyDeploy {
         async fn deploy(&self, _work_dir: &std::path::Path) -> Result<DeployReport, PortError> {
             Ok(DeployReport {
+                failure_bundle: None,
                 success: true,
                 deployed: true,
                 summary: "docker compose up -d --build succeeded".to_owned(),

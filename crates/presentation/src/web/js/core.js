@@ -596,6 +596,52 @@ function renderSidebar(s){
   document.getElementById("ver").textContent=s.current_version||"0.0.0";
   document.getElementById("pn-tickets").textContent=(s.tickets||[]).length+" tickets";
   document.title="CoXAgent · "+(document.getElementById("proj-name").textContent||"");}
+// CXA-F289 — deploy failure forensics. The persisted bundle is already masked
+// at capture; this masks AGAIN before render/copy (defence in depth: state may
+// carry a legacy unmasked bundle). Same secret-shaped rule as the Rust side.
+function maskSecrets(t){return (t||"").split("\n").map(l=>{const i=l.indexOf("=");
+  if(i<0)return l;const k=l.slice(0,i);
+  return /password|passwd|pwd|secret|token|api_key|apikey|credential|private_key/i.test(k)?k+"=***":l;}).join("\n");}
+// The full masked bundle text behind the Copy affordance — set on every render
+// of the forensics section so the clipboard always carries the WHOLE bundle.
+let _fbText="";
+function failureBundleText(dp){
+  const b=dp&&dp.failure_bundle;if(!b)return"";
+  const logs=b.container_logs||[];
+  const out=["Deploy failure forensics","","== compose stderr (tail) ==",maskSecrets(b.stderr_tail||""),"","== container logs =="];
+  if(b.no_container_logs||!logs.length)out.push("No container logs available — compose failed before any container started.");
+  else for(const c of logs)out.push(`--- ${c.service} ---`,maskSecrets(c.tail));
+  return out.join("\n");
+}
+function failureForensicsHtml(dp){
+  const b=dp&&dp.failure_bundle;if(!b)return"";
+  _fbText=failureBundleText(dp);
+  const logs=b.container_logs||[];
+  const logsHtml=logs.length?logs.map(c=>`<div style="margin-top:12px">
+    <div style="font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--dim)">container · ${esc(c.service)}</div>
+    <pre style="margin:4px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11.5px;line-height:1.55;color:var(--text);background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:8px 11px;white-space:pre-wrap;word-break:break-word">${esc(maskSecrets(c.tail))}</pre></div>`).join("")
+    :`<div style="margin-top:12px;font-size:12.5px;color:var(--muted)">No container logs available — compose failed before any container started.</div>`;
+  return `<div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
+    <div style="display:flex;align-items:center;gap:8px">
+      <div style="font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--dim)">Failure forensics</div>
+      <button type="button" onclick="copyFailureBundle(this)" style="margin-left:auto;background:var(--card2);border:1px solid var(--border2);color:var(--muted);border-radius:9px;padding:4px 13px;font-size:12.5px;font-weight:600;cursor:pointer;transition:all .15s">Copy</button>
+    </div>
+    <pre style="margin:8px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11.5px;line-height:1.55;color:var(--text);background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:8px 11px;white-space:pre-wrap;word-break:break-word">${esc(maskSecrets(b.stderr_tail||""))}</pre>
+    ${logsHtml}</div>`;
+}
+function copyFailureBundle(btn){
+  if(!(_fbText&&navigator.clipboard&&navigator.clipboard.writeText))return;
+  navigator.clipboard.writeText(_fbText).then(()=>{btn.textContent="Copied";
+    setTimeout(()=>{btn.textContent="Copy";},1500);},()=>{});
+}
+function rollbackOutcomeHtml(rb){
+  if(!rb)return"";
+  const ok=rb.ok!==false,col=ok?"var(--green)":"var(--red)";
+  return `<div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;display:flex;align-items:center;gap:8px">
+    <span style="flex:none;border-radius:20px;padding:2px 8px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;background:${col}22;color:${col}">${ok?"Rolled back":"Rollback failed"}</span>
+    <div style="flex:1;font-size:12px;color:var(--muted)">${esc(rb.summary||rb.reason||"")}</div>
+    <div style="flex:none;font-size:11px;color:var(--dim)">${esc((rb.at||"").slice(0,16).replace("T"," "))}</div></div>`;
+}
 function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overview")return;
   if(CUR==="overview"){
     renderDriftAlerts(s);
@@ -620,10 +666,13 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
     const ovv=document.getElementById("ov-velocity");if(ovv)ovv.innerHTML=velocityHtml(s);
     renderHealth(s);
     const dp=s.deploy;
-    document.getElementById("ov-deploy").innerHTML=dp?`<div class="panel" style="margin-top:16px;display:flex;align-items:center;gap:13px">
-      <div class="av" style="width:36px;height:36px;background:${dp.ok?'var(--green)':'var(--red)'}22;color:${dp.ok?'var(--green)':'var(--red)'}"><i class="ti ti-${dp.ok?'cloud-check':'cloud-x'}"></i></div>
-      <div style="flex:1"><div style="font-size:13px;font-weight:600">Deployment ${dp.ok?'healthy':'failed'}</div><div style="font-size:12px;color:var(--muted)">${esc(dp.summary)}</div></div>
-      <div style="font-size:11px;color:var(--dim)">${esc((dp.at||"").slice(0,16).replace("T"," "))}</div></div>`:"";
+    document.getElementById("ov-deploy").innerHTML=dp?`<div class="panel" style="margin-top:16px">
+      <div style="display:flex;align-items:center;gap:13px">
+        <div class="av" style="width:36px;height:36px;background:${dp.ok?'var(--green)':'var(--red)'}22;color:${dp.ok?'var(--green)':'var(--red)'}"><i class="ti ti-${dp.ok?'cloud-check':'cloud-x'}"></i></div>
+        <div style="flex:1"><div style="font-size:13px;font-weight:600">Deployment ${dp.ok?'healthy':'failed'}</div><div style="font-size:12px;color:var(--muted)">${esc(dp.summary)}</div></div>
+        <div style="font-size:11px;color:var(--dim)">${esc((dp.at||"").slice(0,16).replace("T"," "))}</div></div>
+      ${failureForensicsHtml(dp)}
+      ${rollbackOutcomeHtml(s.last_rollback)}</div>`:"";
     document.getElementById("ov-charts").innerHTML=chartsHtml(s);
     loadGovernanceAttention();
     document.getElementById("ov-design").innerHTML=designSystemHtml(s.design_system);

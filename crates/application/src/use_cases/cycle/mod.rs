@@ -773,7 +773,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 }
             }
             // Scrum: open/roll over the sprint at the start of the cycle.
-            self.advance_sprint_if_scrum(cycle).await;
+            // Box::pin: the run_cycle future crossed the large-future bound
+            // once the deploy attempt carried its forensics bundle (CXA-F289)
+            // — boxing this one branch keeps the whole future under it.
+            Box::pin(self.advance_sprint_if_scrum(cycle)).await;
             // SM supervision (deterministic, zero tokens): police the sprint
             // scope, route stalled committed work to the role that unblocks
             // it, and descope what will not ship — the SM orchestrates the
@@ -1125,6 +1128,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                                 &summary,
                                 attempt_sha.clone(),
                                 health_check,
+                                r.failure_bundle,
                             )
                             .await;
                             let kind = if success {
@@ -1178,7 +1182,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         Err(e) => {
                             deploy_bad = true;
                             let summary = format!("deploy failed: {e}");
-                            self.record_deploy(false, &summary, attempt_sha.clone(), None)
+                            // A spawn/timeout error produced no compose run at
+                            // all — no forensics exist to capture (CXA-F289).
+                            self.record_deploy(false, &summary, attempt_sha.clone(), None, None)
                                 .await;
                             self.notify("deploy_failed", summary.clone()).await;
                             if let Some(id) = self.file_deploy_bug(&summary).await {

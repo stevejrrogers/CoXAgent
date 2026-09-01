@@ -92,6 +92,156 @@ pub struct DeployStatus {
     /// (COX-F005). `None` until the health check runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health_check: Option<HealthCheckResult>,
+    /// CXA-F289: when this attempt FAILED, the size-capped forensics bundle
+    /// the deploy adapter captured at the failure site (compose stderr tail +
+    /// recent per-container logs), so the record carries its own evidence
+    /// instead of a one-line summary. Absent for successful/skipped attempts
+    /// and for records written before this existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_bundle: Option<DeployFailureBundle>,
+}
+
+/// One container's recent log tail, attributed to its compose service, inside
+/// a [`DeployFailureBundle`] (CXA-F289).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContainerLogTail {
+    /// The compose service the log lines came from.
+    pub service: String,
+    /// The recent log tail (bounded by [`DeployFailureBundle::new`]).
+    pub tail: String,
+}
+
+/// The size-capped forensics bundle a FAILED deploy attempt attaches to its
+/// record (CXA-F289): the compose stderr tail plus the recent logs of every
+/// container the compose project managed, so a deploy failure is diagnosed
+/// from the record instead of host archaeology. Secrets are masked and the
+/// whole bundle bounded by [`DeployFailureBundle::new`] — the persisted state
+/// is broadcast to every dashboard once a second, so a chatty build must not
+/// be able to bloat it (bounded-state house rule).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeployFailureBundle {
+    /// Tail of the failed `docker compose` invocation's own output.
+    pub stderr_tail: String,
+    /// Recent per-container logs, when any container existed.
+    #[serde(default)]
+    pub container_logs: Vec<ContainerLogTail>,
+    /// AC3: set by the adapter when compose failed BEFORE any container
+    /// existed — the record explicitly states there are no container logs
+    /// rather than rendering an empty log section.
+    #[serde(default)]
+    pub no_container_logs: bool,
+}
+
+/// Hard cap on one persisted [`DeployFailureBundle`], serialized.
+pub const MAX_FAILURE_BUNDLE_BYTES: usize = 131_072;
+
+/// Compose stderr tail: keep at most this many lines (CXA-F289 design).
+const BUNDLE_STDERR_MAX_LINES: usize = 400;
+
+/// Per-container log tail: keep at most this many lines (`--tail 200`).
+const BUNDLE_CONTAINER_MAX_LINES: usize = 200;
+
+/// Whether an env-assignment key names a credential. Shared rule for the
+/// secret-shaped masking (AC4) — mirrored by the dashboard's renderer so a
+/// bundle is masked again before it ever reaches a browser.
+fn is_secret_key(key: &str) -> bool {
+    let key = key.trim().trim_matches(['"', '\'']).to_ascii_lowercase();
+    [
+        "password",
+        "passwd",
+        "pwd",
+        "secret",
+        "token",
+        "api_key",
+        "apikey",
+        "credential",
+        "private_key",
+    ]
+    .iter()
+    .any(|needle| key.contains(needle))
+}
+
+/// CXA-F289 AC4: mask the VALUES of secret-shaped `KEY=value` assignments so
+/// a credential never persists or renders inside a forensics bundle. Pure —
+/// the adapter, the persist path and the dashboard renderer share this one
+/// rule instead of each re-deriving it.
+#[must_use]
+pub fn redact_secret_shaped(text: &str) -> String {
+    text.lines()
+        .map(|line| match line.find('=') {
+            Some(eq) if is_secret_key(&line[..eq]) => format!("{}=***", &line[..eq]),
+            _ => line.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Keep only the last `max` LINES of `s` — the newest output is what
+/// diagnoses a failure.
+fn tail_lines(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    let lines: Vec<&str> = s.lines().collect();
+    let start = lines.len().saturating_sub(max);
+    lines[start..].join("\n")
+}
+
+/// Keep only the last `max` BYTES of `s`, cut on a char boundary.
+fn tail_bytes(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_owned();
+    }
+    let mut at = s.len() - max;
+    while !s.is_char_boundary(at) {
+        at += 1;
+    }
+    s[at..].to_owned()
+}
+
+impl DeployFailureBundle {
+    /// Build a bundle from the adapter's raw capture material: mask
+    /// secret-shaped values first (a cap that cuts text must never be able to
+    /// cut a credential in half — masked output is safe to truncate), then
+    /// bound the whole serialized bundle to [`MAX_FAILURE_BUNDLE_BYTES`].
+    #[must_use]
+    pub fn new(
+        stderr_tail: &str,
+        container_logs: Vec<ContainerLogTail>,
+        no_container_logs: bool,
+    ) -> Self {
+        let mut bundle = Self {
+            stderr_tail: redact_secret_shaped(&tail_lines(stderr_tail, BUNDLE_STDERR_MAX_LINES)),
+            container_logs: container_logs
+                .into_iter()
+                .map(|c| ContainerLogTail {
+                    service: c.service,
+                    tail: redact_secret_shaped(&tail_lines(&c.tail, BUNDLE_CONTAINER_MAX_LINES)),
+                })
+                .collect(),
+            no_container_logs,
+        };
+        bundle.bound();
+        bundle
+    }
+
+    /// Enforce the cap: tails are cut first (stderr to half the budget, each
+    /// container tail to an eighth), then — if a pile of container tails
+    /// still overflows — the OLDEST container log is dropped until it fits.
+    /// stderr alone can never exceed half the cap, so this converges.
+    fn bound(&mut self) {
+        self.stderr_tail = tail_bytes(&self.stderr_tail, MAX_FAILURE_BUNDLE_BYTES / 2);
+        for log in &mut self.container_logs {
+            log.tail = tail_bytes(&log.tail, MAX_FAILURE_BUNDLE_BYTES / 8);
+        }
+        while self.serialized_len() > MAX_FAILURE_BUNDLE_BYTES && !self.container_logs.is_empty() {
+            self.container_logs.remove(0);
+        }
+    }
+
+    fn serialized_len(&self) -> usize {
+        serde_json::to_string(self).map_or(usize::MAX, |s| s.len())
+    }
 }
 
 /// Outcome of a single health-endpoint probe (COX-F005): the app's health
@@ -141,6 +291,14 @@ pub struct RollbackStatus {
     /// so rollback was skipped (not attempted).
     #[serde(default)]
     pub migration_blocked: bool,
+    /// CXA-F289: the deploy-failure forensics attached to THIS rollback
+    /// record — the triggering attempt's bundle when the rollback succeeded
+    /// (a successful rollback overwrites the deploy record), or the failed
+    /// rollback redeploy's own bundle when the rollback itself failed, so a
+    /// failed deploy and a failed rollback stay two separately inspectable
+    /// attempt records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_bundle: Option<DeployFailureBundle>,
 }
 
 /// One durable incident record (CXA-F012): after every auto-rollback or
@@ -233,5 +391,75 @@ mod engine_incident_tests {
             s.close_engine_incident("claude").is_none(),
             "closing twice is not an event"
         );
+    }
+}
+
+#[cfg(test)]
+mod failure_bundle_tests {
+    use super::{
+        redact_secret_shaped, ContainerLogTail, DeployFailureBundle, MAX_FAILURE_BUNDLE_BYTES,
+    };
+
+    #[test]
+    fn secret_shaped_assignments_are_masked_but_plain_lines_are_not() {
+        let out = redact_secret_shaped(
+            "PG_PASSWORD=hunter2\ndocker compose up failed: exit 1\nAPI_TOKEN=abc123\nNOTE=plain text",
+        );
+        assert_eq!(
+            out,
+            "PG_PASSWORD=***\ndocker compose up failed: exit 1\nAPI_TOKEN=***\nNOTE=plain text",
+            "secret VALUES masked, keys and ordinary lines untouched"
+        );
+    }
+
+    #[test]
+    fn masking_runs_before_capping_so_a_cut_never_exposes_a_secret() {
+        // A 10 MiB single secret line: the cap must cut the MASKED text, and
+        // no slice of the raw value may survive anywhere in the bundle.
+        let value = "z".repeat(10 * 1024 * 1024);
+        let bundle =
+            DeployFailureBundle::new(&format!("PG_PASSWORD={value}"), Vec::new(), true);
+        assert!(
+            !bundle.stderr_tail.contains('z'),
+            "the raw secret value must not survive masking + capping"
+        );
+        assert!(bundle.stderr_tail.contains("PG_PASSWORD=***"));
+    }
+
+    #[test]
+    fn the_whole_bundle_stays_within_the_persisted_cap() {
+        let chatty = "build line with enough words to bulk up the log output\n".repeat(20_000);
+        let logs: Vec<ContainerLogTail> = (0..40)
+            .map(|i| ContainerLogTail {
+                service: format!("svc{i}"),
+                tail: chatty.clone(),
+            })
+            .collect();
+        let bundle = DeployFailureBundle::new(&chatty, logs, false);
+        let size = serde_json::to_string(&bundle).expect("serialize").len();
+        assert!(
+            size <= MAX_FAILURE_BUNDLE_BYTES,
+            "a chatty build must not bloat the persisted state: {size} > {MAX_FAILURE_BUNDLE_BYTES}"
+        );
+        assert!(
+            !bundle.no_container_logs,
+            "the marker records the ADAPTER's observation, it is not derived from a trimmed list"
+        );
+    }
+
+    #[test]
+    fn tails_keep_the_newest_lines_and_bytes() {
+        let long = (0..1000)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let tail = super::tail_lines(&long, 2);
+        assert_eq!(tail, "line998\nline999", "the tail is the NEWEST output");
+        let cut = super::tail_bytes(&long, 10);
+        assert!(long.ends_with(&cut), "the byte tail keeps the end");
+        // A multi-byte char must never be cut in half: 3 bytes of 2-byte
+        // chars yields ONE whole char (the cap is a maximum, not exact).
+        let multibyte = "é".repeat(100);
+        assert_eq!(super::tail_bytes(&multibyte, 3), "é");
     }
 }

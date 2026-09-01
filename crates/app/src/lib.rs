@@ -410,7 +410,7 @@ mod onboard_scaffold_cleanup_tests {
             git_url: Some("ftp://example.invalid/repo.git".to_owned()),
             ..request("QAB136")
         };
-        let Err(err) = onboard_project(base.path(), &registry, req, None).await else {
+        let Err(err) = Box::pin(onboard_project(base.path(), &registry, req, None)).await else {
             panic!("an unsupported git scheme must refuse the onboarding");
         };
         assert_eq!(
@@ -440,7 +440,7 @@ mod onboard_scaffold_cleanup_tests {
             existing: Some(PathBuf::from("/nonexistent/qab136/codebase")),
             ..request("QAB136")
         };
-        assert!(onboard_project(base.path(), &registry, req, None)
+        assert!(Box::pin(onboard_project(base.path(), &registry, req, None))
             .await
             .is_err());
         assert!(
@@ -477,7 +477,13 @@ mod onboard_alias_traversal_tests {
         std::fs::create_dir_all(&base).expect("workspace base");
         let registry = base.join("registry.json");
 
-        let Err(err) = onboard_project(&base, &registry, request("../qatrav-esc"), None).await
+        let Err(err) = Box::pin(onboard_project(
+            &base,
+            &registry,
+            request("../qatrav-esc"),
+            None,
+        ))
+        .await
         else {
             panic!("a traversing alias must refuse the onboarding");
         };
@@ -509,7 +515,13 @@ mod onboard_alias_traversal_tests {
         let base = tempfile::tempdir().expect("tmp");
         let registry = base.path().join("registry.json");
         for alias in ["..\\qatrav-esc", "qa/../trav", "a/b", "..", ".hidden"] {
-            let Err(err) = onboard_project(base.path(), &registry, request(alias), None).await
+            let Err(err) = Box::pin(onboard_project(
+                base.path(),
+                &registry,
+                request(alias),
+                None,
+            ))
+            .await
             else {
                 panic!("alias {alias:?} must refuse the onboarding");
             };
@@ -840,9 +852,9 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
             let base = base.clone();
             let registry_path = registry_path.clone();
             let auth = auth.clone();
-            Box::pin(
-                async move { onboard_project(&base, &registry_path, req, auth.as_ref()).await },
-            )
+            Box::pin(async move {
+                Box::pin(onboard_project(&base, &registry_path, req, auth.as_ref())).await
+            })
         }
     });
     let remover: coxagent_presentation::ProjectRemover = Arc::new({
