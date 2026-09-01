@@ -28,7 +28,6 @@ fn sample_ticket(id: &str) -> Ticket {
 /// with "migrate: db error". Run the first migration once, alone.
 static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
-
 /// Refuse to run destructive contract tests against a database that already
 /// holds a real hub project. A dedicated test database has no `cxa` row; a
 /// live hub's `cxa` row always carries revision > 0. This closed a real
@@ -61,7 +60,9 @@ async fn sql_store_satisfies_contract() {
         return;
     };
     if is_live_hub_db(&dsn).await {
-        eprintln!("COXAGENT_TEST_PG_DSN points at a LIVE hub database — refusing the contract test");
+        eprintln!(
+            "COXAGENT_TEST_PG_DSN points at a LIVE hub database — refusing the contract test"
+        );
         return;
     }
     // Unique project id per run so repeated runs against the same DB are clean.

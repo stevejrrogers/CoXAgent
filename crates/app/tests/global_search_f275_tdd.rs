@@ -102,7 +102,9 @@ use std::path::{Path, PathBuf};
 
 use coxagent_application::auth::{AuthRole, AuthUser};
 use coxagent_application::state::{ChatMsg, DocPage, ProjectState};
-use coxagent_domain::{Complexity, Priority, Role, Status, TechnicalDesign, Ticket, TicketId, TicketType};
+use coxagent_domain::{
+    Complexity, Priority, Role, Status, TechnicalDesign, Ticket, TicketId, TicketType,
+};
 
 /// The home of the pure search use case: application layer, zero IO — it
 /// reads only the data passed in (`ProjectState`, the query, the viewer) and
@@ -267,10 +269,8 @@ fn outsider_lead() -> AuthUser {
 /// was posted in — every kind AC1 groups, all in one `ProjectState`.
 fn searchable_state() -> ProjectState {
     let mut s = ProjectState::default();
-    s.tickets.push(done_feature(
-        "CXC-F275-live",
-        "Fix payment webhook retries",
-    ));
+    s.tickets
+        .push(done_feature("CXC-F275-live", "Fix payment webhook retries"));
     s.docs.push(wiki_page(
         "doc-payments",
         "Payment webhook integration guide",
@@ -315,8 +315,14 @@ fn the_three_searchable_surfaces_are_real_project_state_today() {
 #[test]
 fn closed_tickets_reach_terminal_statuses_through_the_real_transition_table() {
     for (t, expected) in [
-        (done_feature("CXC-F275-done", "Fix payment webhook retries"), Status::Done),
-        (verified_bug("CXC-F275-verified", "Payment webhook timeout"), Status::Verified),
+        (
+            done_feature("CXC-F275-done", "Fix payment webhook retries"),
+            Status::Done,
+        ),
+        (
+            verified_bug("CXC-F275-verified", "Payment webhook timeout"),
+            Status::Verified,
+        ),
         (
             rejected_feature("CXC-F275-rejected", "Duplicate payment retry idea"),
             Status::Rejected,
@@ -429,8 +435,8 @@ fn ac1_a_global_search_use_case_exists_over_project_state() {
         !src.trim().is_empty(),
         "{SEARCH_MODULE} exists but is empty — AC1 has no implementation"
     );
-    let registry = try_read(USE_CASE_REGISTRY)
-        .unwrap_or_else(|| panic!("read {USE_CASE_REGISTRY}"));
+    let registry =
+        try_read(USE_CASE_REGISTRY).unwrap_or_else(|| panic!("read {USE_CASE_REGISTRY}"));
     assert!(
         registry.contains("pub mod global_search"),
         "{SEARCH_MODULE} exists but is not registered in {USE_CASE_REGISTRY} \
@@ -444,14 +450,12 @@ fn ac1_a_global_search_use_case_exists_over_project_state() {
 /// "TICKETS / WIKI / CHAT" sections). RED: the module does not exist.
 #[test]
 fn ac1_results_are_labeled_and_grouped_by_kind_across_the_three_surfaces() {
-    let src = lower(
-        &try_read(SEARCH_MODULE).unwrap_or_else(|| {
-            panic!(
-                "no global search use case exists: {SEARCH_MODULE} is absent — \
+    let src = lower(&try_read(SEARCH_MODULE).unwrap_or_else(|| {
+        panic!(
+            "no global search use case exists: {SEARCH_MODULE} is absent — \
                  AC1's grouped, labeled results have nothing to run"
-            )
-        }),
-    );
+        )
+    }));
     for kind in ["ticket", "chat"] {
         assert!(
             src.contains(kind),
@@ -482,14 +486,12 @@ fn ac1_results_are_labeled_and_grouped_by_kind_across_the_three_surfaces() {
 /// RED: the module does not exist.
 #[test]
 fn ac1_each_result_deep_links_to_its_surface() {
-    let src = lower(
-        &try_read(SEARCH_MODULE).unwrap_or_else(|| {
-            panic!(
-                "no global search use case exists: {SEARCH_MODULE} is absent — \
+    let src = lower(&try_read(SEARCH_MODULE).unwrap_or_else(|| {
+        panic!(
+            "no global search use case exists: {SEARCH_MODULE} is absent — \
                  AC1's deep links have nothing to build them"
-            )
-        }),
-    );
+        )
+    }));
     assert!(
         src.contains("link"),
         "every search result must carry a deep link to its surface (AC1) — \
@@ -550,14 +552,12 @@ fn ac2_results_are_scoped_to_projects_the_viewer_is_a_member_of() {
 /// use case does not exist.
 #[test]
 fn ac2_chat_results_respect_channel_visibility() {
-    let src = lower(
-        &try_read(SEARCH_MODULE).unwrap_or_else(|| {
-            panic!(
-                "no global search use case exists: {SEARCH_MODULE} is absent — \
+    let src = lower(&try_read(SEARCH_MODULE).unwrap_or_else(|| {
+        panic!(
+            "no global search use case exists: {SEARCH_MODULE} is absent — \
                  AC2's chat visibility has nothing to enforce it"
-            )
-        }),
-    );
+        )
+    }));
     assert!(
         src.contains("can_view") || src.contains("channels_for"),
         "chat results must be filtered through the shipped channel \
@@ -582,14 +582,12 @@ fn ac2_chat_results_respect_channel_visibility() {
 /// no code decides the closed case at all.
 #[test]
 fn ac3_closed_tickets_are_an_explicit_decision_not_an_error() {
-    let src = lower(
-        &try_read(SEARCH_MODULE).unwrap_or_else(|| {
-            panic!(
-                "no global search use case exists: {SEARCH_MODULE} is absent — \
+    let src = lower(&try_read(SEARCH_MODULE).unwrap_or_else(|| {
+        panic!(
+            "no global search use case exists: {SEARCH_MODULE} is absent — \
                  AC3's closed/archived decision has nothing to encode it"
-            )
-        }),
-    );
+        )
+    }));
     assert!(
         src.contains("closed") || src.contains("archived"),
         "the search use case must decide closed/archived tickets explicitly \
@@ -640,23 +638,19 @@ fn ac4_short_and_zero_match_queries_yield_an_explicit_empty_state() {
 /// premise is real today (the green guard above builds it).
 #[test]
 fn ac5_results_are_capped_per_kind_with_a_show_more_affordance() {
-    let src = lower(
-        &try_read(SEARCH_MODULE).unwrap_or_else(|| {
-            panic!(
-                "no global search use case exists: {SEARCH_MODULE} is absent — \
+    let src = lower(&try_read(SEARCH_MODULE).unwrap_or_else(|| {
+        panic!(
+            "no global search use case exists: {SEARCH_MODULE} is absent — \
                  AC5's per-kind cap has nothing to bound it"
-            )
-        }),
-    );
+        )
+    }));
     assert!(
         src.contains("take(") || src.contains("cap") || src.contains("limit"),
         "results must be capped per kind so a 400-ticket backlog cannot \
          render unbounded (AC5) — no cap in {SEARCH_MODULE}"
     );
     assert!(
-        src.contains("show more")
-            || src.contains("show_more")
-            || src.contains("has_more"),
+        src.contains("show more") || src.contains("show_more") || src.contains("has_more"),
         "a capped result set must expose the there-is-more signal the \
          overlay renders as the 'show more' affordance (AC5) — none in \
          {SEARCH_MODULE}"
