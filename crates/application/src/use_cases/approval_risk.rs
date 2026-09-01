@@ -181,6 +181,26 @@ pub fn shape_key(ticket: &Ticket) -> String {
     format!("{kind}/{:?}", ticket.complexity()).to_lowercase()
 }
 
+/// The exact kinds [`shape_key`] can emit, and the complexities it pairs
+/// them with — the whole shape vocabulary, so validation and any error
+/// message that names it can never drift apart.
+pub const SHAPE_KINDS: &[&str] = &["test", "docs", "bug", "chore", "feature"];
+pub const SHAPE_COMPLEXITIES: &[&str] = &["small", "medium", "large"];
+
+/// Whether `shape` is a well-formed `kind/complexity` key this system can
+/// produce. The policy surface (CXA-F303) accepts operator-supplied shapes
+/// and writes them into `state.ask_again_shapes` — an entry nothing will ever
+/// match (a typo like `tests/small`) would silently sit there forever, so the
+/// vocabulary is validated against the one producer of shapes.
+#[must_use]
+pub fn is_valid_shape(shape: &str) -> bool {
+    let Some((kind, complexity)) = shape.split_once('/') else {
+        return false;
+    };
+    SHAPE_KINDS.contains(&kind)
+        && SHAPE_COMPLEXITIES.contains(&complexity.to_ascii_lowercase().as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,5 +347,33 @@ mod tests {
             true,
         );
         assert_eq!(shape_key(&a), shape_key(&b), "both are small test work");
+    }
+
+    /// CXA-F303: every shape the gate itself can produce must pass the
+    /// policy surface's validation — the vocabulary and the producer agree.
+    #[test]
+    fn is_valid_shape_accepts_every_shape_key_output() {
+        for kind in SHAPE_KINDS {
+            for complexity in SHAPE_COMPLEXITIES {
+                assert!(
+                    is_valid_shape(&format!("{kind}/{complexity}")),
+                    "{kind}/{complexity} is producible by shape_key and must be valid"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn is_valid_shape_rejects_malformed_or_unknown_shapes() {
+        for bad in [
+            "test/",
+            "/small",
+            "tests/small",
+            "test/huge",
+            "",
+            "test/small/extra",
+        ] {
+            assert!(!is_valid_shape(bad), "{bad:?} must not validate");
+        }
     }
 }
