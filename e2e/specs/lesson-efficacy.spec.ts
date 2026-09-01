@@ -28,6 +28,7 @@ const rpc = async (op, body) => {
 const LESSON_REPEATING =
   'docker build fails when the base image tag moves — pin the base image version';
 const LESSON_WATCHED = 'route PRs that touch gating files to their human approver at open';
+const LESSON_PLAIN = 'clear every run error before cycle close';
 
 const recurrence = (day, reason) => ({
   at: `2026-09-${day}T10:00:00Z`,
@@ -73,6 +74,13 @@ const seededLedger = [
     re_recordings: 1,
     recurrences: [],
   },
+  {
+    text: LESSON_PLAIN,
+    at: '2026-08-28T10:00:00Z',
+    cycle: 2,
+    re_recordings: 0,
+    recurrences: [],
+  },
 ];
 
 test('a repeating lesson renders its recurrence history with the prevention action', async ({ page }) => {
@@ -97,9 +105,13 @@ test('a repeating lesson renders its recurrence history with the prevention acti
     await expect(
       panel.getByRole('button', { name: /file prevention ticket/i }).first(),
     ).toBeVisible();
-    // The watched lesson renders its own line without joining the repeaters.
+    // The watched lessons render their own lines without joining the
+    // repeaters — including the plain lesson that never recurred (AC2:
+    // "for every lesson ... when it was recorded").
     await expect(panel).toContainText(/Watched/i);
     await expect(panel).toContainText(LESSON_WATCHED);
+    await expect(panel).toContainText(LESSON_PLAIN);
+    await expect(panel).toContainText(/recorded 2026-08-28 · 0 recurrences/);
 
     await assertNoConsoleErrors(errors);
     await expect(page).toHaveScreenshot('lesson-efficacy.png');
@@ -109,7 +121,7 @@ test('a repeating lesson renders its recurrence history with the prevention acti
   }
 });
 
-test('a project whose lessons never recurred renders no efficacy panel', async ({ page }) => {
+test('a project with no recorded lessons renders no efficacy panel', async ({ page }) => {
   const errors = [];
   armConsoleGate(page, errors);
   await setLessonLedger(null);

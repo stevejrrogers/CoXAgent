@@ -27,9 +27,10 @@ function renderLessonEfficacy(){
   const el=document.getElementById("ov-lessons");if(!el)return;
   const eff=window._eff;
   const rows=(eff&&eff.lessons)||[];
-  // Zero gates render nothing: a project whose lessons never recurred (and
-  // were never re-learned) reads exactly as before this panel existed.
-  if(!rows.some(l=>l.recurrence_count>0||l.re_recordings>0||l.repeating)){setHTML(el,"");return;}
+  // Zero gates render nothing: a project with NO recorded lessons reads
+  // exactly as before this panel existed. Every TRACKED lesson renders (AC2:
+  // "for every lesson"), repeating ones first.
+  if(!rows.length){setHTML(el,"");return;}
   const day=iso=>iso?String(iso).slice(0,10):"—";
   const repeating=rows.filter(l=>l.repeating), watched=rows.filter(l=>!l.repeating);
   const incidentsHtml=l=>{
@@ -38,13 +39,13 @@ function renderLessonEfficacy(){
     return recent.map(inc=>`<div style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);margin-top:2px">
       <i class="ti ti-bolt" style="font-size:12px;color:var(--amber)"></i>
       <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(inc.incident_reason||"incident")} · ${day(inc.incident_at)}</span>
-      <a style="color:var(--dim);cursor:pointer;text-decoration:underline" onclick="dismissLessonMatch(this)" data-lesson="${esc(l.text)}" data-incident-at="${esc(inc.incident_at)}" data-incident-reason="${esc(inc.incident_reason||"")}">dismiss</a>
+      <a style="color:var(--dim);cursor:pointer;text-decoration:underline" onclick="dismissLessonMatch(this)" data-lesson="${escAttr(l.text)}" data-incident-at="${escAttr(inc.incident_at)}" data-incident-reason="${escAttr(inc.incident_reason||"")}">dismiss</a>
     </div>`).join("");
   };
   const actionHtml=l=>l.escalated
     ?`<span style="flex:none;display:inline-flex;align-items:center;gap:5px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:2px 8px;border-radius:10px;background:var(--card2);color:var(--muted)" title="structural work escalated">
        <i class="ti ti-${l.stage==="bug"?"bug":"tool"}" style="color:${l.stage==="bug"?"var(--red)":"var(--accent2)"}"></i>${esc(l.stage||"chore")} ${esc(l.structural_ticket||"")}</span>`
-    :`<button class="gc-btn pri" style="flex:none;padding:6px 12px;font-size:12px" onclick="escalateLesson(this)" data-lesson="${esc(l.text)}">File prevention ticket</button>`;
+    :`<button class="gc-btn pri" style="flex:none;padding:6px 12px;font-size:12px" onclick="escalateLesson(this)" data-lesson="${escAttr(l.text)}">File prevention ticket</button>`;
   const row=l=>`<div style="display:flex;align-items:flex-start;gap:12px;padding:10px 2px;border-bottom:1px solid var(--border)">
     <div style="flex:1;min-width:0">
       <div style="font-size:13px;line-height:1.55;color:var(--text)">${esc(l.text)}</div>
@@ -57,7 +58,7 @@ function renderLessonEfficacy(){
   </div>`;
   const repSec=repeating.length
     ?`<div style="font-size:12px;font-weight:600;color:var(--red);text-transform:uppercase;letter-spacing:.6px;margin-bottom:4px">Repeating — file structural fixes</div>${repeating.map(row).join("")}`:"";
-  const watchedRows=watched.filter(l=>l.recurrence_count>0||l.re_recordings>0);
+  const watchedRows=watched;
   const watchedSec=watchedRows.length
     ?`<div style="font-size:11px;color:var(--dim);margin:14px 0 4px">Watched — recorded, no repeat yet</div>${watchedRows.map(row).join("")}`:"";
   setHTML(el,`<div class="sec" style="margin-top:22px">Lesson efficacy <span style="font-size:11px;color:var(--dim);font-weight:400">· whether each lesson actually stopped its failure class — ${eff.repeaters} repeating</span></div>
