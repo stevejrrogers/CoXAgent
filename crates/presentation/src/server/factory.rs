@@ -1,8 +1,10 @@
 //! The onboarding factory contract: the composition root injects this port so
 //! the presentation layer can build a project on demand without touching the
 //! filesystem or the hub registry itself. The failure type is classified at
-//! the source (CXA-B129): an expected client conflict — the target workspace
-//! already holds tickets — must reach the API client as HTTP 409, never a 500.
+//! the source (CXA-B129, CXA-B138, CXA-B139): an expected client conflict —
+//! the target workspace already holds tickets — must reach the API client as
+//! HTTP 409, and invalid client input (a path-traversing alias, an unsupported
+//! git URL scheme) as HTTP 400, never a 500 for either.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -42,18 +44,31 @@ pub struct NewProjectReq {
 pub type ProjectRemover =
     Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>;
 
+/// Which HTTP class a project-factory failure belongs to (CXA-B129, CXA-B138,
+/// CXA-B139). Classified at the source so the HTTP layer never has to guess
+/// from the message text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactoryErrorKind {
+    /// A genuine server-side fault (HTTP 500).
+    Internal,
+    /// An expected client conflict — the target workspace already holds
+    /// tickets (HTTP 409).
+    Conflict,
+    /// Invalid client input — a pure request-validation failure such as a
+    /// path-traversing alias (CXA-B138) or an unsupported git URL scheme
+    /// (CXA-B139) (HTTP 400).
+    BadRequest,
+}
+
 /// A project-factory failure, classified at the source so the HTTP layer can
-/// map an expected client conflict to 409 instead of a 500 (CXA-B129) and a
-/// refused request to 400 instead of a 500 (CXA-B138).
+/// map an expected client conflict to 409 instead of a 500 (CXA-B129), a
+/// refused request to 400 instead of a 500 (CXA-B138), and unsupported client
+/// input such as a bad git URL scheme to 400 (CXA-B139).
 #[derive(Debug, Clone)]
 pub struct FactoryError {
     pub message: String,
-    /// True when the failure is an expected client-side conflict — the target
-    /// workspace already holds tickets — mapped to HTTP 409, not 500.
-    pub conflict: bool,
-    /// True when the REQUEST itself was refused before any IO — malformed
-    /// input such as a path-traversing alias (CXA-B138) — mapped to HTTP 400.
-    pub bad_request: bool,
+    /// The failure class — drives the HTTP status mapping.
+    pub kind: FactoryErrorKind,
 }
 
 impl FactoryError {
@@ -61,8 +76,7 @@ impl FactoryError {
     pub fn internal(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
-            conflict: false,
-            bad_request: false,
+            kind: FactoryErrorKind::Internal,
         }
     }
 
@@ -70,17 +84,16 @@ impl FactoryError {
     pub fn conflict(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
-            conflict: true,
-            bad_request: false,
+            kind: FactoryErrorKind::Conflict,
         }
     }
 
-    /// A refused client request (HTTP 400, CXA-B138).
+    /// Invalid client input — the request itself can never succeed (HTTP 400,
+    /// CXA-B138 path-traversing alias, CXA-B139 bad git URL scheme).
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
-            conflict: false,
-            bad_request: true,
+            kind: FactoryErrorKind::BadRequest,
         }
     }
 }

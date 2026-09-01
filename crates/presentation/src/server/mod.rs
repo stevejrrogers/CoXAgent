@@ -208,7 +208,7 @@ pub struct ProjectHandle {
 /// composition root so the presentation layer stays free of infrastructure.
 /// The contract lives in [`factory`]; re-exported here because every
 /// submodule globs `super::*` and `lib.rs` re-exports the names.
-pub use factory::{FactoryError, NewProjectReq, ProjectFactory, ProjectRemover};
+pub use factory::{FactoryError, FactoryErrorKind, NewProjectReq, ProjectFactory, ProjectRemover};
 
 /// Extract the project ID from a URL path like `/api/projects/:pid/...`.
 fn extract_pid_from_path(path: &str) -> Option<&str> {
@@ -1328,8 +1328,9 @@ fn conflict_error(msg: &str) -> axum::response::Response {
         .into_response()
 }
 
-/// A refused client request (CXA-B138): the same JSON error shape, but 400 —
-/// the caller sent something the factory must never act on.
+/// Invalid client input (CXA-B138, CXA-B139): the same JSON error shape, but
+/// 400 so the client learns the request itself was bad — retrying can never
+/// succeed.
 fn bad_request_error(msg: &str) -> axum::response::Response {
     (
         axum::http::StatusCode::BAD_REQUEST,
