@@ -192,7 +192,12 @@ fn read_dot_env(path: &std::path::Path) -> std::collections::HashSet<String> {
 /// where agents read diffs from and commit from (CXA-B028). Defaults to a
 /// per-user data dir, overridable with `COXAGENT_DEPLOY_SECRETS_DIR` so tests
 /// and sandboxes can point it at an isolated location.
-fn deploy_secrets_root() -> std::path::PathBuf {
+///
+/// Public since CXA-F262: the backup/restore commands need the SAME root to
+/// capture (`--include-secrets`) and to restore secret files onto the CURRENT
+/// machine — resolving it anywhere else would desynchronize the two.
+#[must_use]
+pub fn deploy_secrets_root() -> std::path::PathBuf {
     if let Some(dir) = std::env::var_os("COXAGENT_DEPLOY_SECRETS_DIR") {
         return std::path::PathBuf::from(dir);
     }
