@@ -7,7 +7,8 @@
 use crate::config::Language;
 use crate::error::AppError;
 use crate::ports::outbound::{AgentEnginePort, AgentRequest, DeployPort, StateStorePort};
-use coxagent_domain::Role;
+use crate::state::ProjectState;
+use coxagent_domain::{Role, Status};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -47,6 +48,36 @@ pub struct RunChatReplyUseCase<S: StateStorePort + ?Sized, E: AgentEnginePort + 
     /// obeys the same role map as the Inbox buttons. `None` = open mode (no
     /// auth), where the sole operator may do everything.
     actor_role: Option<crate::auth::AuthRole>,
+    /// Attachments on the inbound message (CXA-F331). The engine is told about
+    /// every one of them; a text-only engine must acknowledge an image instead
+    /// of silently ignoring it.
+    attachments: Vec<crate::state::Attachment>,
+}
+
+/// CXA-F331: a prompt block describing the inbound message's attachments so
+/// the engine can reason about them. Empty when there are none. The engine
+/// running today is text-only, so for images the block demands an explicit
+/// acknowledgement and ONE targeted clarifying question — never silence.
+fn attachments_prompt_block(atts: &[crate::state::Attachment]) -> String {
+    use std::fmt::Write as _;
+    if atts.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n[Attachments on this message — you MUST address them]\n");
+    let mut has_image = false;
+    for a in atts {
+        has_image |= a.mime.starts_with("image/");
+        let _ = writeln!(out, "- {} ({}, {} bytes) at {}", a.name, a.mime, a.size, a.url);
+    }
+    if has_image {
+        out.push_str(
+            "Your engine is text-only and cannot see image pixels. Explicitly acknowledge \
+             each image by name, use the filename and the message text as context, and ask \
+             exactly ONE targeted question about what the image shows if that detail matters \
+             to your answer. Never ignore an attachment.\n",
+        );
+    }
+    out
 }
 
 /// Common docker-compose filenames we treat as "already has a deploy setup".
@@ -80,6 +111,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             files: None,
             reply_channel: None,
             actor_role: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -87,6 +119,13 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
     #[must_use]
     pub fn with_actor_role(mut self, role: Option<crate::auth::AuthRole>) -> Self {
         self.actor_role = role;
+        self
+    }
+
+    /// Attach the inbound message's files so the engine knows they exist.
+    #[must_use]
+    pub fn with_attachments(mut self, attachments: Vec<crate::state::Attachment>) -> Self {
+        self.attachments = attachments;
         self
     }
 
@@ -168,8 +207,31 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
         if self.try_gate_command(msg).await {
             return Ok(());
         }
+        // Chat → ticket bridge: a channel message that names a ticket is a
+        // decision or clarification about it (SM scoping answers, PO calls).
+        // Journal it on that ticket so the NEXT dev/test run reads it in its
+        // briefing — otherwise the chốt lives only in chat where the agent
+        // doing the work never looks.
+        self.journal_ticket_mentions("CHAT", msg).await;
         let persona = route_persona(&msg.to_lowercase());
+        // CXA-F331: the engine must KNOW about every attachment. Text-only
+        // engines cannot see pixels, so the block instructs an explicit
+        // acknowledgement plus one targeted question instead of silence.
+        let att_block = attachments_prompt_block(&self.attachments);
+        let msg_for_engine = if att_block.is_empty() {
+            msg.to_owned()
+        } else {
+            format!("{msg}\n{att_block}")
+        };
+        let msg = msg_for_engine.as_str();
         let context = self.context().await;
+        // A broad or strategic question deserves the TEAM, not one voice:
+        // PO/SA/SM think in parallel, then one synthesis answers with the
+        // distinct viewpoints and a single recommendation — the thing a lone
+        // assistant cannot give you.
+        if wants_panel(msg) {
+            return self.panel_reply(msg, &context).await;
+        }
         let task = format!(
             "{context}\nA human teammate just wrote in the team channel:\n\"{msg}\"\n\nYou are \
              {persona}, replying like a sharp senior teammate — the way a good coding agent in a \
@@ -195,8 +257,8 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
              ACTION: test: <ticket-id>          — QA tests the deployed ticket, files bugs\n\
              ACTION: standup                    — run a standup\n\
              ACTION: discuss: <topic>           — kick off a team discussion (PO+SA weigh in, SM decides)\n\
-             ACTION: feature: <title> :: <desc> :: <low|medium|high> — add a feature to the backlog at that priority\n\
-             ACTION: bug: <title> :: <desc> :: <low|medium|high>     — file a bug at that priority\n\
+             ACTION: feature: <title> :: <desc> :: <low|medium|high> [:: sprint] — add a feature (append `:: sprint` to also commit it into the RUNNING sprint)\n\
+             ACTION: bug: <title> :: <desc> :: <low|medium|high> [:: sprint]     — file a bug (`:: sprint` commits it into the running sprint)\n\
              ACTION: priority: <ticket-id> :: <low|medium|high>      — reprioritise an existing ticket\n\
              ACTION: implement: <ticket-id>    — code the ticket NOW (DEV runs, writes code, tests)\n\
              ACTION: deploy                     — build & run the app now (docker compose up)\n\
@@ -216,7 +278,11 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
              A short affirmative anywhere in the thread — \"ok\", \"uhm\", \"ừ\", \"đi\", \"làm đi\", \
              \"ưu tiên fix\", \"yes\", \"go\" — IS the confirmation of whatever you last proposed. \
              Act on it. Asking the same question again after the human already said yes is the \
-             worst thing you can do here: they answered, and the work still has not started.{}",
+             worst thing you can do here: they answered, and the work still has not started.\n\
+             The ACTION line is your ONLY hand on the board. Nothing you merely SAY happens: if \
+             you claim you filed, created, or queued something and this reply does not end with \
+             the matching ACTION line, you have lied to the team. \"tạo ticket\", \"thêm vào \
+             sprint\", \"file it\" in ANY language means: end THIS reply with the ACTION line.{}",
             self.lang.reply_directive()
         );
         let Some(raw) = self.run(persona, &task).await else {
@@ -396,6 +462,19 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                 .ok_or_else(|| crate::PortError::Corrupt(format!("no ticket {tid}")))?;
             t.transition_to(coxagent_domain::Role::User, to)
                 .map_err(|e| crate::PortError::Corrupt(e.to_string()))?;
+            // Reaching Verified MEANS the QA verdict was rendered; the burn-down
+            // (CXA-F032 AC#2) only counts bugs carrying their own REGRESSION
+            // TEST PASS record, so the human verdict writes the same provenance
+            // the agent TEST path has written since F022.
+            if to == coxagent_domain::Status::Verified {
+                // The chat path knows the verdict's authority (Role::User) but
+                // no username — "USER" is the identity this path records
+                // everywhere else (the activity feed), never an invented name.
+                super::run_test::record_human_verify_evidence(s, &tid.to_string(), "USER");
+                // Goal-line outcome ledger (CXA-F228): a human verdict is a
+                // delivered outcome like the agent path's.
+                s.record_verified_outcome(&tid.to_string());
+            }
             s.log_activity(
                 "USER",
                 &format!("chat-approved to {label}"),
@@ -682,6 +761,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                                     .and_then(serde_json::Value::as_bool)
                                     .unwrap_or(false),
                                 acceptance_criteria: vec![],
+                                goal: None,
                             })
                             .await
                             .ok();
@@ -901,16 +981,39 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
 
     /// Create a ticket from a `<title> :: <description>` payload and confirm it in
     /// the channel, so a chat request turns into tracked, actionable work.
+    /// Append `msg` (trimmed) to the journal of every EXISTING ticket whose id
+    /// appears in it, so per-ticket briefings pick up decisions made in chat.
+    async fn journal_ticket_mentions(&self, who: &str, msg: &str) {
+        let Ok(state) = self.store.load().await else {
+            return;
+        };
+        let ids: Vec<String> = state
+            .tickets
+            .iter()
+            .map(|t| t.id().to_string())
+            .filter(|id| msg.contains(id.as_str()))
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let note: String = msg.chars().take(500).collect();
+        let who = who.to_owned();
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+            for id in &ids {
+                s.journal_note(id, &format!("{who}: {note}"));
+            }
+            Ok(())
+        })
+        .await;
+    }
+
     async fn file_ticket(&self, kind: coxagent_domain::TicketType, payload: &str, author: &str) {
         use coxagent_domain::ticket::{Complexity, Priority};
-        // `title :: desc :: priority` — desc and priority optional.
-        let mut parts = payload.splitn(3, "::").map(str::trim);
-        let title = parts.next().unwrap_or("").trim();
-        let desc = parts.next().unwrap_or("");
-        let prio = parts.next().and_then(parse_priority);
+        let (title, desc, prio, to_sprint) = parse_ticket_payload(payload);
         if title.is_empty() {
             return;
         }
+        let (title, desc) = (title.as_str(), desc.as_str());
         let priority = prio.unwrap_or(if kind == coxagent_domain::TicketType::Bug {
             Priority::High
         } else {
@@ -968,16 +1071,40 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                     .as_ref()
                     .map(|r| r.acceptance_criteria.clone())
                     .unwrap_or_default(),
+                goal: None,
             })
             .await
         {
+            let committed = if to_sprint {
+                crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                    crate::sprint::commit_ticket(s, &id);
+                    s.log_activity(
+                        "SM",
+                        "committed into the running sprint",
+                        Some(id.to_string()),
+                    );
+                    Ok(())
+                })
+                .await
+                .is_ok()
+            } else {
+                false
+            };
             let kind_str = if kind == coxagent_domain::TicketType::Bug {
                 "bug"
             } else {
                 "tính năng"
             };
             let msg = if self.lang.is_vi() {
-                format!("🎫 Đã tạo {id} ({kind_str}): {title}. Team sẽ đưa vào quy trình.")
+                if committed {
+                    format!(
+                        "🎫 Đã tạo {id} ({kind_str}): {title} — và đã đưa vào sprint đang chạy."
+                    )
+                } else {
+                    format!("🎫 Đã tạo {id} ({kind_str}): {title}. Team sẽ đưa vào quy trình.")
+                }
+            } else if committed {
+                format!("🎫 Filed {id}: {title} — committed into the running sprint.")
             } else {
                 format!("🎫 Filed {id}: {title}. The team will pick it up.")
             };
@@ -1011,7 +1138,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
 
     /// A compact, grounded status the reply agent reasons over.
     async fn context(&self) -> String {
-        use coxagent_domain::{Status, TicketType};
+        use coxagent_domain::TicketType;
         let _ = self.token_saver;
         let Ok(s) = self.store.load().await else {
             return String::new();
@@ -1063,41 +1190,17 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             "(The app auto-deploys via docker compose after DEV each cycle; you can also deploy \
              on request with ACTION: deploy.)\n",
         );
-        // Open backlog so the agent knows what's there and can avoid duplicates.
-        let pending: Vec<_> = s
-            .tickets
-            .iter()
-            .filter(|t| matches!(t.status(), Status::Pending | Status::Ready | Status::Open))
-            .take(10)
-            .collect();
-        if !pending.is_empty() {
-            out.push_str("Open tickets (don't file duplicates):\n");
-            for t in pending {
-                let _ = writeln!(
-                    out,
-                    "- {} [{:?}] {} ({:?})",
-                    t.id(),
-                    t.ticket_type(),
-                    t.title(),
-                    t.priority()
-                );
-            }
-        }
-        if !s.decisions.is_empty() {
-            out.push_str("Team decisions/conventions (honour these):\n");
-            for d in s.decisions.iter().rev().take(6).rev() {
-                let _ = writeln!(out, "- {d}");
-            }
-        }
-        out.push_str("Recent team channel:\n");
-        for c in s
+        push_backlog_and_health(&s, &mut out);
+        out.push_str("Recent team channel (oldest first — this is the conversation you are in):\n");
+        let recent: Vec<_> = s
             .comments
             .iter()
             .filter(|c| c.ticket.is_none())
             .rev()
-            .take(8)
-        {
-            let body: String = c.body.chars().take(160).collect();
+            .take(16)
+            .collect();
+        for c in recent.into_iter().rev() {
+            let body: String = c.body.chars().take(400).collect();
             let _ = writeln!(out, "- {}: {body}", c.author);
         }
         out
@@ -1110,6 +1213,54 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
             .ok()
             .and_then(|s| s.sprint.map(|sp| sp.number))
             .unwrap_or(0)
+    }
+
+    /// Team panel: three role perspectives in parallel, one synthesis.
+    async fn panel_reply(&self, msg: &str, context: &str) -> Result<(), AppError> {
+        let view = |role: &str, lens: &str| {
+            format!(
+                "{context}\nA human teammate wrote in the team channel:\n\"{msg}\"\n\nYou are {role}.                  Give YOUR take through the {lens} lens, grounded in the project state above:                  your recommendation, the strongest reason for it, and the one risk the others                  will miss. At most 110 words, no preamble.{}",
+                self.lang.reply_directive()
+            )
+        };
+        let (po_task, sa_task, scrum_task) = (
+            view("PO (product owner)", "value & priority"),
+            view("SA (architect)", "technical feasibility & design"),
+            view("SM (scrum master)", "process, risk & sequencing"),
+        );
+        let (po, sa, sm) = tokio::join!(
+            self.run("PO", &po_task),
+            self.run("SA", &sa_task),
+            self.run("SM", &scrum_task),
+        );
+        let mut takes = String::new();
+        for (who, t) in [("PO", &po), ("SA", &sa), ("SM", &sm)] {
+            if let Some(t) = t {
+                let _ = writeln!(takes, "{who} said:\n{t}\n");
+            }
+        }
+        if takes.trim().is_empty() {
+            // Every perspective failed — fall back to the single-voice path so
+            // the human still gets an answer.
+            let solo = view("SM", "pragmatic");
+            let Some(raw) = self.run("SM", &solo).await else {
+                return Ok(());
+            };
+            self.post("SM", raw.trim()).await;
+            return Ok(());
+        }
+        let synth = format!(
+            "{context}\nA human teammate wrote in the team channel:\n\"{msg}\"\n\nThree teammates              answered from different angles:\n{takes}\nYou are the SM. Write ONE team reply for the              human: open with the team's recommendation in one sentence, then the strongest points              from each teammate WITH attribution (\"PO thinks… SA warns… \"), keep real              disagreements visible instead of averaging them away, and close with the next concrete              step. Under 220 words.\n\nYou may also append EXACTLY ONE final line with an action,              same rules as always:\nACTION: feature: <title> :: <desc> :: <low|medium|high> [:: sprint]\n             ACTION: bug: <title> :: <desc> :: <low|medium|high> [:: sprint]\nACTION: discuss: <topic>\n             ACTION: none\nThe ACTION line is your ONLY hand on the board — claiming you filed              something without it is a lie. A request to create/queue work in ANY language              (\"tạo ticket\", \"thêm vào sprint\") means: end with the ACTION line; append              `:: sprint` when they want it in the running sprint.{}",
+            self.lang.reply_directive()
+        );
+        let Some(raw) = self.run("TEAM", &synth).await else {
+            return Ok(());
+        };
+        let (reply, action) = split_action(&raw);
+        if !reply.trim().is_empty() {
+            self.post("TEAM", reply.trim()).await;
+        }
+        self.dispatch(&action).await
     }
 
     async fn run(&self, persona: &str, task: &str) -> Option<String> {
@@ -1203,6 +1354,10 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
     }
 
     async fn post(&self, author: &str, body: &str) {
+        // Replies that name a ticket carry scoping decisions the next dev/test
+        // run must see — journal them on that ticket (same bridge as inbound
+        // messages; journal_note caps the tail so this cannot grow unbounded).
+        self.journal_ticket_mentions(author, body).await;
         if let Ok(mut state) = self.store.load().await {
             match &self.reply_channel {
                 // A channel is a conversation, not a report. Short answers
@@ -1211,7 +1366,11 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunChatReplyUseCas
                 Some(ch) if body.chars().count() > 500 => {
                     state.post_comment(author, body, None);
                     let head: String = body.chars().take(180).collect();
-                    let ptr = format!("{head}… — chi tiết đầy đủ bên tab Scrum 📋");
+                    let ptr = if self.lang.is_vi() {
+                        format!("{head}… — chi tiết đầy đủ bên tab Scrum 📋")
+                    } else {
+                        format!("{head}… — full details in the Scrum tab 📋")
+                    };
                     state.post_chat_in(author, &ptr, ch, Vec::new());
                 }
                 Some(ch) => state.post_chat_in(author, body, ch, Vec::new()),
@@ -1232,7 +1391,116 @@ const NEEDS_YES: &[&str] = &[
     "import",
 ];
 
+/// Appends the work-surface part of the agent briefing — open backlog, team
+/// decisions, planned sprints, on-hold tickets, engine health — to `out`.
+/// Split out of [`RunChatReplyUseCase::context`] so each half stays reviewable;
+/// the agent must see the plan and the blockers to talk about them.
+fn push_backlog_and_health(s: &ProjectState, out: &mut String) {
+    use coxagent_domain::Status;
+    // Open backlog so the agent knows what's there and can avoid duplicates.
+    let pending: Vec<_> = s
+        .tickets
+        .iter()
+        .filter(|t| matches!(t.status(), Status::Pending | Status::Ready | Status::Open))
+        .take(10)
+        .collect();
+    if !pending.is_empty() {
+        out.push_str("Open tickets (don't file duplicates):\n");
+        for t in pending {
+            let _ = writeln!(
+                out,
+                "- {} [{:?}] {} ({:?})",
+                t.id(),
+                t.ticket_type(),
+                t.title(),
+                t.priority()
+            );
+        }
+    }
+    if !s.decisions.is_empty() {
+        out.push_str("Team decisions/conventions (honour these):\n");
+        for d in s.decisions.iter().rev().take(6).rev() {
+            let _ = writeln!(out, "- {d}");
+        }
+    }
+    // Planned sprints + parked work — the human plans here; the agent must
+    // see the plan to talk about it.
+    if !s.sprint_queue.is_empty() {
+        out.push_str("Planned sprints (run in this order after the current one):\n");
+        for (i, q) in s.sprint_queue.iter().enumerate() {
+            let _ = writeln!(
+                out,
+                "- #{} {} ({} ticket(s))",
+                i + 1,
+                q.goal,
+                q.tickets.len()
+            );
+        }
+    }
+    let held: Vec<String> = s
+        .tickets
+        .iter()
+        .filter(|t| t.status() == Status::OnHold)
+        .map(|t| {
+            let why = s
+                .hold_reasons
+                .get(&t.id().to_string())
+                .cloned()
+                .unwrap_or_default();
+            format!("{} ({why})", t.id())
+        })
+        .collect();
+    if !held.is_empty() {
+        let _ = writeln!(
+            out,
+            "On hold (waiting on the outside world): {}",
+            held.join(", ")
+        );
+    }
+    // Engine health — so "why is BA slow" gets a real answer.
+    let sick: Vec<String> = s
+        .role_health
+        .iter()
+        .filter(|(_, h)| h.errors > 0)
+        .map(|(r, h)| format!("{r}: {} error(s), {} timeout(s)", h.errors, h.timeouts))
+        .collect();
+    if !sick.is_empty() {
+        let _ = writeln!(out, "Engine health: {}", sick.join(" · "));
+    }
+}
+
+/// Wording that means several perspectives beat one voice: broad, strategic,
+/// or comparative questions, where three views beat one.
+const PANEL_CUES: &[&str] = &[
+    "nên ",
+    "hướng",
+    "roadmap",
+    "chiến lược",
+    "strategy",
+    "should we",
+    "approach",
+    "so sánh",
+    "compare",
+    "ý kiến",
+    "opinions",
+    "đánh giá",
+    "thiết kế thế nào",
+    "architecture",
+    "plan for",
+    "kế hoạch",
+    "cả team",
+    "@team",
+    "team nghĩ",
+];
+
 /// Pick which agent should answer a human message from its wording.
+/// Should the whole panel answer instead of one persona? Broad, strategic,
+/// or comparative questions — where three perspectives beat one voice.
+fn wants_panel(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    PANEL_CUES.iter().any(|c| m.contains(c))
+}
+
 fn route_persona(lower: &str) -> &'static str {
     let has = |kw: &[&str]| kw.iter().any(|k| lower.contains(k));
     if has(&[
@@ -1287,6 +1555,36 @@ fn strip_kw<'a>(a: &'a str, kw: &str) -> Option<&'a str> {
 }
 
 /// Split a trailing `ACTION: <directive>` line off the reply body.
+/// Parse a `feature:`/`bug:` action payload: `title :: desc :: priority
+/// [:: sprint]` — everything after the title optional. A trailing `sprint`
+/// token means "commit the new ticket into the RUNNING sprint"; without it
+/// the ticket waits in the backlog for rollover.
+fn parse_ticket_payload(
+    payload: &str,
+) -> (
+    String,
+    String,
+    Option<coxagent_domain::ticket::Priority>,
+    bool,
+) {
+    let mut parts = payload.splitn(4, "::").map(str::trim);
+    let title = parts.next().unwrap_or("").trim();
+    let desc = parts.next().unwrap_or("");
+    let mut prio_tok = parts.next().unwrap_or("");
+    let mut tail = parts.next().unwrap_or("");
+    if tail.is_empty() && prio_tok.eq_ignore_ascii_case("sprint") {
+        // `title :: desc :: sprint` — priority omitted entirely.
+        tail = prio_tok;
+        prio_tok = "";
+    }
+    (
+        title.to_owned(),
+        desc.to_owned(),
+        parse_priority(prio_tok),
+        tail.eq_ignore_ascii_case("sprint"),
+    )
+}
+
 fn split_action(raw: &str) -> (String, String) {
     for (i, line) in raw.lines().enumerate() {
         let t = line.trim();
@@ -1302,8 +1600,36 @@ fn split_action(raw: &str) -> (String, String) {
 }
 
 #[cfg(test)]
+mod panel_tests {
+    use super::wants_panel;
+
+    #[test]
+    fn strategic_questions_get_the_panel_and_reports_do_not() {
+        assert!(wants_panel("mình nên ưu tiên hướng nào cho quý sau?"));
+        assert!(wants_panel("should we adopt a monorepo approach?"));
+        assert!(wants_panel("cả team nghĩ sao về kế hoạch này"));
+        assert!(!wants_panel("nút login bị lỗi 500"));
+        assert!(!wants_panel("deploy lại đi"));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ticket_payload_parses_the_sprint_suffix_in_every_position() {
+        use coxagent_domain::ticket::Priority;
+        let (t, d, p, sp) = parse_ticket_payload("Paste images :: add listener :: high :: sprint");
+        assert_eq!(
+            (t.as_str(), d.as_str(), p, sp),
+            ("Paste images", "add listener", Some(Priority::High), true)
+        );
+        let (_, _, p, sp) = parse_ticket_payload("Paste images :: add listener :: sprint");
+        assert_eq!((p, sp), (None, true));
+        let (_, _, p, sp) = parse_ticket_payload("Paste images :: add listener :: low");
+        assert_eq!((p, sp), (Some(Priority::Low), false));
+    }
     use crate::ports::outbound::{AgentOutcome, AgentRequest, DeployReport};
     use crate::state::ProjectState;
     use crate::PortError;
@@ -1344,6 +1670,7 @@ mod tests {
     impl DeployPort for DeployWithDeadPort {
         async fn deploy(&self, _work_dir: &std::path::Path) -> Result<DeployReport, PortError> {
             Ok(DeployReport {
+                failure_bundle: None,
                 success: true,
                 deployed: true,
                 summary: "docker compose up -d --build succeeded".to_owned(),
@@ -1359,6 +1686,7 @@ mod tests {
     impl DeployPort for HealthyDeploy {
         async fn deploy(&self, _work_dir: &std::path::Path) -> Result<DeployReport, PortError> {
             Ok(DeployReport {
+                failure_bundle: None,
                 success: true,
                 deployed: true,
                 summary: "docker compose up -d --build succeeded".to_owned(),
@@ -1469,5 +1797,32 @@ mod tests {
             !body.contains("Deploy OK"),
             "a malformed host_port must not skip the health gate: {body}"
         );
+    }
+
+    #[test]
+    fn attachments_block_names_files_and_demands_image_acknowledgement() {
+        use crate::state::Attachment;
+        assert!(super::attachments_prompt_block(&[]).is_empty());
+        let atts = vec![
+            Attachment {
+                name: "bug.png".into(),
+                url: "/api/projects/cxa/media/bug.png".into(),
+                mime: "image/png".into(),
+                size: 12345,
+            },
+            Attachment {
+                name: "notes.txt".into(),
+                url: "/api/projects/cxa/media/notes.txt".into(),
+                mime: "text/plain".into(),
+                size: 42,
+            },
+        ];
+        let block = super::attachments_prompt_block(&atts);
+        assert!(block.contains("bug.png (image/png, 12345 bytes)"));
+        assert!(block.contains("notes.txt (text/plain, 42 bytes)"));
+        assert!(block.contains("text-only"), "image demands acknowledgement text");
+        // No image -> no text-only lecture.
+        let block2 = super::attachments_prompt_block(&atts[1..]);
+        assert!(!block2.contains("text-only"));
     }
 }

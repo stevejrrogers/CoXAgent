@@ -74,6 +74,7 @@ struct DeployWithDeadPort;
 impl DeployPort for DeployWithDeadPort {
     async fn deploy(&self, _work_dir: &std::path::Path) -> Result<DeployReport, PortError> {
         Ok(DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "docker compose up -d --build succeeded".to_owned(),
@@ -89,6 +90,7 @@ struct HealthyDeploy;
 impl DeployPort for HealthyDeploy {
     async fn deploy(&self, _work_dir: &std::path::Path) -> Result<DeployReport, PortError> {
         Ok(DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "docker compose up -d --build succeeded".to_owned(),
@@ -123,12 +125,14 @@ fn project_handle_with_raw_host_port(
         config_path,
         engine: Arc::new(UnusedEngine),
         work_dir: dir.path().to_path_buf(),
+        outbox: None,
         budget: Arc::new(Mutex::new(BudgetCaps::default())),
         context_path: dir.path().join("project_context.md"),
         forge: None,
         deploy: Some(deploy),
         storage: None,
         files: None,
+        deps_discovery: None,
     };
     (dir, handle)
 }
@@ -160,12 +164,14 @@ fn project_handle_with_raw_config(
         config_path,
         engine: Arc::new(UnusedEngine),
         work_dir: dir.path().to_path_buf(),
+        outbox: None,
         budget: Arc::new(Mutex::new(BudgetCaps::default())),
         context_path: dir.path().join("project_context.md"),
         forge: None,
         deploy: Some(deploy),
         storage: None,
         files: None,
+        deps_discovery: None,
     };
     (dir, handle)
 }
@@ -306,12 +312,14 @@ async fn git_preview_fixture(
         config_path,
         engine: Arc::new(UnusedEngine),
         work_dir: work.path().to_path_buf(),
+        outbox: None,
         budget: Arc::new(Mutex::new(BudgetCaps::default())),
         context_path: work.path().join("project_context.md"),
         forge: None,
         deploy: Some(deploy),
         storage: None,
         files: None,
+        deps_discovery: None,
     };
     (bare, work, handle)
 }

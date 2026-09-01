@@ -362,6 +362,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 }
             }
             if self.store.claim_ticket(&cand, &worker, &now).await? {
+                // Announce the START in the activity feed: it only ever logged
+                // completions, so two DEVs grinding in parallel were invisible
+                // in Fleet river until the first one finished — an operator
+                // watching the live stream saw an idle team doing work.
+                let role_label = self.role_name().to_owned();
+                let cid = cand.to_string();
+                let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                    s.log_activity(&role_label, "started implementing", Some(cid.clone()));
+                    Ok(())
+                })
+                .await;
                 chosen = Some(cand);
                 break;
             }
@@ -502,14 +513,36 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             Ok(o) if o.succeeded() => {
                 // Persist any BRIEF: notes the agent left for the next
                 // role/engine on this ticket — durable memory that outlives the
-                // engine session (Tầng 2 of per-ticket context reuse).
-                let briefs = crate::prompts::extract_brief_notes(&o.stdout);
-                if !briefs.is_empty() {
-                    let (key, role_tag, briefs) =
-                        (id.to_string(), self.role_name().to_owned(), briefs);
+                // engine session (Tầng 2 of per-ticket context reuse) — but
+                // screened first (CXA-F305): an injection-shaped note would
+                // replay into every future run as PRIOR WORK, so it is
+                // withheld here and flagged to the operator.
+                let screened = crate::prompts::extract_brief_notes_screened(&o.stdout);
+                if !screened.kept.is_empty() || !screened.dropped.is_empty() {
+                    let (key, role_tag, kept, dropped) = (
+                        id.to_string(),
+                        self.role_name().to_owned(),
+                        screened.kept,
+                        screened.dropped,
+                    );
                     let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
-                        for b in &briefs {
+                        for b in &kept {
                             s.journal_note(&key, &format!("{role_tag}: {b}"));
+                        }
+                        if !dropped.is_empty() {
+                            let project = crate::brief_screening::project_label(
+                                &s.alias,
+                                s.display_name.as_deref(),
+                            );
+                            let msg = crate::brief_screening::injection_flagged_message(
+                                &project, &role_tag, &key, &dropped,
+                            );
+                            s.post_chat_in(
+                                "SYSTEM",
+                                &msg,
+                                crate::state::AGENTS_CHANNEL,
+                                Vec::new(),
+                            );
                         }
                         Ok(())
                     })
@@ -538,9 +571,29 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 // the behaviour we want.
                 if let Some((to, body)) = parse_ask(&o.stdout) {
                     let (key, from) = (id.to_string(), format!("{:?}", self.mode.role()));
+                    // A person-addressed question may be held for their
+                    // focus-window digest (CXA-F176) instead of landing as
+                    // its own interrupt — a pure call over config + clock.
+                    let human = self.config.workflow.human.clone();
+                    let sla = human.question_sla_minutes;
+                    let defer = crate::use_cases::question_batching::should_defer(
+                        &human,
+                        &to,
+                        crate::use_cases::question_batching::now_minutes_utc(),
+                        0,
+                        sla,
+                    );
                     let asked =
                         crate::ports::outbound::mutate_state(self.store.as_ref(), move |st| {
                             if st.ask_question(&key, &from, &to, &body) {
+                                if defer {
+                                    // The question was just pushed: the tail
+                                    // IS the new one, still inside the same
+                                    // write pass.
+                                    if let Some(q) = st.questions.last_mut() {
+                                        q.deferred = true;
+                                    }
+                                }
                                 let msg = format!("❓ {from} → {to}: {body}");
                                 st.post_comment(&from, &msg, Some(key.clone()));
                             }
@@ -1268,7 +1321,15 @@ pub fn parse_ask(stdout: &str) -> Option<(String, String)> {
             continue;
         };
         let role = role.trim().to_uppercase();
-        if !matches!(role.as_str(), "BA" | "SA") {
+        // `ASK @username:` is the agent → human hop (docs/HYBRID_TEAM.md):
+        // the question enters that person's inbox with an SLA. The username
+        // must be a single token — anything else is not an addressee.
+        let is_person = role.len() > 1
+            && role.starts_with('@')
+            && role[1..]
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+        if !matches!(role.as_str(), "BA" | "SA") && !is_person {
             continue;
         }
         let q = question.trim();
@@ -1396,6 +1457,8 @@ mod tests {
                 session_id: None,
                 sandbox: SandboxStatus::default(),
                 engine: String::new(),
+                model: String::new(),
+                attempts: Vec::new(),
             })
         }
     }
@@ -1482,6 +1545,7 @@ mod tests {
             _work_dir: &std::path::Path,
         ) -> Result<crate::ports::outbound::DeployReport, PortError> {
             Ok(crate::ports::outbound::DeployReport {
+                failure_bundle: None,
                 success: true,
                 deployed: false,
                 summary: String::new(),
@@ -1496,6 +1560,7 @@ mod tests {
                 .scoped_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(crate::ports::outbound::DeployReport {
+                failure_bundle: None,
                 success: call == 0,
                 deployed: true,
                 summary: if call == 0 {
@@ -1564,6 +1629,119 @@ mod tests {
         assert!(parse_ask("no question here").is_none());
     }
 
+    #[test]
+    fn parse_ask_reaches_a_person_by_at_username() {
+        use super::parse_ask;
+        // The agent → human hop (docs/HYBRID_TEAM.md): a question the
+        // answering role cannot ground goes to a named person's inbox.
+        let (to, q) =
+            parse_ask("ASK @luffy: the customer decided archive semantics verbally — soft delete?")
+                .expect("person question");
+        assert_eq!(to, "@LUFFY");
+        assert!(q.starts_with("the customer decided"), "{q}");
+        // Not an addressee: bare marker, whitespace in the name, or empty.
+        assert!(parse_ask("ASK @: is this a question?").is_none());
+        assert!(parse_ask("ASK @luffy zoro: shared question?").is_none());
+        // The role-level hop is untouched.
+        assert!(parse_ask("ASK SA: how does the store behave?").is_some());
+    }
+
+    /// An engine whose only act is to ask a person — the run must park the
+    /// ticket on the question, not on a failure.
+    struct AskEngine;
+    #[async_trait::async_trait]
+    impl AgentEnginePort for AskEngine {
+        fn id(&self) -> &'static str {
+            "ask"
+        }
+        async fn run(&self, _r: AgentRequest) -> Result<AgentOutcome, PortError> {
+            Ok(AgentOutcome {
+                stdout: "ASK @luffy: the customer decided archive semantics verbally — soft \
+                         delete or purge?"
+                    .to_owned(),
+                stderr: String::new(),
+                exit_code: Some(0),
+                usage: None,
+                trace: String::new(),
+                session_id: None,
+                sandbox: SandboxStatus::default(),
+                engine: String::new(),
+                model: String::new(),
+                attempts: Vec::new(),
+            })
+        }
+    }
+
+    /// A focus window that is active RIGHT NOW, whatever time the test runs
+    /// (wraps midnight cleanly for the last two minutes of the day).
+    fn window_covering_now() -> String {
+        let now = crate::use_cases::question_batching::now_minutes_utc();
+        let end = (now + 2) % (24 * 60);
+        format!(
+            "{:02}:{:02}-{:02}:{:02}",
+            now / 60,
+            now % 60,
+            end / 60,
+            end % 60
+        )
+    }
+
+    fn store_with_ready_feature() -> Arc<MemStore> {
+        Arc::new(MemStore {
+            state: Mutex::new(ProjectState {
+                tickets: vec![ready_feature("FEAT-001")],
+                ..ProjectState::default()
+            }),
+        })
+    }
+
+    // (AC1) With a focus window configured for the addressee, a new
+    // person-addressed question is queued (deferred) instead of landing as
+    // its own interrupt.
+    #[tokio::test]
+    async fn a_person_question_inside_their_focus_window_is_held_for_the_digest() {
+        let mut config = Config::default();
+        config.workflow.human.focus_windows.insert(
+            "luffy".to_owned(),
+            crate::config::FocusWindow {
+                window_utc: window_covering_now(),
+                defer_to_digest: true,
+            },
+        );
+        let store = store_with_ready_feature();
+        let uc = RunDevUseCase::new(
+            Arc::clone(&store),
+            Arc::new(AskEngine),
+            config,
+            PathBuf::from("/tmp"),
+            DevMode::Feature,
+        );
+        // The ask parks the run: nothing was "done", the question waits.
+        assert!(uc.execute().await.expect("run").is_none());
+        let state = store.load().await.expect("load");
+        let q = &state.questions[0];
+        assert_eq!(q.to, "@LUFFY");
+        assert!(q.deferred, "held for the owner's focus-window digest");
+        assert!(!q.escalated, "the window, not the SLA, is what holds it");
+    }
+
+    // (AC boundary) Without a window the same question delivers immediately —
+    // today's behaviour, unchanged.
+    #[tokio::test]
+    async fn without_a_focus_window_a_person_question_delivers_immediately() {
+        let store = store_with_ready_feature();
+        let uc = RunDevUseCase::new(
+            Arc::clone(&store),
+            Arc::new(AskEngine),
+            Config::default(),
+            PathBuf::from("/tmp"),
+            DevMode::Feature,
+        );
+        assert!(uc.execute().await.expect("run").is_none());
+        let state = store.load().await.expect("load");
+        assert!(!state.questions[0].deferred);
+    }
+
     /// Shells to the real `git` binary — `tree_fingerprint` parses actual
     /// `git status --porcelain` output, which the pure `verify_cache` unit
     /// tests never exercise.
@@ -1625,6 +1803,9 @@ mod tests {
     #[async_trait::async_trait]
     impl crate::ports::outbound::WorkspaceFilesPort for RealFiles {
         async fn read(&self, _path: &std::path::Path) -> Option<String> {
+            None
+        }
+        async fn read_bytes(&self, _path: &std::path::Path) -> Option<Vec<u8>> {
             None
         }
         async fn write(&self, _path: &std::path::Path, _content: &str) -> bool {

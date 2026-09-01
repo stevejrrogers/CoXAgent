@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 // Value objects live in `kinds`; re-exported here so existing paths like
 // `crate::ticket::{Status, TicketType}` keep resolving without a cycle.
 pub use crate::kinds::{Complexity, Priority, Role, Status, TicketType};
+// Test cases split into their own seam (test_case.rs); re-exported so
+// `crate::ticket::TestCase` keeps resolving.
+pub use crate::test_case::{CaseEvidence, TestCase, TestCaseStatus};
 
 /// Technical design authored by SA. Presence gates `Pending -> Ready`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,51 +44,6 @@ pub struct UxDesign {
 pub struct Design {
     pub technical: Option<TechnicalDesign>,
     pub ux: Option<UxDesign>,
-}
-
-/// The status of a single test case as verified by the TEST agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TestCaseStatus {
-    /// Not yet verified.
-    Pending,
-    /// The TEST agent marked this case as passing its acceptance criterion.
-    Passed,
-    /// The TEST agent found the case failing (this is usually a bug in the
-    /// ticket's own DoD, distinct from a separately-filed bug ticket).
-    Failed,
-}
-
-fn default_pending() -> TestCaseStatus {
-    TestCaseStatus::Pending
-}
-
-/// Optional per-test-case proof attached when the TEST agent verifies a case.
-/// A real captured image (project media URL) and/or a short reproducible note.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CaseEvidence {
-    /// Project media URL of a captured screenshot (e.g. `/api/projects/../media/...`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image: Option<String>,
-    /// Who/what verified it, or how to reproduce.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
-    /// RFC3339 timestamp the evidence was captured.
-    #[serde(default)]
-    pub at: String,
-}
-
-/// One test case on a ticket — the executable form of an acceptance
-/// criterion — carrying its own verdict and optional evidence. Kept aligned
-/// with `acceptance_criteria` by the agents; each case is marked pass/fail by
-/// the TEST agent when it verifies the ticket.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TestCase {
-    pub description: String,
-    #[serde(default = "default_pending")]
-    pub status: TestCaseStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub evidence: Option<CaseEvidence>,
 }
 
 /// The ticket aggregate root. Fields are private; all access is via methods so
@@ -128,6 +86,19 @@ pub struct Ticket {
     /// clearing the assignment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     assignee: Option<String>,
+    /// The declared product goal this ticket advances (the PO's goal gate).
+    /// Bound to a stable [`GoalId`], never to the goal's wording, so renaming
+    /// a goal never severs attribution of the work done for it. `None` for
+    /// tickets filed before goal-line tracking (or with no declared goal) —
+    /// those surface as "unattributed" in the outcome ledger until backfilled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    goal_id: Option<crate::ids::GoalId>,
+    /// RFC3339 time the ticket was filed. Stamped by the application at
+    /// creation (the domain owns no clock); `None` on tickets that predate
+    /// the field — age-based views must treat those as "age unknown", never
+    /// as brand new or ancient.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    created_at: Option<String>,
 }
 
 impl Ticket {
@@ -170,6 +141,8 @@ impl Ticket {
             claimed_by: None,
             claimed_at: None,
             assignee: None,
+            goal_id: None,
+            created_at: None,
         })
     }
 
@@ -195,105 +168,44 @@ impl Ticket {
             .collect();
     }
 
-    /// The ticket's test cases — one per acceptance criterion, each carrying
-    /// its own verdict and optional per-case evidence.
+    /// The declared product goal this ticket advances, or `None` when no goal
+    /// was declared (pre-tracking tickets, or no resolvable association).
     #[must_use]
-    pub fn test_cases(&self) -> &[TestCase] {
+    pub fn goal_id(&self) -> Option<&crate::ids::GoalId> {
+        self.goal_id.as_ref()
+    }
+
+    /// Declare (or re-point) the product goal this ticket advances. The PO's
+    /// goal gate owns goal associations — the same scope authority as
+    /// priority — so agents cannot quietly attach themselves to a goal line.
+    ///
+    /// # Errors
+    /// [`DomainError::FieldNotPermitted`] if `actor` lacks goal authority.
+    pub fn set_goal_id(
+        &mut self,
+        actor: Role,
+        goal_id: crate::ids::GoalId,
+    ) -> Result<(), DomainError> {
+        if !field_permitted(actor, "goal_id") {
+            return Err(DomainError::FieldNotPermitted {
+                role: actor,
+                field: "goal_id",
+            });
+        }
+        self.goal_id = Some(goal_id);
+        Ok(())
+    }
+
+    /// Crate-internal handles for the test-case seam (`test_case.rs`) to read
+    /// and reconcile the case list against the acceptance criteria.
+    /// Deliberately not `pub`: outside the domain crate the aggregate stays
+    /// opaque.
+    pub(crate) fn test_case_list(&self) -> &[TestCase] {
         &self.test_cases
     }
 
-    /// Reconcile `test_cases` against the current `acceptance_criteria`:
-    /// drop stale cases, add newly-appeared criteria as `Pending`, and keep
-    /// the verdict/evidence of cases that still exist. Call before persisting
-    /// after criteria change, or at load time.
-    pub fn sync_test_cases_from_acceptance(&mut self) {
-        let mut next: Vec<TestCase> = Vec::with_capacity(self.acceptance_criteria.len());
-        for ac in &self.acceptance_criteria {
-            match self.test_cases.iter().find(|t| t.description == *ac) {
-                Some(existing) => next.push(existing.clone()),
-                None => next.push(TestCase {
-                    description: ac.clone(),
-                    status: TestCaseStatus::Pending,
-                    evidence: None,
-                }),
-            }
-        }
-        self.test_cases = next;
-    }
-
-    /// Seed `test_cases` from the acceptance criteria, preserving any existing
-    /// verdict/evidence for criteria that already have a case. No-op when the
-    /// ticket already has as many cases as criteria.
-    pub fn ensure_test_cases_from_acceptance(&mut self) {
-        // In sync only when every case matches its criterion in order. A length
-        // match alone is NOT enough — if criteria were edited to new text (same
-        // count) the old descriptions would otherwise shadow the new ones and
-        // `set_test_case_result` would silently fail to match.
-        let in_sync = self.test_cases.len() == self.acceptance_criteria.len()
-            && self
-                .test_cases
-                .iter()
-                .zip(&self.acceptance_criteria)
-                .all(|(tc, ac)| tc.description == *ac);
-        if in_sync {
-            return;
-        }
-        self.sync_test_cases_from_acceptance();
-    }
-
-    /// Mark one test case pass (or fail, `passed=false`) by its description,
-    /// attaching optional per-case evidence (an image URL + reproducible note)
-    /// and a capture timestamp. A `None` image keeps any image already attached
-    /// so a verdict-only pass never erases an existing screenshot. Returns
-    /// `false` when no case matched.
-    pub fn set_test_case_result(
-        &mut self,
-        description: &str,
-        passed: bool,
-        note: Option<String>,
-        image: Option<String>,
-        at: String,
-    ) -> bool {
-        let Some(tc) = self
-            .test_cases
-            .iter_mut()
-            .find(|t| t.description == description)
-        else {
-            return false;
-        };
-        tc.status = if passed {
-            TestCaseStatus::Passed
-        } else {
-            TestCaseStatus::Failed
-        };
-        let keep_image = image.or_else(|| tc.evidence.as_ref().and_then(|e| e.image.clone()));
-        tc.evidence = Some(CaseEvidence {
-            image: keep_image,
-            note,
-            at,
-        });
-        true
-    }
-
-    /// Attach a captured screenshot URL to a test case's evidence without
-    /// changing its verdict (the TEST agent already marked pass/fail; this is
-    /// the cycle's deterministic screenshot pass filling in the image). Returns
-    /// `false` when no case matched.
-    pub fn set_test_case_image(&mut self, description: &str, image: String, at: String) -> bool {
-        let Some(tc) = self
-            .test_cases
-            .iter_mut()
-            .find(|t| t.description == description)
-        else {
-            return false;
-        };
-        let note = tc.evidence.as_ref().and_then(|e| e.note.clone());
-        tc.evidence = Some(CaseEvidence {
-            image: Some(image),
-            note,
-            at,
-        });
-        true
+    pub(crate) fn test_case_list_mut(&mut self) -> &mut Vec<TestCase> {
+        &mut self.test_cases
     }
 
     // --- Accessors ---
@@ -369,6 +281,19 @@ impl Ticket {
     #[must_use]
     pub fn claimed_at(&self) -> Option<&str> {
         self.claimed_at.as_deref()
+    }
+
+    #[must_use]
+    pub fn created_at(&self) -> Option<&str> {
+        self.created_at.as_deref()
+    }
+
+    /// Stamp the filing time once; later calls are no-ops so a re-save can
+    /// never rewrite history.
+    pub fn stamp_created_at(&mut self, at: impl Into<String>) {
+        if self.created_at.is_none() {
+            self.created_at = Some(at.into());
+        }
     }
 
     // --- Guarded mutations ---
@@ -523,6 +448,8 @@ impl Ticket {
     /// - [`DomainError::InvalidTransition`] — not a legal edge for this type.
     /// - [`DomainError::TransitionNotPermitted`] — role not allowed.
     /// - [`DomainError::NotReady`] — precondition for the target status unmet.
+    /// - [`DomainError::CoverageIncomplete`] — `Verified` with an acceptance
+    ///   criterion no passing test case demonstrates (CXA-F024).
     pub fn transition_to(&mut self, actor: Role, to: Status) -> Result<(), DomainError> {
         let from = self.status;
         if !transition_allowed(self.kind, from, to) {
@@ -542,11 +469,29 @@ impl Ticket {
         if to == Status::Ready {
             self.check_ready()?;
         }
+        if to == Status::Verified {
+            self.check_covered()?;
+        }
         self.status = to;
         // Leaving InProgress (completion or reject) frees the claim.
         if to != Status::InProgress {
             self.claimed_by = None;
             self.claimed_at = None;
+        }
+        Ok(())
+    }
+
+    /// Definition of Verified: every acceptance criterion is demonstrated by a
+    /// PASSING test case (CXA-F024). Deliberately emptied criteria (the BA
+    /// clarification path) leave nothing to cover and verify freely. The check
+    /// is a pure read — a blocked transition leaves the ticket untouched.
+    fn check_covered(&self) -> Result<(), DomainError> {
+        let missing = crate::coverage::uncovered(&self.acceptance_criteria, &self.test_cases);
+        if let Some(first) = missing.first() {
+            return Err(DomainError::CoverageIncomplete {
+                uncovered: missing.len(),
+                first: first.clone(),
+            });
         }
         Ok(())
     }
@@ -774,88 +719,28 @@ mod tests {
     }
 
     #[test]
-    fn ensure_syncs_when_criteria_content_changes_same_count() {
+    fn goal_association_is_the_pos_scope_authority() {
+        use crate::ids::GoalId;
         let mut t = feature(false);
-        t.set_acceptance_criteria(vec!["old ac".to_owned()]);
-        t.ensure_test_cases_from_acceptance();
-        assert_eq!(t.test_cases().len(), 1);
-        assert_eq!(t.test_cases()[0].description, "old ac");
-        // Criteria edited to NEW text but still one entry: length alone is not
-        // enough — ensure must resync so the case tracks the new criterion.
-        t.set_acceptance_criteria(vec!["new ac".to_owned()]);
-        t.ensure_test_cases_from_acceptance();
-        assert_eq!(t.test_cases().len(), 1);
-        assert_eq!(t.test_cases()[0].description, "new ac");
-        assert_eq!(t.test_cases()[0].status, TestCaseStatus::Pending);
-    }
-
-    #[test]
-    fn set_result_keeps_attached_image_when_none_supplied() {
-        let mut t = feature(false);
-        t.set_acceptance_criteria(vec!["ac one".to_owned()]);
-        t.ensure_test_cases_from_acceptance();
-        assert!(
-            t.set_test_case_result(
-                "ac one",
-                true,
-                Some("verified".to_owned()),
-                None,
-                "t1".into(),
-            ),
-            "verdict without image still matches"
-        );
-        // Later the cycle attaches a screenshot, then a re-run's verdict
-        // (image=None) must NOT wipe it.
-        assert!(t.set_test_case_image("ac one", "/api/.../shot.png".into(), "t2".into()));
-        assert_eq!(
-            t.test_cases()[0]
-                .evidence
-                .as_ref()
-                .unwrap()
-                .image
-                .as_deref(),
-            Some("/api/.../shot.png")
-        );
-        assert!(t.set_test_case_result(
-            "ac one",
-            false,
-            Some("now failing".to_owned()),
-            None,
-            "t3".into()
+        // Agents declare work for goals at creation only (via the shared
+        // creation path); re-pointing an association is PO/super-PO scope.
+        assert!(matches!(
+            t.set_goal_id(Role::DevFeature, GoalId::new("G001").expect("gid")),
+            Err(DomainError::FieldNotPermitted {
+                field: "goal_id",
+                ..
+            })
         ));
-        let ev = t.test_cases()[0].evidence.as_ref().unwrap();
-        assert_eq!(
-            ev.image.as_deref(),
-            Some("/api/.../shot.png"),
-            "image survives a verdict-only re-run"
-        );
-        assert_eq!(ev.note.as_deref(), Some("now failing"));
-        assert_eq!(t.test_cases()[0].status, TestCaseStatus::Failed);
+        t.set_goal_id(Role::Po, GoalId::new("G001").expect("gid"))
+            .expect("po may bind");
+        assert_eq!(t.goal_id().map(GoalId::as_str), Some("G001"));
+        t.set_goal_id(Role::User, GoalId::new("G002").expect("gid"))
+            .expect("super-PO may re-point");
+        assert_eq!(t.goal_id().map(GoalId::as_str), Some("G002"));
     }
 
     #[test]
-    fn set_result_overwrites_image_when_one_supplied() {
-        let mut t = feature(false);
-        t.set_acceptance_criteria(vec!["ac".to_owned()]);
-        t.ensure_test_cases_from_acceptance();
-        assert!(t.set_test_case_result("ac", true, None, Some("/old.png".into()), "t1".into()));
-        assert!(t.set_test_case_result("ac", true, None, Some("/new.png".into()), "t2".into()));
-        assert_eq!(
-            t.test_cases()[0]
-                .evidence
-                .as_ref()
-                .unwrap()
-                .image
-                .as_deref(),
-            Some("/new.png")
-        );
-    }
-
-    #[test]
-    fn set_result_false_when_no_case_matches() {
-        let mut t = feature(false);
-        t.set_acceptance_criteria(vec!["ac".to_owned()]);
-        t.ensure_test_cases_from_acceptance();
-        assert!(!t.set_test_case_result("does not exist", true, None, None, "t1".into()));
+    fn new_tickets_start_without_a_goal_association() {
+        assert!(feature(false).goal_id().is_none());
     }
 }

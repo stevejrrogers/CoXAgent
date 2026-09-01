@@ -17,7 +17,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use coxagent_application::deps_scan as scan;
+use coxagent_application::ports::outbound::DependencyDiscoveryPort;
 use coxagent_domain::{Priority, TicketId, TicketType};
+use coxagent_infrastructure::FsLockfileDiscovery;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -26,85 +28,78 @@ fn repo_root() -> PathBuf {
         .unwrap()
 }
 
-/// Every lockfile under `root`, including subdirectories — AC#1's discovery contract.
-/// Discovery is test-only IO (no shipped adapter yet); recognition uses
-/// `scan::is_lockfile` so what counts as a lock stays owned by production code.
-fn discover_lockfiles(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if !path.file_name().is_some_and(|n| n == ".git") && !is_hidden(&path) {
-                    stack.push(path);
-                }
-            } else if path.file_name().and_then(|n| n.to_str()).map_or(false, scan::is_lockfile)
-            {
-                out.push(path);
-            }
-        }
-    }
-    out.sort();
-    out
-}
-
-fn is_hidden(path: &Path) -> bool {
-    matches!(path.file_name().and_then(|n| n.to_str()), Some(n) if n.starts_with('.'))
+/// Every lockfile under `root`, including subdirectories — AC#1's discovery
+/// contract, exercised through the SHIPPED adapter (CXA-B111). The gate keeps
+/// no private copy of the walk: `FsLockfileDiscovery` is the single source of
+/// truth for what counts as a lock and where discovery descends.
+async fn discover_lockfiles(root: &Path) -> Vec<(String, String)> {
+    FsLockfileDiscovery::new()
+        .discover_lockfiles(root)
+        .await
+        .expect("discovery over the real repo")
+        .into_iter()
+        .map(|l| (l.path, l.body))
+        .collect()
 }
 
 const CARGO_SAMPLE: &str = "\n[[package]]\nname = \"alpha\"\nversion = \"1.2.3\"\n";
 const POETRY_SAMPLE: &str = "\n[[package]]\nname = \"gamma\"\nversion = \"3.1.4\"\n";
-const NPM_SAMPLE: &str =
-    r#"{"packages": {"node_modules/lodash": {"version": "4.17.21"}, "node_modules/@scope/pkg": {"version": "7.8.9"}, "": {"name":"app","version":"1.0.0"}}}"#;
+const NPM_SAMPLE: &str = r#"{"packages": {"node_modules/lodash": {"version": "4.17.21"}, "node_modules/@scope/pkg": {"version": "7.8.9"}, "": {"name":"app","version":"1.0.0"}}}"#;
 
 /// Render one TOML lock block for a pinned dependency.
 fn toml_block(pkg: &str, maj: u64, min: u64, pat: u64) -> String {
-    format!(
-        "[[package]]\nname = \"{pkg}\"\nversion = \"{maj}.{min}.{pat}\""
-    )
+    format!("[[package]]\nname = \"{pkg}\"\nversion = \"{maj}.{min}.{pat}\"")
 }
 
 // ---- AC#1: parses lock files from root and all subdirectories ----
 
-#[test]
-fn discovers_lockfiles_in_root_and_subdirectories() {
-    let found = discover_lockfiles(&repo_root());
+#[tokio::test]
+async fn discovers_lockfiles_in_root_and_subdirectories() {
+    let root = repo_root();
+    let found = discover_lockfiles(&root).await;
     assert!(
-        found.iter().any(|p| p == &repo_root().join("Cargo.lock")),
+        found.iter().any(|(p, _)| p == "Cargo.lock"),
         "root Cargo.lock not discovered: {found:?}"
     );
     assert!(
-        found.iter().any(|p| p == &repo_root().join("package-lock.json")),
+        found.iter().any(|(p, _)| p == "package-lock.json"),
         "root package-lock.json not discovered: {found:?}"
     );
     assert!(
-        found
-            .iter()
-            .any(|p| p.strip_prefix(repo_root()).unwrap_or(p).starts_with("e2e/")),
+        found.iter().any(|(p, _)| p.starts_with("e2e/")),
         "a lockfile in a subdirectory (e2e/) was not discovered"
     );
 }
 
-#[test]
-fn extracts_current_versions_from_real_cargo_lock() {
-    let body = std::fs::read_to_string(repo_root().join("Cargo.lock")).unwrap();
-    let deps = scan::parse_lockfile("Cargo.lock", &body);
+#[tokio::test]
+async fn extracts_current_versions_from_real_cargo_lock() {
+    let root = repo_root();
+    let found = discover_lockfiles(&root).await;
+    let (_, body) = found
+        .iter()
+        .find(|(p, _)| p == "Cargo.lock")
+        .expect("root Cargo.lock discovered");
+    let deps = scan::parse_lockfile("Cargo.lock", body);
     let ahash = deps.get("ahash").expect("ahash present in Cargo.lock");
     assert_eq!(ahash.major, 0);
 }
 
-#[test]
-fn extracts_current_versions_from_real_package_locks() {
+#[tokio::test]
+async fn extracts_current_versions_from_real_package_locks() {
+    let root = repo_root();
+    let found = discover_lockfiles(&root).await;
     for rel in ["package-lock.json", "e2e/package-lock.json"] {
-        let body = std::fs::read_to_string(repo_root().join(rel)).unwrap();
-        let deps = scan::parse_lockfile(rel, &body);
+        let (_, body) = found
+            .iter()
+            .find(|(p, _)| p == rel)
+            .unwrap_or_else(|| panic!("{rel} discovered"));
+        let deps = scan::parse_lockfile(rel, body);
         assert!(!deps.is_empty(), "{rel} parsed to no dependencies");
         for v in deps.values() {
-            assert!(v.major > 0 || v.minor > 0 || v.patch > 0, "{rel}: empty version");
+            assert!(
+                v.major > 0 || v.minor > 0 || v.patch > 0,
+                "{rel}: empty version"
+            );
         }
     }
 }
@@ -141,7 +136,7 @@ fn scan_tier(pinned_body: &str, latest_version: &str) -> Option<&'static str> {
     findings
         .iter()
         .find(|f| f.package == "alpha")
-        .and_then(|f| f.tier.map(|t| t.label()))
+        .and_then(|f| f.tier.map(scan::BumpTier::label))
 }
 
 #[test]

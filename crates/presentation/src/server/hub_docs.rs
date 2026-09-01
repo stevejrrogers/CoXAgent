@@ -91,11 +91,23 @@ pub(super) struct WorkspaceDoc {
     pub(super) conventions: String,
     #[serde(default)]
     pub(super) invites: Vec<Invite>,
+    /// Per-project public share links (CXA-F069): unguessable tokens that each
+    /// unlock one project's read-only status page. Kept here — the company-level
+    /// doc — so admins can list/revoke them across projects in one place, the
+    /// same home as the invite tokens.
+    #[serde(default)]
+    pub(super) share_links: Vec<ShareLink>,
     /// Client-app distribution: where users download CoXAgent for each
     /// platform, refreshed automatically from GitHub Releases when
     /// `releases_repo` is set (manual URLs act as overrides).
     #[serde(default)]
     pub(super) downloads: DownloadsCfg,
+    /// Hub-level daily soft ceiling for the fleet spend cockpit (CXA-F278),
+    /// in USD; `0` = uncapped. Additive with a serde default, so old
+    /// workspace docs deserialize unchanged and a DOWNGRADED hub (plain
+    /// `Deserialize`, no `deny_unknown_fields`) tolerates the extra key.
+    #[serde(default)]
+    pub(super) fleet_ceiling_usd: f64,
 }
 
 /// Per-platform download links + the release source of truth.
@@ -135,6 +147,26 @@ pub(super) struct Invite {
     pub(super) created_by: String,
     pub(super) created_at: String,
     pub(super) uses_left: u32,
+}
+
+/// One public share link (CXA-F069): whoever holds `token` can open
+/// `/s/<token>` and read that project's status page — no login. The token IS
+/// the credential and the record's lookup key, so it is minted by a CSPRNG;
+/// revocation flips `revoked`, killing the URL on the next request. Revoked
+/// records are kept (not deleted) so the Settings list can show what was
+/// issued and when.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(super) struct ShareLink {
+    pub(super) token: String,
+    /// The project this link unlocks.
+    pub(super) project_id: String,
+    /// Optional admin label (e.g. "ACME client").
+    #[serde(default)]
+    pub(super) name: String,
+    pub(super) created_by: String,
+    pub(super) created_at: String,
+    #[serde(default)]
+    pub(super) revoked: bool,
 }
 
 /// One space: an organizational unit grouping projects + members under its own

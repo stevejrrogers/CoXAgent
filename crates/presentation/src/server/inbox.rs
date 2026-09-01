@@ -97,9 +97,49 @@ pub(super) async fn inbox_ep(
             && t.status() == coxagent_domain::Status::Fixed
             && state.ticket_evidence.contains_key(&id)
         {
-            items.push(serde_json::json!({
+            // Live reproduction link (CXA-F244): where this project's fix runs
+            // right now, from the one resolvability source the F242 design
+            // pins (deploy.host_port — the base qa_evidence captures against).
+            // Null when no port is configured; additive to the card.
+            // `repro_url` (CXA-F246) is the per-ticket link the evidence
+            // funnel recorded at collection time — the exact base that
+            // ticket's evidence was captured against, null when none.
+            let mut card = serde_json::json!({
                 "kind": "verify", "ticket": id, "title": t.title(),
                 "role": "QA", "can_act": my_role.can_verify(),
+                "reproduce_url": coxagent_application::repro_url::compute_live_repro_url(
+                    cfg.deploy.host_port,
+                ),
+                "repro_url": state.repro_urls.get(&id),
+            });
+            // Engine & model provenance (CXA-F257): the attempts that produced
+            // the work this card asks the reviewer to approve — the most
+            // recent step's engine/model labels, rendered by the same pure
+            // function the detail view uses. Omitted when the ticket predates
+            // provenance capture, so the chip simply doesn't render.
+            let provenance: Vec<String> = state
+                .step_provenance(&id)
+                .last()
+                .map(|s| {
+                    s.attempts
+                        .iter()
+                        .map(coxagent_application::engine_provenance::attempt_label)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !provenance.is_empty() {
+                card["provenance"] = serde_json::json!(provenance);
+            }
+            items.push(card);
+            continue;
+        }
+        // On hold: parked on an outside blocker — the resume decision is a
+        // person's, so it lives in the inbox instead of only a board filter.
+        if t.status() == coxagent_domain::Status::OnHold {
+            items.push(serde_json::json!({
+                "kind": "on_hold", "ticket": id, "title": t.title(),
+                "reason": state.hold_reasons.get(&id).cloned().unwrap_or_default(),
+                "role": "PO", "can_act": my_role.can_approve_ready(),
             }));
             continue;
         }
@@ -128,7 +168,10 @@ pub(super) async fn inbox_ep(
             }));
         }
     }
-    // Questions addressed to me (`@username`, or my bare username).
+    // Questions addressed to me (`@username`, or my bare username). A
+    // question held for my focus-window digest (CXA-F176) still shows here —
+    // the queue stays honest — but carries `deferred` so the UI renders it
+    // as queued-for-digest rather than a fresh interrupt.
     for q in &state.questions {
         if q.answer.is_empty()
             && (q.to.eq_ignore_ascii_case(&me) || q.to.eq_ignore_ascii_case(&format!("@{me}")))
@@ -137,6 +180,7 @@ pub(super) async fn inbox_ep(
                 "kind": "question", "id": q.id, "ticket": q.ticket,
                 "from": q.from, "body": q.body,
                 "asked_at": q.asked_at, "escalated": q.escalated,
+                "deferred": q.deferred,
                 "role": "you", "can_act": true,
             }));
         }
@@ -152,6 +196,22 @@ pub(super) async fn inbox_ep(
             "url": pr.map(|p| p.url.clone()).unwrap_or_default(),
             "reason": reason,
             "role": "SA/dev", "can_act": my_role.can_review(),
+        }));
+    }
+    // Merged-then-reverted work (CXA-F047): the scan suspected a shipped
+    // ticket's work was undone. Only a person can confirm it — the verdict is
+    // what planning is allowed to learn from, so unconfirmed suspicions wait
+    // here instead of silently weighting the next sprint.
+    for ev in state
+        .reverted_work
+        .iter()
+        .filter(|e| e.decision == coxagent_application::state::RevertDecision::Pending)
+    {
+        items.push(serde_json::json!({
+            "kind": "reverted_work", "sha": ev.sha,
+            "ticket": ev.ticket, "subject": ev.subject,
+            "role": ev.role, "at": ev.reverted_at,
+            "can_act": my_role.can_review(),
         }));
     }
     // PRs approved by the SA but held for human eyes.
@@ -345,7 +405,7 @@ pub(super) async fn human_pr_ep(
     State(app): State<AppState>,
     Path((pid, number)): Path<(String, u64)>,
     headers: axum::http::HeaderMap,
-    Json(req): Json<HumanPrReq>,
+    Json(req): Json<HumanActionReq>,
 ) -> axum::response::Response {
     let Some(p) = app.project(&pid).await else {
         return not_found();
@@ -390,8 +450,19 @@ pub(super) async fn human_pr_ep(
         "dismissed the hold on"
     };
     let note = format!("🧑‍⚖️ @{me} {verb} PR #{number} (held for human eyes).");
-    if coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
-        s.human_holds.remove(&number);
+    // Governance-attention ledger (CXA-F230): recorded inside the same atomic
+    // mutation, and ONLY when this call actually resolved the hold — the
+    // second of two concurrent resolutions finds nothing to remove and counts
+    // no effort (AC5).
+    let kind = if req.action == "approve" {
+        coxagent_domain::InterventionKind::HumanPrReviewed
+    } else {
+        coxagent_domain::InterventionKind::HumanPrDismissed
+    };
+    if coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), move |s| {
+        if s.human_holds.remove(&number).is_some() {
+            s.record_pr_intervention(kind, number, &me);
+        }
         s.log_activity("USER", &format!("{me} {verb} PR #{number}"), None);
         s.post_comment(&me, &note, None);
         Ok(())
@@ -404,10 +475,88 @@ pub(super) async fn human_pr_ep(
     Json(serde_json::json!({ "ok": true, "action": req.action })).into_response()
 }
 
+/// The one-field body every human one-click decision endpoint takes: which
+/// of the two verdicts the person chose ("approve" / "dismiss").
 #[derive(serde::Deserialize)]
-pub(super) struct HumanPrReq {
+pub(super) struct HumanActionReq {
     #[serde(default)]
     pub(super) action: String,
+}
+
+/// POST `/api/projects/:pid/reverts/:sha` — a person decides one detected
+/// revert (CXA-F047). `{"action":"approve"}` confirms the shipped work really
+/// was undone — the only verdict next-cycle planning may learn from;
+/// `{"action":"dismiss"}` records it as a false positive. Already-decided
+/// events are final, so a double submit cannot flip a verdict.
+pub(super) async fn revert_decision_ep(
+    State(app): State<AppState>,
+    Path((pid, sha)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<HumanActionReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Some(me) = gate_principal(&app, &headers, coxagent_application::AuthRole::can_review).await
+    else {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "your role may not take this decision",
+        )
+            .into_response();
+    };
+    let decision = match req.action.as_str() {
+        "approve" => coxagent_application::state::RevertDecision::Approved,
+        "dismiss" => coxagent_application::state::RevertDecision::Dismissed,
+        other => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("action must be approve or dismiss, got {other}"),
+            )
+                .into_response()
+        }
+    };
+    let verb = if req.action == "approve" {
+        "approved"
+    } else {
+        "dismissed"
+    };
+    let sha = sha.trim().to_owned();
+    if sha.is_empty() {
+        return (axum::http::StatusCode::BAD_REQUEST, "missing sha").into_response();
+    }
+    let mut decided = false;
+    let mut ticket = String::new();
+    if coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        ticket = s
+            .reverted_work
+            .iter()
+            .find(|e| e.sha == sha)
+            .map(|e| e.ticket.clone())
+            .unwrap_or_default();
+        decided = s.decide_revert(&sha, decision, &me);
+        if decided {
+            s.log_activity(
+                "USER",
+                &format!("{me} {verb} reverted work {ticket}"),
+                Some(ticket.clone()),
+            );
+        }
+        Ok(())
+    })
+    .await
+    .is_err()
+    {
+        return internal_error("store write failed");
+    }
+    if !decided {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            "no pending revert with that sha",
+        )
+            .into_response();
+    }
+    Json(serde_json::json!({ "ok": true, "action": req.action })).into_response()
 }
 
 /// POST `/api/projects/:pid/ticket/:id/ready` — a person approves a designed
@@ -487,7 +636,11 @@ pub(super) async fn send_back_ep(
         format!("↩️ {id} sent back by @{me}: {}", reason.trim())
     };
     state.log_activity("USER", "verification refused", Some(id.clone()));
-    state.post_comment(&me, &note, Some(id));
+    state.post_comment(&me, &note, Some(id.clone()));
+    // Governance-attention ledger (CXA-F230): a send-back is re-review churn
+    // the operator paid for — the exact signal the ledger exists to surface.
+    // The transition above is guarded, so a duplicate submit is a 409 here.
+    state.record_intervention(coxagent_domain::InterventionKind::VerifySendBack, &id, &me);
     match p.store.save(&state).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => internal_error(&e.to_string()),
@@ -523,6 +676,32 @@ async fn human_transition(
     };
     if let Err(e) = t.transition_to(coxagent_domain::Role::User, to) {
         return (axum::http::StatusCode::CONFLICT, e.to_string()).into_response();
+    }
+    // Reaching Verified MEANS the human QA verdict was rendered; the burn-down
+    // (CXA-F032 AC#2) only counts bugs carrying their own REGRESSION TEST PASS
+    // record, so this path writes the same provenance the agent TEST path has
+    // written since F022.
+    if to == coxagent_domain::Status::Verified {
+        coxagent_application::use_cases::run_test::record_human_verify_evidence(
+            &mut state, id, &me,
+        );
+        // Goal-line outcome ledger (CXA-F228): a human verdict is a delivered
+        // outcome like the agent path's.
+        state.record_verified_outcome(id);
+    }
+    // Governance-attention ledger (CXA-F230): the verdict just taken is a
+    // measured moment of operator review effort, attributed to the ticket's
+    // class. The transition guards above make a duplicate submit a 409 before
+    // any record exists, so one resolution is one record. Explicitly mapped
+    // per target status — a future caller adding a third target must decide
+    // what kind it is, never silently inherit ReadyApprove.
+    let kind = match to {
+        coxagent_domain::Status::Verified => Some(coxagent_domain::InterventionKind::VerifyPass),
+        coxagent_domain::Status::Ready => Some(coxagent_domain::InterventionKind::ReadyApprove),
+        _ => None,
+    };
+    if let Some(kind) = kind {
+        state.record_intervention(kind, id, &me);
     }
     let label = format!("{to:?}").to_lowercase();
     // Teach the adaptive gate: every human decision is a sample
@@ -651,6 +830,10 @@ pub(super) async fn undo_approval_ep(
         state.ask_again_shapes.push(shape.clone());
     }
     state.auto_approved_at.remove(&id);
+    // Governance-attention ledger (CXA-F230): an undo is the strongest form of
+    // gate friction the ledger tracks. The window membership check above
+    // refuses a second undo with a 409, so one pull-back is one record.
+    state.record_intervention(coxagent_domain::InterventionKind::UndoAutoApprove, &id, &me);
     let note = format!(
         "↩️ @{me} undid the auto-approval of {id} — `{shape}` goes back to asking a person."
     );

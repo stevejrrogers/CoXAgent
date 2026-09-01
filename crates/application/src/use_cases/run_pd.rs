@@ -398,7 +398,31 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
 /// deliberately conservative about the real corruption patterns rather than
 /// attempting full XML validation.
 fn renderable_svg(body: &str) -> bool {
-    let trimmed = body.trim_start();
+    // An XML prolog, comments, or a DOCTYPE before the root element are all
+    // valid SVG — PD writes `<?xml version="1.0"?>` headers and the gate was
+    // rejecting every real mockup as "malformed" (live incident: 9 valid
+    // 7-11 KB files bounced). Skip leading non-root nodes to find <svg>.
+    let mut trimmed = body.trim_start();
+    loop {
+        if trimmed.starts_with("<?") {
+            match trimmed.find("?>") {
+                Some(i) => trimmed = trimmed[i + 2..].trim_start(),
+                None => return false,
+            }
+        } else if trimmed.starts_with("<!--") {
+            match trimmed.find("-->") {
+                Some(i) => trimmed = trimmed[i + 3..].trim_start(),
+                None => return false,
+            }
+        } else if trimmed.starts_with("<!") {
+            match trimmed.find('>') {
+                Some(i) => trimmed = trimmed[i + 1..].trim_start(),
+                None => return false,
+            }
+        } else {
+            break;
+        }
+    }
     if !trimmed.starts_with("<svg") {
         return false;
     }
@@ -436,8 +460,7 @@ fn regex_lite_like_named_entity(s: &str) -> bool {
             let end = (i + 2..n).take(12).find(|&j| bytes[j] == b';');
             if let Some(end) = end {
                 let name = &s[i + 1..end];
-                if !name.starts_with('#')
-                    && !matches!(name, "amp" | "lt" | "gt" | "quot" | "apos")
+                if !name.starts_with('#') && !matches!(name, "amp" | "lt" | "gt" | "quot" | "apos")
                 {
                     return true;
                 }
@@ -543,6 +566,8 @@ mod tests {
                 session_id: None,
                 sandbox: SandboxStatus::default(),
                 engine: String::new(),
+                model: String::new(),
+                attempts: Vec::new(),
             })
         }
     }
@@ -558,6 +583,7 @@ mod tests {
                 complexity: Complexity::Small,
                 has_ui: true,
                 acceptance_criteria: Vec::new(),
+                goal: None,
             })
             .await
             .expect("seed");
@@ -599,6 +625,16 @@ mod tests {
     }
 
     #[test]
+    fn renderable_svg_accepts_xml_prolog_and_comments() {
+        let svg = "<?xml version=\"1.0\"?>\n<!-- mockup -->\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"><rect width=\"5\" height=\"5\"/></svg>";
+        assert!(
+            renderable_svg(svg),
+            "XML prolog + comment before <svg> is valid"
+        );
+        assert!(!renderable_svg("<?xml version=\"1.0\"?><div></div>"));
+    }
+
+    #[test]
     fn renderable_svg_accepts_well_formed() {
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300"><rect x="40" y="52" width="120" height="80" fill="#101017"/><text x="40" y="80">Login</text></svg>"##;
         assert!(renderable_svg(svg));
@@ -606,25 +642,25 @@ mod tests {
 
     #[test]
     fn renderable_svg_rejects_html_entity() {
-        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg"><text x="40" y="52">A &middot; B</text></svg>"##;
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg"><text x="40" y="52">A &middot; B</text></svg>"#;
         assert!(!renderable_svg(svg));
     }
 
     #[test]
     fn renderable_svg_rejects_unquoted_attribute() {
-        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg"><text x=40 y=52>Login</text></svg>"##;
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg"><text x=40 y=52>Login</text></svg>"#;
         assert!(!renderable_svg(svg));
     }
 
     #[test]
     fn renderable_svg_rejects_empty_stub() {
-        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg"></svg>"##;
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg"></svg>"#;
         assert!(!renderable_svg(svg));
     }
 
     #[test]
     fn renderable_svg_accepts_numeric_entity() {
-        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg"><text x="40" y="52">A &#183; B</text></svg>"##;
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg"><text x="40" y="52">A &#183; B</text></svg>"#;
         assert!(renderable_svg(svg));
     }
 }

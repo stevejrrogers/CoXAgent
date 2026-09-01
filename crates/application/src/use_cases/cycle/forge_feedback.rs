@@ -74,10 +74,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 if attempts == 2 {
                     self.notify(
                         "pr_stuck",
-                        format!(
-                            "PR #{} vẫn kẹt SAU khi SA đã rescue — cần người quyết: {}",
-                            pr.number, pr.url
-                        ),
+                        if self.config.workflow.language.is_vi() {
+                            format!(
+                                "PR #{} vẫn kẹt SAU khi SA đã rescue — cần người quyết: {}",
+                                pr.number, pr.url
+                            )
+                        } else {
+                            format!(
+                                "PR #{} is still stuck AFTER an SA rescue — a person must decide: {}",
+                                pr.number, pr.url
+                            )
+                        },
                     )
                     .await;
                     let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {

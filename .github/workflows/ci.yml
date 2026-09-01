@@ -10,8 +10,12 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  # CXA-B079 re-enabled deploy-smoke; CXA-C016 re-enables `check` and
+  # `deploy-build` now that the debt that kept them red is paid (fmt drift
+  # fixed, clippy pedantic baseline at zero, unit suite green). 0387409f had
+  # disabled every job while the repo was private (GitHub-hosted runs blocked
+  # without a paid plan). ci_availability_gate.rs fails if any job is re-gated.
   check:
-    if: false
     name: fmt · clippy · test
     runs-on: ubuntu-latest
     steps:
@@ -28,14 +32,13 @@ jobs:
         run: cargo test --all-features
 
   deploy-build:
-    if: false
     # COX-B006 regression guard: reproduce the Docker builder's compile — the
     # release binary for Linux, no `test` cfg — which is what turned an ungated
     # macOS-only helper into `error: function ... is never used` under the
     # workspace's `warnings = "deny"`, so no image could ever be built.
     # Deliberately separate from `check`: this job runs plain rustc lints only,
     # so it stays a trustworthy deploy gate while the clippy pedantic baseline
-    # in `crates/application` keeps `check` red.
+    # in `crates/application` kept `check` red when the jobs were split.
     name: release build (linux, as the Docker builder sees it)
     runs-on: ubuntu-latest
     steps:
@@ -46,7 +49,6 @@ jobs:
         run: cargo build --release --bin coxagent
 
   deploy-smoke:
-    if: false
     # COX-B008 regression guard for the OTHER half of the bug report: a green
     # `cargo build` is not a running app. The test brings the stack up with the
     # exact command this repo's docker-compose.yml documents and proves the hub
@@ -56,6 +58,7 @@ jobs:
     # a developer can run the same gate locally.
     name: docker compose smoke (app answers on 8101)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -68,3 +71,26 @@ jobs:
       - name: Tear down
         if: always()
         run: docker compose down -v
+
+  # CXA-F286: merge-blocking is enactable from repo state alone —
+  # branch protection on main must require BOTH gate jobs as required status
+  # checks, matched by their check-run display names exactly —
+  #   - docker compose smoke (app answers on 8101)  (the availability gate)
+  #   - ownership + CI wiring guards                (this job)
+  # ci_availability_gate.rs fails if a name drifts or this documentation
+  # disappears, so a rename can never silently dangle a required check.
+  #
+  # Docker-free by construction: every test here is a pure decision over
+  # names, labels and workflow text — no compose stack, no daemon — so a
+  # docker-less runner can never silently skip the guard.
+  guard-tests:
+    name: ownership + CI wiring guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Reclaimable teardown policy (protected infra stays protected)
+        run: cargo test -p coxagent-infrastructure --lib reclaimable
+      - name: CI wiring guards (jobs exist, ungated, real commands)
+        run: cargo test -p coxagent-app --test deploy_smoke --test ci_availability_gate

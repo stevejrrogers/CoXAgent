@@ -231,6 +231,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     }
                     state.spend.engine_by_role.insert(role, eng);
                 }
+                // Per-step engine/model provenance (CXA-F257): one bounded
+                // record per captured run, appended to its ticket's log.
+                // Unlabeled runs (ceremonies, session resumes) carry no ticket
+                // and are dropped — provenance is per-ticket work.
+                for ms in std::mem::take(&mut m.step_provenance) {
+                    if let Some(ticket) = ms.ticket {
+                        state.record_step_provenance(&ticket, ms.step);
+                    }
+                }
                 // Attribute this cycle's spend to the operator that ran it, so
                 // each user's token usage is measurable in a shared project.
                 if !self.worker.is_empty() {
@@ -275,6 +284,30 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .iter()
             .filter(|e| !e.contains("paused by self-tuning") && !e.contains("skipped"))
             .count() as u64;
+        // Feed per-role health from the error strings ("ROLE: message").
+        for e in report
+            .errors
+            .iter()
+            .filter(|e| !e.contains("paused by self-tuning") && !e.contains("skipped"))
+        {
+            let Some((role, msg)) = e.split_once(':') else {
+                continue;
+            };
+            let role = role.trim().to_owned();
+            if role.contains(' ') {
+                continue; // not a role prefix
+            }
+            let h = state.role_health.entry(role).or_default();
+            h.errors += 1;
+            let m = msg.trim();
+            if m.to_ascii_lowercase().contains("timed out")
+                || m.to_ascii_lowercase().contains("timeout")
+            {
+                h.timeouts += 1;
+            }
+            h.last_error = m.chars().take(160).collect();
+            h.last_error_at = crate::state::now_rfc3339();
+        }
         let incidents = state.engine_incidents.len() as u64;
         let grade = CycleScore::grade_of(shipped, runs, useful, incidents, errors);
         // The cycle counter is per-RUNNER (local, starts at 1 in the app loop).
@@ -292,6 +325,41 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if !should_record_cycle(scored_max, report.cycle) {
             return;
         }
+        // CXA-F232 delivery gate: only healthy-delivery cycles (grade 'A' or
+        // 'B') are finalized into the authoritative history. An idle-but-clean
+        // 'C' or a churn/incident 'D' used to be appended exactly like a
+        // shipping cycle — permanent delivery-history rows for idle churn,
+        // inflating C while shipped stayed 0. A refused cycle records WHY on
+        // the activity trail and stops here; a later cycle that scores 'A'/'B'
+        // passes and is finalized as today (blocking is per-cycle grade, at
+        // decision time). Role-health accounting above and the metering in
+        // `record_activity` are untouched — the gate refuses only the append.
+        if !crate::metrics::can_finalize_cycle(shipped, runs, useful, incidents, errors) {
+            state.log_activity(
+                "GATE",
+                &format!(
+                    "cycle {} scored {grade} — blocked from delivery history (shipped \
+                     {shipped}, useful {useful}/{runs} runs, errors {errors}, incidents \
+                     {incidents})",
+                    report.cycle
+                ),
+                None,
+            );
+            return;
+        }
+        // Governance-attention delta (CXA-F230): the human gate decisions that
+        // landed since the previous scorecard — so each scorecard carries the
+        // operator attention its cycle consumed, chartable like the spend.
+        // Only computed once the cycle is accepted, so a rejected re-score
+        // (leader handover) burns no work.
+        let last_scored_at = state
+            .cycle_scores
+            .iter()
+            .filter(|c| c.cycle < report.cycle)
+            .map(|c| c.at.clone())
+            .max()
+            .unwrap_or_default();
+        let (attention_by_area, attention_by_kind) = state.attention_delta_since(&last_scored_at);
         state.cycle_scores.push(CycleScore {
             cycle: report.cycle,
             at: crate::state::now_rfc3339(),
@@ -304,6 +372,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             grade,
             phase_secs,
             phase_cost,
+            attention_by_area,
+            attention_by_kind,
         });
         let overflow = state.cycle_scores.len().saturating_sub(100);
         if overflow > 0 {
@@ -417,6 +487,12 @@ fn should_record_cycle(scored_max: Option<u64>, new_cycle: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::should_record_cycle;
+    use crate::ports::outbound::{AgentEnginePort, AgentOutcome, AgentRequest, StateStorePort};
+    use crate::state::{CycleScore, EngineIncident, ProjectState, Spend};
+    use crate::use_cases::cycle::{CycleReport, RunCycleUseCase};
+    use crate::PortError;
+    use coxagent_domain::TicketId;
+    use std::collections::BTreeMap;
 
     #[test]
     fn accepts_first_cycle_when_buffer_empty() {
@@ -437,5 +513,191 @@ mod tests {
         // Stale re-run of an early number after a restart.
         assert!(!should_record_cycle(Some(42), 1));
         assert!(!should_record_cycle(Some(42), 41));
+    }
+
+    // --- CXA-F232 delivery gate -------------------------------------------------
+
+    /// Port doubles existing only to name the use-case's type parameters:
+    /// `record_cycle_score` mutates the passed state directly and never
+    /// touches either port (same minimal-MemStore pattern as sibling mods).
+    struct UnusedStore;
+
+    #[async_trait::async_trait]
+    impl StateStorePort for UnusedStore {
+        async fn load(&self) -> Result<ProjectState, PortError> {
+            Ok(ProjectState::default())
+        }
+        async fn save(&self, _state: &ProjectState) -> Result<(), PortError> {
+            Ok(())
+        }
+    }
+
+    struct UnusedEngine;
+
+    #[async_trait::async_trait]
+    impl AgentEnginePort for UnusedEngine {
+        fn id(&self) -> &'static str {
+            "unused"
+        }
+        async fn run(&self, _request: AgentRequest) -> Result<AgentOutcome, PortError> {
+            Err(PortError::Backend(
+                "record_cycle_score never runs agents".into(),
+            ))
+        }
+    }
+
+    /// Drive the REAL scoring path (the same one `record_activity` calls) with
+    /// an explicit runs count, so each test tuple is expressed as the cycle
+    /// would actually have been recorded.
+    fn score_with(state: &mut ProjectState, cycle: u64, runs: u64, mut report: CycleReport) {
+        report.cycle = cycle;
+        RunCycleUseCase::<UnusedStore, UnusedEngine>::record_cycle_score(
+            state,
+            &report,
+            0.0,
+            runs,
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+    }
+
+    fn shipped_report() -> CycleReport {
+        CycleReport {
+            feature_done: Some(TicketId::new("F001").expect("id")),
+            ..CycleReport::default()
+        }
+    }
+
+    #[test]
+    fn idle_but_clean_cycle_is_refused_with_the_reason_recorded() {
+        // Nothing done, three runs, no errors or incidents → grade 'C'.
+        let mut state = ProjectState::default();
+        score_with(&mut state, 7, 3, CycleReport::default());
+        assert!(
+            state.cycle_scores.is_empty(),
+            "an idle-but-clean cycle must not be finalized into delivery history"
+        );
+        let rejection = state
+            .activity
+            .iter()
+            .find(|a| a.agent == "GATE")
+            .expect("the rejection must be recorded on the cycle");
+        assert!(
+            rejection.action.contains("cycle 7") && rejection.action.contains("scored C"),
+            "the rejection names the cycle and the refusing grade: {}",
+            rejection.action
+        );
+    }
+
+    #[test]
+    fn shipped_and_useful_majority_cycles_still_finalize() {
+        let mut state = ProjectState::default();
+        score_with(&mut state, 7, 4, shipped_report());
+        assert_eq!(
+            state.cycle_scores.len(),
+            1,
+            "'A' finalizes exactly as before"
+        );
+        assert_eq!(state.cycle_scores[0].grade, "A");
+        assert_eq!(state.cycle_scores[0].cycle, 7);
+        assert!(!state.activity.iter().any(|a| a.agent == "GATE"));
+
+        // 'B' at the exact majority boundary: 2 useful of 4 runs, zero errors.
+        let useful = CycleReport {
+            bugs_filed: vec![
+                TicketId::new("B001").expect("id"),
+                TicketId::new("B002").expect("id"),
+            ],
+            ..CycleReport::default()
+        };
+        score_with(&mut state, 8, 4, useful);
+        assert_eq!(state.cycle_scores.len(), 2);
+        assert_eq!(state.cycle_scores[1].grade, "B");
+        assert!(!state.activity.iter().any(|a| a.agent == "GATE"));
+    }
+
+    #[test]
+    fn churn_and_incident_cycles_are_blocked_too() {
+        let mut state = ProjectState::default();
+        // 'D' by churn: four-plus runs, nothing useful came of them.
+        score_with(&mut state, 9, 4, CycleReport::default());
+        assert!(state.cycle_scores.is_empty());
+        assert!(
+            state
+                .activity
+                .iter()
+                .any(|a| a.agent == "GATE" && a.action.contains("scored D")),
+            "churn refusal recorded with its grade"
+        );
+
+        // 'D' by incident: even shipped work is not finalized while an engine
+        // incident is open at scoring time.
+        let mut state = ProjectState::default();
+        state.engine_incidents.push(EngineIncident {
+            engine: "stub".into(),
+            reason: "engine down".into(),
+            role: "DEV-BUG".into(),
+            since: "2026-08-30T00:00:00Z".to_owned(),
+            hits: 1,
+        });
+        score_with(&mut state, 10, 4, shipped_report());
+        assert!(state.cycle_scores.is_empty());
+    }
+
+    #[test]
+    fn a_blocked_cycle_does_not_poison_the_next_healthy_one() {
+        // Blocking is per-cycle grade at decision time: once completed work
+        // lifts a later cycle's score above 'C', that score passes and is
+        // finalized — the refused cycle never blocks the history.
+        let mut state = ProjectState::default();
+        score_with(&mut state, 7, 3, CycleReport::default());
+        assert!(state.cycle_scores.is_empty());
+        score_with(&mut state, 8, 4, shipped_report());
+        assert_eq!(state.cycle_scores.len(), 1);
+        assert_eq!(state.cycle_scores[0].cycle, 8);
+        assert_eq!(state.cycle_scores[0].grade, "A");
+    }
+
+    #[test]
+    fn a_duplicate_re_score_is_still_dropped_before_the_gate() {
+        // Dedupe stays separate from the gate and runs first: a leader-handover
+        // re-score of an already-scored number is dropped by the monotonic
+        // check exactly as before — no new row and no duplicate rejection
+        // record, whatever the grade.
+        let mut state = ProjectState::default();
+        state.cycle_scores.push(CycleScore {
+            cycle: 4,
+            ..CycleScore::default()
+        });
+        score_with(&mut state, 4, 3, CycleReport::default());
+        assert_eq!(state.cycle_scores.len(), 1);
+        assert!(!state.activity.iter().any(|a| a.agent == "GATE"));
+    }
+
+    #[test]
+    fn the_gate_changes_only_the_history_append_not_the_accounting() {
+        // The same error-bearing cycle on both sides of the gate: role-health
+        // accounting and the spend ledger are identical whether the row is
+        // written or refused — only the delivery-history append differs.
+        let erroring = || CycleReport {
+            errors: vec!["TEST: assertion window closed".to_owned()],
+            ..CycleReport::default()
+        };
+
+        let mut blocked = ProjectState::default();
+        score_with(&mut blocked, 7, 3, erroring()); // useful 0 of 3 runs, 1 error → 'C'
+        assert!(blocked.cycle_scores.is_empty());
+        assert_eq!(blocked.role_health["TEST"].errors, 1);
+        assert_eq!(blocked.spend, Spend::default());
+
+        let mut accepted = ProjectState::default();
+        let accepted_report = CycleReport {
+            errors: vec!["TEST: assertion window closed".to_owned()],
+            ..shipped_report()
+        };
+        score_with(&mut accepted, 7, 3, accepted_report); // shipped → 'A'
+        assert_eq!(accepted.cycle_scores.len(), 1);
+        assert_eq!(accepted.role_health["TEST"].errors, 1);
+        assert_eq!(accepted.spend, Spend::default());
     }
 }

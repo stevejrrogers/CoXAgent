@@ -11,15 +11,49 @@
 //! reverse), so the mirror cannot rot silently.
 use super::*;
 
-/// One service route as declared on axum's router chain.
+/// Access tier each operation requires — mirrors exactly what
+/// [`super::auth::auth_mw`](auth_mw) enforces at runtime (see it for ground truth):
+/// public paths pass through with no session; manage surfaces need an Admin/lead
+/// role; everything else needs any valid session plus per-project membership.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum SecurityLevel {
+    /// No session required (health, login, openapi spec itself).
+    Public,
+    /// Any valid authenticated session (+ per-project membership where a pid is in path).
+    Authenticated,
+    /// User administration / token management surfaces limited to Admin+ lead roles.
+    Admin,
+}
+
+impl SecurityLevel {
+    /// Map to an OpenAPI security requirement array for one operation:
+    /// public operations declare no requirement; protected ones require bearerAuth.
+    fn requirement(self) -> serde_json::Value {
+        if self == SecurityLevel::Public {
+            return json!([]);
+        }
+        json!([{ "bearerAuth": [] }])
+    }
+}
+
+/// One service route as declared on axum's router chain plus enriched OpenAPI
+/// metadata. Tags/summaries default from stable path conventions ([autotag], [autosummary])
+/// but may be overridden per entry where naming alone cannot express intent; security is always derived from real auth enforcement ([security_for]).
 #[derive(Debug, Clone)]
 pub(crate) struct RouteSpec {
     pub path: &'static str,
     pub methods: &'static [&'static str],
+    pub tag: Option<&'static str>,
+    pub summary: Option<&'static str>,
 }
 
 const fn route(path: &'static str, methods: &'static [&'static str]) -> RouteSpec {
-    RouteSpec { path, methods }
+    RouteSpec {
+        path,
+        methods,
+        tag: None,
+        summary: None,
+    }
 }
 
 /// Every service route registered by `serve_full()`. Keep this complete:
@@ -71,6 +105,9 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/chat/ws", &["get"]),
     route("/api/engines", &["get"]),
     route("/api/engines/opencode/models", &["get"]),
+    route("/api/fleet/ceiling", &["put"]),
+    route("/api/fleet/river", &["get"]),
+    route("/api/fleet/spend", &["get"]),
     route("/api/health", &["get"]),
     route("/api/manage/overview", &["get"]),
     route("/api/manage/spaces/:sid", &["get"]),
@@ -92,10 +129,18 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/agent-evals", &["get"]),
     route("/api/projects/:pid/agent-log", &["get"]),
     route("/api/projects/:pid/agent-log/stream", &["get"]),
+    route("/api/projects/:pid/alerts", &["get"]),
+    route("/api/projects/:pid/alerts/:id/replay", &["post"]),
+    route("/api/projects/:pid/approval-policy", &["get"]),
+    route("/api/projects/:pid/approval-policy/ask-again", &["post"]),
+    route("/api/projects/:pid/approval-policy/release", &["post"]),
     route("/api/projects/:pid/architecture-review", &["post"]),
     route("/api/projects/:pid/attachment", &["get"]),
     route("/api/projects/:pid/audit", &["get"]),
     route("/api/projects/:pid/ba-analyze", &["post"]),
+    route("/api/projects/:pid/brakes", &["get"]),
+    route("/api/projects/:pid/brakes/:brake/hold", &["delete", "post"]),
+    route("/api/projects/:pid/burn-mode", &["post"]),
     route("/api/projects/:pid/channels", &["get", "post"]),
     route("/api/projects/:pid/channels/:cid/invite", &["post"]),
     route(
@@ -115,6 +160,8 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/config", &["get", "put"]),
     route("/api/projects/:pid/context", &["get", "post"]),
     route("/api/projects/:pid/control/:action", &["post"]),
+    route("/api/projects/:pid/dependencies", &["get"]),
+    route("/api/projects/:pid/deps/scan", &["post"]),
     route("/api/projects/:pid/digest", &["post"]),
     route("/api/projects/:pid/discuss", &["post"]),
     route("/api/projects/:pid/doc-folders", &["get", "post"]),
@@ -131,26 +178,46 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/git/auth", &["get"]),
     route("/api/projects/:pid/git/connect", &["post"]),
     route("/api/projects/:pid/git/test", &["post"]),
+    route("/api/projects/:pid/goals", &["post"]),
+    route("/api/projects/:pid/goals/:gid/rename", &["post"]),
+    route("/api/projects/:pid/goals/outcomes", &["get"]),
     route("/api/projects/:pid/inbox", &["get"]),
     route("/api/projects/:pid/media/:file", &["get"]),
     route("/api/projects/:pid/members", &["get", "post"]),
     route("/api/projects/:pid/members/:username", &["delete"]),
     route("/api/projects/:pid/merge-sweep", &["post"]),
     route("/api/projects/:pid/metrics", &["get"]),
+    route("/api/projects/:pid/metrics/burndown", &["get"]),
     route("/api/projects/:pid/metrics/summary", &["get"]),
     route("/api/projects/:pid/metrics/trends", &["get"]),
+    route("/api/projects/:pid/milestones/projection", &["get"]),
+    route("/api/projects/:pid/milestone-complete/:name", &["post"]),
     route("/api/projects/:pid/operators/:operator/:action", &["post"]),
     route("/api/projects/:pid/pr/:number/human", &["post"]),
+    route("/api/projects/:pid/preflight", &["get"]),
+    // Summary override (SUMMARY_OVERRIDES — this table must stay plain
+    // route(...) items for the CXA-B051 drift gate's parser): the go-live
+    // preflight answers in one object with per-item status for the config
+    // model allowlist, host_port, auth mode, docker+compose, publish-port.
     route("/api/projects/:pid/prs", &["get"]),
     route("/api/projects/:pid/prs/:num/:action", &["post"]),
     route("/api/projects/:pid/prs/:num/diff", &["get"]),
+    route("/api/projects/:pid/reverts/:sha", &["post"]),
     route("/api/projects/:pid/runner", &["get"]),
+    route("/api/projects/:pid/share-links", &["get", "post"]),
+    route("/api/projects/:pid/share-links/:token", &["delete"]),
     route("/api/projects/:pid/sprint/:action", &["post"]),
     route("/api/projects/:pid/sprint/close", &["post"]),
     route("/api/projects/:pid/sprint/goal", &["post"]),
+    route("/api/projects/:pid/ticket/:id/status/:action", &["post"]),
+    route("/api/projects/:pid/sprint-queue", &["post"]),
+    route("/api/projects/:pid/sprint-queue/:qid/scope", &["post"]),
+    route("/api/projects/:pid/sprint-queue/:qid/rename", &["post"]),
+    route("/api/projects/:pid/sprint-queue/:qid/move/:dir", &["post"]),
+    route("/api/projects/:pid/sprint-queue/:qid", &["delete"]),
     route("/api/projects/:pid/standup", &["post"]),
     route("/api/projects/:pid/state", &["get"]),
-    route("/api/projects/:pid/store", &["post"]),
+    route("/api/projects/:pid/store", &["get", "post"]),
     route("/api/projects/:pid/terminal", &["get"]),
     route("/api/projects/:pid/ticket-refine", &["post"]),
     route("/api/projects/:pid/ticket/:id", &["get"]),
@@ -158,9 +225,11 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/ticket/:id/assign", &["post"]),
     route("/api/projects/:pid/ticket/:id/attachments", &["post"]),
     route("/api/projects/:pid/ticket/:id/edit", &["post"]),
+    route("/api/projects/:pid/ticket/:id/goal", &["post"]),
     route("/api/projects/:pid/ticket/:id/priority", &["post"]),
     route("/api/projects/:pid/ticket/:id/ready", &["post"]),
     route("/api/projects/:pid/ticket/:id/reject", &["post"]),
+    route("/api/projects/:pid/ticket/:id/reproduction-url", &["get"]),
     route("/api/projects/:pid/ticket/:id/send-back", &["post"]),
     route("/api/projects/:pid/ticket/:id/undo-approval", &["post"]),
     route("/api/projects/:pid/ticket/:id/unpark", &["post"]),
@@ -171,8 +240,12 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/upload", &["post"]),
     route("/api/projects/:pid/workers", &["get"]),
     route("/api/projects/:pid/workspace", &["get"]),
+    // Global search (CXA-F275): labeled hits from tickets (open + closed),
+    // wiki pages and chat threads, server-ranked and capped (8/kind, 30 total).
+    route("/api/search", &["get"]),
     route("/api/spaces", &["get", "post"]),
     route("/api/spaces/:sid", &["delete", "put"]),
+    route("/s/:token", &["get"]),
     route("/api/token-saver", &["get"]),
     route("/api/tooling", &["get"]),
     route("/api/workspace", &["get", "put"]),
@@ -196,7 +269,7 @@ fn build_document() -> serde_json::Value {
             .entry(spec.path)
             .or_insert_with(std::collections::BTreeMap::new);
         for method in spec.methods {
-            item.insert((*method).to_owned(), operation(spec.path, method));
+            item.insert((*method).to_owned(), operation(spec, method));
         }
     }
     serde_json::json!({
@@ -206,24 +279,192 @@ fn build_document() -> serde_json::Value {
             "version": env!("CARGO_PKG_VERSION"),
             "description": "REST API of the CoXAgent hub dashboard.",
         },
+        // The hub authenticates with a personal token via
+        // `Authorization: Bearer <token>` (guards.rs) or a session cookie; only
+        // the bearer scheme is declared so SDK generators can wire clients.
+        // Public operations reference none of it.
+        "components": {
+            "securitySchemes": {
+                "bearerAuth": {
+                    "type": "http",
+                    "scheme": "bearer",
+                    // Machine-generated spec cannot promise an OAuth flow; this
+                    // matches how automation presents credentials today.
+                    "description":
+                        "Personal access token issued under /api/auth/my/tokens.",
+                },
+            },
+        },
         // BTreeMap serialises keys sorted, keeping output stable across runs.
         "paths": paths,
     })
 }
 
-fn operation(path: &str, method: &str) -> serde_json::Value {
+/// Summaries for paths whose intent the path alone cannot express (CXA-B047 /
+/// CXA-B051) — consulted by [`operation`] before falling back to
+/// [`autosummary`]. Kept apart from [`ROUTES`] so every entry stays a plain
+/// `route(...)` item: the CXA-B051 drift guard parses the table by that shape,
+/// and a multi-line struct literal would be invisible to it.
+const SUMMARY_OVERRIDES: &[(&str, &str)] = &[
+    (
+        "/api/search",
+        // CXA-F275: the global search box's contract — scope, kinds and caps.
+        "Global search across tickets (open and closed), wiki pages, ticket comment \
+         threads and team-chat messages. `q` is required (shorter than 2 characters \
+         returns an empty array, longer than 200 is truncated); optional `pid` scopes \
+         to one project, omitting it sweeps every project the caller is a member of \
+         (Super/Admin bypass applies). Returns a bare array of hits \
+         `{kind, id, ref, label, snippet, sub, at, link}` — server-ranked (title > id \
+         > body, prefix > substring, recency tiebreak), capped at 8 per kind and 30 \
+         total, so responses stay O(1). Chat hits respect channel visibility; a \
+         non-member pid answers 403, exactly like the per-project routes",
+    ),
+    (
+        "/api/projects/:pid/inbox",
+        // Verify cards carry the optional reproduce_url (CXA-F244): the live
+        // app URL for a fixed ticket awaiting a verdict, null when the
+        // project's deploy.host_port is not configured. repro_url (CXA-F246)
+        // is the per-ticket link recorded when that ticket's evidence was
+        // collected, null when none was.
+        "The caller's waiting-for-me queue: gate approvals, verify verdicts, cost holds, \
+         on-hold and exception tickets, questions. Verify items add an optional \
+         reproduce_url field — the live app URL for the fixed ticket, null when no \
+         deploy host_port is configured — and an optional repro_url field, the \
+         per-ticket link recorded at evidence-collection time",
+    ),
+    (
+        "/api/projects/:pid/preflight",
+        // The five go-live line items, named (CXA-F239).
+        "Go-live readiness preflight: engine/model allowlist per role, host_port assignment \
+         & collision state, auth mode (open vs provisioned), docker + compose availability, \
+         publish-port availability",
+    ),
+    (
+        "/api/projects/:pid/ticket/:id",
+        // The optional reproduce_url (CXA-F244) rides alongside the injected
+        // evidence: present on a fixed ticket awaiting verification, null
+        // when the project's deploy.host_port is not configured. repro_url
+        // (CXA-F246) is the per-ticket link recorded when that ticket's
+        // evidence was collected, null when none was.
+        "Full detail for one ticket: design specs, coverage matrix, DoD evidence, cost \
+         hold, attachments, blockers. A fixed ticket awaiting verification adds an \
+         optional reproduce_url field — the live app URL, null when no deploy \
+         host_port is configured — and an optional repro_url field, the per-ticket \
+         link recorded at evidence-collection time",
+    ),
+];
+
+fn summary_override(path: &str) -> Option<&'static str> {
+    SUMMARY_OVERRIDES
+        .iter()
+        .find(|(p, _)| *p == path)
+        .map(|(_, s)| *s)
+}
+
+/// Build one OpenAPI Operation object from a [`RouteSpec`] + HTTP verb.
+fn operation(spec: &RouteSpec, method: &str) -> serde_json::Value {
+    let tag = spec.tag.map_or_else(|| autotag(spec.path), str::to_string);
+    let summary = spec
+        .summary
+        .or_else(|| summary_override(spec.path))
+        .map_or_else(|| autosummary(spec.path), str::to_string);
+    let security = security_for(spec.path);
     serde_json::json!({
         // Unique per verb - a multi-method route yields one id per method, so ids
         // never collide (SDK generators index operations by id).
-        "operationId": format!("{}_{}", method.to_lowercase(), tail_word(path)),
+        "operationId": format!("{}_{}", method.to_lowercase(), tail_word(spec.path)),
+        // Group endpoints into client-facing feature areas for SDK/client UIs.
+        "tags": [tag],
+        // Human-readable one-liner; every operation ships with meaning now
+        // instead of an empty description (CXA-B047 / CXA-B051).
+        "summary": summary,
         // Parameters come from :path segments; bodies are not modelled here.
-        "parameters": parameters(path),
+        "parameters": parameters(spec.path),
+        // Security tier mirrors auth_mw's real enforcement (see security_for).
+        "security": security.requirement(),
         // Synthetic response contract - request/response bodies are not modelled,
-        // so only an empty description ships.
-        "responses": { "200": { "description": "" } },
+        // so only an informative description ships.
+        "responses": { "200": { "description": summary } },
     })
 }
 
+/// Security tier for a route derived from what auth_mw actually enforces in
+/// [`super::auth`], so documentation cannot drift from runtime behaviour:
+///
+/// * **Public** - pass-through with no session (health, login, OpenAPI itself).
+/// * **Admin** - management surfaces limited to Admin+ lead roles (`auth_mw`
+///   treats `/api/auth/users*` and `/api/auth/tokens*` as manage-only).
+/// * **Authenticated** - everything else needs any valid session plus membership
+///   of any project named in the path.
+fn security_for(path: &str) -> SecurityLevel {
+    if matches!(
+        path,
+        "/api/health" | "/api/openapi.json" | "/api/auth/login"
+    ) || path.starts_with("/s/")
+    {
+        // /s/:token (CXA-F069): the unguessable share token IS the credential,
+        // so the page is public exactly like the login route.
+        return SecurityLevel::Public;
+    }
+    if path.starts_with("/api/auth/users")
+        || path.starts_with("/api/auth/tokens")
+        || path.contains("/share-links")
+    {
+        // Share-link management is an admin surface: the handlers enforce
+        // manage rights on top of auth_mw's membership gate (CXA-F069).
+        return SecurityLevel::Admin;
+    }
+    SecurityLevel::Authenticated
+}
+
+#[cfg(test)]
+fn tagged(path: &'static str) -> RouteSpec {
+    RouteSpec {
+        path,
+        methods: &["get"],
+        tag: None,
+        summary: None,
+    }
+}
+
+/// Feature-area tag derived from the first static segment after `/api/`. Stable
+/// across routes sharing that prefix so clients see coherent groups rather than
+/// one operation per resource; e.g. every `/api/projects/*` endpoint tags Projects.
+fn autotag(path: &str) -> String {
+    let rest = path.strip_prefix("/api/").unwrap_or("");
+    rest.split('/')
+        .next()
+        .map(|seg| seg.replace(['-', '_'], ""))
+        .filter(|s| !s.is_empty())
+        .map_or_else(
+            || String::from("Misc"),
+            |s| {
+                let mut chars = s.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                    None => String::new(),
+                }
+            },
+        )
+}
+
+/// One-line human summary derived from the last static segment of the path,
+/// capitalised: reads like a terse instruction ("Tickets", "Metrics"). It gives
+/// every operation a meaningful description without hand-authoring 159 strings;
+/// an entry may override via [`RouteSpec::summary`] when path alone cannot
+/// express intent.
+fn autosummary(path: &str) -> String {
+    let tail = tail_word(path);
+    let last = tail.rsplit('_').next().unwrap_or("");
+    if last.is_empty() {
+        return String::from("Operation");
+    }
+    let mut chars = last.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::from("Operation"),
+    }
+}
 /// Path parameters derived from `:segment`s - one required string param each,
 /// emitted in path order as an OpenAPI Parameter array.
 fn parameters(path: &str) -> Vec<serde_json::Value> {
@@ -315,5 +556,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn every_operation_carries_non_empty_tag_summary_and_security() {
+        // CXA-C005 enrichment: no operation may ship an empty description or a
+        // missing security requirement - SDK generators rely on all three.
+        let doc = build_document();
+        for item in doc["paths"].as_object().expect("paths object").values() {
+            for op in item.as_object().expect("path item").values() {
+                let tag = &op["tags"];
+                assert!(
+                    tag.as_array().is_some_and(|tags| !tags.is_empty()),
+                    "operation lacks a tag: {:?}",
+                    op["operationId"]
+                );
+                let summary = &op["summary"];
+                assert!(
+                    summary.as_str().is_some_and(|s| !s.is_empty()),
+                    "operation lacks a summary: {:?}",
+                    op["operationId"]
+                );
+                assert!(
+                    op.get("security").is_some(),
+                    "operation lacks security requirement: {:?}",
+                    op["operationId"]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tags_are_derived_from_the_first_api_segment() {
+        // A project-scoped route groups under its leading feature area so SDKs
+        // show coherent collections rather than one group per resource.
+        let spec = tagged("/api/projects/:pid/metrics/summary");
+        let op = operation(&spec, "get");
+        assert_eq!(op["tags"], json!(["Projects"]));
     }
 }

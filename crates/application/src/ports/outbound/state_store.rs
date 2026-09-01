@@ -107,6 +107,24 @@ pub struct WorkerCaps {
     pub version: String,
 }
 
+/// One write the structural-integrity audit refused at the write boundary
+/// (CXA-F229): the attempted payload is quarantined in the adapter's audit
+/// ledger instead of being silently persisted, so the corruption that would
+/// have poisoned goal-line attribution stays inspectable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuarantineEntry {
+    /// RFC3339 instant of the refused write.
+    pub at: String,
+    /// The first integrity rule the payload violated (see
+    /// `state::integrity`); `detail` names every rule that fired.
+    pub rule_id: String,
+    /// The violation detail — the same text the refusing store returned.
+    pub detail: String,
+    /// The attempted payload, JSON-serialized and capped — enough to
+    /// diagnose, not enough to matter as storage.
+    pub payload: String,
+}
+
 /// Atomic read-modify-write with retry: load the state, apply `f`, and save. If
 /// a concurrent writer advanced the revision (a [`PortError::Conflict`]), reload
 /// and re-apply `f` up to a bounded number of times. This is how two operators
@@ -178,6 +196,31 @@ pub trait StateStorePort: Send + Sync {
     /// today's behaviour; callers treat `None` as "no guard available".
     async fn current_version(&self) -> Result<Option<i64>, PortError> {
         Ok(None)
+    }
+
+    /// Delete this project's ENTIRE persisted footprint from the backend: the
+    /// aggregate row plus every coordination row (leases, worker registry,
+    /// desired-run state) scoped to this project id. After a successful delete
+    /// the store must behave as never-written — `load` yields the default and
+    /// `current_version` the baseline — so a later project recreated under the
+    /// same id starts fresh instead of silently adopting the deleted team's
+    /// tickets, spend and claims (CXA-B130).
+    ///
+    /// The default is a no-op for backends that keep no external footprint and
+    /// for single-runner test fakes; every adapter with real persistence
+    /// (file or shared database) MUST override it. A deregistering caller
+    /// treats an error as fatal: returning success from the delete flow while
+    /// the persisted state survives is exactly the resurrection bug.
+    async fn delete(&self) -> Result<(), PortError> {
+        Ok(())
+    }
+
+    /// Recent quarantine ledger entries: payloads the structural-integrity
+    /// audit refused at write-back, kept so a refused corruption is
+    /// inspectable instead of only a failed HTTP call. Default: an empty
+    /// ledger (backends that keep none). Newest last.
+    async fn quarantined(&self) -> Vec<QuarantineEntry> {
+        Vec::new()
     }
 
     /// Atomically claim `id` for `worker` (`account@host`), stamping `now` as the

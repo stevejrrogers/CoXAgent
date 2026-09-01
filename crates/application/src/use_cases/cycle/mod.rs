@@ -23,8 +23,11 @@ mod backlog;
 mod ceremonies;
 mod debt_sweep;
 mod escalation;
+mod po_daily;
+mod pr_truth;
 mod preflight;
 mod scrum;
+mod ship_truth;
 mod sm_watch;
 mod wiring;
 
@@ -36,6 +39,7 @@ mod ops;
 mod qa_evidence;
 mod recovery;
 mod release_cut;
+mod revert_learning;
 mod trend;
 
 /// Local, non-pushed ref updated after every deploy that passes both
@@ -478,7 +482,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return;
         };
         let base = self.flow_base();
-        let _ = git.raw(&self.work_dir, &["fetch", "-q", "origin", base]).await;
+        let _ = git
+            .raw(&self.work_dir, &["fetch", "-q", "origin", base])
+            .await;
         let (ok, text) = git
             .raw(
                 &self.work_dir,
@@ -742,6 +748,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // op this cycle fails in a chain (the 2026-08-16 all-D night). Clean
         // up before anything touches git.
         self.tree_hygiene().await;
+        // Brake-hold reconciliation BEFORE any phase reads the brakes
+        // (CXA-F238): an operator hold whose expiry bound elapsed must not
+        // survive to gate this cycle's BA/DEV phases.
+        self.reconcile_brake_holds().await;
         // Keep the code map fresh so `.coxagent/REPO_MAP.md` reflects the tree
         // the agents are about to work on (best-effort, token-saver-gated).
         // Leader-only: it writes shared files under the repo.
@@ -763,7 +773,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 }
             }
             // Scrum: open/roll over the sprint at the start of the cycle.
-            self.advance_sprint_if_scrum(cycle).await;
+            // Box::pin: the run_cycle future crossed the large-future bound
+            // once the deploy attempt carried its forensics bundle (CXA-F289)
+            // — boxing this one branch keeps the whole future under it.
+            Box::pin(self.advance_sprint_if_scrum(cycle)).await;
             // SM supervision (deterministic, zero tokens): police the sprint
             // scope, route stalled committed work to the role that unblocks
             // it, and descope what will not ship — the SM orchestrates the
@@ -773,6 +786,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // One digest per UTC day into the team chat: shipped/spend/sprint at
             // a glance, so the user doesn't need the dashboard open to keep up.
             self.post_daily_digest().await;
+            // One bug-count snapshot per UTC day: the persisted burn-down
+            // history the metrics dashboard and the self-tuning escalation
+            // read (CXA-F032). Recorded BEFORE self-tune so today's delta is
+            // already on file when the tuner evaluates it.
+            self.record_daily_bug_snapshot().await;
 
             // Self-correcting memory: audit the engine's per-machine notes
             // against the current process law once a day.
@@ -789,6 +807,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // surfaces (inflow vs outflow, failure hotspots, grade/cost
             // direction) and propose — never decide — system-level work.
             self.trend_sentinel().await;
+            self.ship_truth_sweep().await;
+            self.pr_truth_sweep().await;
+            self.po_daily_pass().await;
             // Stop starting, start finishing: review + merge the PR queue at
             // the TOP of the cycle. This used to run at the very end — after
             // codegraph, ceremonies and the (tens-of-minutes) dev phases — so
@@ -812,8 +833,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // work is merging — creative roles are paused below.
             recovery = self.run_queue_recovery(self.open_pr_count().await).await;
 
-            // Ops/SRE: ping the deployed app; file a bug + alert on an outage.
-            self.ops_monitor().await;
+            // Ops/SRE: ping the deployed app; file a bug + alert on an outage,
+            // and (CXA-F240, opt-in) revert to last-known-good when the LIVE
+            // deployment stays unhealthy — not only when the deploy that
+            // shipped it fails in the same cycle.
+            self.ops_monitor(&mut report).await;
 
             // Daily standup: every few cycles the SM runs the room — but only when
             // the team actually did something since last time. A standup with no
@@ -964,12 +988,34 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // nothing, and an unconditional brake deadlocked BOTH lanes for 50+
         // cycles (features locked "for bugs", no bug workable). The brake only
         // holds when this cycle actually spent its slot on a bug.
-        let bugs_first = self.store.load().await.is_ok_and(|s| s.tuning.bugs_first)
-            && report.bug_fixed.is_some();
-        if bugs_first {
+        let brake_state = self.store.load().await.ok();
+        let reactive_brake = brake_state.as_ref().is_some_and(|s| s.tuning.bugs_first);
+        let burn_hold = brake_state
+            .as_ref()
+            .is_some_and(crate::selection::burn_mode_holds);
+        // Human burn mode (CXA-F030), layered on the reactive brake: when its
+        // explicit exit gate is met the mode clears itself through the store —
+        // the burn-down sprint ends by itself instead of waiting for a person.
+        // Best-effort: a lost race just re-evaluates and re-clears next cycle.
+        if let Some(s) = &brake_state {
+            if s.tuning.burn_mode && !burn_hold {
+                let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |st| {
+                    crate::selection::clear_burn_mode_if_gate_met(st);
+                    Ok(())
+                })
+                .await;
+            }
+        }
+        let bug_slot_worked = report.bug_fixed.is_some();
+        if reactive_brake && bug_slot_worked {
             report
                 .errors
                 .push("DEV-FEATURE: paused by self-tuning — burning down bugs first".to_owned());
+        }
+        if burn_hold && bug_slot_worked {
+            report.errors.push(
+                "DEV-FEATURE: paused by burn mode — open bugs still above the exit gate".to_owned(),
+            );
         }
         if self.pause_requested() {
             report
@@ -977,7 +1023,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 .push("cycle cut short — paused by user".to_owned());
             return report;
         }
-        if self.config.workflow.feature_dev_enabled && !queue_full && !bugs_first {
+        // Either brake pauses features (OR); both honour the deadlock valve.
+        let feature_paused = brake_state
+            .as_ref()
+            .is_some_and(|s| crate::selection::dev_feature_paused(s, bug_slot_worked));
+        if self.config.workflow.feature_dev_enabled && !queue_full && !feature_paused {
             // Before building, make sure the next feature has a clear definition
             // of done — DEV raises unclear tickets and the BA fills them in.
             self.clarify_next_feature().await;
@@ -997,6 +1047,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // cheap compared with a wrong implementation. Bounded per cycle.
         Box::pin(self.answer_open_questions()).await;
         self.escalate_stale_human_questions().await;
+        // Focus windows over: held questions flush as one digest each
+        // (CXA-F176), before anything else assumes the inbox is current.
+        self.flush_focus_digests().await;
         // Fill the acceptance criteria BEFORE the gate judges the ticket: a
         // ticket nobody can check is one a human can only bounce, and the
         // missing AC alone scores it out of the auto lane.
@@ -1075,6 +1128,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                                 &summary,
                                 attempt_sha.clone(),
                                 health_check,
+                                r.failure_bundle,
                             )
                             .await;
                             let kind = if success {
@@ -1128,7 +1182,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         Err(e) => {
                             deploy_bad = true;
                             let summary = format!("deploy failed: {e}");
-                            self.record_deploy(false, &summary, attempt_sha.clone(), None)
+                            // A spawn/timeout error produced no compose run at
+                            // all — no forensics exist to capture (CXA-F289).
+                            self.record_deploy(false, &summary, attempt_sha.clone(), None, None)
                                 .await;
                             self.notify("deploy_failed", summary.clone()).await;
                             if let Some(id) = self.file_deploy_bug(&summary).await {
@@ -1730,3 +1786,6 @@ mod version_reconcile_tests {
 
 #[cfg(test)]
 mod cycle_tests;
+
+#[cfg(test)]
+mod qa_evidence_tests;

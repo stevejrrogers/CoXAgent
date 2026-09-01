@@ -55,6 +55,7 @@ fn handle(id: &str, state: ProjectState) -> ProjectHandle {
             state: Mutex::new(state),
         }),
         runner: Arc::new(coxagent_application::use_cases::RunnerHandle::new()),
+        outbox: None,
         config_path: dir.join("coxagent.json"),
         engine: Arc::new(StubEngine),
         work_dir: dir.clone(),
@@ -63,6 +64,7 @@ fn handle(id: &str, state: ProjectState) -> ProjectHandle {
         forge: None,
         deploy: None,
         files: None,
+        deps_discovery: None,
         storage: None,
     }
 }
@@ -125,6 +127,15 @@ async fn metrics_endpoints_return_shape_404_and_insufficient_edge() {
     assert!(v["burn_warning"].is_null());
     // Pattern recognition must surface total failure volume, not just top-3.
     assert_eq!(v["patterns"]["total_failures"], 0);
+
+    // Governance-attention ledger (CXA-F230): the summary carries the
+    // attributed view additively; a project with no gate decisions renders a
+    // complete zero grid rather than a missing key.
+    assert_eq!(v["attention"]["interventions_total"], 0);
+    assert_eq!(
+        v["attention"]["attention_by_area"]["feature"]["ready_approve"],
+        0
+    );
 
     // Missing project: 404, matching every other project-scoped route.
     let url = format!("http://127.0.0.1:{PORT}/api/projects/nope/metrics/summary");

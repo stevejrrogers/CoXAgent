@@ -4,6 +4,7 @@
 //! engines, storage, MCP access. Config loading/self-heal lives in
 //! `config_load.rs`.
 
+use super::retry::{boot_backoff, retrying, BOOT_ATTEMPTS};
 use super::*;
 
 /// Build the state store for one project. Backend selection is ordered,
@@ -40,6 +41,9 @@ pub(crate) async fn make_store(
                 token: std::env::var("COXAGENT_REMOTE_TOKEN")
                     .ok()
                     .filter(|t| !t.is_empty()),
+                // CXA-F029 bug #2: per-deployment request deadline; defaults to
+                // the previously hard-coded 120 s.
+                timeout: RestConfig::timeout_from_env(),
             };
             let store = RestStateStore::new(cfg)?;
             tracing::info!("[{id}] state store: REMOTE gateway");
@@ -88,8 +92,38 @@ pub(crate) async fn make_store(
 /// `<base>/coordination.json` into the environment, unless already set. Lets the
 /// Finder-launched app join the distributed backend without env plumbing.
 pub fn load_coordination(base: &Path) {
+    load_coordination_in(base, &std::env::current_dir().unwrap_or_default());
+}
+
+/// Is this working directory an agent slot checkout? Pure — the rule is the
+/// same everywhere, only the caller decides which cwd applies (the process
+/// cwd in production, an explicit path in tests).
+fn in_agent_worktree(cwd: &Path) -> bool {
+    cwd.components().any(|c| {
+        c.as_os_str()
+            .to_string_lossy()
+            .starts_with(".coxagent-worktrees")
+    })
+}
+
+/// The decision behind [`load_coordination`] as a pure function of the inputs
+/// the real one reads: the process cwd (the worktree guard's input) and the
+/// config base dir. Split out so the suite can exercise the load path from
+/// any cwd — the test binary itself runs inside `.coxagent-worktrees`, where
+/// the real guard must (and does) bail.
+fn load_coordination_in(base: &Path, cwd: &Path) {
     if std::env::var("COXAGENT_DB_DSN").is_ok_and(|v| !v.is_empty()) {
         return; // an explicit env always wins
+    }
+    // Agent sandboxes must never join the operator's shared backend: engine
+    // spawns already strip the DSN env, but a test that runs `coxagent serve`
+    // from a worktree still discovered coordination.json in $HOME and wrote
+    // test-* project rows straight into the production Postgres. Same
+    // heuristic as the scaffold guard: inside .coxagent-worktrees, stay on
+    // the local JSON store.
+    if in_agent_worktree(cwd) {
+        tracing::info!("agent worktree detected — skipping shared coordination backend");
+        return;
     }
     let path = base.join("coordination.json");
     let Ok(text) = std::fs::read_to_string(&path) else {
@@ -300,6 +334,15 @@ pub(crate) async fn build_project(
         }
     }
     let webhook = config.workflow.webhook_url.clone();
+    // Durable outbound alert delivery (CXA-F235): one spool per project, shared
+    // by every runner's notifier, the background flusher and the dashboard's
+    // delivery-history view.
+    let outbox = coxagent_infrastructure::spool_in_dir(state_dir);
+    if let Some(url) = webhook.as_deref().filter(|u| !u.is_empty()) {
+        // One background flusher per project — never per runner — so three
+        // polling loops don't race the same spool's leases.
+        coxagent_infrastructure::spawn_outbox_flusher(Arc::clone(&outbox), url.to_owned());
+    }
     // Shared, live-adjustable budget caps — seeded from config, updated by the
     // config API, read by the loop each cycle (so edits apply without a restart).
     let live_budget: coxagent_application::LiveBudget =
@@ -424,16 +467,19 @@ pub(crate) async fn build_project(
         } else {
             leader
         };
-        let leader = leader.with_notifier(build_notifier(Arc::clone(&store), webhook.clone()));
+        let leader = leader.with_notifier(build_notifier(
+            Arc::clone(&store),
+            webhook.clone(),
+            Arc::clone(&outbox),
+        ));
         let leader = if let Some(r) = build_pr_reporter(&config, auth, id, id).await {
             leader.with_reporter(r)
         } else {
             // Same-process hub: reviews/holds/latency write straight to the
             // shared store — the Null fallback silently dropped them all.
             leader.with_reporter(Arc::new(
-                coxagent_application::ports::outbound::StorePrReporter::new(
-                    Arc::clone(&store) as Arc<dyn coxagent_application::ports::outbound::StateStorePort>,
-                ),
+                coxagent_application::ports::outbound::StorePrReporter::new(Arc::clone(&store)
+                    as Arc<dyn coxagent_application::ports::outbound::StateStorePort>),
             ))
         };
         let wh = Arc::clone(&handle);
@@ -444,62 +490,79 @@ pub(crate) async fn build_project(
         // delays a ripe PR by a whole cycle. It reuses the full gate stack;
         // duplicate work across machines is stopped by the per-PR review
         // lease + head-sha guard. It respects Pause and stops with the hub.
+        // TWO review lanes: the per-PR lease (claim_stage "PR-n") already
+        // stops them colliding on one PR, so a second loop simply doubles
+        // review throughput — the queue used to pin at the WIP limit behind
+        // a single GLM reviewer digesting one PR at a time.
         if config.git.enabled && forge.is_some() {
-            let reviewer = RunCycleUseCase::new(
-                Arc::clone(&store),
-                engine.clone(),
-                config.clone(),
-                worktree_at(work_dir.clone(), &format!("{id}-review")),
-                context.clone(),
-            )
-            .with_leader_election(false)
-            .with_meter(meter.clone())
-            .with_live_budget(Arc::clone(&live_budget))
-            .with_deploy(Arc::new(DockerComposeDeploy::new()))
-            .with_host_port_probe(host_port_probe)
-            .with_git(Arc::new(coxagent_infrastructure::SystemGit::new()))
-            .with_files(Some(Arc::new(
-                coxagent_infrastructure::FsWorkspaceFiles::new(),
-            )));
-            let mut reviewer = reviewer;
-            reviewer.set_worker(format!("review@{}", worker_host()));
-            let reviewer = if let Some(ref f) = forge {
-                reviewer.with_forge(Arc::clone(f))
-            } else {
-                reviewer
-            };
-            let reviewer =
-                reviewer.with_notifier(build_notifier(Arc::clone(&store), webhook.clone()));
-            let reviewer = if let Some(r) = build_pr_reporter(&config, auth, id, id).await {
-                reviewer.with_reporter(r)
-            } else {
-                // Same-process hub: reviews/holds/latency write straight to
-                // the shared store — the Null fallback silently dropped them.
-                reviewer.with_reporter(Arc::new(
-                    coxagent_application::ports::outbound::StorePrReporter::new(
-                        Arc::clone(&store)
-                            as Arc<dyn coxagent_application::ports::outbound::StateStorePort>,
-                    ),
-                ))
-            };
-            let rh = Arc::clone(&handle);
-            tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(Duration::from_secs(90)).await;
-                    let snap = rh.snapshot();
-                    if snap.mode == "stopped" {
-                        break;
+            for lane in 1u8..=2 {
+                let lane_slug = if lane == 1 {
+                    format!("{id}-review")
+                } else {
+                    format!("{id}-review-{lane}")
+                };
+                let reviewer = RunCycleUseCase::new(
+                    Arc::clone(&store),
+                    engine.clone(),
+                    config.clone(),
+                    worktree_at(work_dir.clone(), &lane_slug),
+                    context.clone(),
+                )
+                .with_leader_election(false)
+                .with_meter(meter.clone())
+                .with_live_budget(Arc::clone(&live_budget))
+                .with_deploy(Arc::new(DockerComposeDeploy::new()))
+                .with_host_port_probe(host_port_probe)
+                .with_git(Arc::new(coxagent_infrastructure::SystemGit::new()))
+                .with_files(Some(Arc::new(
+                    coxagent_infrastructure::FsWorkspaceFiles::new(),
+                )));
+                let mut reviewer = reviewer;
+                reviewer.set_worker(format!("review{lane}@{}", worker_host()));
+                let reviewer = if let Some(ref f) = forge {
+                    reviewer.with_forge(Arc::clone(f))
+                } else {
+                    reviewer
+                };
+                let reviewer = reviewer.with_notifier(build_notifier(
+                    Arc::clone(&store),
+                    webhook.clone(),
+                    Arc::clone(&outbox),
+                ));
+                let reviewer = if let Some(r) = build_pr_reporter(&config, auth, id, id).await {
+                    reviewer.with_reporter(r)
+                } else {
+                    // Same-process hub: reviews/holds/latency write straight to
+                    // the shared store — the Null fallback silently dropped them.
+                    reviewer.with_reporter(Arc::new(
+                        coxagent_application::ports::outbound::StorePrReporter::new(Arc::clone(
+                            &store,
+                        )
+                            as Arc<dyn coxagent_application::ports::outbound::StateStorePort>),
+                    ))
+                };
+                let rh = Arc::clone(&handle);
+                tokio::spawn(async move {
+                    // Staggered so the two lanes scan the queue out of phase.
+                    tokio::time::sleep(Duration::from_secs(u64::from(lane) * 45)).await;
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(90)).await;
+                        let snap = rh.snapshot();
+                        if snap.mode == "stopped" {
+                            break;
+                        }
+                        if snap.mode != "running" {
+                            continue; // paused — the review loop pauses with the team
+                        }
+                        reviewer.run_review_pass().await;
                     }
-                    if snap.mode != "running" {
-                        continue; // paused — the review loop pauses with the team
-                    }
-                    reviewer.run_review_pass().await;
-                }
-            });
-            tracing::info!("[{id}] dedicated review runner armed (90s loop)");
+                });
+                tracing::info!("[{id}] review lane {lane} armed (90s loop)");
+            }
         }
     }
 
+    crate::spawn_worktree_janitor(work_dir.clone());
     tracing::info!(
         "[{id}] spawning {} worker runner(s) (total {} runners)",
         concurrency.saturating_sub(1),
@@ -553,16 +616,19 @@ pub(crate) async fn build_project(
         } else {
             worker
         };
-        let worker = worker.with_notifier(build_notifier(Arc::clone(&store), webhook.clone()));
+        let worker = worker.with_notifier(build_notifier(
+            Arc::clone(&store),
+            webhook.clone(),
+            Arc::clone(&outbox),
+        ));
         let worker = if let Some(r) = build_pr_reporter(&config, auth, id, id).await {
             worker.with_reporter(r)
         } else {
             // Same-process hub: reviews/holds/latency write straight to the
             // shared store — the Null fallback silently dropped them all.
             worker.with_reporter(Arc::new(
-                coxagent_application::ports::outbound::StorePrReporter::new(
-                    Arc::clone(&store) as Arc<dyn coxagent_application::ports::outbound::StateStorePort>,
-                ),
+                coxagent_application::ports::outbound::StorePrReporter::new(Arc::clone(&store)
+                    as Arc<dyn coxagent_application::ports::outbound::StateStorePort>),
             ))
         };
         let wh = Arc::clone(&handle);
@@ -660,7 +726,9 @@ pub(crate) async fn build_project(
         files: Some(std::sync::Arc::new(
             coxagent_infrastructure::FsWorkspaceFiles::new(),
         )),
+        deps_discovery: Some(Arc::new(coxagent_infrastructure::FsLockfileDiscovery::new())),
         deploy: Some(Arc::new(DockerComposeDeploy::new())),
+        outbox: Some(outbox),
         storage: Some(build_storage().await.unwrap_or_else(|| {
             Arc::new(coxagent_infrastructure::storage::LocalStorage::new(
                 std::env::var_os("HOME")
@@ -686,7 +754,18 @@ pub(crate) async fn build_syschat_store(
     let dsn = std::env::var("COXAGENT_DB_DSN")
         .ok()
         .filter(|s| !s.is_empty())?;
-    match coxagent_infrastructure::PgKvDoc::connect(&dsn).await {
+    // CXA-B114: one failed connect at boot used to downgrade the KV store to
+    // a local file for the process' whole lifetime; give a database that is
+    // still starting the same short boot window the project stores get.
+    let connect = || coxagent_infrastructure::PgKvDoc::connect(&dsn);
+    match retrying(
+        "system chat store connect",
+        BOOT_ATTEMPTS,
+        boot_backoff,
+        connect,
+    )
+    .await
+    {
         Ok(store) => {
             // One-time migration: seed the DB from the local file if the DB has
             // no system-chat doc yet but a file exists.
@@ -800,7 +879,10 @@ pub(crate) async fn build_audit() -> Arc<dyn coxagent_application::ports::outbou
         .and_then(|v| v.parse::<u32>().ok());
     if let Ok(dsn) = std::env::var("COXAGENT_DB_DSN") {
         if !dsn.is_empty() {
-            match SqlAuditSink::connect(&dsn, retention_days).await {
+            // CXA-B114: retry within the boot window instead of silently
+            // downgrading the durable trail to memory on a slow database.
+            let connect = || SqlAuditSink::connect(&dsn, retention_days);
+            match retrying("audit sink connect", BOOT_ATTEMPTS, boot_backoff, connect).await {
                 Ok(sink) => {
                     tracing::info!("audit sink: Postgres (retention: {retention_days:?} days)");
                     return Arc::new(sink);
@@ -834,7 +916,12 @@ pub(crate) async fn build_auth(
     // project can move its state to Postgres while keeping the local account file
     // (no forced re-login when going distributed on one host).
     if let Ok(dsn) = std::env::var("COXAGENT_AUTH_DSN") {
-        let mut svc = SqlAuthService::connect(&dsn).await?;
+        // CXA-B114: a database seconds from ready must not fail the whole hub
+        // (or serve) boot; retry within the boot window first.
+        let mut svc = retrying("auth store connect", BOOT_ATTEMPTS, boot_backoff, || {
+            SqlAuthService::connect(&dsn)
+        })
+        .await?;
         // Sessions are ephemeral TTL data — store them in Redis (native expiry)
         // when available, else they fall back to the Postgres auth_sessions table.
         if let Ok(url) = std::env::var("COXAGENT_REDIS_URL") {
@@ -982,15 +1069,19 @@ pub(crate) async fn build_pr_reporter(
 
 /// The event notifier for a runner: always the project's own team chat (with a
 /// native push via the app's chat-notification path), plus an external webhook
-/// when one is configured.
+/// when one is configured. The webhook sink is durable (CXA-F235): events are
+/// spooled to the project's outbox and an independent flusher delivers them
+/// with backoff + idempotency keys, so a down webhook delays an alert instead
+/// of silently losing it.
 pub(crate) fn build_notifier(
     store: Arc<AnyStateStore>,
     webhook: Option<String>,
+    outbox: std::sync::Arc<dyn coxagent_application::ports::outbound::OutboxStorePort>,
 ) -> Arc<dyn coxagent_application::ports::outbound::NotifierPort> {
     use coxagent_application::ports::outbound::{ChatNotifier, FanoutNotifier, NotifierPort};
     let mut sinks: Vec<Arc<dyn NotifierPort>> = vec![Arc::new(ChatNotifier::new(store))];
-    if let Some(url) = webhook.filter(|u| !u.is_empty()) {
-        sinks.push(Arc::new(WebhookNotifier::new(url)));
+    if webhook.is_some_and(|u| !u.is_empty()) {
+        sinks.push(Arc::new(WebhookNotifier::new(outbox)));
     }
     Arc::new(FanoutNotifier(sinks))
 }
@@ -1022,8 +1113,8 @@ pub(crate) fn port_holder(port: u16) -> Option<String> {
 
 #[cfg(test)]
 mod builders_tests {
-    use super::{load_coordination, provision_local_token};
-    use std::path::PathBuf;
+    use super::{in_agent_worktree, load_coordination_in, provision_local_token};
+    use std::path::{Path, PathBuf};
 
     /// These tests read/write process-global env vars; serialize them so they
     /// cannot clobber one another's values when Rust runs them on many threads.
@@ -1137,8 +1228,12 @@ mod builders_tests {
         .unwrap();
 
         // Case A — fresh environment: all five keys land on their env vars,
-        // including the new remote-store pair.
-        load_coordination(&base);
+        // including the new remote-store pair. The file→env mapping under
+        // test is independent of the process cwd, so pin it to a neutral one:
+        // load_coordination's worktree guard keys off the LIVE cwd, and agent
+        // slots run the suite from inside .coxagent-worktrees — where the
+        // guard (correctly, for real boots) skips the file entirely.
+        load_coordination_in(&base, Path::new("/"));
         for (_, env_key, expected) in &cases {
             assert_eq!(
                 std::env::var(env_key).ok(),
@@ -1153,7 +1248,7 @@ mod builders_tests {
             std::env::remove_var(env_key);
         }
         std::env::set_var("COXAGENT_REMOTE_STORE_URL", "http://already-set");
-        load_coordination(&base);
+        load_coordination_in(&base, Path::new("/"));
         assert_eq!(
             std::env::var("COXAGENT_REMOTE_STORE_URL").unwrap(),
             "http://already-set",
@@ -1171,9 +1266,42 @@ mod builders_tests {
         );
         assert_eq!(std::env::var("COXAGENT_REMOTE_TOKEN").unwrap(), "t0k");
 
+        // Case C — the fa33aa58 guard itself: a cwd inside .coxagent-worktrees
+        // bails BEFORE reading coordination.json even with the file present,
+        // so an agent sandbox can never join the operator's shared backend.
+        for (_, env_key, _) in &cases {
+            std::env::remove_var(env_key);
+        }
+        load_coordination_in(&base, Path::new("/Users/x/.coxagent-worktrees/cxa-slot-9"));
+        for (_, env_key, _) in &cases {
+            assert_eq!(
+                std::env::var_os(env_key),
+                None,
+                "{env_key} must never be set from coordination.json inside a worktree"
+            );
+        }
+
         // Leave no trace behind for parallel tests.
         for (_, env_key, _) in &cases {
             std::env::remove_var(env_key);
         }
+    }
+
+    /// fa33aa58's sandbox rule, pinned: a cwd inside a `.coxagent-worktrees`
+    /// slot must never reach the shared coordination backend. Without this
+    /// pin the rule was only exercised incidentally — and the five-key test
+    /// above broke the moment the suite ran FROM such a slot.
+    #[test]
+    fn agent_worktree_cwd_is_refused_the_shared_coordination_backend() {
+        assert!(in_agent_worktree(Path::new(
+            "/Users/dev/CoXAgent/cxa/.coxagent-worktrees/cxa-slot-1"
+        )));
+        assert!(in_agent_worktree(Path::new(".coxagent-worktrees/slot-2")));
+        // A normal checkout, the hub's own tree, or a tempdir never trips it.
+        assert!(!in_agent_worktree(Path::new("/")));
+        assert!(!in_agent_worktree(Path::new("/Users/dev/CoXAgent/cxa")));
+        assert!(!in_agent_worktree(Path::new(
+            "/var/folders/8c/x/T/test-dir"
+        )));
     }
 }

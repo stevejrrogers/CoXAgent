@@ -100,6 +100,10 @@ pub struct CyclePerfSummary {
     pub deploy_7d: usize,
     /// Set when one recent cycle's cost exceeds 2x its sprint average (AC4).
     pub burn_warning: Option<BurnWarning>,
+    /// The human governance-attention ledger, aggregated (CXA-F230) — the
+    /// operator-side mirror of this agent-side overlay. Additive; old clients
+    /// that never read the key are unaffected.
+    pub attention: crate::metrics_governance::AttentionSummary,
 }
 
 /// One day of a time-series trend (line-chart point).
@@ -348,6 +352,7 @@ pub fn compute_cycle_perf(state: &ProjectState, now_day: &str) -> CyclePerfSumma
         patterns,
         deploy_7d,
         burn_warning: detect_burn_warning(state),
+        attention: crate::metrics_governance::attention_summary(state, now_day),
     }
 }
 
@@ -571,6 +576,7 @@ mod tests {
             length_cycles: 5,
             committed: vec![f1.clone()],
             started_at: "2026-07-01T00:00:00Z".into(),
+            bug_burn_floor: None,
         });
         s.tickets.push(ticket("F001"));
         let v = compute_velocity(&s);

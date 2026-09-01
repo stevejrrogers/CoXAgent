@@ -227,13 +227,14 @@ async fn pr_actions_are_reviewer_only_not_open_to_every_writer() {
     for role in [
         AuthRole::Super,
         AuthRole::Admin,
+        AuthRole::Reviewer,
+        AuthRole::Sa,
         AuthRole::Director,
         AuthRole::Manager,
         AuthRole::TechLead,
         AuthRole::DsLead,
         AuthRole::DaLead,
-        AuthRole::Reviewer,
-        AuthRole::Sa,
+        AuthRole::Fe,
         AuthRole::Fe,
         AuthRole::Be,
         AuthRole::Aie,
@@ -252,4 +253,3 @@ async fn pr_actions_are_reviewer_only_not_open_to_every_writer() {
         }
     }
 }
-

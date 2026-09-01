@@ -72,6 +72,7 @@ async function saveSettings(){
   cfg.workflow.sprint_unit=val("wf-su")==="cycles"?"cycles":"days";
   {const sd=parseInt(val("wf-sp-days")||"1",10);cfg.workflow.sprint_length_days=Number.isFinite(sd)&&sd>0?sd:1;}
   cfg.workflow.ba_every_n_cycles=parseInt(val("wf-ba")||"4",10);
+  cfg.workflow.dev_scope_floor=parseInt(val("wf-floor")||"4",10);
   cfg.workflow.feature_dev_enabled=val("wf-fd")==="true";
   cfg.workflow.ops_monitor=val("wf-ops")!=="false";
   cfg.workflow.token_saver=val("wf-ts")==="true";
@@ -127,6 +128,12 @@ function renderRunner(r){if(!r)return;window.RUNNER=r;const running=r.mode==="ru
   const lbl=document.getElementById("runlbl");
   if(lbl)lbl.textContent=running?(r.active_role?r.active_role.replace(/_/g,'-'):("cycle "+r.cycle)):(r.cycle>0?("paused · "+r.cycle):"idle");
   const pill=document.getElementById("runpill");if(pill)pill.title=(running&&r.active_note)?(r.active_role+" — "+r.active_note):(r.last_summary||(running?"running":(r.cycle>0?"paused":"idle")));
+  // Go-live preflight (CXA-F239): fetched once per project (and re-fetched on
+  // every project switch); the primary Resume/Step affordance only renders
+  // when every hard-gate item is ok — warn informs, blocked suppresses.
+  if(PID&&window._pfPid!==PID){window._pfPid=PID;window.PREFLIGHT=null;loadPreflight();}
+  const pfBlocked=!!window.PREFLIGHT&&window.PREFLIGHT.ready===false;
+  if(pfBlocked&&pill)pill.title="go-live preflight is not ready — see Go-live readiness on the Overview";
   // Primary toggles Start/Pause; it's the accent "go" button unless running.
   // Ownership: a live run belongs to whoever started it (r.operator). Others
   // see Start (starts THEIR agents), never Pause — only owner or admin/root
@@ -137,10 +144,31 @@ function renderRunner(r){if(!r)return;window.RUNNER=r;const running=r.mode==="ru
     const showPause=running&&mine;
     ic.className="ti ti-player-"+(showPause?"pause":"play");
     prim.title=showPause?"Pause":(running?("Start my agents ("+r.operator+"'s run stays untouched)"):(r.cycle>0?"Resume":"Start"));
-    prim.classList.toggle("rp-go",!showPause);}
-  const step=document.getElementById("ctl-step");if(step)step.style.display=(running&&mine)?"none":"";}
+    prim.classList.toggle("rp-go",!showPause);
+    prim.style.display=pfBlocked?"none":"";}
+  const step=document.getElementById("ctl-step");if(step)step.style.display=((running&&mine)||pfBlocked)?"none":"";}
 function toggleRun(){const r=window.RUNNER;const mine=!r||!r.operator||!ME||!ME.auth||ME.username===r.operator||ME.role==="super"||ME.role==="admin";ctl((r&&r.mode==="running"&&mine)?"pause":"resume");}
 async function ctl(a){try{renderRunner(await(await fetch(api("/control/"+a),{method:"POST"})).json());}catch(e){}}
+// ── Go-live readiness preflight (CXA-F239) ────────────────────────────────
+// One fetch per project; the verdict gates the runpill affordances (see
+// renderRunner) and the Overview panel lists every line item with its own
+// ok / warn / blocked status.
+async function loadPreflight(){let p=null;try{const r=await fetch(api("/preflight"));if(r.ok)p=await r.json();}catch(e){}
+  window.PREFLIGHT=p;renderPreflight();}
+function renderPreflight(){const el=document.getElementById("ov-preflight");if(!el)return;
+  const pf=window.PREFLIGHT;if(!pf){el.innerHTML="";return;}
+  // Status color map — an unknown status falls back to the blocked color
+  // (fail-closed) while still rendering its real text.
+  const CHIP_COLOR={ok:"var(--green)",warn:"var(--amber)",blocked:"var(--red)"};
+  const chip=s=>{const c=CHIP_COLOR[s]||CHIP_COLOR.blocked;
+    return `<span style="flex:none;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:${c};background:color-mix(in srgb,${c} 12%,transparent);border:1px solid color-mix(in srgb,${c} 33%,transparent);border-radius:20px;padding:2px 8px">${esc(s)}</span>`;};
+  const rows=(pf.items||[]).map(i=>`<div style="display:flex;gap:8px;align-items:baseline;padding:4px 0;border-bottom:1px solid var(--border2)">
+    ${chip(i.status)}<span style="flex:none;font-size:12.5px;font-weight:600">${esc(i.label)}</span>
+    <span style="font-size:11.5px;color:var(--muted)">${esc(i.detail||"")}</span></div>`).join("");
+  const verdict=pf.ready?`<span style="color:var(--green);font-size:12px;font-weight:700">ready to go</span>`
+    :`<span style="color:var(--red);font-size:12px;font-weight:700">not ready — ${(pf.blocking||[]).length} blocker(s)</span>`;
+  el.innerHTML=`<div class="panel"><h4><i class="ti ti-shield-check" style="color:var(--accent2)"></i> Go-live readiness <span style="margin-left:auto;font-weight:400">${verdict}</span></h4>
+    ${rows||'<div style="font-size:12px;color:var(--muted)">No line items reported.</div>'}</div>`;}
 let PID=null, ES=null, poll=null;
 const api=p=>"/api/projects/"+encodeURIComponent(PID)+p;
 let ONLINE=[];
@@ -212,17 +240,17 @@ function renderDocsList(){
   box.innerHTML=node(root,0)||'<div class="empty" style="padding:14px 8px;font-size:12px">Empty. Create a folder (＋) or page.</div>';
 }
 async function newFolder(parent){
-  const name=await coxModal({title:"New folder",message:parent?("Tạo folder trong \""+parent+"\"."):"Tạo folder ở root.",input:{placeholder:"Folder name"},confirmText:"Create"});if(!name||!name.trim())return;
+  const name=await coxModal({title:"New folder",message:parent?("Create a folder in \""+parent+"\"."):"Create a folder at root.",input:{placeholder:"Folder name"},confirmText:"Create"});if(!name||!name.trim())return;
   const path=(parent?parent+"/":"")+name.trim().replace(/\//g,"-");
   try{await fetch(api("/doc-folders"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path})});}catch(e){}
   if(parent)docExp().add(parent);docExp().add(path);saveExp();await loadDocs();
 }
-async function deleteFolder(path){if(!await coxModal({title:"Delete folder",message:'Xoá folder "'+path+'" và toàn bộ nội dung bên trong? Không hoàn tác được.',danger:true,confirmText:"Delete"}))return;
+async function deleteFolder(path){if(!await coxModal({title:"Delete folder",message:'Delete folder "'+path+'" and everything inside it? This cannot be undone.',danger:true,confirmText:"Delete"}))return;
   try{await fetch(api("/doc-folders/delete"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path})});}catch(e){}
   await loadDocs();
 }
 async function moveDoc(id){const cur=DOCS.find(d=>d.id===id);if(!cur)return;
-  const folder=await coxModal({title:"Move page",message:"Folder đích (để trống = root).",input:{placeholder:"e.g. Technical/Architecture",value:cur.folder||""},confirmText:"Move"});if(folder===null)return;
+  const folder=await coxModal({title:"Move page",message:"Destination folder (blank = root).",input:{placeholder:"e.g. Technical/Architecture",value:cur.folder||""},confirmText:"Move"});if(folder===null)return;
   try{await fetch(api("/docs/"+id+"/move"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:folder.trim()})});}catch(e){}
   if(folder.trim())docExp().add(folder.trim());saveExp();await loadDocs();}
 function openDoc(id){if(typeof docsWsClose==="function")docsWsClose();DOC_CUR=id;DOC_EDIT=false;renderDocsList();renderDocMain();}
@@ -271,9 +299,9 @@ function renderDocMain(){
   renderMermaidIn(el);
 }
 async function newDoc(folder){
-  const title=await coxModal({title:"New page",message:"Tiêu đề trang mới.",input:{placeholder:"Page title"},confirmText:"Next"});if(!title||!title.trim())return;
+  const title=await coxModal({title:"New page",message:"Title for the new page.",input:{placeholder:"Page title"},confirmText:"Next"});if(!title||!title.trim())return;
   // Folder given (from a tree node) → use it; else ask.
-  if(folder===undefined||folder===null){folder=(await coxModal({title:"New page",message:"Folder chứa trang (để trống = root).",input:{placeholder:"e.g. Product, Technical/Architecture"},confirmText:"Create"}));if(folder===null)return;folder=folder.trim();}
+  if(folder===undefined||folder===null){folder=(await coxModal({title:"New page",message:"Folder for the page (blank = root).",input:{placeholder:"e.g. Product, Technical/Architecture"},confirmText:"Create"}));if(folder===null)return;folder=folder.trim();}
   if(folder)docExp().add(folder),saveExp();
   await putDoc("", folder, title.trim(), "# "+title.trim()+"\n\nWrite here…");DOC_EDIT=true;renderDocMain();
 }

@@ -5,6 +5,7 @@
 
 use coxagent_application::config::Config;
 use coxagent_application::ports::outbound::StateStorePort;
+use coxagent_application::state::ProjectState;
 use coxagent_application::use_cases::{AddTicketInput, AddTicketUseCase};
 use coxagent_domain::{Complexity, Priority, SemVer, TicketType};
 use std::collections::{HashMap, HashSet};
@@ -344,6 +345,7 @@ async fn seed_smart_tickets<S: StateStorePort + 'static>(
                 complexity: Complexity::Medium,
                 has_ui: false,
                 acceptance_criteria: Vec::new(),
+                goal: None,
             })
             .await?;
         seeded.push(format!("{id} (dockerize)"));
@@ -388,6 +390,7 @@ async fn seed_smart_tickets<S: StateStorePort + 'static>(
                     "Compose file no longer declares duplicate services".to_owned(),
                     "App connects to existing running infrastructure".to_owned(),
                 ],
+                goal: None,
             })
             .await?;
         seeded.push(format!("{id} (fix-compose)"));
@@ -407,6 +410,7 @@ async fn seed_smart_tickets<S: StateStorePort + 'static>(
                 complexity: Complexity::Small,
                 has_ui: false,
                 acceptance_criteria: Vec::new(),
+                goal: None,
             })
             .await?;
         seeded.push(format!("{id} (dockerfile)"));
@@ -418,16 +422,70 @@ async fn seed_smart_tickets<S: StateStorePort + 'static>(
 /// Scaffold `coxagent.json`, a `project_context.md` template, and seed the
 /// FEAT-000 walking skeleton. Returns the message shown to the operator. Works
 /// with any [`StateStorePort`] (JSON file or Postgres).
+/// Refuse project scaffolding from inside an agent worktree. A TEST/DEV agent
+/// "testing project creation" from its sandbox ran the real CLI against the
+/// operator's global registry and minted six live `qab-N` cleanroom projects
+/// in one afternoon — cleanroom experiments belong in a temp dir, not the hub.
+fn refuse_agent_scaffold() -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if cwd.components().any(|c| {
+        c.as_os_str()
+            .to_string_lossy()
+            .starts_with(".coxagent-worktrees")
+    }) {
+        return Err(
+            "refusing to scaffold a project from inside an agent worktree — \
+                    this would register a live project in the operator's hub. Use a \
+                    plain temp directory (outside .coxagent-worktrees) for cleanroom \
+                    tests."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// An expected onboarding conflict: the target store already holds tickets, so
+/// re-onboarding is refused. The caller asked to scaffold a workspace that is
+/// already alive — a client-side conflict, not a server fault. Typed so the
+/// HTTP layer can map it to 409 instead of 500 (CXA-B129).
+#[derive(Debug)]
+pub struct OnboardConflict(pub String);
+
+impl std::fmt::Display for OnboardConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for OnboardConflict {}
+
+/// Classify an onboarding failure (CXA-B129): `Some(message)` when it is the
+/// expected client conflict, `None` for a genuine fault. Pure.
+pub fn conflict_message(err: &(dyn std::error::Error + 'static)) -> Option<String> {
+    err.downcast_ref::<OnboardConflict>().map(|c| c.0.clone())
+}
+
+/// Refuse re-onboarding over an active backlog (CXA-F003): scaffolding again
+/// on top of existing tickets would silently double-seed or lose state. Typed
+/// as [`OnboardConflict`] so the API layer returns 409, never 500 (CXA-B129).
+fn refuse_existing_tickets(state: &ProjectState) -> Result<(), Box<dyn std::error::Error>> {
+    if !state.tickets.is_empty() {
+        return Err(Box::new(OnboardConflict(
+            "workspace already has tickets; refusing to re-onboard".into(),
+        )));
+    }
+    Ok(())
+}
+
 pub async fn greenfield<S: StateStorePort + 'static>(
     store: &Arc<S>,
     state_dir: &Path,
     name: &str,
     alias: Option<String>,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    refuse_agent_scaffold()?;
     let mut existing = store.load().await?;
-    if !existing.tickets.is_empty() {
-        return Err("workspace already has tickets; refusing to re-onboard".into());
-    }
+    refuse_existing_tickets(&existing)?;
 
     // Establish the ticket-id alias (user-provided or derived) before minting.
     let alias = alias.map_or_else(
@@ -462,6 +520,7 @@ pub async fn greenfield<S: StateStorePort + 'static>(
             complexity: Complexity::Small,
             has_ui: false,
             acceptance_criteria: Vec::new(),
+            goal: None,
         })
         .await?;
 
@@ -489,13 +548,12 @@ pub async fn brownfield<S: StateStorePort + 'static>(
     alias: Option<String>,
     codebase: &Path,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    refuse_agent_scaffold()?;
     if !codebase.exists() {
         return Err(format!("codebase path does not exist: {}", codebase.display()).into());
     }
     let mut state = store.load().await?;
-    if !state.tickets.is_empty() {
-        return Err("workspace already has tickets; refusing to re-onboard".into());
-    }
+    refuse_existing_tickets(&state)?;
 
     let alias = alias.map_or_else(
         || coxagent_application::state::derive_alias(name),
@@ -553,7 +611,9 @@ pub async fn brownfield<S: StateStorePort + 'static>(
         };
         cfg.engine.default.engine = engine;
         if has_opencode {
-            "bizbrain/DeepSeek-V4-Pro".clone_into(&mut cfg.engine.default.model);
+            // V4-Pro was removed from the provider catalog; every project
+            // onboarded with it warned at boot and failed its default runs.
+            "bizbrain/DeepSeek-V4-Flash".clone_into(&mut cfg.engine.default.model);
         }
         cfg.engine.auto_fallback = false;
         // Save consumed ports so assign_host_port skips them
@@ -1082,5 +1142,56 @@ mod version_adoption_tests {
         for bad in ["release-summer", "2026-08-04", "", "v"] {
             assert!(parse_semver(bad).is_none(), "{bad:?} must not parse");
         }
+    }
+}
+
+/// CXA-B129: the re-onboard refusal is a TYPED client conflict, classified so
+/// the API layer maps it to 409 instead of 500.
+#[cfg(test)]
+mod re_onboard_conflict_tests {
+    use super::{conflict_message, refuse_existing_tickets};
+    use coxagent_application::state::ProjectState;
+
+    fn state_with_one_ticket() -> ProjectState {
+        let mut state = ProjectState::default();
+        state.tickets.push(
+            coxagent_domain::Ticket::new(
+                coxagent_domain::TicketId::new("CXC-F001").expect("valid ticket id"),
+                coxagent_domain::TicketType::Feature,
+                "Walking skeleton",
+                "Hello-world service with a /health endpoint that builds and runs.",
+                coxagent_domain::Priority::High,
+                coxagent_domain::Complexity::Small,
+                false,
+            )
+            .expect("valid ticket"),
+        );
+        state
+    }
+
+    #[test]
+    fn re_onboarding_over_tickets_is_a_typed_conflict_with_the_operational_message() {
+        let err = refuse_existing_tickets(&state_with_one_ticket()).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "workspace already has tickets; refusing to re-onboard",
+            "CLI operators read this text; it must not change"
+        );
+        assert_eq!(
+            conflict_message(err.as_ref()).as_deref(),
+            Some("workspace already has tickets; refusing to re-onboard"),
+            "the API layer classifies by type, so the marker must survive the Box"
+        );
+    }
+
+    #[test]
+    fn a_clean_workspace_onboards_without_conflict() {
+        assert!(refuse_existing_tickets(&ProjectState::default()).is_ok());
+    }
+
+    #[test]
+    fn an_ordinary_onboarding_fault_is_not_classified_as_a_conflict() {
+        let err: Box<dyn std::error::Error> = "store unreachable".into();
+        assert!(conflict_message(err.as_ref()).is_none());
     }
 }

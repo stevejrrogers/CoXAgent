@@ -23,6 +23,11 @@ sha1.workspace = true
 reqwest.workspace = true
 tokio-postgres.workspace = true
 deadpool-postgres.workspace = true
+percent-encoding.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+tokio-postgres-rustls.workspace = true
+webpki-roots.workspace = true
 redis.workspace = true
 mongodb.workspace = true
 

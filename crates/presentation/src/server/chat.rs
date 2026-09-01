@@ -101,6 +101,7 @@ pub(super) async fn chat_post_ep(
     let channel = req
         .channel
         .unwrap_or_else(|| coxagent_application::GENERAL_CHANNEL.to_owned());
+    let atts_for_engine = req.attachments.clone();
     if deliver_chat(&app, &p, &user, body, &channel, req.attachments).await {
         // A human asking the TEAM in a channel deserves an answer there —
         // until now only the Scrum box had a listener, so channel questions
@@ -133,8 +134,12 @@ pub(super) async fn chat_post_ep(
                 )
                 .with_files(p2.files.clone())
                 .with_reply_channel(Some(reply_channel))
-                .with_actor_role(actor_role);
-                let _ = uc.execute(&msg).await;
+                .with_actor_role(actor_role)
+                .with_attachments(atts_for_engine);
+                // Box::pin: the use-case future grew past clippy's 16 KB
+                // large-future limit when the governance ledger joined
+                // ProjectState (CXA-F230) — same future, just heap-pinned.
+                let _ = Box::pin(uc.execute(&msg)).await;
             });
         }
         Json(serde_json::json!({ "ok": true })).into_response()
@@ -383,8 +388,12 @@ pub(super) async fn syschat_messages_ep(
         let Ok(state) = p.store.load().await else {
             return internal_error("load failed");
         };
-        return Json(paginate_tail(&state.chat_in(&room), q.limit, q.before.as_deref()))
-            .into_response();
+        return Json(paginate_tail(
+            &state.chat_in(&room),
+            q.limit,
+            q.before.as_deref(),
+        ))
+        .into_response();
     }
     let sc = app.syschat.inner.lock().await;
     if !sc.can_view(&channel, &user, &ctx) {
@@ -1176,7 +1185,9 @@ pub(super) async fn chat_reply_ep(
         };
         uc = uc.with_forge(Arc::clone(f), target, cfg.git.require_ci);
     }
-    match uc.execute(msg).await {
+    // Same Box::pin as the spawned path above: the future crossed clippy's
+    // 16 KB large-future limit when the governance ledger joined ProjectState.
+    match Box::pin(uc.execute(msg)).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => internal_error(&e.to_string()),
     }

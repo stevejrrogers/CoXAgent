@@ -9,7 +9,7 @@ mod onboard;
 mod shutdown;
 
 use coxagent_application::config::{
-    Config, DeployConfig, GitConfig, PolicyConfig, ReleasesConfig, WorkflowConfig,
+    Config, DeployConfig, DepsConfig, GitConfig, PolicyConfig, ReleasesConfig, WorkflowConfig,
 };
 use coxagent_application::ports::outbound::{SandboxStatus, StateStorePort};
 use coxagent_application::use_cases::{RecoverUseCase, RunBaUseCase, RunCycleUseCase};
@@ -21,7 +21,7 @@ use coxagent_infrastructure::{
     discover, AnyStateStore, DockerComposeDeploy, JsonStateStore, RestConfig, RestStateStore,
     SqlStateStore, WebhookNotifier,
 };
-use coxagent_presentation::{cli, render_changelog, render_report, Command};
+use coxagent_presentation::{cli, render_changelog, render_report, Command, FactoryError};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -29,9 +29,12 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+mod backup;
 mod builders;
 mod config_load;
 mod host_port;
+mod recovery;
+mod retry;
 mod shims;
 
 pub use builders::load_coordination;
@@ -41,6 +44,7 @@ use builders::*;
 use config_load::*;
 #[allow(clippy::wildcard_imports)] // one module, many files — see host_port.rs
 use host_port::*;
+use recovery::{build_registry, Entry, ProjectBuilder, RecoveryPolicy};
 pub use shims::shim_script;
 #[allow(clippy::wildcard_imports)] // one module, many files — see shims.rs
 use shims::*;
@@ -151,12 +155,26 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
                 coxagent_infrastructure::FsWorkspaceFiles::new(),
             )));
             let filed = uc.execute().await?;
-            if filed.is_empty() {
+            let state = store.load().await?;
+            if filed.is_empty() && state.drift_alerts.is_empty() {
                 Ok("architecture conformance: OK (no drift)\n".to_owned())
             } else {
-                let mut out = format!("architecture drift — filed {} bug(s):\n", filed.len());
-                for id in &filed {
-                    let _ = writeln!(out, "  {id}");
+                // The drift alerts themselves — area, message, and the bug
+                // each links to — not just the ids filed this pass; a re-run
+                // over standing drift must still name what is violating.
+                let mut out = format!(
+                    "architecture drift — {} open alert(s):\n",
+                    state.drift_alerts.len()
+                );
+                for a in &state.drift_alerts {
+                    let _ = writeln!(out, "  [{}] {} — {}", a.area, a.message, a.ticket);
+                }
+                if !filed.is_empty() {
+                    let _ = write!(out, "filed {} bug(s):", filed.len());
+                    for id in &filed {
+                        let _ = write!(out, " {id}");
+                    }
+                    out.push('\n');
                 }
                 Ok(out)
             }
@@ -180,6 +198,25 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             load_coordination(registry.parent().unwrap_or_else(|| Path::new(".")));
             run_hub(&registry, port).await?;
             Ok(String::new())
+        }
+        Command::Backup {
+            hub_dir,
+            out,
+            include_secrets,
+        } => {
+            // Same pickup as Hub: coordination.json DSNs must show up in the
+            // backup's "not captured (externally backed)" warnings.
+            load_coordination(&hub_dir);
+            backup::run_backup(&hub_dir, out, include_secrets).await
+        }
+        Command::Restore {
+            archive,
+            hub_dir,
+            force,
+            dry_run,
+        } => {
+            load_coordination(&hub_dir);
+            backup::run_restore(&archive, &hub_dir, force, dry_run).await
         }
         Command::Run {
             work_dir,
@@ -305,6 +342,202 @@ mod project_id_tests {
     }
 }
 
+/// CXA-B129/CXA-B139: onboarding failures must arrive at the API classified —
+/// the glue between [`onboard::OnboardConflict`] / input validation and the
+/// presentation layer's [`FactoryError`].
+#[cfg(test)]
+mod onboard_error_classification_tests {
+    use super::classify_onboard_error;
+    use crate::onboard::OnboardConflict;
+    use coxagent_presentation::FactoryErrorKind;
+
+    #[test]
+    fn the_re_onboard_refusal_is_classified_as_a_conflict() {
+        let err: Box<dyn std::error::Error> = Box::new(OnboardConflict(
+            "workspace already has tickets; refusing to re-onboard".into(),
+        ));
+        let mapped = classify_onboard_error(err.as_ref());
+        assert_eq!(
+            mapped.kind,
+            FactoryErrorKind::Conflict,
+            "the refusal must map to 409 material"
+        );
+        assert_eq!(
+            mapped.message,
+            "workspace already has tickets; refusing to re-onboard"
+        );
+    }
+
+    #[test]
+    fn any_other_onboarding_failure_stays_a_server_fault() {
+        let err: Box<dyn std::error::Error> = "store unreachable".into();
+        let mapped = classify_onboard_error(err.as_ref());
+        assert_eq!(
+            mapped.kind,
+            FactoryErrorKind::Internal,
+            "an ordinary fault must map to 500"
+        );
+        assert_eq!(mapped.message, "store unreachable");
+    }
+}
+
+/// CXA-B136: `onboard_project` scaffolds `state/` (+ `codebase/`) BEFORE the
+/// conflict checks run, so a refused/failed onboarding used to leave half-built
+/// workspace dirs behind — debris that occupies the derived id (forcing
+/// `-2`-suffixed recreates) and reads as a real project to ops.
+#[cfg(test)]
+mod onboard_scaffold_cleanup_tests {
+    use super::{onboard_project, unique_id};
+    use coxagent_presentation::{FactoryErrorKind, NewProjectReq};
+    use std::path::PathBuf;
+
+    fn request(alias: &str) -> NewProjectReq {
+        NewProjectReq {
+            name: "QA B136 Debris".to_owned(),
+            alias: Some(alias.to_owned()),
+            ..Default::default()
+        }
+    }
+
+    /// An unsupported git scheme is refused after `state/` exists but before
+    /// any network work — the exact "created then failed" shape. The workspace
+    /// must be gone afterwards and the id free for the next recreate.
+    #[tokio::test]
+    async fn a_failed_onboarding_removes_the_workspace_it_scaffolded() {
+        let base = tempfile::tempdir().expect("tmp");
+        let registry = base.path().join("registry.json");
+        let req = NewProjectReq {
+            git_url: Some("ftp://example.invalid/repo.git".to_owned()),
+            ..request("QAB136")
+        };
+        let Err(err) = Box::pin(onboard_project(base.path(), &registry, req, None)).await else {
+            panic!("an unsupported git scheme must refuse the onboarding");
+        };
+        assert_eq!(
+            err.kind,
+            FactoryErrorKind::BadRequest,
+            "a bad git URL is the client's bad input (400), not a 409 conflict or a 500 fault"
+        );
+        assert!(
+            !base.path().join("qab136").exists(),
+            "the failed onboarding must not leave the scaffolded workspace behind"
+        );
+        assert_eq!(
+            unique_id(base.path(), "qab136"),
+            "qab136",
+            "the id must be free again — no `-2` suffix on the next recreate"
+        );
+    }
+
+    /// A brownfield adoption of a missing codebase fails inside
+    /// `onboard::brownfield`, after the store was built — the same cleanup
+    /// must apply to every error path, not just the URL check.
+    #[tokio::test]
+    async fn a_brownfield_onboard_of_a_missing_codebase_leaves_no_debris() {
+        let base = tempfile::tempdir().expect("tmp");
+        let registry = base.path().join("registry.json");
+        let req = NewProjectReq {
+            existing: Some(PathBuf::from("/nonexistent/qab136/codebase")),
+            ..request("QAB136")
+        };
+        assert!(Box::pin(onboard_project(base.path(), &registry, req, None))
+            .await
+            .is_err());
+        assert!(
+            !base.path().join("qab136").exists(),
+            "the failed adoption must not leave the scaffolded workspace behind"
+        );
+    }
+}
+
+/// CXA-B138: the alias becomes the workspace directory id (`base.join(id)`),
+/// so `../name` used to scaffold — and DELETE `rm -rf` — OUTSIDE the hub's
+/// workspace base (on the docker deploy, at container root). The port must
+/// refuse such an alias before any IO and classify it bad-request (HTTP 400),
+/// not a server fault.
+#[cfg(test)]
+mod onboard_alias_traversal_tests {
+    use super::onboard_project;
+    use coxagent_presentation::{FactoryErrorKind, NewProjectReq};
+
+    fn request(alias: &str) -> NewProjectReq {
+        NewProjectReq {
+            name: "QA Trav".to_owned(),
+            alias: Some(alias.to_owned()),
+            ..Default::default()
+        }
+    }
+
+    /// The ticket's repro, at the port: nothing may be created inside OR
+    /// outside the workspace base, and the registry must stay untouched.
+    #[tokio::test]
+    async fn a_traversing_alias_is_refused_before_any_directory_is_created() {
+        let root = tempfile::tempdir().expect("tmp");
+        let base = root.path().join("workspaces");
+        std::fs::create_dir_all(&base).expect("workspace base");
+        let registry = base.join("registry.json");
+
+        let Err(err) = Box::pin(onboard_project(
+            &base,
+            &registry,
+            request("../qatrav-esc"),
+            None,
+        ))
+        .await
+        else {
+            panic!("a traversing alias must refuse the onboarding");
+        };
+        assert_eq!(
+            err.kind,
+            FactoryErrorKind::BadRequest,
+            "a refused alias is client input, not a server fault"
+        );
+        assert!(
+            !root.path().join("qatrav-esc").exists(),
+            "no workspace may be scaffolded outside the base"
+        );
+        let created: Vec<String> = std::fs::read_dir(&base)
+            .expect("base listing")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            created.is_empty(),
+            "nothing may be scaffolded inside the base either: {created:?}"
+        );
+        assert!(!registry.exists(), "the registry must not gain an entry");
+    }
+
+    /// Every traversal shape the ticket names is refused the same way —
+    /// including `\`, which only escapes on Windows hosts.
+    #[tokio::test]
+    async fn every_path_separator_shape_is_refused_as_bad_request() {
+        let base = tempfile::tempdir().expect("tmp");
+        let registry = base.path().join("registry.json");
+        for alias in ["..\\qatrav-esc", "qa/../trav", "a/b", "..", ".hidden"] {
+            let Err(err) = Box::pin(onboard_project(
+                base.path(),
+                &registry,
+                request(alias),
+                None,
+            ))
+            .await
+            else {
+                panic!("alias {alias:?} must refuse the onboarding");
+            };
+            assert_eq!(
+                err.kind,
+                FactoryErrorKind::BadRequest,
+                "alias {alias:?} must classify bad-request"
+            );
+        }
+        assert!(
+            !registry.exists(),
+            "no refused attempt may register anything"
+        );
+    }
+}
+
 #[cfg(test)]
 mod shim_script_tests {
     use super::{shim_script, SHIM_CMDS};
@@ -366,6 +599,30 @@ mod shim_script_tests {
     fn shim_script_skips_its_own_directory_on_path() {
         let script = shim_script("git", "/tmp/coxagent-shims", "/opt/coxagent");
         assert!(script.contains(r#"[ "$d" = "/tmp/coxagent-shims" ] && continue"#));
+    }
+
+    /// CXA-B109: the compress binary's path is baked in at generation time and
+    /// can vanish (a hub wrote the shims from a worktree the janitor purged).
+    /// Unguarded, the pipeline's writer SIGPIPEs into the dead second stage —
+    /// exit 141, zero output, for every shimmed tool call. Every shim must
+    /// check the baked binary before piping and degrade to `exec "$real"`.
+    #[test]
+    fn every_shim_degrades_to_the_real_binary_when_compress_is_gone() {
+        for cmd in SHIM_CMDS {
+            let script = shim_script(cmd, "/tmp/coxagent-shims", "/opt/coxagent");
+            let guard = script
+                .find(r#"[ -x "/opt/coxagent" ] || exec "$real" "$@""#)
+                .unwrap_or_else(|| {
+                    panic!("{cmd} shim has no fallback for a vanished compress binary")
+                });
+            let merge = script
+                .find("2>&1")
+                .expect("shim lost its compress pipeline");
+            assert!(
+                guard < merge,
+                "{cmd} shim checks the compress binary only after the pipeline:\n{script}"
+            );
+        }
     }
 }
 
@@ -509,13 +766,6 @@ pub async fn operator_main(
 /// selected by `COXAGENT_ROLE`. The registry is a JSON array of
 /// `{ "id", "path" }` where `path` contains `state/` and `codebase/`.
 ///
-/// One entry of the hub registry JSON array.
-#[derive(serde::Deserialize)]
-struct Entry {
-    id: String,
-    path: PathBuf,
-}
-
 /// # Errors
 /// Returns an error when the registry can't be read or the port can't bind.
 #[allow(clippy::too_many_lines)] // one linear wiring pass; splitting hurts readability
@@ -570,30 +820,21 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
     // here would silently mint tokens nobody validates against.
     let auth = build_auth(registry.parent().unwrap_or_else(|| Path::new("."))).await?;
 
-    let mut projects = Vec::new();
-    let mut broken = Vec::new();
-    for e in entries {
-        let state_dir = e.path.join("state");
-        let work_dir = e.path.join("codebase");
-        match build_project(&e.id, &state_dir, work_dir, auth.as_ref()).await {
-            Ok(p) => {
-                tracing::info!("hub: registered project '{}'", p.id);
-                projects.push(p);
-            }
-            // Loud, and carried into the dashboard: a project that fails to
-            // load has no handle to serve, so without this record it would
-            // simply be absent from /api/projects and the person looking for
-            // it would have only the hub log to go on (COX-B043).
-            Err(err) => {
-                tracing::error!("hub: skipping '{}': {err}", e.id);
-                broken.push(coxagent_presentation::BrokenProject {
-                    id: e.id.clone(),
-                    config_path: e.path.join("coxagent.json"),
-                    error: err.to_string(),
-                });
-            }
-        }
-    }
+    // CXA-B114: a project whose store cannot connect at boot used to be
+    // parked in the broken list FOREVER — one failed DB connect at boot kept
+    // the project dead until someone restarted the app, even once the
+    // database was healthy again. Boot now retries transiently, and whatever
+    // still fails is rebuilt in the background and admitted live (through the
+    // `recoveries` inbox below) the moment its store recovers.
+    let (admit, recoveries) = tokio::sync::mpsc::channel(4);
+    let build: ProjectBuilder = {
+        let auth = auth.clone();
+        Arc::new(move |id: &str, state_dir: &Path, work_dir: PathBuf| {
+            let auth = auth.clone();
+            Box::pin(async move { build_project(id, state_dir, work_dir, auth.as_ref()).await })
+        })
+    };
+    let (projects, broken) = build_registry(entries, admit, build, RecoveryPolicy::default()).await;
 
     // Factory: onboard a brand-new project from the dashboard. New workspaces
     // land under the registry's directory and are appended to the registry file
@@ -611,9 +852,9 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
             let base = base.clone();
             let registry_path = registry_path.clone();
             let auth = auth.clone();
-            Box::pin(
-                async move { onboard_project(&base, &registry_path, req, auth.as_ref()).await },
-            )
+            Box::pin(async move {
+                Box::pin(onboard_project(&base, &registry_path, req, auth.as_ref())).await
+            })
         }
     });
     let remover: coxagent_presentation::ProjectRemover = Arc::new({
@@ -631,7 +872,10 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
             engine: coxagent_application::config::EngineMapping {
                 default: coxagent_application::config::EngineChoice {
                     engine: coxagent_application::config::EngineKind::Opencode,
-                    model: "bizbrain/DeepSeek-V4-Pro".to_owned(),
+                    // V4-Pro was removed from the provider catalog (every
+                    // run failed with an opaque server error and the boot
+                    // catalog check flagged it against this hardcoded value).
+                    model: "bizbrain/DeepSeek-V4-Flash".to_owned(),
                 },
                 per_role: std::collections::HashMap::new(),
                 fallbacks: Vec::new(),
@@ -645,6 +889,8 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
             policy: PolicyConfig::default(),
             releases: ReleasesConfig::default(),
             coverage: coxagent_application::config::CoverageConfig::default(),
+            artifacts: coxagent_application::config::ArtifactsConfig::default(),
+            deps: DepsConfig::default(),
         },
         logs_dir(&base),
         None,
@@ -669,7 +915,13 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
         doc_store: build_doc_store().await,
         syschat_store: build_syschat_store(&base).await,
         broken,
+        // CXA-B114: recovered projects arrive here and join the live registry
+        // without a restart.
+        recoveries: Some(recoveries),
     };
+    // CXA-F262: scheduled workspace backups run on the same code path as
+    // `coxagent backup`, so a live-serving capture is exercised continuously.
+    backup::spawn_scheduled(base.clone());
     coxagent_presentation::serve_full(projects, port, audit, extras).await?;
     Ok(())
 }
@@ -688,6 +940,17 @@ fn remove_from_registry(registry_path: &Path, id: &str) -> Result<(), String> {
     std::fs::rename(&tmp, registry_path).map_err(|e| e.to_string())
 }
 
+/// Map an onboarding failure onto the factory's classified error (CXA-B129):
+/// the typed "workspace already has tickets" conflict becomes 409 material at
+/// the API; everything else stays a server fault.
+fn classify_onboard_error(e: &(dyn std::error::Error + 'static)) -> FactoryError {
+    if let Some(message) = onboard::conflict_message(e) {
+        FactoryError::conflict(message)
+    } else {
+        FactoryError::internal(e.to_string())
+    }
+}
+
 /// Scaffold a new project workspace under `base`, seed it, append it to the hub
 /// registry, and build a live [`ProjectHandle`]. Used by the dashboard's
 /// "new project" flow.
@@ -696,20 +959,59 @@ async fn onboard_project(
     registry_path: &Path,
     req: coxagent_presentation::NewProjectReq,
     auth: Option<&Arc<dyn coxagent_application::auth::AuthPort>>,
-) -> Result<coxagent_presentation::ProjectHandle, String> {
-    let name = req.name.trim();
+) -> Result<coxagent_presentation::ProjectHandle, FactoryError> {
     let derived = req
         .alias
         .clone()
-        .unwrap_or_else(|| coxagent_application::state::derive_alias(name));
+        .unwrap_or_else(|| coxagent_application::state::derive_alias(req.name.trim()));
+    // CXA-B138: the id becomes the workspace directory (`base.join(id)`), so a
+    // path-traversing alias must be refused before ANY filesystem work — the
+    // HTTP layer rejects it first; this keeps the port itself safe for every
+    // caller. (An empty derived id keeps the unique_id "project" fallback.)
+    if !derived.is_empty() && !coxagent_application::state::is_safe_workspace_id(&derived) {
+        return Err(FactoryError::bad_request(format!(
+            "alias {derived:?} must not contain '/', '\\', '..' or leading dots"
+        )));
+    }
     let id = unique_id(base, &derived.to_lowercase());
     let proj_dir = base.join(&id);
-    let state_dir = proj_dir.join("state");
-    std::fs::create_dir_all(&state_dir).map_err(|e| e.to_string())?;
 
-    let store = make_store(&id, &state_dir)
+    // `unique_id` only returns an id whose directory does not exist, so the
+    // scaffold creates a fresh workspace. EVERY failure inside it — a refused
+    // re-onboard (409), a rejected git URL, a store fault — must remove the
+    // scaffold again: a surviving empty dir keeps the derived id occupied
+    // (forcing `-2`-suffixed recreates) and reads as a real project to ops
+    // (CXA-B136).
+    let outcome = scaffold_onboarded_project(base, registry_path, &proj_dir, &id, req, auth).await;
+    if outcome.is_err() && proj_dir.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&proj_dir) {
+            tracing::warn!(
+                "onboard: could not remove the half-scaffolded workspace {}: {e}",
+                proj_dir.display()
+            );
+        }
+    }
+    outcome
+}
+
+/// The scaffold half of [`onboard_project`]: `proj_dir` must not exist yet
+/// ([`unique_id`] guarantees it). Kept separate so the failure unwinding —
+/// discarding the half-built workspace — has exactly one place to live.
+async fn scaffold_onboarded_project(
+    base: &Path,
+    registry_path: &Path,
+    proj_dir: &Path,
+    id: &str,
+    req: coxagent_presentation::NewProjectReq,
+    auth: Option<&Arc<dyn coxagent_application::auth::AuthPort>>,
+) -> Result<coxagent_presentation::ProjectHandle, FactoryError> {
+    let name = req.name.trim();
+    let state_dir = proj_dir.join("state");
+    std::fs::create_dir_all(&state_dir).map_err(|e| FactoryError::internal(e.to_string()))?;
+
+    let store = make_store(id, &state_dir)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| FactoryError::internal(e.to_string()))?;
 
     // Git-URL import: clone into the workspace first, then adopt it exactly
     // like a local brownfield import (remote detection pre-fills git config).
@@ -724,7 +1026,12 @@ async fn onboard_project(
                 || url.starts_with("https://")
                 || url.starts_with("http://"))
             {
-                return Err("git URL must start with git@, https:// or http://".to_owned());
+                // CXA-B139: an unsupported scheme is the CLIENT's bad input —
+                // the request can never succeed, so it must be classified as
+                // a bad request (400), not a server fault (500).
+                return Err(FactoryError::bad_request(
+                    "git URL must start with git@, https:// or http://",
+                ));
             }
             let wd = proj_dir.join("codebase");
             let out = tokio::process::Command::new("git")
@@ -733,13 +1040,13 @@ async fn onboard_project(
                 .stdin(std::process::Stdio::null())
                 .output()
                 .await
-                .map_err(|e| format!("spawn git clone: {e}"))?;
+                .map_err(|e| FactoryError::internal(format!("spawn git clone: {e}")))?;
             if !out.status.success() {
                 let err = String::from_utf8_lossy(&out.stderr);
-                return Err(format!(
+                return Err(FactoryError::internal(format!(
                     "git clone failed: {}",
                     err.lines().last().unwrap_or("unknown error")
-                ));
+                )));
             }
             Some(wd)
         }
@@ -751,14 +1058,14 @@ async fn onboard_project(
     let work_dir = if let Some(path) = cloned.as_ref().or(req.existing.as_ref()) {
         onboard::brownfield(&store, &state_dir, name, req.alias.clone(), path)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| classify_onboard_error(e.as_ref()))?;
         path.clone()
     } else {
         let wd = proj_dir.join("codebase");
-        std::fs::create_dir_all(&wd).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&wd).map_err(|e| FactoryError::internal(e.to_string()))?;
         onboard::greenfield(&store, &state_dir, name, req.alias.clone())
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| classify_onboard_error(e.as_ref()))?;
         wd
     };
 
@@ -781,13 +1088,21 @@ async fn onboard_project(
 
     // Assign a unique host port so this project's `docker compose` deploy does
     // not clash with the others on this host.
-    assign_host_port(base, registry_path, &proj_dir).map_err(|e| e.to_string())?;
+    assign_host_port(base, registry_path, proj_dir)
+        .map_err(|e| FactoryError::internal(e.to_string()))?;
 
-    append_registry(registry_path, &id, &proj_dir).map_err(|e| e.to_string())?;
+    append_registry(registry_path, id, proj_dir)
+        .map_err(|e| FactoryError::internal(e.to_string()))?;
 
-    build_project(&id, &state_dir, work_dir, auth)
+    // The registry entry is already on disk: a failed build must drop it again,
+    // or a restart would re-register a project whose workspace the caller just
+    // discarded.
+    build_project(id, &state_dir, work_dir, auth)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| {
+            let _ = remove_from_registry(registry_path, id);
+            FactoryError::internal(e.to_string())
+        })
 }
 
 /// Pick an id not already taken by a workspace directory under `base`.
@@ -909,7 +1224,9 @@ fn build_engine(
             SandboxStatus::Unavailable(_) | SandboxStatus::Denied(_)
         )
     {
-        tracing::warn!("workflow.sandbox is on but no sandbox backend is available — agents run unsandboxed");
+        tracing::warn!(
+            "workflow.sandbox is on but no sandbox backend is available — agents run unsandboxed"
+        );
     }
     let fallbacks = effective_fallbacks(config);
     let default = build_failover(
@@ -950,6 +1267,31 @@ fn build_engine(
             ""
         }
     );
+    // Provider catalogs drift: a saved `opencode` model can vanish upstream
+    // (bizbrain dropped DeepSeek-V4-Pro and every run failed with an opaque
+    // "Unexpected server error"). Compare what the config names against what
+    // `opencode models` offers RIGHT NOW and say so at boot, while an operator
+    // is still looking at the log — instead of the silent per-run failures.
+    {
+        use coxagent_application::config::EngineKind;
+        let offered = coxagent_infrastructure::engine::discover_opencode_models();
+        if !offered.is_empty() {
+            let check = |label: &str, choice: &coxagent_application::config::EngineChoice| {
+                if matches!(choice.engine, EngineKind::Opencode)
+                    && !offered.iter().any(|m| m == &choice.model)
+                {
+                    tracing::warn!(
+                        "{label} names opencode model '{}' which `opencode models` no longer offers — the provider may have removed it; its runs will fail until the config is updated",
+                        choice.model
+                    );
+                }
+            };
+            check("default engine", &config.engine.default);
+            for (role, choice) in &config.engine.per_role {
+                check(&format!("per-role engine for {role:?}"), choice);
+            }
+        }
+    }
     let router = RoutingEngine::new(default, per_role);
     let logged = TranscriptEngine::new(router, logs_dir);
     let meter: Meter = Arc::new(Mutex::new(Spend::default()));
@@ -1026,6 +1368,13 @@ async fn run_loop(
     }
 
     let webhook = config.workflow.webhook_url.clone();
+    // Durable outbound alert delivery (CXA-F235): the headless runner spools
+    // its webhook alerts to the project's outbox and drains them in the
+    // background, same as an in-hub runner.
+    let outbox = coxagent_infrastructure::spool_in_dir(state_dir);
+    if let Some(url) = webhook.as_deref().filter(|u| !u.is_empty()) {
+        coxagent_infrastructure::spawn_outbox_flusher(Arc::clone(&outbox), url.to_owned());
+    }
     // Worker identity for the shared registry + claim ownership. A headless
     // worker has no web login, so it takes its name from COXAGENT_OPERATOR.
     let operator = std::env::var("COXAGENT_OPERATOR")
@@ -1081,7 +1430,7 @@ async fn run_loop(
     if let Some(f) = forge {
         uc = uc.with_forge(f);
     }
-    uc = uc.with_notifier(build_notifier(Arc::clone(&store), webhook));
+    uc = uc.with_notifier(build_notifier(Arc::clone(&store), webhook, outbox));
     // Heartbeat the shared worker registry with the live role + ticket each phase,
     // so every dashboard shows this headless team's current agent.
     let hb_store = Arc::clone(&store);
@@ -1421,7 +1770,27 @@ pub(crate) fn worktree_at(work_dir: PathBuf, slug: &str) -> PathBuf {
         .unwrap_or(&work_dir)
         .join(".coxagent-worktrees")
         .join(&slug);
+    // The onboarding-generated context files (.coxagent/REPO_MAP.md and
+    // friends) are gitignored, so `git worktree add` never carries them —
+    // a DEV run in a fresh slot then failed its own precondition ("REPO_MAP
+    // is missing in this worktree"). Seed/refresh them from the primary
+    // checkout on every call, existing worktrees included.
+    let seed_context = |wt: &std::path::Path| {
+        let src = work_dir.join(".coxagent");
+        if !src.is_dir() || wt.join(".coxagent").join("REPO_MAP.md").exists() {
+            return;
+        }
+        let _ = std::fs::create_dir_all(wt.join(".coxagent"));
+        if let Ok(rd) = std::fs::read_dir(&src) {
+            for e in rd.flatten() {
+                if e.path().is_file() {
+                    let _ = std::fs::copy(e.path(), wt.join(".coxagent").join(e.file_name()));
+                }
+            }
+        }
+    };
     if wt.exists() {
+        seed_context(&wt);
         return wt;
     }
     let base = std::process::Command::new("git")
@@ -1443,11 +1812,190 @@ pub(crate) fn worktree_at(work_dir: PathBuf, slug: &str) -> PathBuf {
         .status()
         .is_ok_and(|s| s.success());
     if ok {
+        seed_context(&wt);
         tracing::info!("worker checkout isolated at {}", wt.display());
         wt
     } else {
         work_dir
     }
+}
+
+/// Worktree janitor: the per-slot checkouts under `.coxagent-worktrees/` each
+/// grow their own multi-GB cargo `target/`, and releasing a slot only detached
+/// its branch — the directories (and 150+ GB of build artifacts) accumulated
+/// forever until the DISK filled mid-build. Every sweep:
+///   1. deletes stray files dumped in the worktrees root (agent scratch);
+///   2. removes husk dirs git no longer lists as worktrees;
+///   3. `git worktree remove --force`s registered trees idle > 48 h;
+///   4. deletes the `target/` of trees idle > 2 h (rebuilt on next use).
+///
+/// Best-effort throughout: a busy tree just gets skipped this round.
+pub(crate) fn spawn_worktree_janitor(work_dir: std::path::PathBuf) {
+    tokio::spawn(async move {
+        loop {
+            let reclaimed = worktree_janitor_sweep(&work_dir);
+            if reclaimed > 0 {
+                tracing::info!(
+                    "worktree janitor reclaimed ~{} MB under .coxagent-worktrees",
+                    reclaimed / (1024 * 1024)
+                );
+            }
+            // Hourly, not 6-hourly: a busy night refills ~40 GB of worktree
+            // targets in under two hours — a 6 h cadence let free space fall
+            // to 56 GB four times in one night of manual cleanups.
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        }
+    });
+}
+
+/// One sweep; returns roughly how many bytes were deleted.
+/// Cap-or-trim one cargo `target` dir: delete it outright when `force` (an
+/// idle tree) or when it exceeds the size cap, otherwise trim 7-day-stale
+/// files — but never while a build holds a fresh `.cargo-lock`.
+fn sweep_target_dir(target: &std::path::Path, now: std::time::SystemTime, force: bool) -> u64 {
+    const TARGET_CAP_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+    if !target.is_dir() {
+        return 0;
+    }
+    let building_recently = ["debug", "release"].iter().any(|prof| {
+        let lock = target.join(prof).join(".cargo-lock");
+        lock.metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|d| d.as_secs() < 600)
+    });
+    if building_recently {
+        return 0;
+    }
+    if force || dir_size(target) > TARGET_CAP_BYTES {
+        let n = dir_size(target);
+        let _ = std::fs::remove_dir_all(target);
+        n
+    } else {
+        trim_stale_files(target, now, 7 * 24 * 3600)
+    }
+}
+
+fn worktree_janitor_sweep(work_dir: &std::path::Path) -> u64 {
+    let root = match work_dir.parent() {
+        Some(p) => p.join(".coxagent-worktrees"),
+        None => return 0,
+    };
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return 0;
+    };
+    // What git still considers a live worktree of this repo.
+    let listed = std::process::Command::new("git")
+        .arg("-C")
+        .arg(work_dir)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    let now = std::time::SystemTime::now();
+    let idle_hours = |p: &std::path::Path| -> u64 {
+        p.metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .map_or(0, |d| d.as_secs() / 3600)
+    };
+    let mut reclaimed = 0u64;
+    for e in entries.flatten() {
+        let path = e.path();
+        let name = e.file_name().to_string_lossy().to_string();
+        if name == "logs" {
+            continue; // live transcript streams
+        }
+        let is_dir = path.is_dir();
+        if !is_dir {
+            // Stray agent scratch files dumped next to the worktrees.
+            reclaimed += path.metadata().map_or(0, |m| m.len());
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
+        let registered = listed.contains(&path.display().to_string());
+        let idle = idle_hours(&path);
+        if !registered {
+            if idle >= 24 {
+                reclaimed += dir_size(&path);
+                let _ = std::fs::remove_dir_all(&path);
+            }
+            continue;
+        }
+        if idle >= 48 {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(work_dir)
+                .args(["worktree", "remove", "--force"])
+                .arg(&path)
+                .status()
+                .is_ok_and(|s| s.success());
+            if ok {
+                continue;
+            }
+        }
+        // Idle trees lose their target outright; a busy tree is size-capped
+        // or stale-trimmed (cargo never garbage-collects; 65 GB seen).
+        reclaimed += sweep_target_dir(&path.join("target"), now, idle >= 2);
+    }
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(work_dir)
+        .args(["worktree", "prune"])
+        .status();
+    // The WORK DIR's own target gets the same treatment: the review/hygiene
+    // machinery builds in the main checkout, whose artifacts nothing swept —
+    // it grew to 137 GB once, and regrew 17 GB within hours of a manual
+    // clean. Same rules as a worktree that never idles: size-capped when no
+    // build is running, stale-trimmed otherwise.
+    reclaimed += sweep_target_dir(&work_dir.join("target"), now, false);
+    reclaimed
+}
+
+/// Delete files under `p` whose mtime is older than `max_age_secs`; returns
+/// bytes reclaimed. Directories are left in place (cargo recreates freely).
+fn trim_stale_files(p: &std::path::Path, now: std::time::SystemTime, max_age_secs: u64) -> u64 {
+    let mut reclaimed = 0u64;
+    let Ok(rd) = std::fs::read_dir(p) else {
+        return 0;
+    };
+    for e in rd.flatten() {
+        let path = e.path();
+        if path.is_dir() {
+            reclaimed += trim_stale_files(&path, now, max_age_secs);
+            continue;
+        }
+        let stale = path
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|d| d.as_secs() > max_age_secs);
+        if stale {
+            reclaimed += path.metadata().map_or(0, |m| m.len());
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    reclaimed
+}
+
+/// Rough recursive size; good enough for a log line.
+fn dir_size(p: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(rd) = std::fs::read_dir(p) {
+        for e in rd.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                total += dir_size(&path);
+            } else {
+                total += path.metadata().map_or(0, |m| m.len());
+            }
+        }
+    }
+    total
 }
 
 /// Append one compression sample (`before after` bytes) to the shim dir's
@@ -1500,6 +2048,7 @@ async fn run_probe(hub: &str, project: &str) -> Result<String, Box<dyn std::erro
         base_url: hub.trim_end_matches('/').to_owned(),
         project_id: project.to_owned(),
         token,
+        timeout: RestConfig::timeout_from_env(),
     };
     let store = RestStateStore::new(cfg)?;
     let worker = ["HOSTNAME", "HOST"]

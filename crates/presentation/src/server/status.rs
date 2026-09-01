@@ -30,7 +30,7 @@ pub(super) async fn build_state(
         docs_bus: Arc::new(RwLock::new(HashMap::new())),
         docs_editors: Arc::new(std::sync::Mutex::new(HashMap::new())),
         order: Arc::new(RwLock::new(order)),
-        broken: Arc::new(extras.broken),
+        broken: Arc::new(RwLock::new(extras.broken)),
         factory: extras.factory,
         auth: extras.auth,
         audit,
@@ -99,8 +99,7 @@ pub(super) fn lite_state_value(state: &coxagent_application::ProjectState) -> se
         // (newest 50) — history beyond that comes from the paginated REST
         // list. Bounded-500 chat serialized 4 channels per tick was a real
         // drag on the chat pane.
-        let mut seen: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
+        let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         let keep: Vec<bool> = chat
             .iter()
             .rev()
@@ -120,6 +119,19 @@ pub(super) fn lite_state_value(state: &coxagent_application::ProjectState) -> se
         let mut it = keep_fwd.into_iter();
         chat.retain(|_| it.next().unwrap_or(false));
     }
+    // Dependency radar (CXA-F237): read-only derived summary on top of the
+    // SAME snapshot served today — why each Ready ticket is not running (the
+    // full blocking chain, powering the backlog BLOCKED badge) and the
+    // critical path to the next release. Pure derivation, no persisted
+    // change. A project with nothing to report emits no `derived` key at all,
+    // so clients treat absence as an empty radar rather than an error.
+    let radar = coxagent_application::dependency_radar::radar(state);
+    let derived = serde_json::to_value(&radar).unwrap_or_default();
+    if derived.as_object().is_some_and(|o| !o.is_empty()) {
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("derived".into(), derived);
+        }
+    }
     v
 }
 
@@ -132,6 +144,47 @@ pub(super) async fn state_ep(
     };
     match p.store.load().await {
         Ok(state) => Json(lite_state_value(&state)).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// The project's dependency graph (CXA-F237 AC5), derived ONLY from
+/// `ProjectState`: nodes are exactly the tickets in state with their live
+/// status, edges exactly the declared `depends_on` pairs — nothing fabricated
+/// (an edge to an id the state does not know is still served; the absent id
+/// simply has no node and surfaces as unknown). `cycle` flags members of a
+/// `depends_on` cycle so the render can mark them instead of hanging on them.
+pub(super) async fn dependencies_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    match p.store.load().await {
+        Ok(state) => {
+            use coxagent_application::dependency_radar::{cycle_members, dependency_graph};
+            let (nodes, edges) = dependency_graph(&state);
+            let cycles = cycle_members(&state);
+            Json(serde_json::json!({
+                "nodes": nodes
+                    .iter()
+                    .map(|n| serde_json::json!({
+                        "id": n.id.as_str(),
+                        "status": n.status,
+                        "cycle": cycles.contains(&n.id),
+                    }))
+                    .collect::<Vec<_>>(),
+                "edges": edges
+                    .iter()
+                    .map(|e| serde_json::json!({
+                        "dependent": e.dependent.as_str(),
+                        "prerequisite": e.prerequisite.as_str(),
+                    }))
+                    .collect::<Vec<_>>(),
+            }))
+            .into_response()
+        }
         Err(e) => internal_error(&e.to_string()),
     }
 }
@@ -191,6 +244,31 @@ pub(super) async fn metrics_trends_ep(
             let day = today.get(..10).unwrap_or("").to_owned();
             Json(coxagent_application::metrics_health::compute_trends(
                 &state, days, &day,
+            ))
+            .into_response()
+        }
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Bug burn-down history (CXA-F032): per-day open/fixed/verified counts over
+/// the dashboard window plus the net open-bug change across the last two
+/// known days (`delta_24h`, positive = backlog burned down). Same auth surface
+/// as the other `/metrics` reads: project membership via `auth_mw`.
+pub(super) async fn metrics_burndown_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    match p.store.load().await {
+        Ok(state) => {
+            let day = now_rfc3339().get(..10).unwrap_or("").to_owned();
+            Json(coxagent_application::metrics::compute_burndown(
+                &state,
+                &day,
+                coxagent_application::metrics::BURNDOWN_WINDOW_DAYS,
             ))
             .into_response()
         }
@@ -415,5 +493,89 @@ mod settings_config_tests {
             err.field,
             coxagent_application::config_parse::WHOLE_DOCUMENT
         );
+    }
+}
+
+#[cfg(test)]
+mod radar_state_tests {
+    use super::lite_state_value;
+    use coxagent_application::state::ProjectState;
+    use coxagent_domain::{
+        Complexity, Priority, Role, Status, TechnicalDesign, Ticket, TicketId, TicketType,
+    };
+
+    fn tid(s: &str) -> TicketId {
+        TicketId::new(s).expect("valid ticket id")
+    }
+
+    /// A Ready feature declaring `deps` — same legal-edge walk the radar
+    /// suite's fixtures use.
+    fn ready_feature(id: &str, deps: &[&str]) -> Ticket {
+        let mut t = Ticket::new(
+            tid(id),
+            TicketType::Feature,
+            format!("feature {id}"),
+            "fixture",
+            Priority::Medium,
+            Complexity::Medium,
+            false,
+        )
+        .expect("ticket");
+        for dep in deps {
+            t.add_dependency(Role::Sa, tid(dep))
+                .expect("SA declares the dependency");
+        }
+        t.set_technical_design(Role::Sa, TechnicalDesign::default())
+            .expect("attach design");
+        t.transition_to(Role::Sa, Status::Ready).expect("ready");
+        t
+    }
+
+    fn state_with(tickets: Vec<Ticket>) -> ProjectState {
+        ProjectState {
+            tickets,
+            ..ProjectState::default()
+        }
+    }
+
+    /// The wire contract the backlog badge depends on (CXA-F237): a blocked
+    /// Ready ticket surfaces `derived.blocked` with its full blocking chain.
+    #[test]
+    fn a_blocked_ready_ticket_rides_the_state_snapshot_with_its_chain() {
+        let state = state_with(vec![
+            ready_feature("FEAT-A", &[]),
+            ready_feature("FEAT-B", &["FEAT-A"]),
+        ]);
+        let v = lite_state_value(&state);
+        let derived = v.get("derived").expect("the radar must be on the snapshot");
+        let blocked = derived
+            .get("blocked")
+            .and_then(|b| b.as_array())
+            .expect("blocked list");
+        assert_eq!(blocked.len(), 1, "only FEAT-B qualifies");
+        assert_eq!(
+            blocked[0].get("id").and_then(|i| i.as_str()),
+            Some("FEAT-B")
+        );
+        assert_eq!(
+            blocked[0]
+                .get("blockers")
+                .and_then(|b| b.as_array())
+                .map(std::vec::Vec::len),
+            Some(1)
+        );
+    }
+
+    /// Nothing to report → NO `derived` key at all: clients treat absence as
+    /// an empty radar rather than an error (the SA design's omission rule).
+    #[test]
+    fn a_project_with_nothing_to_report_emits_no_derived_key() {
+        let v = lite_state_value(&ProjectState::default());
+        assert!(v.get("derived").is_none());
+        let v = lite_state_value(&state_with(vec![
+            ready_feature("FEAT-A", &[]),
+            ready_feature("FEAT-B", &[]),
+        ]));
+        assert!(v.get("derived").is_none(), "unblocked work is no finding");
     }
 }

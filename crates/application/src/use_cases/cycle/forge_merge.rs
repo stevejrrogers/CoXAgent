@@ -17,6 +17,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// 3. Review comments starting with `LESSON:` become team lessons.
     #[allow(clippy::too_many_lines)] // three linear hygiene passes; splitting hurts readability
     pub(super) async fn forge_hygiene(&self) {
+        // 0. LEARN: merged-then-reverted work (CXA-F047) — needs only local
+        //    git, not the forge, so it runs before the forge gate below.
+        self.learn_reverted_work().await;
         let Some(forge) = &self.forge else {
             return;
         };
@@ -271,8 +274,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         return Ok(());
                     }
                     // Stamp the merge time — the fix-on-fix brake reads it.
-                    s.ticket_last_merge
-                        .insert(ticket.clone(), crate::state::now_rfc3339());
+                    // Only for branches that NAME A REAL TICKET: an operator
+                    // or infra branch ("fix/heal-names-refs") minted a
+                    // dangling ticket_last_merge orphan on every merge, which
+                    // the write-boundary healer then scrubbed every 20 min.
+                    if s.tickets.iter().any(|t| t.id().to_string() == ticket) {
+                        s.ticket_last_merge
+                            .insert(ticket.clone(), crate::state::now_rfc3339());
+                    }
                     s.ticket_fail_attempts.remove(&ticket);
                     s.ticket_journal.remove(&ticket);
                     // Merged into main — the DEV work-session for this ticket is
@@ -451,6 +460,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if let Some(git) = &self.git {
             let _ = git.checkout_branch(&fix_dir, self.flow_base()).await;
         }
+        let vi = self.config.workflow.language.is_vi();
         let say = |msg: String| {
             let store = Arc::clone(&self.store);
             async move {
@@ -468,20 +478,23 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
                         s.pr_fix_attempts.remove(&pr.number);
                         s.pr_sessions.remove(&pr.number);
+                        s.pr_review_skips.remove(&pr.number);
                         Ok(())
                     })
                     .await;
-                    say(format!(
-                        "🧯 SM→SA rescue PR #{}: SA TỰ XỬ xong — verification pass, chờ merge sweep.",
-                        pr.number
-                    ))
+                    say(if vi {
+                        format!("🧯 SM→SA rescue PR #{}: SA TỰ XỬ xong — verification pass, chờ merge sweep.", pr.number)
+                    } else {
+                        format!("🧯 SM→SA rescue PR #{}: SA fixed it directly — verification passed, awaiting the merge sweep.", pr.number)
+                    })
                     .await;
                 }
                 Err(why) => {
-                    say(format!(
-                        "🧯 SM→SA rescue PR #{}: SA báo FIXED nhưng verification từ chối ({why}) — chuyển người quyết.",
-                        pr.number
-                    ))
+                    say(if vi {
+                        format!("🧯 SM→SA rescue PR #{}: SA báo FIXED nhưng verification từ chối ({why}) — chuyển người quyết.", pr.number)
+                    } else {
+                        format!("🧯 SM→SA rescue PR #{}: SA said FIXED but verification refused it ({why}) — escalating to a person.", pr.number)
+                    })
                     .await;
                 }
             }
@@ -498,10 +511,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     Ok(())
                 })
                 .await;
-                say(format!(
-                    "🧯 SM→SA rescue PR #{}: SA kết luận ĐÓNG (đã bị thay thế/sai hướng).",
-                    pr.number
-                ))
+                say(if vi {
+                    format!(
+                        "🧯 SM→SA rescue PR #{}: SA kết luận ĐÓNG (đã bị thay thế/sai hướng).",
+                        pr.number
+                    )
+                } else {
+                    format!(
+                        "🧯 SM→SA rescue PR #{}: SA ruled CLOSE (superseded / wrong direction).",
+                        pr.number
+                    )
+                })
                 .await;
             }
         } else if let Some(steps) = out.strip_prefix("INSTRUCT") {
@@ -517,16 +537,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 Ok(())
             })
             .await;
-            say(format!(
-                "🧯 SM→SA rescue PR #{}: SA để lại chỉ dẫn cụ thể — DEV được một vòng thử lại có định hướng.",
-                pr.number
-            ))
+            say(if vi {
+                format!("🧯 SM→SA rescue PR #{}: SA để lại chỉ dẫn cụ thể — DEV được một vòng thử lại có định hướng.", pr.number)
+            } else {
+                format!("🧯 SM→SA rescue PR #{}: SA left concrete instructions — DEV gets one guided retry.", pr.number)
+            })
             .await;
         } else {
-            say(format!(
-                "🧯 SM→SA rescue PR #{}: SA không kết luận được — chuyển người quyết.",
-                pr.number
-            ))
+            say(if vi {
+                format!("🧯 SM→SA rescue PR #{}: SA không kết luận được — chuyển người quyết.", pr.number)
+            } else {
+                format!("🧯 SM→SA rescue PR #{}: SA could not reach a verdict — escalating to a person.", pr.number)
+            })
             .await;
         }
     }
@@ -577,7 +599,31 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             match deploy.run_tests(&dir).await {
                 // `deployed=false` means no toolchain was recognised: there is
                 // no suite to be red.
-                Ok(r) if r.success || !r.deployed => Ok(()),
+                Ok(r) if r.success || !r.deployed => {
+                    // UI-touching merges also face the browser suite: with
+                    // hosted CI dead (billing), SA prose review was the ONLY
+                    // gate between a broken screen and main. Golden
+                    // screenshots + the console-error gate run here instead.
+                    let (ok_diff, names) =
+                        git.raw(&dir, &["diff", "--name-only", &sha, "HEAD"]).await;
+                    let touches_ui = ok_diff
+                        && names.lines().any(|l| {
+                            l.starts_with("crates/presentation/src/web/") || l.starts_with("e2e/")
+                        });
+                    if touches_ui {
+                        let seed = self.work_dir.join("e2e").join("node_modules");
+                        match deploy.run_e2e(&dir, Some(seed.as_path())).await {
+                            Ok(r) if r.success || !r.deployed => Ok(()),
+                            Ok(r) => Err(format!(
+                                "browser e2e fails on the merged tree: {}",
+                                r.summary.chars().take(300).collect::<String>()
+                            )),
+                            Err(e) => Err(format!("could not run the e2e suite: {e}")),
+                        }
+                    } else {
+                        Ok(())
+                    }
+                }
                 Ok(r) => Err(format!(
                     "tests fail on the merged tree: {}",
                     r.summary.chars().take(300).collect::<String>()
@@ -599,87 +645,139 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// the PR branch, verify (markers + forge-mergeable), merge, and narrate to
     /// #agents. Same machinery as address_pr_feedback, same hard gates.
     pub(super) async fn force_merge_job(&self, num: u64, by: &str) {
+        let vi = self.config.workflow.language.is_vi();
         let Some(forge) = self.forge.clone() else {
             return;
         };
         self.report("SA", &format!("force-merging PR #{num} for {by}"));
-        let say = |msg: String| {
-            let store = Arc::clone(&self.store);
-            async move {
-                let _ = crate::ports::outbound::mutate_state(store.as_ref(), |s| {
-                    s.post_chat_in("SA", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
-                    Ok(())
-                })
-                .await;
-            }
-        };
         let Ok(prs) = forge.list_open_prs().await else {
             return;
         };
         let Some(pr) = prs.into_iter().find(|p| p.number == num) else {
-            say(format!(
-                "⚡ Force-merge #{num} ({by}): PR không còn mở — bỏ qua."
-            ))
+            self.say_agents(if vi {
+                format!("⚡ Force-merge #{num} ({by}): PR không còn mở — bỏ qua.")
+            } else {
+                format!("⚡ Force-merge #{num} ({by}): the PR is no longer open — skipping.")
+            })
             .await;
             return;
         };
-        if !pr.mergeable {
-            say(format!(
-                "⚡ Force-merge #{num} ({by}): runner đang gỡ conflict trên `{}`…",
-                pr.head
-            ))
-            .await;
-            let request = crate::ports::outbound::AgentRequest {
-                role: coxagent_domain::Role::DevBug,
-                system_prompt: crate::prompts::system_prompt(crate::prompts::DEV),
-                task_prompt: format!(
-                    "URGENT: a human ordered PR #{num} (branch `{h}`) force-merged. It has merge \
-                     conflicts with `{b}`.\n\
-                     1. `git fetch origin && git checkout {h} && git pull origin {h}`\n\
-                     2. `git merge origin/{b}` and resolve EVERY conflict, preserving both this \
-                     branch's fix and what already landed on {b}.\n\
-                     3. Run the build/tests to make sure nothing broke.\n\
-                     4. `git add -A && git commit -m \"fix: resolve conflicts for #{num}\"` then \
-                     `git push origin {h}`.",
-                    h = pr.head,
-                    b = pr.base,
-                ),
-                work_dir: self.work_dir.clone(),
-                timeout: std::time::Duration::from_secs(1800),
-                escalation_level: 0,
-                label: None,
-            };
-            let ok = matches!(self.engine.run(request).await, Ok(o) if o.succeeded());
-            if let Some(git) = &self.git {
-                let _ = git.checkout_branch(&self.work_dir, self.flow_base()).await;
-            }
-            if !ok {
-                say(format!(
-                    "⚡ Force-merge #{num}: gỡ conflict THẤT BẠI — cần xử lý tay: {}",
-                    pr.url
-                ))
-                .await;
-                return;
-            }
-            if let Err(why) = self.verify_conflict_resolution(num).await {
-                say(format!(
-                    "⚡ Force-merge #{num}: verification từ chối ({why}) — KHÔNG merge: {}",
-                    pr.url
-                ))
-                .await;
-                return;
-            }
+        if !pr.mergeable
+            && !self
+                .resolve_conflicts_for_force_merge(num, by, vi, &pr)
+                .await
+        {
+            return;
         }
         match forge.merge_pr(num).await {
-            Ok(()) => say(format!("⚡ Force-merge #{num} ({by}): ✅ đã merge.")).await,
+            Ok(()) => {
+                self.say_agents(if vi {
+                    format!("⚡ Force-merge #{num} ({by}): ✅ đã merge.")
+                } else {
+                    format!("⚡ Force-merge #{num} ({by}): ✅ merged.")
+                })
+                .await;
+            }
             Err(e) => {
-                say(format!(
-                    "⚡ Force-merge #{num}: merge bị từ chối — {e}: {}",
-                    pr.url
-                ))
+                self.say_agents(if vi {
+                    format!("⚡ Force-merge #{num}: merge bị từ chối — {e}: {}", pr.url)
+                } else {
+                    format!(
+                        "⚡ Force-merge #{num}: the merge was refused — {e}: {}",
+                        pr.url
+                    )
+                })
                 .await;
             }
         }
+    }
+    /// Post to #agents as the SA — the narration channel every force-merge leg
+    /// reports through.
+    async fn say_agents(&self, msg: String) {
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            s.post_chat_in("SA", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+            Ok(())
+        })
+        .await;
+    }
+    /// The `!mergeable` leg of a force-merge: narrate, drive a DevBug agent to
+    /// resolve every conflict on the PR branch, then PROVE the resolution
+    /// (markers + forge-mergeable) before the merge is attempted. `false` means
+    /// the PR must be abandoned — the failure is already narrated.
+    async fn resolve_conflicts_for_force_merge(
+        &self,
+        num: u64,
+        by: &str,
+        vi: bool,
+        pr: &crate::ports::outbound::PullRequest,
+    ) -> bool {
+        self.say_agents(if vi {
+            format!(
+                "⚡ Force-merge #{num} ({by}): runner đang gỡ conflict trên `{}`…",
+                pr.head
+            )
+        } else {
+            format!(
+                "⚡ Force-merge #{num} ({by}): the runner is resolving conflicts on `{}`…",
+                pr.head
+            )
+        })
+        .await;
+        let request = crate::ports::outbound::AgentRequest {
+            role: coxagent_domain::Role::DevBug,
+            system_prompt: crate::prompts::system_prompt(crate::prompts::DEV),
+            task_prompt: format!(
+                "URGENT: a human ordered PR #{num} (branch `{h}`) force-merged. It has merge \
+                 conflicts with `{b}`.\n\
+                 1. `git fetch origin && git checkout {h} && git pull origin {h}`\n\
+                 2. `git merge origin/{b}` and resolve EVERY conflict, preserving both this \
+                 branch's fix and what already landed on {b}.\n\
+                 3. Run the build/tests to make sure nothing broke.\n\
+                 4. `git add -A && git commit -m \"fix: resolve conflicts for #{num}\"` then \
+                 `git push origin {h}`.",
+                h = pr.head,
+                b = pr.base,
+            ),
+            work_dir: self.work_dir.clone(),
+            timeout: std::time::Duration::from_secs(1800),
+            escalation_level: 0,
+            label: None,
+        };
+        let ok = matches!(self.engine.run(request).await, Ok(o) if o.succeeded());
+        if let Some(git) = &self.git {
+            let _ = git.checkout_branch(&self.work_dir, self.flow_base()).await;
+        }
+        if !ok {
+            self.say_agents(if vi {
+                format!(
+                    "⚡ Force-merge #{num}: gỡ conflict THẤT BẠI — cần xử lý tay: {}",
+                    pr.url
+                )
+            } else {
+                format!(
+                    "⚡ Force-merge #{num}: conflict resolution FAILED — needs a manual fix: {}",
+                    pr.url
+                )
+            })
+            .await;
+            return false;
+        }
+        if let Err(why) = self.verify_conflict_resolution(num).await {
+            self.say_agents(if vi {
+                format!(
+                    "⚡ Force-merge #{num}: verification từ chối ({why}) — KHÔNG merge: {}",
+                    pr.url
+                )
+            } else {
+                format!(
+                    "⚡ Force-merge #{num}: verification refused ({why}) — NOT merging: {}",
+                    pr.url
+                )
+            })
+            .await;
+            return false;
+        }
+        true
     }
     /// PROVE a conflict "resolution" actually worked — never trust the engine's
     /// word for it. (1) The pushed diff must contain no conflict markers;

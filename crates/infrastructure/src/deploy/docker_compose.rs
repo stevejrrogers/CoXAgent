@@ -3,6 +3,7 @@
 //! compose file, so non-dockerised projects don't error the cycle.
 
 use async_trait::async_trait;
+use coxagent_application::ports::outbound::deploy::COMPOSE_FILES;
 use coxagent_application::ports::outbound::{DeployPort, DeployReport};
 use coxagent_application::PortError;
 use std::path::Path;
@@ -11,14 +12,8 @@ use tokio::process::Command;
 
 // Deploy may tear down only what [`reclaimable_compose_project`] allows — see
 // that shared policy for why port-eviction must never touch the live hub.
-use super::reclaimable::reclaimable_compose_project;
+use super::reclaimable::{reclaimable_compose_project, reclaimable_raw_container};
 
-const COMPOSE_FILES: &[&str] = &[
-    "docker-compose.yml",
-    "docker-compose.yaml",
-    "compose.yml",
-    "compose.yaml",
-];
 const DEPLOY_TIMEOUT: Duration = Duration::from_secs(900);
 
 /// Keys every secret-bearing compose file this adapter can meet requires via
@@ -197,7 +192,12 @@ fn read_dot_env(path: &std::path::Path) -> std::collections::HashSet<String> {
 /// where agents read diffs from and commit from (CXA-B028). Defaults to a
 /// per-user data dir, overridable with `COXAGENT_DEPLOY_SECRETS_DIR` so tests
 /// and sandboxes can point it at an isolated location.
-fn deploy_secrets_root() -> std::path::PathBuf {
+///
+/// Public since CXA-F262: the backup/restore commands need the SAME root to
+/// capture (`--include-secrets`) and to restore secret files onto the CURRENT
+/// machine — resolving it anywhere else would desynchronize the two.
+#[must_use]
+pub fn deploy_secrets_root() -> std::path::PathBuf {
     if let Some(dir) = std::env::var_os("COXAGENT_DEPLOY_SECRETS_DIR") {
         return std::path::PathBuf::from(dir);
     }
@@ -635,27 +635,49 @@ async fn apply_resource_limits(proj: &str) {
     }
 }
 
-/// The id of ANY container publishing `port` (compose-labelled or not).
-async fn container_on_port(port: &str) -> Option<String> {
+/// The `(id, container name)` of the first container publishing `port`, or
+/// `None` when docker yields nothing usable. Only reached on the label-less
+/// branch — [`compose_project_on_port`] is consulted first — and a holder this
+/// cannot name is treated as unknown, never as ours to stop (CXA-B083/B085).
+async fn raw_container_on_port(port: &str) -> Option<(String, String)> {
     let out = Command::new("docker")
         .args([
             "ps",
             "--filter",
             &format!("publish={port}"),
             "--format",
-            "{{.ID}}",
+            "{{.ID}}\t{{.Names}}",
         ])
         .stdin(std::process::Stdio::null())
         .output()
         .await
         .ok()?;
-    let id = String::from_utf8_lossy(&out.stdout)
+    String::from_utf8_lossy(&out.stdout)
         .lines()
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_owned();
-    (!id.is_empty()).then_some(id)
+        .find_map(parse_holder_line)
+}
+
+/// Pure parse of one `docker ps` identity line into `(id, name)`; `None` for
+/// anything malformed, so a holder with no recoverable name can never be
+/// classified as ours to stop (CXA-B085). Tolerates either separator docker
+/// renders between `{{.ID}}` and `{{.Names}}` (tab or space).
+fn parse_holder_line(line: &str) -> Option<(String, String)> {
+    let line = line.trim();
+    let (id, name) = line.split_once(char::is_whitespace)?;
+    let name = name.trim();
+    let name = name.strip_prefix('/').unwrap_or(name);
+    if id.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some((id.to_owned(), name.to_owned()))
+}
+
+/// Pure eviction verdict for one label-less port holder (CXA-B085):
+/// `Some(id)` — stop that exact container because its name proves an
+/// agent-managed `cox-` container; `None` — foreign, anonymous or protected,
+/// leave it strictly alone and report the collision instead.
+fn raw_stop_target(id: &str, name: &str) -> Option<String> {
+    reclaimable_raw_container(name).then(|| id.to_owned())
 }
 
 /// Deterministic compose project name for a deploy dir: `cox-<parent>-<dir>`
@@ -701,6 +723,86 @@ async fn running_services(work_dir: &Path) -> Vec<String> {
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+/// CXA-F289: resolved `${VAR}` secret values must never survive into a
+/// forensics bundle — replace every configured value with a marker before the
+/// text reaches the bundle (which masks secret-SHAPED `KEY=value` lines again
+/// at persistence). Values shorter than 8 chars are skipped: masking a short
+/// common word would mangle unrelated log lines without buying protection.
+fn mask_resolved_secrets(text: &str, secrets: &[(String, String)]) -> String {
+    let mut out = text.to_owned();
+    for (_, value) in secrets {
+        if value.len() >= 8 {
+            out = out.replace(value.as_str(), "***");
+        }
+    }
+    out
+}
+
+/// CXA-F289: the recent log tail of every container the compose project
+/// managed at failure time (`docker compose logs --tail 200` per service).
+/// An empty result — a validation failure, or no container ever started — is
+/// the caller's explicit "no container logs" signal: the bundle records that
+/// fact rather than rendering an empty log section.
+async fn capture_container_logs(proj: &str) -> Vec<coxagent_application::state::ContainerLogTail> {
+    // Which services does this compose project manage? `-a` so stopped/errored
+    // containers are listed too — they are exactly the interesting ones after
+    // a failed `up`. A non-zero exit here (invalid compose file, daemon down)
+    // means there is nothing to collect, same as an empty list.
+    let Ok(listed) = Command::new("docker")
+        .args([
+            "compose",
+            "-p",
+            proj,
+            "ps",
+            "-a",
+            "--format",
+            "{{.Service}}",
+        ])
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+    else {
+        return Vec::new();
+    };
+    if !listed.status.success() {
+        return Vec::new();
+    }
+    let services: Vec<String> = String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|service| !service.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    let mut logs = Vec::new();
+    for service in services {
+        // Recent tail of THIS service's output; `--no-log-prefix` so the
+        // service attribution comes from the listing above, not the line.
+        if let Ok(tailed) = Command::new("docker")
+            .args([
+                "compose",
+                "-p",
+                proj,
+                "logs",
+                "--no-log-prefix",
+                "--tail",
+                "200",
+                &service,
+            ])
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output()
+            .await
+        {
+            let tail = String::from_utf8_lossy(&tailed.stdout).to_string();
+            if !tail.trim().is_empty() {
+                logs.push(coxagent_application::state::ContainerLogTail { service, tail });
+            }
+        }
+    }
+    logs
 }
 
 /// Deploys via the `docker` CLI.
@@ -801,6 +903,19 @@ fn linux_c_toolchain_present() -> bool {
 
 #[async_trait]
 impl DeployPort for DockerComposeDeploy {
+    /// The one honest check that `docker compose` (CLI + plugin) can run:
+    /// asking it for its version, exactly like `daemon_up` asks the daemon.
+    async fn compose_available(&self) -> bool {
+        Command::new("docker")
+            .args(["compose", "version"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .is_ok_and(|s| s.success())
+    }
+
     async fn lint(&self, work_dir: &Path) -> Result<Option<u64>, PortError> {
         // Rust-only for now: clippy's error count is the lint currency the
         // DoD gate compares against the project baseline.
@@ -1009,9 +1124,89 @@ impl DeployPort for DockerComposeDeploy {
         self.run_test_command(work_dir, &cmd, &refs).await
     }
 
+    async fn run_e2e(
+        &self,
+        work_dir: &Path,
+        seed_modules: Option<&std::path::Path>,
+    ) -> Result<DeployReport, PortError> {
+        let e2e = work_dir.join("e2e");
+        if !e2e.join("playwright.config.ts").exists() {
+            return Ok(DeployReport {
+                failure_bundle: None,
+                success: true,
+                deployed: false,
+                summary: "no e2e suite".to_owned(),
+            });
+        }
+        // The browser gate is OPTIONAL tooling: a user's machine without
+        // Node/Playwright must DEGRADE (skip with a visible warning), never
+        // hold every UI PR red for a missing dev tool.
+        let npx_ok = std::process::Command::new("npx")
+            .args(["playwright", "--version"])
+            .current_dir(&e2e)
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !npx_ok {
+            tracing::warn!(
+                "browser e2e gate skipped: Node/Playwright not available — \
+                 install Node and `cd e2e && npm ci && npx playwright install` to enable it"
+            );
+            return Ok(DeployReport {
+                failure_bundle: None,
+                success: true,
+                deployed: false,
+                summary: "e2e runner unavailable (Node/Playwright not installed) — gate skipped"
+                    .to_owned(),
+            });
+        }
+        // A fresh verification worktree has no node_modules; borrow the main
+        // checkout's via symlink instead of a per-PR npm install.
+        let nm = e2e.join("node_modules");
+        if !nm.exists() {
+            if let Some(seed) = seed_modules.filter(|s| s.exists()) {
+                let _ = std::os::unix::fs::symlink(seed, &nm);
+            }
+        }
+        if !nm.exists() {
+            let ok = std::process::Command::new("npm")
+                .arg("ci")
+                .arg("--silent")
+                .current_dir(&e2e)
+                .status()
+                .is_ok_and(|s| s.success());
+            if !ok {
+                return Ok(DeployReport {
+                    failure_bundle: None,
+                    success: false,
+                    deployed: true,
+                    summary: "e2e: npm ci failed".to_owned(),
+                });
+            }
+        }
+        let report = self
+            .run_test_command(&e2e, "npx", &["playwright", "test", "--reporter=line"])
+            .await?;
+        // Browsers not downloaded yet is the same class as no Node: optional
+        // tooling missing, not a red suite.
+        if !report.success && report.summary.contains("Executable doesn't exist") {
+            tracing::warn!(
+                "browser e2e gate skipped: Playwright browsers not installed — \
+                 run `cd e2e && npx playwright install`"
+            );
+            return Ok(DeployReport {
+                failure_bundle: None,
+                success: true,
+                deployed: false,
+                summary: "e2e browsers not installed — gate skipped".to_owned(),
+            });
+        }
+        Ok(report)
+    }
+
     async fn run_tests(&self, work_dir: &Path) -> Result<DeployReport, PortError> {
         let Some((cmd, args)) = test_command(work_dir) else {
             return Ok(DeployReport {
+                failure_bundle: None,
                 success: true,
                 deployed: false,
                 summary: "no recognised test runner".to_owned(),
@@ -1122,6 +1317,7 @@ impl DeployPort for DockerComposeDeploy {
     async fn deploy(&self, work_dir: &Path) -> Result<DeployReport, PortError> {
         if !COMPOSE_FILES.iter().any(|f| work_dir.join(f).exists()) {
             return Ok(DeployReport {
+                failure_bundle: None,
                 success: true,
                 deployed: false,
                 summary: "no compose file — deploy skipped".to_owned(),
@@ -1188,9 +1384,11 @@ impl DeployPort for DockerComposeDeploy {
         // notices.
         let mut evicted = None;
         // Up to two eviction+retry rounds: round 1 handles a stale compose
-        // project; round 2 (or when no compose label exists) stops whatever
-        // raw container is squatting the port. Docker also needs a beat to
-        // release a freshly-stopped binding, hence the short sleep.
+        // project; round 2 (or when no compose label exists) stops a raw
+        // squatter only when its name proves this deploy namespace owns it —
+        // anything else is reported as a collision, never touched
+        // (CXA-B083/B085). Docker also needs a beat to release a
+        // freshly-stopped binding, hence the short sleep.
         for round in 0..2u8 {
             if output.status.success() {
                 break;
@@ -1217,14 +1415,28 @@ impl DeployPort for DockerComposeDeploy {
                     .output()
                     .await;
                 evicted = Some(format!("compose project `{project}`"));
-            } else if let Some(id) = container_on_port(&port).await {
-                let _ = Command::new("docker")
-                    .args(["stop", &id])
-                    .stdin(std::process::Stdio::null())
-                    .kill_on_drop(true)
-                    .output()
-                    .await;
-                evicted = Some(format!("container `{id}`"));
+            } else if let Some((id, name)) = raw_container_on_port(&port).await {
+                // Same ownership policy as compose projects, applied to the
+                // container NAME — the only ownership signal a label-less
+                // container has (CXA-B083). A label-less holder is stopped by
+                // id only when its NAME proves an agent-managed `cox-`
+                // container; the live hub or shared infra launched via plain
+                // `docker run`, and any foreign or anonymous raw squatter
+                // (e.g. a bare `docker run -p 8101:80 nginx`), is never
+                // touched — the deploy reports the collision instead of
+                // killing an unrelated service (CXA-B085).
+                match raw_stop_target(&id, &name) {
+                    Some(target) => {
+                        let _ = Command::new("docker")
+                            .args(["stop", &target])
+                            .stdin(std::process::Stdio::null())
+                            .kill_on_drop(true)
+                            .output()
+                            .await;
+                        evicted = Some(format!("container `{name}`"));
+                    }
+                    None => break,
+                }
             } else if round > 0 {
                 break; // nothing visible holds the port — give up, report
             }
@@ -1248,6 +1460,7 @@ impl DeployPort for DockerComposeDeploy {
         if success {
             apply_resource_limits(&proj).await;
         }
+        let mut failure_bundle = None;
         let summary = if success {
             let note = evicted
                 .map(|p| format!(" (evicted stale {p} off the port)"))
@@ -1276,9 +1489,27 @@ impl DeployPort for DockerComposeDeploy {
                 .unwrap_or_else(|| {
                     format!("exit {} (no output)", output.status.code().unwrap_or(-1))
                 });
+            // CXA-F289: a failed deploy must not destroy its own evidence.
+            // Capture the stderr tail plus the recent per-container logs while
+            // this process still holds them, mask the resolved secret values,
+            // and let the bundle type bound + re-mask before anything
+            // persists. No container ever listed = the explicit AC3 marker.
+            let raw = if err.trim().is_empty() {
+                out.as_ref()
+            } else {
+                err.as_ref()
+            };
+            let logs = capture_container_logs(&proj).await;
+            let no_container_logs = logs.is_empty();
+            failure_bundle = Some(coxagent_application::state::DeployFailureBundle::new(
+                &mask_resolved_secrets(raw, &secrets),
+                logs,
+                no_container_logs,
+            ));
             format!("docker compose failed: {detail}")
         };
         Ok(DeployReport {
+            failure_bundle,
             success,
             deployed: true,
             summary,
@@ -1290,10 +1521,81 @@ impl DeployPort for DockerComposeDeploy {
 mod tests {
     use super::*;
 
-    /// The deploy port-eviction decision routes through the single shared
-    /// reclaimability policy (`crate::deploy::reclaimable`), whose own unit
-    /// tests own the full blast-radius matrix — live hub, shared infra,
-    /// case-insensitivity and foreign projects.
+    // The deploy port-eviction decision routes through the single shared
+    // reclaimability policy (`crate::deploy::reclaimable`), whose own unit
+    // tests own the full blast-radius matrix — live hub, shared infra,
+    // case-insensitivity and foreign projects — for both compose projects and
+    // label-less raw containers (CXA-B083/B085).
+
+    /// CXA-B085 regression guard: a label-less holder is stopped by id only
+    /// when its name proves an agent-managed `cox-` container.
+    #[test]
+    fn agent_named_raw_holder_is_stopped_by_id() {
+        assert_eq!(
+            raw_stop_target("deadbeef", "cox--slot-b-hub"),
+            Some("deadbeef".to_owned())
+        );
+        assert_eq!(
+            raw_stop_target("deadbeef", "cox-my-project-web-1"),
+            Some("deadbeef".to_owned())
+        );
+    }
+
+    /// The CXA-B085 repro: a bare `docker run -p 8101:80 nginx` squatting the
+    /// port must never be force-stopped — the old code stopped whatever id
+    /// published the port with no ownership check at all.
+    #[test]
+    fn anonymous_raw_holder_is_never_stopped() {
+        assert_eq!(raw_stop_target("deadbeef", "nginx"), None);
+        assert_eq!(raw_stop_target("deadbeef", "sharp_poincare"), None);
+    }
+
+    #[test]
+    fn protected_and_foreign_raw_holders_are_never_stopped() {
+        for name in [
+            "coxagent",
+            "coxagent-gateway",
+            "cox-infra",
+            "cox-infra-db",
+            "COXAGENT",
+            "Cox-Infra-Db",
+            "someone-elses-stack",
+            "myapp-prod",
+        ] {
+            assert_eq!(
+                raw_stop_target("deadbeef", name),
+                None,
+                "{name} must never be stopped by id"
+            );
+        }
+    }
+
+    /// The identity parse fails closed: a holder line docker renders without a
+    /// usable id+name pair yields `None`, and the caller treats unknown as
+    /// never-touch.
+    #[test]
+    fn holder_line_parses_id_and_name_and_fails_closed() {
+        assert_eq!(
+            parse_holder_line("deadbeef nginx"),
+            Some(("deadbeef".to_owned(), "nginx".to_owned()))
+        );
+        // The `{{.ID}}\t{{.Names}}` format docker actually renders (tab).
+        assert_eq!(
+            parse_holder_line("deadbeef\tcox--slot-b-hub"),
+            Some(("deadbeef".to_owned(), "cox--slot-b-hub".to_owned()))
+        );
+        // Defensively normalize a leading '/' (docker renders it in some name
+        // fields) so a cox-owned holder can never be misread as foreign.
+        assert_eq!(
+            parse_holder_line("deadbeef /cox--slot-b-hub"),
+            Some(("deadbeef".to_owned(), "cox--slot-b-hub".to_owned()))
+        );
+        assert_eq!(parse_holder_line(""), None);
+        assert_eq!(parse_holder_line("deadbeef"), None);
+        assert_eq!(parse_holder_line("deadbeef "), None);
+        assert_eq!(parse_holder_line("deadbeef\t"), None);
+        assert_eq!(parse_holder_line("  /nginx"), None);
+    }
 
     /// Regression guard for CXA-B010 + CXA-B017: every site that runs compose
     /// against this repo's secret-bearing docker-compose.yml must seed
@@ -2454,6 +2756,7 @@ impl DockerComposeDeploy {
             format!("{cmd} tests failed:\n{err}\n{out}")
         };
         Ok(DeployReport {
+            failure_bundle: None,
             success,
             deployed: true,
             summary,

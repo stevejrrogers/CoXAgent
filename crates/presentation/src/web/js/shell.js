@@ -1,6 +1,6 @@
 // App shell: project switching, files browser, codemap, settings, boot.
 // Split from index.html — classic script, load order matters (one shared scope).
-function switchProject(id){PID=id;INIT_ACT=false;GOAL_LOADED_PID=null;localStorage.setItem("coxpid",id);closeProjMenu();renderProjBtn();loadBudget();loadComments();connect();if(CUR==="codemap"&&window._cmTab==="files"){window._wsPath="";loadWorkspace("");}
+function switchProject(id){PID=id;INIT_ACT=false;GOAL_LOADED_PID=null;ALERTS_AT=0;ALERTS_CACHE=[];localStorage.setItem("coxpid",id);closeProjMenu();renderProjBtn();loadBudget();loadComments();connect();if(CUR==="codemap"&&window._cmTab==="files"){window._wsPath="";loadWorkspace("");}
   termKill();if(CUR==="terminal")openTerminal();
   // Chat is system-wide; switching project only refreshes which project channels show.
   loadChannels();}
@@ -97,7 +97,7 @@ function renderProjMore(){
   const m=document.getElementById("proj-more-menu");if(!m||m.hidden)return;
   const q=(window._pmq||"").toLowerCase();
   const list=PROJECTS.filter(p=>!q||(p.alias||"").toLowerCase().includes(q)||p.name.toLowerCase().includes(q));
-  m.innerHTML=`<div class="pm-search"><i class="ti ti-search"></i><input placeholder="Tìm project…" value="${esc(window._pmq||"")}" oninput="window._pmq=this.value;renderProjMore()" onclick="event.stopPropagation()"></div>
+  m.innerHTML=`<div class="pm-search"><i class="ti ti-search"></i><input placeholder="Find project…" value="${esc(window._pmq||"")}" oninput="window._pmq=this.value;renderProjMore()" onclick="event.stopPropagation()"></div>
     <div class="pm-list">${list.map(p=>`<button class="pm-item${p.id===PID?' on':''}" onclick="closeProjMore();switchProject('${esc(p.id)}')">
       <span class="sdot" style="background:${projColor(p.id)}"></span><span>${esc(p.alias||p.name)}</span></button>`).join("")||'<span class="segproj-empty">no match</span>'}</div>`;
   const i=m.querySelector("input");if(i){const v=i.value;i.focus();i.setSelectionRange(v.length,v.length);}
@@ -212,7 +212,7 @@ function tkRich(){return document.getElementById("nt-desc");}
 function tkFmt(cmd){document.execCommand(cmd,false,null);tkRich().focus();}
 function tkCode(){const s=window.getSelection();const t=s&&s.toString();document.execCommand("insertHTML",false,t?'<code>'+esc(t)+'</code>&nbsp;':'<code>code</code>&nbsp;');tkRich().focus();}
 async function tkLink(){const s0=window.getSelection();const saved=(s0&&s0.rangeCount)?s0.getRangeAt(0).cloneRange():null;
-  const url=await coxModal({title:"Insert link",message:"URL để chèn vào ticket.",input:{placeholder:"https://…",value:"https://"},confirmText:"Insert"});if(!url)return;
+  const url=await coxModal({title:"Insert link",message:"URL to insert into the ticket.",input:{placeholder:"https://…",value:"https://"},confirmText:"Insert"});if(!url)return;
   if(saved){const s=window.getSelection();s.removeAllRanges();s.addRange(saved);}
   const s=window.getSelection();if(s&&s.toString())document.execCommand("createLink",false,url);else document.execCommand("insertHTML",false,'<a href="'+esc(url)+'" target="_blank" rel="noopener">'+esc(url)+'</a>&nbsp;');tkRich().focus();}
 function ntDescGet(){return htmlToMd(tkRich()).trim();}
@@ -235,6 +235,10 @@ async function teamAnalyze(){
       if(p.complexity)document.getElementById("nt-cx").value=p.complexity;
       document.getElementById("nt-ui").checked=!!p.has_ui;
       if(p.acceptance_criteria&&p.acceptance_criteria.length)document.getElementById("nt-ac").value=p.acceptance_criteria.join("\n");
+      // The refine replaced the idea — an earlier feasibility verdict no
+      // longer describes what is on screen; drop it rather than leave a
+      // stale estimate contradicting the rewritten fields.
+      const fp=document.getElementById("nt-feas");fp.style.display="none";fp.innerHTML="";
       const nb=document.getElementById("nt-notes");
       if(p.team_notes&&p.team_notes.length){
         nb.style.display="block";
@@ -247,7 +251,7 @@ async function teamAnalyze(){
   }catch(e){err.textContent="Network error.";}
   clearInterval(tick);btn.disabled=false;btn.querySelector("i").className="ti ti-sparkles";lbl.textContent="Re-analyze with the team";
 }
-function openNewTicket(){["nt-title","nt-ac"].forEach(i=>document.getElementById(i).value="");ntDescSet("");document.getElementById("nt-err").textContent="";document.getElementById("nt-ui").checked=false;const nb=document.getElementById("nt-notes");nb.style.display="none";nb.innerHTML="";document.getElementById("nt-analyze-label").textContent="Let the team analyze & refine";document.getElementById("ov-newticket").classList.add("open");setTimeout(()=>document.getElementById("nt-title").focus(),50);}
+function openNewTicket(){["nt-title","nt-ac"].forEach(i=>document.getElementById(i).value="");ntDescSet("");document.getElementById("nt-err").textContent="";document.getElementById("nt-ui").checked=false;const nb=document.getElementById("nt-notes");nb.style.display="none";nb.innerHTML="";const fb=document.getElementById("nt-feas");fb.style.display="none";fb.innerHTML="";document.getElementById("nt-feas-label").textContent="Check feasibility";document.getElementById("nt-analyze-label").textContent="Let the team analyze & refine";document.getElementById("ov-newticket").classList.add("open");setTimeout(()=>document.getElementById("nt-title").focus(),50);}
 async function saveTicket(startFlow){
   const title=document.getElementById("nt-title").value.trim();
   const err=document.getElementById("nt-err");
@@ -271,6 +275,45 @@ async function saveTicket(startFlow){
     if(startFlow){try{const rn=await(await fetch(api("/runner"))).json();renderRunner(rn);}catch(e){}}
   }catch(e){err.textContent="Network error.";}
 }
+// Filing-time feasibility preview (CXA-F250): a read-only estimate over the
+// refine endpoint's response — no ticket is created, nothing is saved, and
+// every typed value survives success and failure alike. The heavy "let the
+// team analyze" pass stays separate; this is triage before committing design
+// effort.
+async function checkFeasibility(){
+  const idea=(ntDescGet()||document.getElementById("nt-title").value).trim();
+  const err=document.getElementById("nt-err");const panel=document.getElementById("nt-feas");
+  const btn=document.getElementById("nt-feas-btn");const lbl=document.getElementById("nt-feas-label");
+  if(!idea){err.textContent="Write the idea first — feasibility needs something to assess.";return;}
+  err.textContent="";btn.disabled=true;lbl.textContent="Checking…";
+  panel.style.display="block";panel.innerHTML='<div class="tk-notes-h"><i class="ti ti-gauge att-spin"></i> Assessing feasibility…</div>';
+  try{
+    const r=await fetch(api("/ticket-refine"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({description:idea})});
+    if(!r.ok){
+      panel.style.display="none";
+      err.textContent="Feasibility check failed: "+(await r.text()||r.status)+" (needs a configured engine).";
+    }else{
+      const f=(await r.json()).feasibility;
+      if(!f){
+        panel.style.display="none";
+        err.textContent="No feasibility verdict came back (needs a configured engine).";
+      }else{
+        const v=f.score>=70?"Not feasible":(f.lane==="ask"?"Needs clarification":"Feasible");
+        const col=f.score>=70?"var(--red)":(f.lane==="ask"?"var(--amber)":"var(--green)");
+        const ic=f.score>=70?"ti-alert-triangle":(f.lane==="ask"?"ti-help":"ti-circle-check");
+        const prior=f.prior_art>0
+          ?`${f.prior_art} similar ticket${f.prior_art===1?" has":"s have"} already shipped here — the team knows this shape.`
+          :"Nothing of this shape has shipped here yet — filing it opens new ground for the team.";
+        const gaps=(f.gaps&&f.gaps.length)?` Gaps as filed: ${f.gaps.map(g=>esc(g)).join("; ")}.`:"";
+        // Force-show: the dialog may have been closed and reopened while the
+        // request was in flight, which resets the panel to hidden.
+        panel.style.display="block";
+        panel.innerHTML=`<div class="tk-notes-h"><i class="ti ${ic}" style="color:${col}"></i> ${v} <span style="color:var(--dim);font-weight:400">· filing risk ${f.score}/100</span></div><div style="font-size:12.5px;line-height:1.55">${prior}${gaps}</div>`;
+      }
+    }
+  }catch(e){panel.style.display="none";err.textContent="Network error.";}
+  btn.disabled=false;lbl.textContent="Check feasibility";
+}
 let PROJ_MODE="new";
 let IMPORT_SRC="folder";
 function setImportSrc(sc){IMPORT_SRC=sc;
@@ -286,7 +329,7 @@ function setProjMode(m){PROJ_MODE=m;
   // Goal (+ AI drafting) applies to both modes — an imported codebase needs a
   // brief just as much; it merges into the auto-detected comprehension context.
   document.getElementById("np-goal").placeholder=m==="import"
-    ?"Hướng đi tiếp cho codebase này — e.g. 'ổn định hoá, thêm thanh toán, mobile app'. Click Draft để BA/PO viết brief."
+    ?"Where this codebase should go next — e.g. 'stabilize, add payments, mobile app'. Click Draft to have BA/PO write the brief."
     :"Rough idea — e.g. 'a secure team chat, more private than WhatsApp'. Click Draft to have BA/PO turn it into a project brief you review.";
   document.getElementById("np-submit-label").textContent=m==="import"?"Import project":"Create project";}
 function openNewProject(){["np-name","np-alias","np-path","np-goal"].forEach(i=>document.getElementById(i).value="");document.getElementById("np-err").textContent="";setProjMode("new");document.getElementById("ov-newproj").classList.add("open");setTimeout(()=>document.getElementById("np-name").focus(),50);return loadNpSpaces();}
@@ -343,7 +386,7 @@ async function createProject(){
 async function deleteProject(id){
   id=id||PID;if(!id)return;
   const p=PROJECTS.find(x=>x.id===id);const nm=p?p.name:id;
-  if(!await coxModal({title:"Remove project",message:'Gỡ project "'+nm+'" khỏi CoXAgent? File workspace vẫn còn trên disk; chỉ gỡ đăng ký.',danger:true,confirmText:"Remove"}))return;
+  if(!await coxModal({title:"Remove project",message:'Remove project "'+nm+'" from CoXAgent? Workspace files stay on disk; only the registration is removed.',danger:true,confirmText:"Remove"}))return;
   try{
     const r=await fetch("/api/projects/"+encodeURIComponent(id),{method:"DELETE"});
     if(!r.ok){toasty("Delete failed: "+(await r.text()||r.status),"err");return;}
@@ -502,6 +545,7 @@ async function doLogin(){
     // them (see rememberDestination): navigate there once auth succeeds.
     const next=sessionStorage.getItem(NEXT_KEY);
     sessionStorage.removeItem(NEXT_KEY);
+    SESS_CACHE=null;SESS_AT=0;
     await boot();
     // A guest who asked for ?next=<hash> lands back on that view once signed
     // in; an invalid/nonexistent fragment safely falls through to overview.
@@ -527,11 +571,19 @@ function canManage(){return !ME||!ME.auth||roleCanManage(ME.role);}
 // AuthRole::can_review, which auth_mw enforces (COX-B038). Keep the two in step:
 // a role shown a Merge button the server refuses is a 403 the user can't act on.
 function roleCanReview(r){return r==="super"||r==="admin"||r==="reviewer"||LEAD_ROLES.includes(r);}
+// Admin-only surfaces (Audit, People, the Team view's people panel) are the
+// hub-admin tier: Super AND Admin — bootstrap_admin provisions the hub owner
+// as Super, and the server admits Super on these surfaces (AuthRole::can_manage),
+// so gating the UI on "admin" exactly locked the owner out of panels the API
+// already serves (CXA-B132). Open/local mode (no auth) sees them too, same
+// as canManage().
+function roleIsHubAdmin(r){return r==="super"||r==="admin";}
+function isHubAdmin(){return !ME||!ME.auth||roleIsHubAdmin(ME.role);}
 // Only the legacy read-only Viewer gets a locked-down UI; every real role writes.
 function applyRole(){
   const isViewer=ME&&ME.auth&&ME.role==="viewer";
-  // Admin surfaces (Audit, user mgmt) show for admins and in open/local mode.
-  const isAdmin=!ME||!ME.auth||ME.role==="admin";
+  // Admin surfaces (Audit, user mgmt) show for the hub-admin tier and in open/local mode.
+  const isAdmin=isHubAdmin();
   document.body.classList.toggle("viewer",!!isViewer);
   document.body.classList.toggle("admin",!!isAdmin);
   document.body.classList.toggle("manage",canManage());
@@ -664,8 +716,10 @@ function goalIsRefactor(){
   const g=(((STATE||{}).sprint||{}).goal||"")+" "+((STATE||{}).sprint_goal||"");
   return ((STATE||{}).refactor_mode===true)||/refactor|restructure|migrat|tái cấu trúc|cấu trúc lại/i.test(g);
 }
+let REVIEW_CONFIGURED=true;
 async function drainBanner(elId){
   const el=document.getElementById(elId);if(!el)return;
+  if(elId==="rv-drain"&&!REVIEW_CONFIGURED){el.innerHTML="";return;}
   const sweepBtn=`<button class="gc-btn pri" onclick="mergeSweep()" title="SA merges every green PR right now (oldest first) — no tokens"><i class="ti ti-git-merge"></i> SA merge sweep</button>`;
   // The Review tab always offers the sweep, drain or not.
   const toolbar=elId==="rv-drain"?`<div style="display:flex;justify-content:flex-end;margin-bottom:10px">${sweepBtn}</div>`:"";
@@ -674,20 +728,20 @@ async function drainBanner(elId){
     try{const prs=await(await fetch(api("/prs"))).json();DRAIN_CACHE={t:Date.now(),n:Array.isArray(prs)?prs.length:0};}catch(e){el.innerHTML=toolbar;return;}
   }
   el.innerHTML=(DRAIN_CACHE.n>0?`<div class="drainbar"><i class="ti ti-barrier-block"></i>
-    <div><b>CLEAN-BASE DRAIN</b> — refactor đang chờ merge sạch <b>${DRAIN_CACHE.n} PR</b>.
-    Mọi agent của mọi user tạm NGỪNG mở việc mới — chỉ fix conflict &amp; merge (cũ nhất trước).
-    <a onclick="nav('review')">Mở Review để merge PR xanh →</a> ${sweepBtn}</div></div>`:"")+toolbar;
+    <div><b>CLEAN-BASE DRAIN</b> — refactor waiting on a clean merge of <b>${DRAIN_CACHE.n} PR</b>.
+    All agents for all users PAUSE new work — only fix conflicts &amp; merge (oldest first).
+    <a onclick="nav('review')">Open Review to merge green PRs →</a> ${sweepBtn}</div></div>`:"")+toolbar;
 }
 // Ask the SA to merge every green open PR right now (oldest first). Token-free;
 // results are announced in #agents and summarised in a toast.
 async function mergeSweep(){
-  toasty("SA đang quét queue & merge PR xanh…","ok");
+  toasty("SA is sweeping the queue & merging green PRs…","ok");
   try{
     const r=await fetch(api("/merge-sweep"),{method:"POST"});
     if(!r.ok){toasty("Sweep failed: "+(await r.text()||r.status),"err");return;}
     const d=await r.json();
     const m=(d.merged||[]).length,s=(d.skipped||[]).length;
-    toasty(m?`Đã merge ${m} PR ✓${s?` · còn ${s} chưa đủ điều kiện`:""}`:`Chưa merge được PR nào${s?` — ${s} cái đang conflict/CI`:""}`,m?"ok":"warn");
+    toasty(m?`Merged ${m} PR ✓${s?` · ${s} not eligible yet`:""}`:`No PRs merged${s?` — ${s} stuck on conflict/CI`:""}`,m?"ok":"warn");
     DRAIN_CACHE.t=0;
     if(CUR==="review")renderReview(); if(CUR==="overview")drainBanner("ov-drain");
   }catch(e){toasty("Network error","err");}
@@ -707,9 +761,20 @@ async function renderReview(){
   el.innerHTML='<div class="empty">loading pull requests…</div>';
   let d={};try{d=await(await fetch(api("/prs"))).json();}catch(e){el.innerHTML='<div class="empty">unable to load</div>';return;}
   const prs=d.prs||[];
-  if(!d.configured&&!prs.length){el.innerHTML=`<div class="rev-empty"><i class="ti ti-git-pull-request"></i><div>Git review isn't set up</div><span>Configure a repository in <a onclick="nav('settings')">Settings → Git &amp; version control</a> to open and review pull requests here.</span></div>`;return;}
+  // Remembered for drainBanner: offering "SA merge sweep" over an
+  // unconfigured repo is a dead-end button next to a "not set up" notice.
+  REVIEW_CONFIGURED=!!d.configured||prs.length>0;
+  if(!d.configured&&!prs.length){drainBanner("rv-drain");el.innerHTML=`<div class="rev-empty"><i class="ti ti-git-pull-request"></i><div>Git review isn't set up</div><span>Configure a repository in <a onclick="nav('settings')">Settings → Git &amp; version control</a> to open and review pull requests here.</span></div>`;return;}
   const roNote=!d.configured?' · <b class="rev-ro-note"><i class="ti ti-lock"></i> read-only — configure git in Settings for actions</b>':'';
-  const head=`<div class="sec">Pull requests <span style="font-size:11px;color:var(--dim);font-weight:400">· ${prs.length} open${roNote}${d.error?' · <span style=\"color:var(--red)\">'+esc(d.error)+'</span>':''}</span></div>`;
+  // Review-latency pulse from the SA's recorded verdicts (rides the state
+  // snapshot): how long a PR waits for its review, over the last 20.
+  const lat=(typeof STATE!=="undefined"&&Array.isArray(STATE.reviews)?STATE.reviews:[])
+    .slice(-20).map(r=>r.latency_secs||0).filter(n=>n>0);
+  const fmtMin=s=>s>=5400?`${Math.round(s/3600*10)/10}h`:`${Math.round(s/60)}m`;
+  const latNote=lat.length
+    ?` · review latency avg ${fmtMin(lat.reduce((a,b)=>a+b,0)/lat.length)} · max ${fmtMin(Math.max(...lat))} (last ${lat.length})`
+    :"";
+  const head=`<div class="sec">Pull requests <span style="font-size:11px;color:var(--dim);font-weight:400">· ${prs.length} open${latNote}${roNote}${d.error?' · <span style=\"color:var(--red)\">'+esc(d.error)+'</span>':''}</span></div>`;
   if(!prs.length){el.innerHTML=head+`<div class="rev-empty"><i class="ti ti-check"></i><div>No open pull requests</div><span>Agent-shipped tickets will appear here for review.</span></div>`;return;}
   const ciBadge=c=>{const m={passing:["passing","var(--green)","circle-check"],failing:["failing","var(--red)","circle-x"],pending:["CI running","var(--amber)","loader"],none:["no CI","var(--dim)","minus"]}[c]||["",""];
     return `<span class="rev-ci" style="color:${m[1]}"><i class="ti ti-${m[2]}"></i> ${m[0]}</span>`;};
@@ -739,7 +804,7 @@ async function renderReview(){
         <button class="gc-btn" title="Stop the preview and restore the main build" onclick="prAction(${p.number},'preview-stop')"><i class="ti ti-eye-off"></i></button>
         <button class="gc-btn" onclick="prAction(${p.number},'request-changes')"><i class="ti ti-arrow-back-up"></i> Changes</button>
         <button class="gc-btn pri" ${p.mergeable?'':'disabled'} onclick="prAction(${p.number},'merge')"><i class="ti ti-git-merge"></i> Merge</button>
-        <button class="gc-btn forcemg" title="SA gỡ conflict NGAY (nếu có) rồi merge PR này — theo dõi tiến trình trong #agents" onclick="prAction(${p.number},'force-merge')"><i class="ti ti-bolt"></i> Force</button>`:''}
+        <button class="gc-btn forcemg" title="SA resolves conflicts NOW (if any) then merges this PR — follow progress in #agents" onclick="prAction(${p.number},'force-merge')"><i class="ti ti-bolt"></i> Force</button>`:''}
       </div>
     </div>`).join("")+`</div>`;
 }
@@ -771,16 +836,16 @@ function renderDiff(t){
 async function prAction(num,action){
   let comment="";
   if(action==="request-changes"){
-    comment=await coxModal({title:"Request changes on PR #"+num,message:"Mô tả rõ cần sửa gì — DEV agent sẽ đọc và tự xử lý ở cycle tới.",input:{placeholder:"e.g. thêm test cho case token hết hạn; đừng đổi API public",multiline:true},confirmText:"Request changes"});
+    comment=await coxModal({title:"Request changes on PR #"+num,message:"Describe exactly what needs fixing — the DEV agent reads it and handles it next cycle.",input:{placeholder:"e.g. add a test for the expired-token case; don't change the public API",multiline:true},confirmText:"Request changes"});
     if(comment===null||comment==="")return;}
-  if(action==="merge"&&!(await coxModal({title:"Merge PR #"+num+"?",message:"Squash-merge vào main và xoá branch — chính thức ship code này.",confirmText:"Merge"})))return;
-  if(action==="force-merge"&&!(await coxModal({title:"⚡ Force-merge PR #"+num+"?",message:"SA sẽ gỡ conflict ngay (nếu có) rồi merge thẳng vào main — kể cả khi chưa có CI check. Theo dõi tiến trình trong #agents.",danger:true,confirmText:"Force merge"})))return;
+  if(action==="merge"&&!(await coxModal({title:"Merge PR #"+num+"?",message:"Squash-merge into main and delete the branch — officially ship this code.",confirmText:"Merge"})))return;
+  if(action==="force-merge"&&!(await coxModal({title:"⚡ Force-merge PR #"+num+"?",message:"SA resolves conflicts now (if any) then merges straight into main — even without CI checks. Follow progress in #agents.",danger:true,confirmText:"Force merge"})))return;
   if(action==="preview")toasty("Building preview of PR #"+num+"… (docker build, may take a minute)","ok");
   try{const r=await fetch(api("/prs/"+num+"/"+action),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({comment})});
     if(r.ok){
       if(action==="preview"){const d=await r.json().catch(()=>({}));
         toasty("Preview live"+(d.url?" — "+d.url:""),"ok");if(d.url)window.open(d.url,"_blank");}
-      else if(action==="force-merge"){toasty("⚡ SA đang force-merge #"+num+" — xem tiến trình trong #agents","ok");}
+      else if(action==="force-merge"){toasty("⚡ SA is force-merging #"+num+" — follow progress in #agents","ok");}
       else toasty(action==="merge"?"Merged ✓":action==="request-changes"?"Changes requested — a DEV agent will address it next cycle":action==="preview-stop"?"Preview stopped — main restored":"Done","ok");
       renderReview();}
     else{toasty("Failed: "+(await r.text()||r.status),"err");}
@@ -814,8 +879,8 @@ function termTabsRender(){
   if(lbl)lbl.textContent=a?`${a.pid} · ${a.term.cols}×${a.term.rows}`:"";
 }
 async function termNew(){
-  if(!PID){toasty("Chọn project trước","warn");return;}
-  try{await termLib();}catch(e){toasty("Không tải được xterm.js (cần mạng)","err");return;}
+  if(!PID){toasty("Pick a project first","warn");return;}
+  try{await termLib();}catch(e){toasty("Couldn't load xterm.js (network needed)","err");return;}
   const id=++TERM_SEQ;
   const host=document.getElementById("term-host");
   const pane=document.createElement("div");pane.className="term-pane";pane.id="term-pane-"+id;
@@ -832,7 +897,7 @@ async function termNew(){
   ws.onopen=()=>{t.live=true;fit.fit();ws.send(JSON.stringify({resize:{cols:term.cols,rows:term.rows}}));termTabsRender();term.focus();};
   ws.onmessage=e=>{term.write(typeof e.data==="string"?e.data:new Uint8Array(e.data));};
   ws.onclose=e=>{t.live=false;
-    term.write("\r\n\x1b[2m["+(e.code===1008?"read-only role":"session closed")+" — bấm + để mở terminal mới]\x1b[0m\r\n");
+    term.write("\r\n\x1b[2m["+(e.code===1008?"read-only role":"session closed")+" — press + to open a new terminal]\x1b[0m\r\n");
     termTabsRender();};
   ws.onerror=()=>{t.live=false;termTabsRender();};
   term.onData(d=>{if(ws.readyState===1)ws.send(JSON.stringify({input:d}));});
@@ -1140,7 +1205,7 @@ async function resetUserPassword(){if(!EU_USER)return;
     else{msg.style.color="var(--red)";msg.textContent=await r.text()||"Failed.";}
   }catch(e){msg.style.color="var(--red)";msg.textContent="Network error.";}
 }
-async function deleteUser(username){if(!await coxModal({title:"Remove account",message:"Xoá tài khoản \""+username+"\"? Không hoàn tác được.",danger:true,confirmText:"Remove"}))return;try{const r=await fetch("/api/auth/users/"+username,{method:"DELETE"});if(!r.ok)document.getElementById("usr-err").textContent=await r.text();renderUsers();}catch(e){}}
+async function deleteUser(username){if(!await coxModal({title:"Remove account",message:"Delete account \""+username+"\"? This cannot be undone.",danger:true,confirmText:"Remove"}))return;try{const r=await fetch("/api/auth/users/"+username,{method:"DELETE"});if(!r.ok)document.getElementById("usr-err").textContent=await r.text();renderUsers();}catch(e){}}
 async function assignUser(pid,username){try{await fetch("/api/projects/"+pid+"/members",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:decodeURIComponent(username)})});renderUsers();}catch(e){}}
 async function unassignUser(pid,username){try{await fetch("/api/projects/"+pid+"/members/"+username,{method:"DELETE"});renderUsers();}catch(e){}}
 function fmtBytes(n){return n<1024?n+" B":n<1048576?(n/1024).toFixed(1)+" KB":(n/1048576).toFixed(1)+" MB";}
@@ -1160,9 +1225,21 @@ function deviceIcon(label){const l=(label||"").toLowerCase();
   if(l.includes("chrome"))return "brand-chrome";if(l.includes("firefox"))return "brand-firefox";
   if(l.includes("safari"))return "brand-safari";if(l.includes("edge"))return "brand-edge";
   return "device-desktop";}
+// /api/auth/* is rate-limited (20 req/min per IP); renderSessions fires on every
+// state snapshot, so an uncached fetch here turns agent churn into a 429 storm.
+let SESS_CACHE=null,SESS_AT=0;
+const SESS_TTL_MS=60*1000;
 async function renderSessions(){
   const el=document.getElementById("team-sessions");if(!el)return;
-  let ss=[];try{ss=await(await fetch("/api/auth/sessions")).json();}catch(e){}
+  let ss=SESS_CACHE;
+  if(!ss||Date.now()-SESS_AT>SESS_TTL_MS){
+    // Claim the TTL window BEFORE awaiting: a render burst (SSE reconnect
+    // flood) used to fan out one fetch per render while the first was still
+    // in flight — 56 requests in 2 seconds straight into the auth limiter.
+    SESS_AT=Date.now();
+    ss=[];try{ss=await(await fetch("/api/auth/sessions")).json();}catch(e){}
+    SESS_CACHE=ss;
+  }
   if(!Array.isArray(ss)||!ss.length){el.innerHTML="";return;}
   // Only show current device — not history.
   var cur=ss.find(function(s){return s.current;});
@@ -1260,8 +1337,23 @@ async function renderTeamsOnline(){
         +`</div>`;
     }).join("")+`</div></div>`;
 }
+// Loop-liveness watchdog chip (CXA-F259): STATE.liveness carries the hub
+// watchdog's OPEN stall episode — its presence IS the stalled state, and
+// absence is the healthy one (the episode self-clears when activity lands).
+// Renders nothing when quiet, so a healthy team panel looks untouched.
+function renderLiveness(s){
+  const el=document.getElementById("team-liveness");if(!el)return;
+  const lv=s&&s.liveness;
+  if(!lv){el.innerHTML="";return;}
+  const since=lv.since?new Date(lv.since).toLocaleString():'';
+  const escSuffix=lv.escalations?` · ${lv.escalations} escalation${lv.escalations===1?'':'s'}`:'';
+  el.innerHTML=`<div class="lv-chip" title="Loop-liveness watchdog: no new activity since ${escAttr(lv.last_activity_at||lv.since||'')} — the hub watchdog will re-alert on escalation and clear this when work resumes.">
+    <i class="ti ti-alert-octagon"></i>
+    <span><b>loop stalled</b> — worker ${esc(lv.worker||'unknown')} silent</span>
+    <span class="lv-since">since ${esc(since)}${escSuffix}</span></div>`;
+}
 async function stopOperator(op){
-  if(!await coxModal({title:"Stop operator",message:"Dừng operator "+op+"? Nó sẽ idle (không đốt token) cho tới khi được start lại.",confirmText:"Stop"}))return;
+  if(!await coxModal({title:"Stop operator",message:"Stop operator "+op+"? It will idle (no token burn) until started again.",confirmText:"Stop"}))return;
   try{await fetch(api("/operators/"+encodeURIComponent(op)+"/stop"),{method:"POST"});}catch(e){}
   setTimeout(renderTeamsOnline,600);
 }
@@ -1288,7 +1380,10 @@ async function openAgent(role,worker){
     `<div class="act"><div class="atx"><span>${esc(a.action)}</span> ${a.ticket?`<span class="tk">${esc(a.ticket)}</span>`:''}</div><span class="tm">${esc((a.at||'').slice(11,16))}</span></div>`).join("")
     :'<div class="empty">no recorded actions yet</div>';
   const body=document.getElementById("agent-transcript");
-  body.innerHTML='<div class="wl-empty"><i class="ti ti-loader-2"></i> loading…</div>';
+  // CXA-B128: no indefinite placeholder — open on the terminal empty state.
+  // The stream's init kick-off / first lines replace it within a tick; if the
+  // stream never delivers, showAgentLogError paints the error state instead.
+  body.innerHTML='<div class="wl-empty"><i class="ti ti-moon-stars"></i> this agent hasn\'t run yet</div>';
   AGENT_LOG_SIGS=[];   // force a fresh render for this role/operator
   document.getElementById("ov-agent").classList.add("open");
   AGENT_LOG_ROLE=role.toLowerCase().replace(/-/g,"_");  // serde key: DEV-FEATURE→dev_feature
@@ -1529,9 +1624,30 @@ function restartAgentLog(isRetry){
 }
 function showAgentLogError(on){
   const b=document.getElementById("agent-err-badge");
-  if(!b)return;
-  if(on){ b.textContent=AGENT_LOG_RETRIES>0?"● RECONNECTING…":"● STREAM LOST"; b.style.display="inline-block"; }
-  else { b.style.display="none"; }
+  if(b){
+    if(on){ b.textContent=AGENT_LOG_RETRIES>0?"● RECONNECTING…":"● STREAM LOST"; b.style.display="inline-block"; }
+    else { b.style.display="none"; }
+  }
+  // CXA-B128: the work-log BODY must carry the state too — a dead stream with
+  // nothing buffered used to leave the panel on its indefinite 'loading…'
+  // placeholder with only a tiny header badge explaining why. Buffered history
+  // stays untouched (renderAgentLog reconciles children by index, so this node
+  // is replaced the moment lines flow again).
+  const body=document.getElementById("agent-transcript");
+  if(body&&on&&!AGENT_LOG_BUF.trim()){
+    body.innerHTML='<div class="wl-empty"><i class="ti ti-wifi-off"></i> live log connection lost — retrying</div>';
+  }
+}
+// CXA-B131: the Work log panel lives in the page DOM on every view, but only
+// openAgent() ever painted a terminal state into it — a visit to Transcripts
+// & alerts left the panel on its bare 'loading…' placeholder forever, with no
+// stream engaged and no error to show. Normalise it to the honest empty state.
+// Guards keep this from fighting the drawer: an open drawer (AGENT_LOG_ROLE
+// set, stream or retry in flight) or buffered history is left exactly as-is.
+function paintAgentLogIdle(){
+  const body=document.getElementById("agent-transcript");
+  if(!body||AGENT_LOG_ROLE||AGENT_LOG_ES||AGENT_LOG_BUF.trim())return;
+  body.innerHTML='<div class="wl-empty"><i class="ti ti-moon-stars"></i> this agent hasn\'t run yet</div>';
 }
 function renderAgentLog(force){
   const body=document.getElementById("agent-transcript");
@@ -1540,8 +1656,10 @@ function renderAgentLog(force){
   const items=parseWorklog(AGENT_LOG_BUF);
   const atBottom=body.scrollHeight-body.scrollTop-body.clientHeight<40;
   if(items.length===0){
-    // Keep any "hasn't run yet" placeholder unless this is a fresh open.
-    if(!AGENT_LOG_INIT){ body.innerHTML='<div class="wl-empty"><i class="ti ti-moon-stars"></i> this agent hasn\'t run yet</div>'; }
+    // Repaint the empty state on a fresh open (init kick-off) — it must also
+    // overwrite a "connection lost" error state left by a dead stream, or a
+    // recovered panel would stay stuck on the error (CXA-B128).
+    if(!AGENT_LOG_INIT||force){ body.innerHTML='<div class="wl-empty"><i class="ti ti-moon-stars"></i> this agent hasn\'t run yet</div>'; }
     AGENT_LOG_INIT=AGENT_LOG_INIT||true; AGENT_LOG_SIGS=[]; updateTyping(body);
     return;
   }
@@ -1747,7 +1865,7 @@ function toast(msg,type){const c=document.getElementById("toasts");if(!c)return;
 const NAV_IC={overview:"layout-dashboard",team:"robot",board:"columns",roadmap:"timeline",activity:"activity",discuss:"messages",insights:"coin",people:"user-star",audit:"shield-lock",access:"user-cog",settings:"settings"};
 let CMDK_ITEMS=[],CMDK_SEL=0;
 function cmdkBuild(){
-  const items=[];const isAdmin=ME&&ME.role==="admin";
+  const items=[];const isAdmin=!!ME&&roleIsHubAdmin(ME.role);
   Object.keys(TITLES).forEach(v=>{const a=document.querySelector(`.nav a[data-v="${v}"]`);if(!a)return;
     if(a.classList.contains("admin-only")&&!isAdmin)return;
     if(a.classList.contains("manage-only")&&!canManage())return;
@@ -1782,7 +1900,12 @@ function cmdkKey(e){const m=window._cmdkMatches||[];
   else if(e.key==="ArrowUp"){e.preventDefault();cmdkSel(Math.max(CMDK_SEL-1,0));scrollSel();}
   else if(e.key==="Enter"){e.preventDefault();cmdkRun(CMDK_SEL);}}
 function scrollSel(){const s=document.querySelector("#cmdk-list .cmdk-item.sel");if(s)s.scrollIntoView({block:"nearest"});}
-document.addEventListener("keydown",e=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==="k"){e.preventDefault();
+// Command palette keybinding. CXA-F275 moved ⌘K to the GLOBAL SEARCH palette:
+// both handlers used to fire, stacking the shell palette (z-index 200) over
+// the search overlay (z-index 20) where it intercepted every click on search
+// results. The palette stays keyboard-reachable on ⌘/ and via its topbar
+// button; ⌘K opens the one box that searches tickets, wiki and chat.
+document.addEventListener("keydown",e=>{if((e.metaKey||e.ctrlKey)&&e.key==="/"){e.preventDefault();
   document.getElementById("cmdk").classList.contains("open")?closeCmdk():openCmdk();}});
 // ── Chat enhancements: threads, edit, delete, pin, search, typing ────────
 let THREAD_MSG=null, THREAD_LOADING=false;
@@ -1869,7 +1992,7 @@ function renderSlackMsg(m){
   const gutter=m.grouped?`<span class="sgt">${time}</span>`:avat(m.user,"sav");
   // Hybrid gate announcements become ACTION CARDS: the decision is one click
   // away from the message that asked for it (see docs/HYBRID_TEAM.md).
-  const gate=(!deleted&&m.user==="SYSTEM")?gateActions(m.body):"";
+  const gate=(!deleted&&(m.user==="SYSTEM"||m.user==="SM"))?gateActions(m.body):"";
   return `<div class="smsg${m.grouped?' grouped':''}" id="msg-${esc(m.id)}">
     <div class="sgut">${gutter}</div>
     <div class="smain">
@@ -1889,12 +2012,26 @@ function gateActions(body){
     return `<div style="display:flex;gap:8px;margin-top:7px">${btn("Approve → Ready","ti-checks",`chatGate('${id}','ready')`,1)}${btn("Open ticket","ti-external-link",`showTicket('${id}')`)}</div>`;
   if(b.includes("awaiting HUMAN verification")||b.includes("gate_verify"))
     return `<div style="display:flex;gap:8px;margin-top:7px">${btn("Mark Verified","ti-shield-check",`chatGate('${id}','verify')`,1)}${btn("Open ticket","ti-external-link",`showTicket('${id}')`)}</div>`;
+  // SM's cost-hold chase ("… sits behind a cost hold — approve or reject it")
+  // gets the same one-click treatment as the Inbox card: chat and Inbox stay
+  // two doors to one decision.
+  if(b.includes("cost hold")||b.includes("cost_approve"))
+    return `<div style="display:flex;gap:8px;margin-top:7px">${btn("Approve spend","ti-coin",`chatGate('${id}','approve-cost')`,1)}${btn("Reject","ti-x",`chatCostReject('${id}')`)}${btn("Open ticket","ti-external-link",`showTicket('${id}')`)}</div>`;
   return "";
 }
 async function chatGate(id,action){
   try{const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/"+action),{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
     if(!r.ok)toasty(await r.text(),"err");
-    else toasty(action==="ready"?(id+" → Ready"):(id+" verified"),"ok");
+    else toasty(action==="ready"?(id+" → Ready"):action==="approve-cost"?(id+" spend approved"):(id+" verified"),"ok");
+  }catch(e){}
+}
+// Rejecting a cost hold from chat still requires a reason — the reason is
+// what the agents learn from (same contract as the Inbox reject).
+async function chatCostReject(id){
+  const reason=await coxModal({title:"Reject "+id,message:"Why? (agents learn from this)",input:{placeholder:"e.g. not worth the spend"},confirmText:"Reject"});
+  if(reason===null||reason===undefined)return;
+  try{const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/reject"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reason:String(reason||"")})});
+    if(!r.ok)toasty(await r.text(),"err");else toasty(id+" rejected","ok");
   }catch(e){}
 }
 // Wrap the selection of any input/textarea in a markdown marker (**,*,`).

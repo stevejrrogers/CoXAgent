@@ -66,6 +66,10 @@ fn kind_icon(kind: &str) -> &'static str {
         k if k.contains("sprint") => "🏁",
         k if k.contains("impediment") => "🚧",
         k if k.contains("digest") => "📰",
+        // Loop-liveness watchdog (CXA-F259): a stalled cycle must scan as an
+        // alarm, and its recovery as a clear — distinct from every other arm.
+        k if k.contains("stalled") => "🛑",
+        k if k.contains("resumed") => "✅",
         _ => "🔔",
     }
 }
@@ -119,5 +123,16 @@ mod tests {
     fn impediment_digest_gets_the_construction_icon_not_the_generic_digest_one() {
         assert_eq!(kind_icon("impediment_digest"), "🚧");
         assert_ne!(kind_icon("impediment_digest"), "📰");
+    }
+
+    /// CXA-F259: the loop-liveness watchdog's two kinds — a stall alarm and
+    /// its recovery — get distinct icons, neither colliding with any other
+    /// alert family.
+    #[test]
+    fn cycle_stalled_and_cycle_resumed_get_distinct_icons() {
+        assert_eq!(kind_icon("cycle_stalled"), "🛑");
+        assert_eq!(kind_icon("cycle_resumed"), "✅");
+        assert_ne!(kind_icon("cycle_stalled"), kind_icon("cycle_resumed"));
+        assert_ne!(kind_icon("cycle_stalled"), kind_icon("deploy_failed"));
     }
 }
