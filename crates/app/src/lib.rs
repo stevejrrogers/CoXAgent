@@ -450,6 +450,82 @@ mod onboard_scaffold_cleanup_tests {
     }
 }
 
+/// CXA-B138: the alias becomes the workspace directory id (`base.join(id)`),
+/// so `../name` used to scaffold — and DELETE `rm -rf` — OUTSIDE the hub's
+/// workspace base (on the docker deploy, at container root). The port must
+/// refuse such an alias before any IO and classify it bad-request (HTTP 400),
+/// not a server fault.
+#[cfg(test)]
+mod onboard_alias_traversal_tests {
+    use super::onboard_project;
+    use coxagent_presentation::{FactoryErrorKind, NewProjectReq};
+
+    fn request(alias: &str) -> NewProjectReq {
+        NewProjectReq {
+            name: "QA Trav".to_owned(),
+            alias: Some(alias.to_owned()),
+            ..Default::default()
+        }
+    }
+
+    /// The ticket's repro, at the port: nothing may be created inside OR
+    /// outside the workspace base, and the registry must stay untouched.
+    #[tokio::test]
+    async fn a_traversing_alias_is_refused_before_any_directory_is_created() {
+        let root = tempfile::tempdir().expect("tmp");
+        let base = root.path().join("workspaces");
+        std::fs::create_dir_all(&base).expect("workspace base");
+        let registry = base.join("registry.json");
+
+        let Err(err) = onboard_project(&base, &registry, request("../qatrav-esc"), None).await
+        else {
+            panic!("a traversing alias must refuse the onboarding");
+        };
+        assert_eq!(
+            err.kind,
+            FactoryErrorKind::BadRequest,
+            "a refused alias is client input, not a server fault"
+        );
+        assert!(
+            !root.path().join("qatrav-esc").exists(),
+            "no workspace may be scaffolded outside the base"
+        );
+        let created: Vec<String> = std::fs::read_dir(&base)
+            .expect("base listing")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            created.is_empty(),
+            "nothing may be scaffolded inside the base either: {created:?}"
+        );
+        assert!(!registry.exists(), "the registry must not gain an entry");
+    }
+
+    /// Every traversal shape the ticket names is refused the same way —
+    /// including `\`, which only escapes on Windows hosts.
+    #[tokio::test]
+    async fn every_path_separator_shape_is_refused_as_bad_request() {
+        let base = tempfile::tempdir().expect("tmp");
+        let registry = base.path().join("registry.json");
+        for alias in ["..\\qatrav-esc", "qa/../trav", "a/b", "..", ".hidden"] {
+            let Err(err) = onboard_project(base.path(), &registry, request(alias), None).await
+            else {
+                panic!("alias {alias:?} must refuse the onboarding");
+            };
+            assert_eq!(
+                err.kind,
+                FactoryErrorKind::BadRequest,
+                "alias {alias:?} must classify bad-request"
+            );
+        }
+        assert!(
+            !registry.exists(),
+            "no refused attempt may register anything"
+        );
+    }
+}
+
 #[cfg(test)]
 mod shim_script_tests {
     use super::{shim_script, SHIM_CMDS};
@@ -876,6 +952,15 @@ async fn onboard_project(
         .alias
         .clone()
         .unwrap_or_else(|| coxagent_application::state::derive_alias(req.name.trim()));
+    // CXA-B138: the id becomes the workspace directory (`base.join(id)`), so a
+    // path-traversing alias must be refused before ANY filesystem work — the
+    // HTTP layer rejects it first; this keeps the port itself safe for every
+    // caller. (An empty derived id keeps the unique_id "project" fallback.)
+    if !derived.is_empty() && !coxagent_application::state::is_safe_workspace_id(&derived) {
+        return Err(FactoryError::bad_request(format!(
+            "alias {derived:?} must not contain '/', '\\', '..' or leading dots"
+        )));
+    }
     let id = unique_id(base, &derived.to_lowercase());
     let proj_dir = base.join(&id);
 

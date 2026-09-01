@@ -63,14 +63,67 @@ pub(super) async fn list_projects(State(app): State<AppState>) -> impl IntoRespo
 
 /// Map a classified factory failure onto its HTTP response (CXA-B129/CXA-B139):
 /// an expected client conflict (the target workspace already holds tickets) is
-/// 409, invalid input (an unsupported git URL scheme) is 400, and only a
-/// genuine fault stays a 500.
+/// 409, invalid input (a path-traversing alias, an unsupported git URL scheme)
+/// is 400, and only a genuine fault stays a 500.
 fn factory_error_response(e: &FactoryError) -> axum::response::Response {
     match e.kind {
         FactoryErrorKind::Conflict => conflict_error(&e.message),
         FactoryErrorKind::BadRequest => bad_request_error(&e.message),
         FactoryErrorKind::Internal => internal_error(&e.message),
     }
+}
+
+/// CXA-B138: the alias becomes the workspace directory id (`base.join(id)`),
+/// so a path-traversing alias would scaffold — and DELETE rm -rf — outside
+/// the workspace base. Refuse it HERE, before the factory touches the
+/// filesystem. (Empty/absent keeps the derive-from-name fallback.)
+fn refused_alias(alias: Option<&String>) -> Option<axum::response::Response> {
+    let alias = alias.map(String::as_str).filter(|a| !a.is_empty())?;
+    (!coxagent_application::state::is_safe_workspace_id(alias))
+        .then(|| bad_request_error("alias must not contain '/', '\\', '..' or leading dots"))
+}
+
+/// Validate brownfield import path: must be under the hub's workspace root
+/// or under /tmp (safe sandbox). Reject paths pointing to system directories.
+fn refused_import_path(existing: Option<&String>) -> Option<axum::response::Response> {
+    let existing = existing?;
+    if existing.trim().is_empty() {
+        return None;
+    }
+    let p = std::path::Path::new(existing.trim());
+    // Resolve to absolute canonical path to prevent symlink tricks.
+    let real = p.canonicalize().ok()?;
+    // Allow under /tmp or under $HOME (typical user repos).
+    // Block system directories.
+    let path_str = real.to_string_lossy();
+    // Block if path equals a blocked directory, or if it starts with
+    // a blocked directory plus '/', to catch `/private/etc/foo` etc.
+    let blocked_prefixes = [
+        "/etc",
+        "/private/etc",
+        "/root",
+        "/var/run",
+        "/var/log",
+        "/usr/lib",
+        "/usr/sbin",
+        "/bin",
+        "/sbin",
+        "/dev",
+        "/proc",
+        "/sys",
+    ];
+    let blocked = blocked_prefixes.iter().any(|pfx| {
+        path_str == *pfx
+            || path_str.starts_with(pfx)
+                && path_str.as_bytes().get(pfx.len()).copied() == Some(b'/')
+    });
+    blocked.then(|| {
+        (
+            StatusCode::FORBIDDEN,
+            "cannot import from this path".to_owned(),
+        )
+            .into_response()
+    })
 }
 
 /// Onboard a new project from the dashboard (greenfield, or brownfield import
@@ -113,42 +166,11 @@ pub(super) async fn create_project(
     if name.is_empty() {
         return (StatusCode::BAD_REQUEST, "name is required").into_response();
     }
-    // Validate brownfield import path: must be under the hub's workspace root
-    // or under /tmp (safe sandbox). Reject paths pointing to system directories.
-    if let Some(ref existing) = req.existing {
-        if !existing.trim().is_empty() {
-            let p = std::path::Path::new(existing.trim());
-            // Resolve to absolute canonical path to prevent symlink tricks.
-            if let Ok(real) = p.canonicalize() {
-                // Allow under /tmp or under $HOME (typical user repos).
-                // Block system directories.
-                let path_str = real.to_string_lossy();
-                // Block if path equals a blocked directory, or if it starts with
-                // a blocked directory plus '/', to catch `/private/etc/foo` etc.
-                let blocked_prefixes = [
-                    "/etc",
-                    "/private/etc",
-                    "/root",
-                    "/var/run",
-                    "/var/log",
-                    "/usr/lib",
-                    "/usr/sbin",
-                    "/bin",
-                    "/sbin",
-                    "/dev",
-                    "/proc",
-                    "/sys",
-                ];
-                let blocked = blocked_prefixes.iter().any(|pfx| {
-                    path_str == *pfx
-                        || path_str.starts_with(pfx)
-                            && path_str.as_bytes().get(pfx.len()).copied() == Some(b'/')
-                });
-                if blocked {
-                    return (StatusCode::FORBIDDEN, "cannot import from this path").into_response();
-                }
-            }
-        }
+    if let Some(refusal) = refused_alias(req.alias.as_ref()) {
+        return refusal;
+    }
+    if let Some(refusal) = refused_import_path(req.existing.as_ref()) {
+        return refusal;
     }
     let handle = match factory(NewProjectReq {
         name,
@@ -163,6 +185,10 @@ pub(super) async fn create_project(
     .await
     {
         Ok(h) => h,
+        // CXA-B129/CXA-B138/CXA-B139: the factory classifies its failures —
+        // an expected client conflict (the target workspace already holds
+        // tickets) reaches the client as 409, invalid input as 400, and only
+        // a genuine fault stays a 500.
         Err(e) => return factory_error_response(&e),
     };
     let id = handle.id.clone();
@@ -221,6 +247,11 @@ pub(super) async fn rename_project_ep(
 /// it from the hub and the registry, and remove the workspace scaffolding from
 /// disk. Every step that could resurrect the project under a recreated id is
 /// fatal (500); a 200 therefore means the stored state is really gone.
+///
+/// CXA-B138: onboarding refuses path-traversing ids, so a separator-carrying
+/// pid can only get here from a hand-edited registry — and deletion must keep
+/// working for exactly that cleanup. Do NOT 400-guard this route on the id
+/// shape; that would strand the escaped workspace it exists to remove.
 pub(super) async fn delete_project_ep(
     State(app): State<AppState>,
     Path(pid): Path<String>,

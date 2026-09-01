@@ -1328,8 +1328,9 @@ fn conflict_error(msg: &str) -> axum::response::Response {
         .into_response()
 }
 
-/// Invalid client input (CXA-B139): the same JSON error shape, but 400 so the
-/// client learns the request itself was bad — retrying can never succeed.
+/// Invalid client input (CXA-B138, CXA-B139): the same JSON error shape, but
+/// 400 so the client learns the request itself was bad — retrying can never
+/// succeed.
 fn bad_request_error(msg: &str) -> axum::response::Response {
     (
         axum::http::StatusCode::BAD_REQUEST,

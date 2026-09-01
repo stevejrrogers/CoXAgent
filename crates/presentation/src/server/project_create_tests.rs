@@ -1,8 +1,9 @@
-//! CXA-B129/CXA-B139 regression: `POST /api/projects` maps the injected
-//! factory's failure CLASS to the right status — an expected client conflict
-//! (the target workspace already holds tickets, e.g. after delete-then-recreate
-//! against a surviving store row) is 409, invalid client input (a bad git URL
-//! scheme) is 400, both with the same JSON error shape, never a 500.
+//! CXA-B129/CXA-B138/CXA-B139 regression: `POST /api/projects` maps the
+//! injected factory's failure CLASS to the right status — an expected client
+//! conflict (the target workspace already holds tickets, e.g. after
+//! delete-then-recreate against a surviving store row) is 409, invalid client
+//! input (a bad git URL scheme, a path-traversing alias) is 400, both with the
+//! same JSON error shape, never a 500.
 //! Pure in-process: requests answered via `tower::ServiceExt::oneshot`, no
 //! hub process, no host harness, no TCP port.
 
@@ -38,6 +39,10 @@ fn factory_returning(result: Result<ProjectHandle, FactoryError>) -> ProjectFact
 }
 
 async fn post_create(state: AppState) -> axum::response::Response {
+    post_create_with_body(state, r#"{"name":"QA-B126-Conflict"}"#).await
+}
+
+async fn post_create_with_body(state: AppState, body: &str) -> axum::response::Response {
     Router::new()
         .route("/api/projects", post(super::projects::create_project))
         .with_state(state)
@@ -46,7 +51,7 @@ async fn post_create(state: AppState) -> axum::response::Response {
                 .method("POST")
                 .uri("/api/projects")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"name":"QA-B126-Conflict"}"#))
+                .body(Body::from(body.to_owned()))
                 .expect("well-formed request"),
         )
         .await
@@ -108,6 +113,112 @@ async fn a_bad_request_failure_is_mapped_to_400_with_the_error_json() {
     assert_eq!(
         body["error"], "git URL must start with git@, https:// or http://",
         "the operator-facing message must survive the status mapping"
+    );
+}
+
+/// CXA-B138: a path-traversing alias would be `base.join`-ed into a workspace
+/// OUTSIDE the hub's workspace base (the docker deploy escapes to container
+/// root, and DELETE then `rm -rf`s it). The route must refuse it with 400
+/// BEFORE the factory is ever called — the factory below panics to prove it.
+#[tokio::test]
+async fn a_path_traversing_alias_is_refused_with_400_before_the_factory_runs() {
+    let factory_was_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = Arc::clone(&factory_was_called);
+    let app = hub_with_factory(Arc::new(move |_req| {
+        seen.store(true, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async {
+            Err::<ProjectHandle, FactoryError>(FactoryError::internal("must never run"))
+        })
+    }))
+    .await;
+
+    for alias in [
+        "../qatrav-esc", // the ticket's repro
+        "..\\qatrav",
+        "qa/../trav",
+        "..",
+        ".",
+        ".hidden",
+        "a/b",
+    ] {
+        let body = format!(
+            r#"{{"name":"QA Trav","alias":"{}"}}"#,
+            alias.replace('\\', "\\\\")
+        );
+        let resp = post_create_with_body(app.clone(), &body).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "alias {alias:?} must be refused with 400"
+        );
+        let body = body_json(resp).await;
+        assert!(
+            body["error"].as_str().unwrap_or_default().contains("alias"),
+            "the refusal must say why: {body}"
+        );
+    }
+    assert!(
+        !factory_was_called.load(std::sync::atomic::Ordering::SeqCst),
+        "the factory must never see a traversing alias"
+    );
+}
+
+/// The honest counterpart: a plain alias still reaches the factory untouched.
+#[tokio::test]
+async fn a_plain_alias_still_reaches_the_factory() {
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let recorder = Arc::clone(&seen);
+    let app = hub_with_factory(Arc::new(move |req| {
+        *recorder.lock().expect("poisoned") = Some(req.alias);
+        Box::pin(async {
+            Err::<ProjectHandle, FactoryError>(FactoryError::internal("stop after capture"))
+        })
+    }))
+    .await;
+
+    let resp = post_create_with_body(app, r#"{"name":"QA Trav","alias":"QATRAV"}"#).await;
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        *seen.lock().expect("poisoned"),
+        Some(Some("QATRAV".to_owned()))
+    );
+}
+
+/// Pin the empty-alias contract: "" stays on the derive-from-name fallback —
+/// the refusal filter skips it and the port's guard exempts it, so neither
+/// layer may turn `{"alias":""}` into a 400.
+#[tokio::test]
+async fn an_empty_alias_falls_through_to_the_factory_unchanged() {
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let recorder = Arc::clone(&seen);
+    let app = hub_with_factory(Arc::new(move |req| {
+        *recorder.lock().expect("poisoned") = Some(req.alias);
+        Box::pin(async {
+            Err::<ProjectHandle, FactoryError>(FactoryError::internal("stop after capture"))
+        })
+    }))
+    .await;
+
+    let resp = post_create_with_body(app, r#"{"name":"QA Trav","alias":""}"#).await;
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(*seen.lock().expect("poisoned"), Some(Some(String::new())));
+}
+
+/// The port may also refuse a request itself (CXA-B138): a factory-classified
+/// bad request reaches the client as 400 with the JSON error shape, never 500.
+#[tokio::test]
+async fn a_factory_classified_bad_request_is_mapped_to_400() {
+    let app = hub_with_factory(factory_returning(Err(FactoryError::bad_request(
+        "alias \"../x\" must not contain '/', '\\', '..' or leading dots",
+    ))))
+    .await;
+
+    let resp = post_create(app).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    assert!(
+        body["error"].as_str().unwrap_or_default().contains("alias"),
+        "the operator-facing message must survive the status mapping: {body}"
     );
 }
 
