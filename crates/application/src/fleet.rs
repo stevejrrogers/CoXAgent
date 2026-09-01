@@ -675,7 +675,10 @@ mod tests {
             Some("s1".to_owned()),
             &state,
             "2026-09-01",
-            BudgetCaps { lifetime_usd: Some(20.0), daily_usd: Some(5.0) },
+            BudgetCaps {
+                lifetime_usd: Some(20.0),
+                daily_usd: Some(5.0),
+            },
         );
         assert_eq!(snap.spend_total_usd, 12.5);
         assert_eq!(snap.spend_today_usd, 3.25);

@@ -20,7 +20,9 @@ async fn auto_issue_mints_once_and_stays_idempotent() {
         return;
     };
     if common::is_live_hub_db(&dsn).await {
-        eprintln!("COXAGENT_TEST_PG_DSN points at a LIVE hub database — refusing the auth harvest test");
+        eprintln!(
+            "COXAGENT_TEST_PG_DSN points at a LIVE hub database — refusing the auth harvest test"
+        );
         return;
     }
     let svc = SqlAuthService::connect(&dsn)
