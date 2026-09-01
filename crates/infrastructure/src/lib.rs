@@ -17,6 +17,7 @@ pub mod git;
 pub mod kv_doc;
 pub mod notifier;
 pub mod outbox;
+mod pg;
 pub mod pr_report;
 pub mod probe;
 pub mod proc;
