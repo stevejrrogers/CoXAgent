@@ -1,9 +1,14 @@
 name: CI
 
+# Cost discipline (2026-09): CI runs ONCE per change — on the merge to main —
+# not on every PR push. Every merge is already verified locally (clippy, full
+# test suite, Playwright) by the SA review lane before it lands; the Actions
+# run on main is the independent record, and workflow_dispatch covers ad-hoc
+# runs. This halves billed minutes without weakening the merge bar.
 on:
   push:
     branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
