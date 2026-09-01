@@ -173,6 +173,8 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/docs/:id/move", &["post"]),
     route("/api/projects/:pid/docs/:id/ws", &["get"]),
     route("/api/projects/:pid/docs/generate", &["post"]),
+    route("/api/projects/:pid/lessons/dismiss", &["post"]),
+    route("/api/projects/:pid/lessons/escalate", &["post"]),
     route("/api/projects/:pid/events", &["get"]),
     route("/api/projects/:pid/file", &["get"]),
     route("/api/projects/:pid/git/auth", &["get"]),

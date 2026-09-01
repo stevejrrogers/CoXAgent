@@ -474,6 +474,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
 
         let failed = failed_sha.clone().unwrap_or_default();
         let short_target = short_sha(target_sha);
+        let incident_at = crate::state::now_rfc3339();
         let mood = if rolled_forward {
             "rolled-forward/stale"
         } else {
@@ -485,14 +486,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         );
 
         // Blacklist + durable record + #incidents surface in ONE state mutation:
-        // they describe the same incident and must land atomically.
+        // they describe the same incident and must land atomically. The stamp
+        // is minted once: it is also the once-per-incident identity the lesson
+        // efficacy loop dedupes and dismisses on (CXA-F306).
         crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
             if !failed.is_empty() {
                 s.rolled_back_commits.insert(failed.clone());
             }
             s.post_chat_in("SM", &body, INCIDENTS_CHANNEL, Vec::new());
             s.incidents.push(crate::state::IncidentRecord {
-                at: crate::state::now_rfc3339(),
+                at: incident_at.clone(),
                 reason: reason.to_owned(),
                 failed_sha: failed.clone(),
                 to_sha: target_sha.to_owned(),
@@ -525,6 +528,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         })
         .await
         .ok();
+
+        // CXA-F306: does this failure class ALREADY have a lesson? Match the
+        // summary against existing project + hub lessons and increment the
+        // hit's recurrence count (once per incident). Best-effort like the
+        // rest of this path — a matching failure never delays the cycle.
+        self.match_lesson_recurrence(&summary, reason, &incident_at)
+            .await;
     }
     /// File a High bug when a rollback attempt itself fails (deduped on an
     /// open one) — the root-cause failure already filed its own bug via

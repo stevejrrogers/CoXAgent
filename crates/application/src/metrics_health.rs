@@ -104,6 +104,12 @@ pub struct CyclePerfSummary {
     /// operator-side mirror of this agent-side overlay. Additive; old clients
     /// that never read the key are unaffected.
     pub attention: crate::metrics_governance::AttentionSummary,
+    /// Lesson efficacy loop (CXA-F306): per-lesson recorded-at, recurrence
+    /// counts, most recent recurrence, linked incidents and escalation, so
+    /// the Hub lessons page can show whether a lesson actually prevented its
+    /// failure class from recurring. Additive on the same contract as
+    /// `attention`; old clients unaffected.
+    pub lesson_efficacy: crate::lesson_efficacy::LessonEfficacy,
 }
 
 /// One day of a time-series trend (line-chart point).
@@ -353,6 +359,7 @@ pub fn compute_cycle_perf(state: &ProjectState, now_day: &str) -> CyclePerfSumma
         deploy_7d,
         burn_warning: detect_burn_warning(state),
         attention: crate::metrics_governance::attention_summary(state, now_day),
+        lesson_efficacy: crate::lesson_efficacy::lesson_efficacy(state),
     }
 }
 

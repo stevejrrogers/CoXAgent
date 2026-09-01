@@ -35,6 +35,7 @@ mod forge;
 mod forge_feedback;
 mod forge_merge;
 mod forge_review;
+mod lesson_sweep;
 mod ops;
 mod qa_evidence;
 mod recovery;
@@ -797,6 +798,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.memory_hygiene().await;
             // Self-tuning: react to our own evals (daily) — quality/intake brakes.
             self.self_tune().await;
+            // Lesson efficacy (CXA-F306, daily): force lessons with 2+
+            // recurrences into structural fixes — chore first, then a bug
+            // when a closed chore failed to stop the recurrence.
+            self.lesson_efficacy_sweep().await;
             // Forge hygiene: rebase open PRs onto the moving base + learn
             // from PRs a human closed without merging.
             self.forge_hygiene().await;
