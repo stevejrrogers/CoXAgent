@@ -62,7 +62,7 @@ use coxagent_application::{PortError, ProjectState};
 use coxagent_domain::{SemVer, TicketId};
 use coxagent_infrastructure::{FileAuthService, JsonStateStore, RestStateStore};
 use coxagent_presentation::{HubExtras, ProjectHandle};
-use rest_store_support::{NOW, PID, now_rfc3339, rest_store, sample_bug, sample_ticket};
+use rest_store_support::{now_rfc3339, rest_store, sample_bug, sample_ticket, NOW, PID};
 
 /// A second project: the outside personas' ONLY membership, so any access to
 /// [`PID`] is cross-project by construction.

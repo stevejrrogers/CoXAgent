@@ -91,13 +91,13 @@ const F248_FOOTPRINT: &[(&str, &str)] = &[
         "crates/application/src/use_cases/run_test.rs",
         "config.deploy.host_port",
     ),
-    ("crates/presentation/src/web/js/chat.js", "class=\"tcrepro\""),
+    (
+        "crates/presentation/src/web/js/chat.js",
+        "class=\"tcrepro\"",
+    ),
     ("crates/presentation/src/web/app.css", "tcrepro"),
     ("e2e/specs/evidence-repro.spec.ts", FIELD),
-    (
-        "crates/app/tests/evidence_repro_routes_f248_tdd.rs",
-        TICKET,
-    ),
+    ("crates/app/tests/evidence_repro_routes_f248_tdd.rs", TICKET),
 ];
 
 /// The documented pre-existing red list (AC5): the CXA-B037 engine-spawn
@@ -208,7 +208,8 @@ fn merges() -> Vec<Landing> {
 /// (`config.deploy.host_port`). Each criterion's evidence must end up with
 /// its OWN resolved repro on the deployed app's base.
 #[test]
-fn ac1_api_and_screenshot_evidence_with_a_verdict_route_show_the_clickable_repro_link_per_criterion() {
+fn ac1_api_and_screenshot_evidence_with_a_verdict_route_show_the_clickable_repro_link_per_criterion(
+) {
     const AC_API: &str = "Toggling autosave shows a saved indicator";
     const AC_SHOT: &str = "Reloading keeps the toggle state";
     const AC_NEITHER: &str = "Autosave survives a slow network";
@@ -257,12 +258,7 @@ fn ac1_api_and_screenshot_evidence_with_a_verdict_route_show_the_clickable_repro
     );
 
     let cases = state.tickets[0].test_cases();
-    let repro_of = |i: usize| {
-        cases[i]
-            .evidence
-            .as_ref()
-            .and_then(|e| e.repro.as_deref())
-    };
+    let repro_of = |i: usize| cases[i].evidence.as_ref().and_then(|e| e.repro.as_deref());
     assert_eq!(
         repro_of(0),
         Some("http://127.0.0.1:8101/settings"),
@@ -290,11 +286,13 @@ fn ac1_api_and_screenshot_evidence_with_a_verdict_route_show_the_clickable_repro
 #[test]
 fn ac1_the_reviewer_panel_anchor_opens_the_recorded_reproduction() {
     let chat = flat(&read("crates/presentation/src/web/js/chat.js"));
-    let at = chat
-        .find("class=\"tcrepro\"")
-        .unwrap_or_else(|| panic!("the reviewer panel no longer renders the evidence \
+    let at = chat.find("class=\"tcrepro\"").unwrap_or_else(|| {
+        panic!(
+            "the reviewer panel no longer renders the evidence \
              reproduction link as a `tcrepro` anchor — point this guard at the \
-             review panel's test-case render"));
+             review panel's test-case render"
+        )
+    });
     let anchor = &chat[at.saturating_sub(200)..at.saturating_add(400)];
     assert!(
         anchor.contains("tc.evidence&&tc.evidence.repro?"),
@@ -596,7 +594,10 @@ fn ac4_the_complete_f248_delta_lands_as_exactly_one_truthful_merge_off_feat_cxa_
         landing.subject
     );
     assert!(
-        !landing.subject.to_lowercase().contains(MISLABELED_TITLE_FRAGMENT),
+        !landing
+            .subject
+            .to_lowercase()
+            .contains(MISLABELED_TITLE_FRAGMENT),
         "the landed merge's subject must not carry the unrelated 'loading \
              skeletons' title — subject: {}",
         landing.subject
@@ -607,7 +608,8 @@ fn ac4_the_complete_f248_delta_lands_as_exactly_one_truthful_merge_off_feat_cxa_
     let base_tip = git(&["rev-parse", BASE_BRANCH]);
     let base_tip = base_tip.trim();
     assert!(
-        !base_tip.is_empty() && git_ok(&["rev-parse", "--verify", &format!("{base_tip}^{{commit}}")]),
+        !base_tip.is_empty()
+            && git_ok(&["rev-parse", "--verify", &format!("{base_tip}^{{commit}}")]),
         "{BASE_BRANCH} must resolve — point this guard at the branch the slice is cut from"
     );
     assert!(

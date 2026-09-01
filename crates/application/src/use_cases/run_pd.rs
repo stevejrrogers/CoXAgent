@@ -627,7 +627,10 @@ mod tests {
     #[test]
     fn renderable_svg_accepts_xml_prolog_and_comments() {
         let svg = "<?xml version=\"1.0\"?>\n<!-- mockup -->\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"><rect width=\"5\" height=\"5\"/></svg>";
-        assert!(renderable_svg(svg), "XML prolog + comment before <svg> is valid");
+        assert!(
+            renderable_svg(svg),
+            "XML prolog + comment before <svg> is valid"
+        );
         assert!(!renderable_svg("<?xml version=\"1.0\"?><div></div>"));
     }
 
