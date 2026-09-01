@@ -13,9 +13,8 @@ use coxagent_application::ports::outbound::{
 use coxagent_application::state::{ProjectState, SCHEMA_VERSION};
 use coxagent_application::PortError;
 use coxagent_domain::{Role, TicketId};
-use deadpool_postgres::{Config, Pool, Runtime};
+use deadpool_postgres::Pool;
 use std::sync::Arc;
-use tokio_postgres::NoTls;
 
 use super::quarantine::{gate_save, QuarantineLedger};
 
@@ -101,11 +100,9 @@ impl SqlStateStore {
     /// [`PortError::Backend`] if the pool cannot be built or the schema
     /// migration fails.
     pub async fn connect(dsn: &str, project_id: impl Into<String>) -> Result<Self, PortError> {
-        let mut cfg = Config::new();
-        cfg.url = Some(dsn.to_owned());
-        let pool = cfg
-            .create_pool(Some(Runtime::Tokio1), NoTls)
-            .map_err(|e| PortError::Backend(format!("pool: {e}")))?;
+        let pool = crate::pg::pool(dsn, "state")
+            .await
+            .map_err(PortError::Backend)?;
         let store = Self {
             pool,
             project_id: project_id.into(),
