@@ -143,8 +143,13 @@ fn comment_text(src: &str) -> String {
 /// deploy-smoke job exists, is ungated, runs the smoke test with `--ignored`,
 /// and the workflow triggers on pushes to main and on pull requests.
 fn why_not_wired(src: &str) -> Result<(), String> {
-    if !src.contains("branches: [main]") || !src.contains("pull_request:") {
-        return Err("workflow must trigger on pushes to main and on pull requests".to_owned());
+    // Cost discipline (2026-09): the contract is push-to-main (+ manual
+    // dispatch), NOT per-PR — PRs are verified locally by the review lane
+    // before merging, so billed minutes are spent once per change.
+    if !src.contains("branches: [main]") || !src.contains("workflow_dispatch:") {
+        return Err(
+            "workflow must trigger on pushes to main and allow workflow_dispatch".to_owned(),
+        );
     }
     let block =
         job_block(src, SMOKE_JOB).ok_or_else(|| format!("no `{SMOKE_JOB}` job in the workflow"))?;
@@ -309,7 +314,7 @@ fn a_regated_job_is_caught() {
 on:
   push:
     branches: [main]
-  pull_request:
+  workflow_dispatch:
 jobs:
   deploy-smoke:
     if: false
@@ -330,7 +335,7 @@ fn step_level_conditions_are_not_a_job_gate() {
 on:
   push:
     branches: [main]
-  pull_request:
+  workflow_dispatch:
 jobs:
   deploy-smoke:
     name: docker compose smoke (app answers on 8101)
@@ -352,7 +357,7 @@ fn dropping_ignored_runs_nothing_and_is_caught() {
 on:
   push:
     branches: [main]
-  pull_request:
+  workflow_dispatch:
 jobs:
   deploy-smoke:
     name: docker compose smoke (app answers on 8101)
@@ -367,7 +372,7 @@ jobs:
 fn losing_a_trigger_is_caught() {
     let src = "\
 on:
-  pull_request:
+  workflow_dispatch:
 jobs:
   deploy-smoke:
     name: docker compose smoke (app answers on 8101)
@@ -384,7 +389,7 @@ fn a_missing_job_is_caught() {
 on:
   push:
     branches: [main]
-  pull_request:
+  workflow_dispatch:
 jobs:
   check:
     name: fmt · clippy · test
@@ -399,7 +404,7 @@ fn a_regated_quality_job_is_caught() {
 on:
   push:
     branches: [main]
-  pull_request:
+  workflow_dispatch:
 jobs:
   check:
     if: false
@@ -420,7 +425,7 @@ fn a_dropped_gate_step_is_caught() {
 on:
   push:
     branches: [main]
-  pull_request:
+  workflow_dispatch:
 jobs:
   check:
     name: fmt · clippy · test
@@ -441,7 +446,7 @@ fn a_missing_quality_job_is_caught() {
 on:
   push:
     branches: [main]
-  pull_request:
+  workflow_dispatch:
 jobs:
   deploy-build:
     name: release build (linux, as the Docker builder sees it)
@@ -463,7 +468,7 @@ fn wired_workflow() -> String {
 on:
   push:
     branches: [main]
-  pull_request:
+  workflow_dispatch:
 jobs:
   deploy-smoke:
     name: docker compose smoke (app answers on 8101)
