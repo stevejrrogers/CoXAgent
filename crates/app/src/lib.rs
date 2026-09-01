@@ -29,6 +29,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+mod backup;
 mod builders;
 mod config_load;
 mod host_port;
@@ -198,6 +199,25 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             run_hub(&registry, port).await?;
             Ok(String::new())
         }
+        Command::Backup {
+            hub_dir,
+            out,
+            include_secrets,
+        } => {
+            // Same pickup as Hub: coordination.json DSNs must show up in the
+            // backup's "not captured (externally backed)" warnings.
+            load_coordination(&hub_dir);
+            backup::run_backup(&hub_dir, out, include_secrets).await
+        }
+        Command::Restore {
+            archive,
+            hub_dir,
+            force,
+            dry_run,
+        } => {
+            load_coordination(&hub_dir);
+            backup::run_restore(&archive, &hub_dir, force, dry_run).await
+        }
         Command::Run {
             work_dir,
             context,
@@ -322,13 +342,14 @@ mod project_id_tests {
     }
 }
 
-/// CXA-B129: the onboarding refusal must arrive at the API classified as a
-/// client conflict — the glue between [`onboard::OnboardConflict`] and the
+/// CXA-B129/CXA-B139: onboarding failures must arrive at the API classified —
+/// the glue between [`onboard::OnboardConflict`] / input validation and the
 /// presentation layer's [`FactoryError`].
 #[cfg(test)]
 mod onboard_error_classification_tests {
     use super::classify_onboard_error;
     use crate::onboard::OnboardConflict;
+    use coxagent_presentation::FactoryErrorKind;
 
     #[test]
     fn the_re_onboard_refusal_is_classified_as_a_conflict() {
@@ -336,7 +357,11 @@ mod onboard_error_classification_tests {
             "workspace already has tickets; refusing to re-onboard".into(),
         ));
         let mapped = classify_onboard_error(err.as_ref());
-        assert!(mapped.conflict, "the refusal must map to 409 material");
+        assert_eq!(
+            mapped.kind,
+            FactoryErrorKind::Conflict,
+            "the refusal must map to 409 material"
+        );
         assert_eq!(
             mapped.message,
             "workspace already has tickets; refusing to re-onboard"
@@ -347,8 +372,157 @@ mod onboard_error_classification_tests {
     fn any_other_onboarding_failure_stays_a_server_fault() {
         let err: Box<dyn std::error::Error> = "store unreachable".into();
         let mapped = classify_onboard_error(err.as_ref());
-        assert!(!mapped.conflict, "an ordinary fault must map to 500");
+        assert_eq!(
+            mapped.kind,
+            FactoryErrorKind::Internal,
+            "an ordinary fault must map to 500"
+        );
         assert_eq!(mapped.message, "store unreachable");
+    }
+}
+
+/// CXA-B136: `onboard_project` scaffolds `state/` (+ `codebase/`) BEFORE the
+/// conflict checks run, so a refused/failed onboarding used to leave half-built
+/// workspace dirs behind — debris that occupies the derived id (forcing
+/// `-2`-suffixed recreates) and reads as a real project to ops.
+#[cfg(test)]
+mod onboard_scaffold_cleanup_tests {
+    use super::{onboard_project, unique_id};
+    use coxagent_presentation::{FactoryErrorKind, NewProjectReq};
+    use std::path::PathBuf;
+
+    fn request(alias: &str) -> NewProjectReq {
+        NewProjectReq {
+            name: "QA B136 Debris".to_owned(),
+            alias: Some(alias.to_owned()),
+            ..Default::default()
+        }
+    }
+
+    /// An unsupported git scheme is refused after `state/` exists but before
+    /// any network work — the exact "created then failed" shape. The workspace
+    /// must be gone afterwards and the id free for the next recreate.
+    #[tokio::test]
+    async fn a_failed_onboarding_removes_the_workspace_it_scaffolded() {
+        let base = tempfile::tempdir().expect("tmp");
+        let registry = base.path().join("registry.json");
+        let req = NewProjectReq {
+            git_url: Some("ftp://example.invalid/repo.git".to_owned()),
+            ..request("QAB136")
+        };
+        let Err(err) = onboard_project(base.path(), &registry, req, None).await else {
+            panic!("an unsupported git scheme must refuse the onboarding");
+        };
+        assert_eq!(
+            err.kind,
+            FactoryErrorKind::BadRequest,
+            "a bad git URL is the client's bad input (400), not a 409 conflict or a 500 fault"
+        );
+        assert!(
+            !base.path().join("qab136").exists(),
+            "the failed onboarding must not leave the scaffolded workspace behind"
+        );
+        assert_eq!(
+            unique_id(base.path(), "qab136"),
+            "qab136",
+            "the id must be free again — no `-2` suffix on the next recreate"
+        );
+    }
+
+    /// A brownfield adoption of a missing codebase fails inside
+    /// `onboard::brownfield`, after the store was built — the same cleanup
+    /// must apply to every error path, not just the URL check.
+    #[tokio::test]
+    async fn a_brownfield_onboard_of_a_missing_codebase_leaves_no_debris() {
+        let base = tempfile::tempdir().expect("tmp");
+        let registry = base.path().join("registry.json");
+        let req = NewProjectReq {
+            existing: Some(PathBuf::from("/nonexistent/qab136/codebase")),
+            ..request("QAB136")
+        };
+        assert!(onboard_project(base.path(), &registry, req, None)
+            .await
+            .is_err());
+        assert!(
+            !base.path().join("qab136").exists(),
+            "the failed adoption must not leave the scaffolded workspace behind"
+        );
+    }
+}
+
+/// CXA-B138: the alias becomes the workspace directory id (`base.join(id)`),
+/// so `../name` used to scaffold — and DELETE `rm -rf` — OUTSIDE the hub's
+/// workspace base (on the docker deploy, at container root). The port must
+/// refuse such an alias before any IO and classify it bad-request (HTTP 400),
+/// not a server fault.
+#[cfg(test)]
+mod onboard_alias_traversal_tests {
+    use super::onboard_project;
+    use coxagent_presentation::{FactoryErrorKind, NewProjectReq};
+
+    fn request(alias: &str) -> NewProjectReq {
+        NewProjectReq {
+            name: "QA Trav".to_owned(),
+            alias: Some(alias.to_owned()),
+            ..Default::default()
+        }
+    }
+
+    /// The ticket's repro, at the port: nothing may be created inside OR
+    /// outside the workspace base, and the registry must stay untouched.
+    #[tokio::test]
+    async fn a_traversing_alias_is_refused_before_any_directory_is_created() {
+        let root = tempfile::tempdir().expect("tmp");
+        let base = root.path().join("workspaces");
+        std::fs::create_dir_all(&base).expect("workspace base");
+        let registry = base.join("registry.json");
+
+        let Err(err) = onboard_project(&base, &registry, request("../qatrav-esc"), None).await
+        else {
+            panic!("a traversing alias must refuse the onboarding");
+        };
+        assert_eq!(
+            err.kind,
+            FactoryErrorKind::BadRequest,
+            "a refused alias is client input, not a server fault"
+        );
+        assert!(
+            !root.path().join("qatrav-esc").exists(),
+            "no workspace may be scaffolded outside the base"
+        );
+        let created: Vec<String> = std::fs::read_dir(&base)
+            .expect("base listing")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            created.is_empty(),
+            "nothing may be scaffolded inside the base either: {created:?}"
+        );
+        assert!(!registry.exists(), "the registry must not gain an entry");
+    }
+
+    /// Every traversal shape the ticket names is refused the same way —
+    /// including `\`, which only escapes on Windows hosts.
+    #[tokio::test]
+    async fn every_path_separator_shape_is_refused_as_bad_request() {
+        let base = tempfile::tempdir().expect("tmp");
+        let registry = base.path().join("registry.json");
+        for alias in ["..\\qatrav-esc", "qa/../trav", "a/b", "..", ".hidden"] {
+            let Err(err) = onboard_project(base.path(), &registry, request(alias), None).await
+            else {
+                panic!("alias {alias:?} must refuse the onboarding");
+            };
+            assert_eq!(
+                err.kind,
+                FactoryErrorKind::BadRequest,
+                "alias {alias:?} must classify bad-request"
+            );
+        }
+        assert!(
+            !registry.exists(),
+            "no refused attempt may register anything"
+        );
     }
 }
 
@@ -733,6 +907,9 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
         // without a restart.
         recoveries: Some(recoveries),
     };
+    // CXA-F262: scheduled workspace backups run on the same code path as
+    // `coxagent backup`, so a live-serving capture is exercised continuously.
+    backup::spawn_scheduled(base.clone());
     coxagent_presentation::serve_full(projects, port, audit, extras).await?;
     Ok(())
 }
@@ -771,17 +948,56 @@ async fn onboard_project(
     req: coxagent_presentation::NewProjectReq,
     auth: Option<&Arc<dyn coxagent_application::auth::AuthPort>>,
 ) -> Result<coxagent_presentation::ProjectHandle, FactoryError> {
-    let name = req.name.trim();
     let derived = req
         .alias
         .clone()
-        .unwrap_or_else(|| coxagent_application::state::derive_alias(name));
+        .unwrap_or_else(|| coxagent_application::state::derive_alias(req.name.trim()));
+    // CXA-B138: the id becomes the workspace directory (`base.join(id)`), so a
+    // path-traversing alias must be refused before ANY filesystem work — the
+    // HTTP layer rejects it first; this keeps the port itself safe for every
+    // caller. (An empty derived id keeps the unique_id "project" fallback.)
+    if !derived.is_empty() && !coxagent_application::state::is_safe_workspace_id(&derived) {
+        return Err(FactoryError::bad_request(format!(
+            "alias {derived:?} must not contain '/', '\\', '..' or leading dots"
+        )));
+    }
     let id = unique_id(base, &derived.to_lowercase());
     let proj_dir = base.join(&id);
+
+    // `unique_id` only returns an id whose directory does not exist, so the
+    // scaffold creates a fresh workspace. EVERY failure inside it — a refused
+    // re-onboard (409), a rejected git URL, a store fault — must remove the
+    // scaffold again: a surviving empty dir keeps the derived id occupied
+    // (forcing `-2`-suffixed recreates) and reads as a real project to ops
+    // (CXA-B136).
+    let outcome = scaffold_onboarded_project(base, registry_path, &proj_dir, &id, req, auth).await;
+    if outcome.is_err() && proj_dir.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&proj_dir) {
+            tracing::warn!(
+                "onboard: could not remove the half-scaffolded workspace {}: {e}",
+                proj_dir.display()
+            );
+        }
+    }
+    outcome
+}
+
+/// The scaffold half of [`onboard_project`]: `proj_dir` must not exist yet
+/// ([`unique_id`] guarantees it). Kept separate so the failure unwinding —
+/// discarding the half-built workspace — has exactly one place to live.
+async fn scaffold_onboarded_project(
+    base: &Path,
+    registry_path: &Path,
+    proj_dir: &Path,
+    id: &str,
+    req: coxagent_presentation::NewProjectReq,
+    auth: Option<&Arc<dyn coxagent_application::auth::AuthPort>>,
+) -> Result<coxagent_presentation::ProjectHandle, FactoryError> {
+    let name = req.name.trim();
     let state_dir = proj_dir.join("state");
     std::fs::create_dir_all(&state_dir).map_err(|e| FactoryError::internal(e.to_string()))?;
 
-    let store = make_store(&id, &state_dir)
+    let store = make_store(id, &state_dir)
         .await
         .map_err(|e| FactoryError::internal(e.to_string()))?;
 
@@ -798,7 +1014,10 @@ async fn onboard_project(
                 || url.starts_with("https://")
                 || url.starts_with("http://"))
             {
-                return Err(FactoryError::internal(
+                // CXA-B139: an unsupported scheme is the CLIENT's bad input —
+                // the request can never succeed, so it must be classified as
+                // a bad request (400), not a server fault (500).
+                return Err(FactoryError::bad_request(
                     "git URL must start with git@, https:// or http://",
                 ));
             }
@@ -857,15 +1076,21 @@ async fn onboard_project(
 
     // Assign a unique host port so this project's `docker compose` deploy does
     // not clash with the others on this host.
-    assign_host_port(base, registry_path, &proj_dir)
+    assign_host_port(base, registry_path, proj_dir)
         .map_err(|e| FactoryError::internal(e.to_string()))?;
 
-    append_registry(registry_path, &id, &proj_dir)
+    append_registry(registry_path, id, proj_dir)
         .map_err(|e| FactoryError::internal(e.to_string()))?;
 
-    build_project(&id, &state_dir, work_dir, auth)
+    // The registry entry is already on disk: a failed build must drop it again,
+    // or a restart would re-register a project whose workspace the caller just
+    // discarded.
+    build_project(id, &state_dir, work_dir, auth)
         .await
-        .map_err(|e| FactoryError::internal(e.to_string()))
+        .map_err(|e| {
+            let _ = remove_from_registry(registry_path, id);
+            FactoryError::internal(e.to_string())
+        })
 }
 
 /// Pick an id not already taken by a workspace directory under `base`.
@@ -1590,7 +1815,7 @@ pub(crate) fn worktree_at(work_dir: PathBuf, slug: &str) -> PathBuf {
 ///   1. deletes stray files dumped in the worktrees root (agent scratch);
 ///   2. removes husk dirs git no longer lists as worktrees;
 ///   3. `git worktree remove --force`s registered trees idle > 48 h;
-///   4. deletes the `target/` of trees idle > 6 h (rebuilt on next use).
+///   4. deletes the `target/` of trees idle > 2 h (rebuilt on next use).
 ///
 /// Best-effort throughout: a busy tree just gets skipped this round.
 pub(crate) fn spawn_worktree_janitor(work_dir: std::path::PathBuf) {
@@ -1603,7 +1828,10 @@ pub(crate) fn spawn_worktree_janitor(work_dir: std::path::PathBuf) {
                     reclaimed / (1024 * 1024)
                 );
             }
-            tokio::time::sleep(std::time::Duration::from_secs(6 * 3600)).await;
+            // Hourly, not 6-hourly: a busy night refills ~40 GB of worktree
+            // targets in under two hours — a 6 h cadence let free space fall
+            // to 56 GB four times in one night of manual cleanups.
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
         }
     });
 }
@@ -1699,7 +1927,7 @@ fn worktree_janitor_sweep(work_dir: &std::path::Path) -> u64 {
         }
         // Idle trees lose their target outright; a busy tree is size-capped
         // or stale-trimmed (cargo never garbage-collects; 65 GB seen).
-        reclaimed += sweep_target_dir(&path.join("target"), now, idle >= 6);
+        reclaimed += sweep_target_dir(&path.join("target"), now, idle >= 2);
     }
     let _ = std::process::Command::new("git")
         .arg("-C")

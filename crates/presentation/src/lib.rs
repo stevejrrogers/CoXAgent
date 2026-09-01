@@ -11,8 +11,8 @@ pub mod server;
 
 pub use cli::{parse, Cli, CodegraphQuery, Command};
 pub use server::{
-    serve_full, BrokenProject, FactoryError, HubExtras, NewProjectReq, ProjectFactory,
-    ProjectHandle, ProjectRemover,
+    serve_full, BrokenProject, FactoryError, FactoryErrorKind, HubExtras, NewProjectReq,
+    ProjectFactory, ProjectHandle, ProjectRemover,
 };
 
 use coxagent_application::state::ProjectState;

@@ -650,21 +650,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return;
         };
         self.report("SA", &format!("force-merging PR #{num} for {by}"));
-        let say = |msg: String| {
-            let store = Arc::clone(&self.store);
-            async move {
-                let _ = crate::ports::outbound::mutate_state(store.as_ref(), |s| {
-                    s.post_chat_in("SA", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
-                    Ok(())
-                })
-                .await;
-            }
-        };
         let Ok(prs) = forge.list_open_prs().await else {
             return;
         };
         let Some(pr) = prs.into_iter().find(|p| p.number == num) else {
-            say(if vi {
+            self.say_agents(if vi {
                 format!("⚡ Force-merge #{num} ({by}): PR không còn mở — bỏ qua.")
             } else {
                 format!("⚡ Force-merge #{num} ({by}): the PR is no longer open — skipping.")
@@ -672,79 +662,24 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .await;
             return;
         };
-        if !pr.mergeable {
-            say(if vi {
-                format!(
-                    "⚡ Force-merge #{num} ({by}): runner đang gỡ conflict trên `{}`…",
-                    pr.head
-                )
-            } else {
-                format!(
-                    "⚡ Force-merge #{num} ({by}): the runner is resolving conflicts on `{}`…",
-                    pr.head
-                )
-            })
-            .await;
-            let request = crate::ports::outbound::AgentRequest {
-                role: coxagent_domain::Role::DevBug,
-                system_prompt: crate::prompts::system_prompt(crate::prompts::DEV),
-                task_prompt: format!(
-                    "URGENT: a human ordered PR #{num} (branch `{h}`) force-merged. It has merge \
-                     conflicts with `{b}`.\n\
-                     1. `git fetch origin && git checkout {h} && git pull origin {h}`\n\
-                     2. `git merge origin/{b}` and resolve EVERY conflict, preserving both this \
-                     branch's fix and what already landed on {b}.\n\
-                     3. Run the build/tests to make sure nothing broke.\n\
-                     4. `git add -A && git commit -m \"fix: resolve conflicts for #{num}\"` then \
-                     `git push origin {h}`.",
-                    h = pr.head,
-                    b = pr.base,
-                ),
-                work_dir: self.work_dir.clone(),
-                timeout: std::time::Duration::from_secs(1800),
-                escalation_level: 0,
-                label: None,
-            };
-            let ok = matches!(self.engine.run(request).await, Ok(o) if o.succeeded());
-            if let Some(git) = &self.git {
-                let _ = git.checkout_branch(&self.work_dir, self.flow_base()).await;
-            }
-            if !ok {
-                say(if vi {
-                    format!("⚡ Force-merge #{num}: gỡ conflict THẤT BẠI — cần xử lý tay: {}", pr.url)
-                } else {
-                    format!("⚡ Force-merge #{num}: conflict resolution FAILED — needs a manual fix: {}", pr.url)
-                })
-                .await;
-                return;
-            }
-            if let Err(why) = self.verify_conflict_resolution(num).await {
-                say(if vi {
-                    format!(
-                        "⚡ Force-merge #{num}: verification từ chối ({why}) — KHÔNG merge: {}",
-                        pr.url
-                    )
-                } else {
-                    format!(
-                        "⚡ Force-merge #{num}: verification refused ({why}) — NOT merging: {}",
-                        pr.url
-                    )
-                })
-                .await;
-                return;
-            }
+        if !pr.mergeable
+            && !self
+                .resolve_conflicts_for_force_merge(num, by, vi, &pr)
+                .await
+        {
+            return;
         }
         match forge.merge_pr(num).await {
             Ok(()) => {
-                say(if vi {
+                self.say_agents(if vi {
                     format!("⚡ Force-merge #{num} ({by}): ✅ đã merge.")
                 } else {
                     format!("⚡ Force-merge #{num} ({by}): ✅ merged.")
                 })
-                .await
+                .await;
             }
             Err(e) => {
-                say(if vi {
+                self.say_agents(if vi {
                     format!("⚡ Force-merge #{num}: merge bị từ chối — {e}: {}", pr.url)
                 } else {
                     format!(
@@ -755,6 +690,94 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 .await;
             }
         }
+    }
+    /// Post to #agents as the SA — the narration channel every force-merge leg
+    /// reports through.
+    async fn say_agents(&self, msg: String) {
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            s.post_chat_in("SA", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
+            Ok(())
+        })
+        .await;
+    }
+    /// The `!mergeable` leg of a force-merge: narrate, drive a DevBug agent to
+    /// resolve every conflict on the PR branch, then PROVE the resolution
+    /// (markers + forge-mergeable) before the merge is attempted. `false` means
+    /// the PR must be abandoned — the failure is already narrated.
+    async fn resolve_conflicts_for_force_merge(
+        &self,
+        num: u64,
+        by: &str,
+        vi: bool,
+        pr: &crate::ports::outbound::PullRequest,
+    ) -> bool {
+        self.say_agents(if vi {
+            format!(
+                "⚡ Force-merge #{num} ({by}): runner đang gỡ conflict trên `{}`…",
+                pr.head
+            )
+        } else {
+            format!(
+                "⚡ Force-merge #{num} ({by}): the runner is resolving conflicts on `{}`…",
+                pr.head
+            )
+        })
+        .await;
+        let request = crate::ports::outbound::AgentRequest {
+            role: coxagent_domain::Role::DevBug,
+            system_prompt: crate::prompts::system_prompt(crate::prompts::DEV),
+            task_prompt: format!(
+                "URGENT: a human ordered PR #{num} (branch `{h}`) force-merged. It has merge \
+                 conflicts with `{b}`.\n\
+                 1. `git fetch origin && git checkout {h} && git pull origin {h}`\n\
+                 2. `git merge origin/{b}` and resolve EVERY conflict, preserving both this \
+                 branch's fix and what already landed on {b}.\n\
+                 3. Run the build/tests to make sure nothing broke.\n\
+                 4. `git add -A && git commit -m \"fix: resolve conflicts for #{num}\"` then \
+                 `git push origin {h}`.",
+                h = pr.head,
+                b = pr.base,
+            ),
+            work_dir: self.work_dir.clone(),
+            timeout: std::time::Duration::from_secs(1800),
+            escalation_level: 0,
+            label: None,
+        };
+        let ok = matches!(self.engine.run(request).await, Ok(o) if o.succeeded());
+        if let Some(git) = &self.git {
+            let _ = git.checkout_branch(&self.work_dir, self.flow_base()).await;
+        }
+        if !ok {
+            self.say_agents(if vi {
+                format!(
+                    "⚡ Force-merge #{num}: gỡ conflict THẤT BẠI — cần xử lý tay: {}",
+                    pr.url
+                )
+            } else {
+                format!(
+                    "⚡ Force-merge #{num}: conflict resolution FAILED — needs a manual fix: {}",
+                    pr.url
+                )
+            })
+            .await;
+            return false;
+        }
+        if let Err(why) = self.verify_conflict_resolution(num).await {
+            self.say_agents(if vi {
+                format!(
+                    "⚡ Force-merge #{num}: verification từ chối ({why}) — KHÔNG merge: {}",
+                    pr.url
+                )
+            } else {
+                format!(
+                    "⚡ Force-merge #{num}: verification refused ({why}) — NOT merging: {}",
+                    pr.url
+                )
+            })
+            .await;
+            return false;
+        }
+        true
     }
     /// PROVE a conflict "resolution" actually worked — never trust the engine's
     /// word for it. (1) The pushed diff must contain no conflict markers;

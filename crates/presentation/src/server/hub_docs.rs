@@ -109,6 +109,12 @@ pub(super) struct WorkspaceDoc {
     /// that predates the radar loads clean — no migration.
     #[serde(default)]
     pub(super) dupe_allowlist: Vec<DupeAllow>,
+    /// Hub-level daily soft ceiling for the fleet spend cockpit (CXA-F278),
+    /// in USD; `0` = uncapped. Additive with a serde default, so old
+    /// workspace docs deserialize unchanged and a DOWNGRADED hub (plain
+    /// `Deserialize`, no `deny_unknown_fields`) tolerates the extra key.
+    #[serde(default)]
+    pub(super) fleet_ceiling_usd: f64,
 }
 
 /// One human "keep both" verdict on a cross-project duplicate pair.

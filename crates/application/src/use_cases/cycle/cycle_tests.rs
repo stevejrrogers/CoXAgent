@@ -3016,3 +3016,72 @@ async fn merge_sweep_never_merges_a_human_held_pr() {
         out.skipped
     );
 }
+
+// --- CXA-C016: pin the re-enabled force-merge control plane (drain_jobs →
+// force_merge_job) — the machinery the human "force-merge" button drives. ---
+
+/// Queue a force_merge job for PR #7 the way the API does, then drain it.
+async fn queue_and_drain_force_merge(
+    uc: &RunCycleUseCase<MemStore, impl AgentEnginePort>,
+    store: &MemStore,
+) {
+    let _ = crate::ports::outbound::mutate_state(store, |s| {
+        s.jobs.push(crate::state::PendingJob {
+            id: crate::state::mint_id(),
+            kind: "force_merge".to_owned(),
+            args: serde_json::json!({ "pr": 7 }),
+            queued_at: crate::state::now_rfc3339(),
+            queued_by: "human".to_owned(),
+        });
+        Ok(())
+    })
+    .await;
+    uc.drain_jobs().await;
+}
+
+/// A human force-merges an UNCONFLICTED PR: the runner skips the
+/// conflict-resolution leg entirely and the merge lands.
+#[tokio::test]
+async fn force_merge_of_a_mergeable_pr_skips_resolution_and_merges() {
+    let forge = Arc::new(SpyForge {
+        mergeable: true,
+        ..SpyForge::default()
+    });
+    let store = Arc::new(MemStore::default());
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(ReviewEngine {
+            decision: "approve",
+        }),
+        Config::default(),
+        PathBuf::from("/tmp"),
+        "goal".to_owned(),
+    )
+    .with_forge(Arc::clone(&forge) as Arc<dyn ForgePort>);
+    queue_and_drain_force_merge(&uc, store.as_ref()).await;
+    assert_eq!(*forge.merged.lock().expect("lock"), vec![7]);
+}
+
+/// A human force-merges a CONFLICTED PR but the runner's agent fails to
+/// resolve it: the hard gate holds — no merge is ever attempted.
+#[tokio::test]
+async fn force_merge_of_a_conflicted_pr_whose_resolution_fails_never_merges() {
+    let forge = Arc::new(SpyForge {
+        mergeable: false,
+        ..SpyForge::default()
+    });
+    let store = Arc::new(MemStore::default());
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(FailEngine),
+        Config::default(),
+        PathBuf::from("/tmp"),
+        "goal".to_owned(),
+    )
+    .with_forge(Arc::clone(&forge) as Arc<dyn ForgePort>);
+    queue_and_drain_force_merge(&uc, store.as_ref()).await;
+    assert!(
+        forge.merged.lock().expect("lock").is_empty(),
+        "a conflicted PR whose resolution failed must not be merged"
+    );
+}

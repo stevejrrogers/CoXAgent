@@ -1,8 +1,9 @@
-//! CXA-B079 regression guard: CI must actually run the availability gate.
+//! CI workflow wiring guard (CXA-B079 + CXA-C016): the gates ci.yml declares
+//! must actually run.
 //!
-//! The bug: every job in ci.yml carried `if: false` (0387409f disabled all
-//! GitHub-hosted runs while the repo was private), so the `deploy-smoke` job —
-//! the "app answers on 8101" gate — never executed and availability
+//! The bug (B079): every job in ci.yml carried `if: false` (0387409f disabled
+//! all GitHub-hosted runs while the repo was private), so the `deploy-smoke`
+//! job — the "app answers on 8101" gate — never executed and availability
 //! regressions shipped silently. Re-enabling it was a one-line delete, and it
 //! is exactly as easy to undo. This file pins the wiring: the job exists, no
 //! job-level `if:` disables it, its run step invokes the real `deploy_smoke`
@@ -10,13 +11,30 @@
 //! the workflow triggers on the events the gate must cover — pushes to main
 //! (post-merge verification, the ticket's whole point) and pull requests.
 //!
-//! `why_not_wired` is a pure function over the workflow text that returns
-//! `Err` instead of panicking. The tests at the bottom feed it synthetic
-//! workflows to prove the guard actually bites: re-gating the job, dropping
-//! `--ignored`, or losing a trigger are all caught. Step-level
-//! `if: failure()` / `if: always()` conditions inside the job are legitimate
-//! and must NOT read as a job gate — `job_gate` keys on the exact four-space
-//! indentation of a job-level key, the edge case the real workflow exercises.
+//! C016 extends the same pin to the other two jobs: `check` (the fmt · clippy
+//! · test pedantic baseline, re-enabled once its debt was paid) and
+//! `deploy-build` (the linux release build the Docker builder reproduces).
+//! Each must exist, be ungated, and still run its gate steps — dropping the
+//! fmt step from `check` must fail here, not surface a month later as green
+//! PRs over red gates.
+//!
+//! F286 adds the last two pins. First, a `guard-tests` job (display name
+//! `ownership + CI wiring guards`) must run the reclaimable teardown-policy
+//! tests and the pure deploy_smoke ownership decisions on every push and PR —
+//! docker-free and ungated, so a teardown-policy regression or a docker-less
+//! runner can never paint a false green. Second, both gate jobs must expose
+//! exactly the check-run display names ci.yml documents for branch
+//! protection on main to require as status checks — a rename would otherwise
+//! silently dangle the required checks and unblock merges.
+//!
+//! `why_not_wired` and `why_quality_gates_not_wired` are pure functions over
+//! the workflow text that return `Err` instead of panicking. The tests at the
+//! bottom feed them synthetic workflows to prove the guards actually bite:
+//! re-gating a job, `continue-on-error`ing it, dropping a gate step, or
+//! losing a trigger are all caught. Step-level `if: failure()` /
+//! `if: always()` conditions inside a job are legitimate and must NOT read
+//! as a job gate — `job_gate` keys on the exact four-space indentation of a
+//! job-level key, the edge case the real workflow exercises.
 
 #![allow(clippy::unwrap_used)]
 
@@ -27,6 +45,43 @@ const CI_WORKFLOW: &str = ".github/workflows/ci.yml";
 
 /// The job whose run step must execute the deploy smoke test.
 const SMOKE_JOB: &str = "deploy-smoke";
+
+/// The jobs whose run steps are the quality gates (C016): the pedantic
+/// baseline (`fmt · clippy · test`) and the release build the Docker builder
+/// reproduces. Each entry is `(job, substrings that must appear in its block)`.
+const QUALITY_GATES: [(&str, &[&str]); 2] = [
+    (
+        "check",
+        &[
+            "cargo fmt --all --check",
+            "cargo clippy --all-targets --all-features",
+            "cargo test --all-features",
+        ],
+    ),
+    ("deploy-build", &["cargo build --release --bin coxagent"]),
+];
+
+/// The job that makes the guard tests merge-blocking CI (F286): the
+/// reclaimable teardown policy (protected infrastructure never reclaimable)
+/// and the pure deploy_smoke ownership decisions, plus this file's own
+/// wiring guards — ungated and docker-free, so neither a teardown-policy
+/// regression nor a docker-less runner can paint a false green.
+const GUARD_TESTS_JOB: &str = "guard-tests";
+
+/// The gate commands the guard job must run, as exact run-payload substrings.
+const GUARD_TESTS_STEPS: [&str; 2] = [
+    "cargo test -p coxagent-infrastructure --lib reclaimable",
+    "cargo test -p coxagent-app --test deploy_smoke --test ci_availability_gate",
+];
+
+/// The check-run display names (the jobs' `name:` fields) that branch
+/// protection on main must require as status checks, so merge-blocking is
+/// enactable from repo state alone (F286). GitHub matches a required status
+/// check against exactly this string.
+const REQUIRED_CHECKS: [(&str, &str); 2] = [
+    (SMOKE_JOB, "docker compose smoke (app answers on 8101)"),
+    (GUARD_TESTS_JOB, "ownership + CI wiring guards"),
+];
 
 /// One job's YAML block: from its two-space `  <name>:` line to the next
 /// job-level key or end of file. `None` when the workflow has no such job.
@@ -41,22 +96,47 @@ fn job_block(src: &str, job: &str) -> Option<String> {
     Some(rest[..end].join("\n"))
 }
 
-/// The job-level `if:` gate, if any. Job-level keys sit at exactly four
-/// spaces; step-level conditions (`if: failure()`) sit deeper and never match
-/// — a step that only runs on failure is not a disabled job.
+/// The job-level disable, if any: an `if:` gate or a `continue-on-error`
+/// (a failed run that still reports green — the same silent bypass).
+/// Job-level keys sit at exactly four spaces; step-level conditions
+/// (`if: failure()`) sit deeper and never match — a step that only runs on
+/// failure is not a disabled job.
 fn job_gate(block: &str) -> Option<String> {
     block
         .lines()
-        .find(|l| l.starts_with("    if:"))
+        .find(|l| l.starts_with("    if:") || l.starts_with("    continue-on-error:"))
         .map(|l| l.trim().to_owned())
 }
 
-/// The run step that brings the stack up — the line invoking the smoke test.
-fn smoke_run(block: &str) -> Option<String> {
+/// The job's `run:` payloads (trimmed) — what would actually execute. Both
+/// step spellings count: `run:` on its own line and the inline `- run:` form.
+fn run_payloads(block: &str) -> Vec<String> {
     block
         .lines()
-        .find(|l| l.contains("--test deploy_smoke"))
-        .map(|l| l.trim().to_owned())
+        .filter_map(|l| {
+            let t = l.trim_start();
+            let t = t.strip_prefix("- ").unwrap_or(t);
+            t.strip_prefix("run:").map(|r| r.trim().to_owned())
+        })
+        .collect()
+}
+
+/// The job's check-run display name: its first job-level `    name:` line.
+/// GitHub matches a required status check against exactly this string.
+fn job_display_name(block: &str) -> Option<String> {
+    block
+        .lines()
+        .find_map(|l| l.strip_prefix("    name:").map(str::trim))
+        .map(ToOwned::to_owned)
+}
+
+/// The workflow's comment text — where the repo documents the check-run
+/// display names branch protection on main must require.
+fn comment_text(src: &str) -> String {
+    src.lines()
+        .filter_map(|l| l.trim_start().strip_prefix('#'))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Why would CI not verify availability after a merge? `Ok` only when the
@@ -73,11 +153,108 @@ fn why_not_wired(src: &str) -> Result<(), String> {
             "`{SMOKE_JOB}` is disabled by a job-level `{gate}` — the availability gate never runs"
         ));
     }
-    let run =
-        smoke_run(&block).ok_or_else(|| format!("`{SMOKE_JOB}` never invokes deploy_smoke"))?;
+    let run = run_payloads(&block)
+        .into_iter()
+        .find(|r| r.contains("--test deploy_smoke"))
+        .ok_or_else(|| format!("`{SMOKE_JOB}` never invokes deploy_smoke"))?;
     if !run.contains("--ignored") {
         return Err(
             "the smoke test is #[ignore]d — without `--ignored` cargo runs nothing".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+/// Why would CI not enforce the quality gates after a merge? `Ok` only when
+/// every [`QUALITY_GATES`] job exists, is not disabled by a job-level `if:`,
+/// and still runs each of its gate steps.
+fn why_quality_gates_not_wired(src: &str) -> Result<(), String> {
+    for (job, steps) in QUALITY_GATES {
+        let block = job_block(src, job).ok_or_else(|| format!("no `{job}` job in the workflow"))?;
+        if let Some(gate) = job_gate(&block) {
+            return Err(format!(
+                "`{job}` is disabled by a job-level `{gate}` — the quality gates never run"
+            ));
+        }
+        for step in steps {
+            if !block.contains(step) {
+                return Err(format!(
+                    "`{job}` no longer runs `{step}` — a gate step was dropped"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Why would CI not run the guard tests (F286)? `Ok` only when the
+/// `guard-tests` job exists, is ungated, and runs both gate commands — the
+/// reclaimable teardown-policy tests and the pure deploy_smoke +
+/// ci_availability_gate suites — without touching docker: the guard is a
+/// pure decision over names, labels and workflow text, so depending on a
+/// daemon would let a docker-less runner silently skip it.
+fn why_guard_tests_not_wired(src: &str) -> Result<(), String> {
+    let block = job_block(src, GUARD_TESTS_JOB)
+        .ok_or_else(|| format!("no `{GUARD_TESTS_JOB}` job in the workflow"))?;
+    if let Some(gate) = job_gate(&block) {
+        return Err(format!(
+            "`{GUARD_TESTS_JOB}` is disabled by a job-level `{gate}` — the \
+             guard tests never run"
+        ));
+    }
+    let runs = run_payloads(&block);
+    for step in GUARD_TESTS_STEPS {
+        if !runs.iter().any(|r| r.contains(step)) {
+            return Err(format!(
+                "`{GUARD_TESTS_JOB}` no longer runs `{step}` — a gate step \
+                 was dropped"
+            ));
+        }
+    }
+    if let Some(run) = runs.iter().find(|r| r.contains("docker")) {
+        return Err(format!(
+            "the guard tests are pure decisions over names and labels — \
+             `{run}` needs a docker daemon a runner may not have"
+        ));
+    }
+    Ok(())
+}
+
+/// Why would merge-blocking not be enactable from repo state alone (F286)?
+/// `Ok` only when every [`REQUIRED_CHECKS`] job exposes exactly its
+/// documented display `name:`, and the workflow's comments document those
+/// names together with the branch-protection requirement — so the required
+/// checks can never silently dangle after a rename.
+fn why_check_names_not_enactable(src: &str) -> Result<(), String> {
+    for (job, name) in REQUIRED_CHECKS {
+        let block = job_block(src, job).ok_or_else(|| format!("no `{job}` job in the workflow"))?;
+        let exposed = job_display_name(&block).ok_or_else(|| {
+            format!(
+                "`{job}` declares no display `name:` — GitHub would fall back \
+                 to the YAML key `{job}`, which cannot match the required check"
+            )
+        })?;
+        if exposed != name {
+            return Err(format!(
+                "`{job}`'s check-run display name drifted: the workflow says \
+                 `{exposed}` but branch protection must require `{name}`"
+            ));
+        }
+    }
+    let comments = comment_text(src);
+    for (_, name) in REQUIRED_CHECKS {
+        if !comments.contains(name) {
+            return Err(format!(
+                "ci.yml no longer documents required status check `{name}` in \
+                 a comment — update the documentation together with any rename"
+            ));
+        }
+    }
+    if !comments.contains("branch protection") {
+        return Err(
+            "ci.yml must say the check names are what branch protection on \
+             main must require as status checks"
+                .to_owned(),
         );
     }
     Ok(())
@@ -93,6 +270,36 @@ fn ci_runs_the_availability_gate() {
     let src = std::fs::read_to_string(&path).unwrap();
     if let Err(why) = why_not_wired(&src) {
         panic!("{CI_WORKFLOW} no longer wires up the availability gate: {why}");
+    }
+}
+
+#[test]
+fn ci_runs_the_quality_gates() {
+    let path = repo_root().join(CI_WORKFLOW);
+    let src = std::fs::read_to_string(&path).unwrap();
+    if let Err(why) = why_quality_gates_not_wired(&src) {
+        panic!("{CI_WORKFLOW} no longer wires up the quality gates: {why}");
+    }
+}
+
+#[test]
+fn ci_runs_the_guard_tests() {
+    let path = repo_root().join(CI_WORKFLOW);
+    let src = std::fs::read_to_string(&path).unwrap();
+    if let Err(why) = why_guard_tests_not_wired(&src) {
+        panic!("{CI_WORKFLOW} no longer wires up the guard tests: {why}");
+    }
+}
+
+#[test]
+fn required_check_names_are_exposed_and_documented() {
+    let path = repo_root().join(CI_WORKFLOW);
+    let src = std::fs::read_to_string(&path).unwrap();
+    if let Err(why) = why_check_names_not_enactable(&src) {
+        panic!(
+            "{CI_WORKFLOW} does not make merge-blocking enactable from repo \
+             state alone: {why}"
+        );
     }
 }
 
@@ -184,4 +391,221 @@ jobs:
 ";
     let why = why_not_wired(src).unwrap_err();
     assert!(why.contains("no `deploy-smoke` job"), "unhelpful: {why}");
+}
+
+#[test]
+fn a_regated_quality_job_is_caught() {
+    let src = "\
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  check:
+    if: false
+    name: fmt · clippy · test
+    steps:
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --all-features
+      - run: cargo test --all-features
+";
+    let why = why_quality_gates_not_wired(src).unwrap_err();
+    assert!(why.contains("`check` is disabled"), "unhelpful: {why}");
+    assert!(why.contains("if: false"), "unhelpful: {why}");
+}
+
+#[test]
+fn a_dropped_gate_step_is_caught() {
+    let src = "\
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  check:
+    name: fmt · clippy · test
+    steps:
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --all-features
+";
+    let why = why_quality_gates_not_wired(src).unwrap_err();
+    assert!(
+        why.contains("`check` no longer runs `cargo test --all-features`"),
+        "unhelpful: {why}"
+    );
+}
+
+#[test]
+fn a_missing_quality_job_is_caught() {
+    let src = "\
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  deploy-build:
+    name: release build (linux, as the Docker builder sees it)
+    steps:
+      - run: cargo build --release --bin coxagent
+";
+    let why = why_quality_gates_not_wired(src).unwrap_err();
+    assert!(why.contains("no `check` job"), "unhelpful: {why}");
+}
+
+/// A minimal workflow that satisfies every F286 rule — the positive control
+/// each `..._is_caught` fixture below mutates.
+fn wired_workflow() -> String {
+    "\
+# Merge-blocking from repo state alone: branch protection on main must
+# require these status checks, by their check-run display names exactly:
+#   - docker compose smoke (app answers on 8101)
+#   - ownership + CI wiring guards
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  deploy-smoke:
+    name: docker compose smoke (app answers on 8101)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - run: cargo test -p coxagent-app --test deploy_smoke -- --ignored
+      - name: logs
+        if: failure()
+        run: docker compose logs
+      - name: tear down
+        if: always()
+        run: docker compose down -v
+  guard-tests:
+    name: ownership + CI wiring guards
+    runs-on: ubuntu-latest
+    steps:
+      - run: cargo test -p coxagent-infrastructure --lib reclaimable
+      - run: cargo test -p coxagent-app --test deploy_smoke --test ci_availability_gate
+"
+    .to_owned()
+}
+
+#[test]
+fn a_fully_wired_workflow_passes_every_f286_rule() {
+    let src = wired_workflow();
+    why_not_wired(&src).unwrap_or_else(|why| panic!("smoke half of the control: {why}"));
+    why_guard_tests_not_wired(&src)
+        .unwrap_or_else(|why| panic!("guard half of the control: {why}"));
+    why_check_names_not_enactable(&src)
+        .unwrap_or_else(|why| panic!("check-name half of the control: {why}"));
+}
+
+#[test]
+fn a_regated_guard_tests_job_is_caught() {
+    let src = wired_workflow().replace(
+        "  guard-tests:\n    name:",
+        "  guard-tests:\n    if: false\n    name:",
+    );
+    let why = why_guard_tests_not_wired(&src).unwrap_err();
+    assert!(why.contains("disabled by a job-level"), "unhelpful: {why}");
+    assert!(why.contains("if: false"), "unhelpful: {why}");
+}
+
+#[test]
+fn a_job_level_continue_on_error_is_caught_on_both_gate_jobs() {
+    // A failed run that still reports green bypasses the required check
+    // exactly like `if: false` — the guard must treat it as a disable.
+    let smoke = wired_workflow().replace(
+        "  deploy-smoke:\n    name:",
+        "  deploy-smoke:\n    continue-on-error: true\n    name:",
+    );
+    let why = why_not_wired(&smoke).unwrap_err();
+    assert!(why.contains("disabled by a job-level"), "unhelpful: {why}");
+    assert!(why.contains("continue-on-error"), "unhelpful: {why}");
+
+    let guard = wired_workflow().replace(
+        "  guard-tests:\n    name:",
+        "  guard-tests:\n    continue-on-error: true\n    name:",
+    );
+    let why = why_guard_tests_not_wired(&guard).unwrap_err();
+    assert!(why.contains("disabled by a job-level"), "unhelpful: {why}");
+    assert!(why.contains("continue-on-error"), "unhelpful: {why}");
+}
+
+#[test]
+fn dropping_a_guard_command_is_caught() {
+    let no_policy = wired_workflow().replace(
+        "      - run: cargo test -p coxagent-infrastructure --lib reclaimable\n",
+        "",
+    );
+    let why = why_guard_tests_not_wired(&no_policy).unwrap_err();
+    assert!(why.contains("--lib reclaimable"), "unhelpful: {why}");
+
+    let no_wiring = wired_workflow().replace(
+        "      - run: cargo test -p coxagent-app --test deploy_smoke --test ci_availability_gate\n",
+        "",
+    );
+    let why = why_guard_tests_not_wired(&no_wiring).unwrap_err();
+    assert!(
+        why.contains("--test ci_availability_gate"),
+        "unhelpful: {why}"
+    );
+}
+
+#[test]
+fn a_missing_guard_tests_job_is_caught() {
+    let src = wired_workflow()
+        .split("  guard-tests:")
+        .next()
+        .unwrap()
+        .to_owned();
+    let why = why_guard_tests_not_wired(&src).unwrap_err();
+    assert!(why.contains("no `guard-tests` job"), "unhelpful: {why}");
+}
+
+#[test]
+fn docker_in_the_guard_job_is_caught() {
+    let src = wired_workflow().replace(
+        "      - run: cargo test -p coxagent-infrastructure --lib reclaimable",
+        "      - run: docker compose up -d && cargo test -p \
+         coxagent-infrastructure --lib reclaimable",
+    );
+    let why = why_guard_tests_not_wired(&src).unwrap_err();
+    assert!(why.contains("docker"), "unhelpful: {why}");
+}
+
+#[test]
+fn step_level_conditions_in_the_guard_job_are_not_a_gate() {
+    let src = wired_workflow().replace(
+        "      - run: cargo test -p coxagent-infrastructure --lib reclaimable",
+        "      - name: post-mortem\n        if: failure()\n        run: echo \
+         fell over\n      - run: cargo test -p coxagent-infrastructure --lib \
+         reclaimable",
+    );
+    why_guard_tests_not_wired(&src)
+        .unwrap_or_else(|why| panic!("step conditions read as a gate: {why}"));
+}
+
+#[test]
+fn a_drifted_or_undocumented_check_name_is_caught() {
+    let renamed = wired_workflow().replace(
+        "    name: ownership + CI wiring guards",
+        "    name: guard checks",
+    );
+    let why = why_check_names_not_enactable(&renamed).unwrap_err();
+    assert!(why.contains("drifted"), "unhelpful: {why}");
+
+    let no_display_name = wired_workflow().replace("    name: ownership + CI wiring guards\n", "");
+    let why = why_check_names_not_enactable(&no_display_name).unwrap_err();
+    assert!(why.contains("declares no display"), "unhelpful: {why}");
+
+    let undocumented = wired_workflow()
+        .replace("#   - docker compose smoke (app answers on 8101)\n", "")
+        .replace("#   - ownership + CI wiring guards\n", "");
+    let why = why_check_names_not_enactable(&undocumented).unwrap_err();
+    assert!(why.contains("no longer documents"), "unhelpful: {why}");
+
+    let no_context = wired_workflow().replace(
+        "# Merge-blocking from repo state alone: branch protection on main must",
+        "# Merge-blocking from repo state alone: an operator must",
+    );
+    let why = why_check_names_not_enactable(&no_context).unwrap_err();
+    assert!(why.contains("branch protection"), "unhelpful: {why}");
 }

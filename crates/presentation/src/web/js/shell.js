@@ -1337,6 +1337,21 @@ async function renderTeamsOnline(){
         +`</div>`;
     }).join("")+`</div></div>`;
 }
+// Loop-liveness watchdog chip (CXA-F259): STATE.liveness carries the hub
+// watchdog's OPEN stall episode — its presence IS the stalled state, and
+// absence is the healthy one (the episode self-clears when activity lands).
+// Renders nothing when quiet, so a healthy team panel looks untouched.
+function renderLiveness(s){
+  const el=document.getElementById("team-liveness");if(!el)return;
+  const lv=s&&s.liveness;
+  if(!lv){el.innerHTML="";return;}
+  const since=lv.since?new Date(lv.since).toLocaleString():'';
+  const escSuffix=lv.escalations?` · ${lv.escalations} escalation${lv.escalations===1?'':'s'}`:'';
+  el.innerHTML=`<div class="lv-chip" title="Loop-liveness watchdog: no new activity since ${escAttr(lv.last_activity_at||lv.since||'')} — the hub watchdog will re-alert on escalation and clear this when work resumes.">
+    <i class="ti ti-alert-octagon"></i>
+    <span><b>loop stalled</b> — worker ${esc(lv.worker||'unknown')} silent</span>
+    <span class="lv-since">since ${esc(since)}${escSuffix}</span></div>`;
+}
 async function stopOperator(op){
   if(!await coxModal({title:"Stop operator",message:"Stop operator "+op+"? It will idle (no token burn) until started again.",confirmText:"Stop"}))return;
   try{await fetch(api("/operators/"+encodeURIComponent(op)+"/stop"),{method:"POST"});}catch(e){}
@@ -1885,7 +1900,12 @@ function cmdkKey(e){const m=window._cmdkMatches||[];
   else if(e.key==="ArrowUp"){e.preventDefault();cmdkSel(Math.max(CMDK_SEL-1,0));scrollSel();}
   else if(e.key==="Enter"){e.preventDefault();cmdkRun(CMDK_SEL);}}
 function scrollSel(){const s=document.querySelector("#cmdk-list .cmdk-item.sel");if(s)s.scrollIntoView({block:"nearest"});}
-document.addEventListener("keydown",e=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==="k"){e.preventDefault();
+// Command palette keybinding. CXA-F275 moved ⌘K to the GLOBAL SEARCH palette:
+// both handlers used to fire, stacking the shell palette (z-index 200) over
+// the search overlay (z-index 20) where it intercepted every click on search
+// results. The palette stays keyboard-reachable on ⌘/ and via its topbar
+// button; ⌘K opens the one box that searches tickets, wiki and chat.
+document.addEventListener("keydown",e=>{if((e.metaKey||e.ctrlKey)&&e.key==="/"){e.preventDefault();
   document.getElementById("cmdk").classList.contains("open")?closeCmdk():openCmdk();}});
 // ── Chat enhancements: threads, edit, delete, pin, search, typing ────────
 let THREAD_MSG=null, THREAD_LOADING=false;

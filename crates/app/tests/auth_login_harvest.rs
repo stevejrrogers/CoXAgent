@@ -35,12 +35,18 @@ use coxagent_application::auth::{
     AuthPort, AuthRole, AuthUser, LoginResult, SessionInfo, TokenInfo,
 };
 
-/// Ports this file boots hubs on. All fixed, high, and unique to this file so they cannot collide
-/// with `store_rpc_auth_gate.rs` (47_712), `pr_review_role_gate.rs` (47_711) or any other test.
-const P_HARVEST: u16 = 47_720;
-const P_TOTP: u16 = 47_721;
-const P_DENIED: u16 = 47_722;
-const P_NOAUTH: u16 = 47_723;
+/// A free 127.0.0.1 port: bind :0, read the assigned port, release. Fixed
+/// ports collide head-on when two worktrees run this suite at the same time
+/// (the sibling's hub wins the bind, this process's `serve_full` dies silently
+/// inside its spawn, and every request below lands on the WRONG hub), so every
+/// boot allocates its own port instead.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral listener")
+        .local_addr()
+        .expect("local addr")
+        .port()
+}
 
 /// The process-wide env key whose harvesting is under test.
 const TOKEN_KEY: &str = "COXAGENT_REMOTE_TOKEN";
@@ -144,33 +150,40 @@ impl AuthPort for HarvestAuth {
     }
 }
 
-/// Boot a hub on `port` with an optional auth store, waiting for it to answer.
-/// `Some(stub)` enables auth; `None` yields an auth-less hub (AC3).
-async fn boot(port: u16, auth: Option<Arc<dyn AuthPort>>) -> tempfile::TempDir {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let extras = coxagent_presentation::HubExtras {
-        auth,
-        hub_dir: Some(dir.path().to_path_buf()),
-        ..Default::default()
-    };
-    let audit: Arc<dyn coxagent_application::ports::outbound::AuditPort> =
-        Arc::new(coxagent_infrastructure::MemoryAuditSink::default());
-    tokio::spawn(coxagent_presentation::serve_full(
-        vec![],
-        port,
-        audit,
-        extras,
-    ));
-
+/// Boot a hub with an optional auth store, waiting for it to answer, and
+/// return `(port, hub dir)` — the port it actually answered on. `Some(stub)`
+/// enables auth; `None` yields an auth-less hub (AC3). Between grabbing a free
+/// port and the hub binding it another process could theoretically win the
+/// race; the health probe detects the silent `serve_full` death and retries on
+/// a fresh port rather than marching into assertions against a dead port.
+async fn boot(auth: Option<Arc<dyn AuthPort>>) -> (u16, tempfile::TempDir) {
     let client = reqwest::Client::new();
-    let health = format!("http://127.0.0.1:{port}/api/health");
-    for _ in 0..50 {
-        if client.get(&health).send().await.is_ok() {
-            break;
+    for _ in 0..3 {
+        let port = free_port();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let extras = coxagent_presentation::HubExtras {
+            auth: auth.clone(),
+            hub_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let audit: Arc<dyn coxagent_application::ports::outbound::AuditPort> =
+            Arc::new(coxagent_infrastructure::MemoryAuditSink::default());
+        tokio::spawn(coxagent_presentation::serve_full(
+            vec![],
+            port,
+            audit,
+            extras,
+        ));
+
+        let health = format!("http://127.0.0.1:{port}/api/health");
+        for _ in 0..50 {
+            if client.get(&health).send().await.is_ok() {
+                return (port, dir);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    dir
+    panic!("hub never answered on 3 freshly allocated ports");
 }
 
 /// POST `/api/auth/login` with JSON creds and return (status, body text).
@@ -216,10 +229,10 @@ async fn login_harvest_populates_and_rejections_leave_preexisting_value_untouche
         LoginResult::Ok("session-alice".to_string()),
         Some("secret-abc".to_string()),
     ));
-    let harvest_dir = boot(P_HARVEST, Some(stub.clone())).await;
+    let (harvest_port, harvest_dir) = boot(Some(stub.clone())).await;
 
     std::env::remove_var(TOKEN_KEY);
-    let (s1, b1) = login_req(P_HARVEST, "alice", "pw").await;
+    let (s1, b1) = login_req(harvest_port, "alice", "pw").await;
     assert_eq!(s1, 200, "AC1 login ok - got {b1}");
     assert_eq!(
         std::env::var(TOKEN_KEY).ok(),
@@ -228,7 +241,7 @@ async fn login_harvest_populates_and_rejections_leave_preexisting_value_untouche
     );
 
     // Second sign-in: harvest now returns None (already issued) -> no rotation.
-    let (s2, b2) = login_req(P_HARVEST, "alice", "pw").await;
+    let (s2, b2) = login_req(harvest_port, "alice", "pw").await;
     assert_eq!(s2, 200, "repeat login ok - got {b2}");
     assert_eq!(
         std::env::var(TOKEN_KEY).ok(),
@@ -239,9 +252,9 @@ async fn login_harvest_populates_and_rejections_leave_preexisting_value_untouche
 
     // --- AC2a: totp_required leaves preexisting untouched.
     let stub_totp = Arc::new(HarvestAuth::new(LoginResult::TotpRequired, None));
-    let _dir2 = boot(P_TOTP, Some(stub_totp)).await;
+    let (totp_port, _dir2) = boot(Some(stub_totp)).await;
     std::env::set_var(TOKEN_KEY, "keep-me");
-    let (stotp, _btotp) = login_req(P_TOTP, "carol", "pw").await;
+    let (stotp, _btotp) = login_req(totp_port, "carol", "pw").await;
     assert_eq!(stotp, 401);
     assert_eq!(
         std::env::var(TOKEN_KEY).unwrap_or_default(),
@@ -250,9 +263,9 @@ async fn login_harvest_populates_and_rejections_leave_preexisting_value_untouche
     );
     // --- AC2b: invalid credentials leave preexisting untouched.
     let stub_denied = Arc::new(HarvestAuth::new(LoginResult::Denied, None));
-    let denied_dir = boot(P_DENIED, Some(stub_denied)).await;
+    let (denied_port, denied_dir) = boot(Some(stub_denied)).await;
     std::env::set_var(TOKEN_KEY, "keep-me");
-    let (sdeny, _bdeny) = login_req(P_DENIED, "eve", "wrong-password").await;
+    let (sdeny, _bdeny) = login_req(denied_port, "eve", "wrong-password").await;
     assert_eq!(sdeny, 401);
     assert_eq!(
         std::env::var(TOKEN_KEY).unwrap_or_default(),
@@ -263,9 +276,9 @@ async fn login_harvest_populates_and_rejections_leave_preexisting_value_untouche
 
     // --- AC3: a hub with NO auth service configured harvests nothing cleanly —
     // it answers open (`auth:false`) and never touches the env var.
-    let _dir4 = boot(P_NOAUTH, None).await;
+    let (noauth_port, _dir4) = boot(None).await;
     std::env::set_var(TOKEN_KEY, "keep-me");
-    let (snoauth, bnoauth) = login_req(P_NOAUTH, "oscar", "pw").await;
+    let (snoauth, bnoauth) = login_req(noauth_port, "oscar", "pw").await;
     assert_eq!(snoauth, 200);
     assert!(
         bnoauth.contains("\"auth\":false"),

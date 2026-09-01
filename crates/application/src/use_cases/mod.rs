@@ -4,12 +4,14 @@ pub mod add_ticket;
 pub mod analyze_attachment;
 pub mod approval_memory;
 pub mod approval_risk;
+pub mod backup;
 pub mod ceremony;
 pub mod conformance_check;
 pub mod coverage;
 pub mod cycle;
 pub mod duplicate_radar;
 pub mod generate_docs;
+pub mod global_search;
 pub mod json_repair;
 pub mod manual_rollback;
 pub mod merge_policy;
@@ -20,6 +22,7 @@ pub mod recover;
 pub mod refine_ticket;
 pub mod release_assembly;
 pub mod repro_url;
+pub mod restore;
 pub mod run_ba;
 pub mod run_chat_reply;
 pub mod run_design_system;
@@ -40,6 +43,10 @@ pub mod scan_deps;
 
 pub use add_ticket::{AddTicketInput, AddTicketUseCase};
 pub use analyze_attachment::{AnalyzeAttachmentUseCase, ReadableAttachment};
+pub use backup::{
+    is_excluded, path_stamp, rel_from, secret_statement, BackupOutcome, BackupRequest,
+    BackupWorkspaceUseCase,
+};
 pub use conformance_check::RunConformanceUseCase;
 pub use coverage::{match_score, matches_criterion, record_verdicts};
 pub use cycle::{CycleReport, RunCycleUseCase};
@@ -47,6 +54,10 @@ pub use duplicate_radar::{
     find_cross_project_duplicates, pair_key, DuplicatePair, RadarTicket, TicketSnapshot,
 };
 pub use generate_docs::GenerateDocsUseCase;
+pub use global_search::{
+    global_search, global_search_many, GroupedSearch, SearchGroup, SearchHit, SearchKind,
+    MAX_PER_KIND, MAX_QUERY_LEN, MAX_TOTAL, MIN_QUERY_LEN,
+};
 pub use json_repair::repair_json;
 pub use manual_rollback::{known_good_target, ManualRollbackInput, RollbackOutcome};
 pub use merge_policy::{
@@ -68,6 +79,7 @@ pub use release_assembly::{
 pub use repro_url::{
     resolve_repro_url, ReproSource, ReproUrl, ReproUrlSnapshot, ResolveReproUrlUseCase,
 };
+pub use restore::{RestoreOutcome, RestoreRequest, RestoreWorkspaceUseCase};
 pub use run_ba::RunBaUseCase;
 pub use run_chat_reply::RunChatReplyUseCase;
 pub use run_design_system::RunDesignSystemUseCase;

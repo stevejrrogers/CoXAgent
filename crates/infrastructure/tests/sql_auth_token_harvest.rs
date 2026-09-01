@@ -9,6 +9,8 @@
 #![allow(clippy::expect_used)]
 
 use coxagent_application::auth::{AuthPort, AuthRole, TokenInfo};
+
+mod common;
 use coxagent_infrastructure::SqlAuthService;
 
 #[tokio::test]
@@ -17,6 +19,12 @@ async fn auto_issue_mints_once_and_stays_idempotent() {
         eprintln!("COXAGENT_TEST_PG_DSN unset - skipping Postgres auth harvest test");
         return;
     };
+    if common::is_live_hub_db(&dsn).await {
+        eprintln!(
+            "COXAGENT_TEST_PG_DSN points at a LIVE hub database — refusing the auth harvest test"
+        );
+        return;
+    }
     let svc = SqlAuthService::connect(&dsn)
         .await
         .expect("connect + migrate");
