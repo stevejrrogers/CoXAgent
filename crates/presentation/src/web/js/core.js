@@ -396,12 +396,29 @@ function renderRoadmap(){
   // Delivery timeline from release history.
   let timeline='';
   if(hist.length){const recent=hist.slice(-8);
+    // A ship record stamps the version that was LIVE when it merged, but the
+    // change itself LANDS in the next cut release — labelling five items
+    // "v2.30.0" when they all ship inside v2.31.0 reads as a broken version
+    // counter. Label each node with the release that contains it: the first
+    // higher version seen later in history, else the running current version,
+    // else "next release".
+    const all=(s.history||[]).slice();
+    const landsIn=(rec)=>{
+      const n=vnum(rec.version);const t=Date.parse(rec.at)||0;
+      for(const h of all){const hv=vnum(h.version);
+        if(hv>n&&(Date.parse(h.at)||0)>=t)return h.version;}
+      const cur=String(s.current_version||"");
+      if(cur&&vnum(cur)>n)return cur;
+      return null;
+    };
     timeline=`<div class="sec" style="margin-top:22px">Delivery timeline</div><div class="panel" style="overflow-x:auto" data-keepscroll="rm-timeline" data-scrollend="1">
       <div style="display:flex;align-items:flex-start;min-width:min-content;padding:6px 0">${recent.map((r,i)=>`
         <div style="flex:1 1 0;min-width:118px;max-width:190px;position:relative;text-align:center;padding:0 4px">
           ${i<recent.length-1?'<div style="position:absolute;top:8px;left:50%;width:100%;height:2px;background:var(--border2);pointer-events:none"></div>':''}
           <div style="width:16px;height:16px;border-radius:50%;background:transparent;border:3px solid var(--green);margin:0 auto;position:relative;z-index:1"></div>
-          <div style="font-size:13px;font-weight:700;margin-top:7px;color:var(--accent2)">v${esc(r.version)}</div>
+          ${(()=>{const l=landsIn(r);return l
+            ?`<div style="font-size:13px;font-weight:700;margin-top:7px;color:var(--accent2)" title="merged while v${esc(r.version)} was live — shipped in the v${esc(l)} release">v${esc(l)}</div>`
+            :`<div style="font-size:13px;font-weight:700;margin-top:7px;color:var(--accent2)">v${esc(r.version)} <span style="font-size:10px;color:var(--dim);font-weight:400" title="merged after v${esc(r.version)} — ships in the next release">· next release</span></div>`;})()}
           <div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.title)}">${esc(r.title)}</div>
           <div style="font-size:10px;color:var(--dim)">${esc((r.at||'').slice(0,10))}</div></div>`).join("")}</div></div>`;
   }
