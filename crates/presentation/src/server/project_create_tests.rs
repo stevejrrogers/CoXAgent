@@ -1,7 +1,8 @@
-//! CXA-B129 regression: `POST /api/projects` maps the injected factory's
-//! failure CLASS to the right status — an expected client conflict (the target
-//! workspace already holds tickets, e.g. after delete-then-recreate against a
-//! surviving store row) is 409 with the same JSON error shape, never a 500.
+//! CXA-B129/CXA-B139 regression: `POST /api/projects` maps the injected
+//! factory's failure CLASS to the right status — an expected client conflict
+//! (the target workspace already holds tickets, e.g. after delete-then-recreate
+//! against a surviving store row) is 409, invalid client input (a bad git URL
+//! scheme) is 400, both with the same JSON error shape, never a 500.
 //! Pure in-process: requests answered via `tower::ServiceExt::oneshot`, no
 //! hub process, no host harness, no TCP port.
 
@@ -88,6 +89,26 @@ async fn an_unclassified_factory_failure_stays_a_500() {
 
     let resp = post_create(app).await;
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+/// CXA-B139 regression: invalid client input classified by the factory —
+/// e.g. the git-URL scheme check on a `ftp://` import — must reach the client
+/// as 400 with the same JSON error shape, never a 500 that invites a retry
+/// which can never succeed.
+#[tokio::test]
+async fn a_bad_request_failure_is_mapped_to_400_with_the_error_json() {
+    let app = hub_with_factory(factory_returning(Err(FactoryError::bad_request(
+        "git URL must start with git@, https:// or http://",
+    ))))
+    .await;
+
+    let resp = post_create(app).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    assert_eq!(
+        body["error"], "git URL must start with git@, https:// or http://",
+        "the operator-facing message must survive the status mapping"
+    );
 }
 
 /// Sanity pin on the harness: the route under test is the real one, and a

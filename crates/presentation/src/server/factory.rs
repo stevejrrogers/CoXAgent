@@ -1,8 +1,10 @@
 //! The onboarding factory contract: the composition root injects this port so
 //! the presentation layer can build a project on demand without touching the
 //! filesystem or the hub registry itself. The failure type is classified at
-//! the source (CXA-B129): an expected client conflict — the target workspace
-//! already holds tickets — must reach the API client as HTTP 409, never a 500.
+//! the source (CXA-B129, CXA-B139): an expected client conflict — the target
+//! workspace already holds tickets — must reach the API client as HTTP 409,
+//! and invalid client input (an unsupported git URL scheme) as HTTP 400,
+//! never a 500 for either.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -42,14 +44,28 @@ pub struct NewProjectReq {
 pub type ProjectRemover =
     Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>;
 
+/// Which HTTP class a project-factory failure belongs to (CXA-B129, CXA-B139).
+/// Classified at the source so the HTTP layer never has to guess from the
+/// message text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactoryErrorKind {
+    /// A genuine server-side fault (HTTP 500).
+    Internal,
+    /// An expected client conflict — the target workspace already holds
+    /// tickets (HTTP 409).
+    Conflict,
+    /// Invalid client input — a pure request-validation failure such as an
+    /// unsupported git URL scheme (HTTP 400).
+    BadRequest,
+}
+
 /// A project-factory failure, classified at the source so the HTTP layer can
-/// map an expected client conflict to 409 instead of a 500 (CXA-B129).
+/// map expected client failures to 4xx instead of a 500 (CXA-B129, CXA-B139).
 #[derive(Debug, Clone)]
 pub struct FactoryError {
     pub message: String,
-    /// True when the failure is an expected client-side conflict — the target
-    /// workspace already holds tickets — mapped to HTTP 409, not 500.
-    pub conflict: bool,
+    /// The failure class — drives the HTTP status mapping.
+    pub kind: FactoryErrorKind,
 }
 
 impl FactoryError {
@@ -57,7 +73,7 @@ impl FactoryError {
     pub fn internal(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
-            conflict: false,
+            kind: FactoryErrorKind::Internal,
         }
     }
 
@@ -65,7 +81,15 @@ impl FactoryError {
     pub fn conflict(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
-            conflict: true,
+            kind: FactoryErrorKind::Conflict,
+        }
+    }
+
+    /// Invalid client input — the request itself can never succeed (HTTP 400).
+    pub fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: FactoryErrorKind::BadRequest,
         }
     }
 }

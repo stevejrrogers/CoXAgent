@@ -342,13 +342,14 @@ mod project_id_tests {
     }
 }
 
-/// CXA-B129: the onboarding refusal must arrive at the API classified as a
-/// client conflict — the glue between [`onboard::OnboardConflict`] and the
+/// CXA-B129/CXA-B139: onboarding failures must arrive at the API classified —
+/// the glue between [`onboard::OnboardConflict`] / input validation and the
 /// presentation layer's [`FactoryError`].
 #[cfg(test)]
 mod onboard_error_classification_tests {
     use super::classify_onboard_error;
     use crate::onboard::OnboardConflict;
+    use coxagent_presentation::FactoryErrorKind;
 
     #[test]
     fn the_re_onboard_refusal_is_classified_as_a_conflict() {
@@ -356,7 +357,11 @@ mod onboard_error_classification_tests {
             "workspace already has tickets; refusing to re-onboard".into(),
         ));
         let mapped = classify_onboard_error(err.as_ref());
-        assert!(mapped.conflict, "the refusal must map to 409 material");
+        assert_eq!(
+            mapped.kind,
+            FactoryErrorKind::Conflict,
+            "the refusal must map to 409 material"
+        );
         assert_eq!(
             mapped.message,
             "workspace already has tickets; refusing to re-onboard"
@@ -367,7 +372,11 @@ mod onboard_error_classification_tests {
     fn any_other_onboarding_failure_stays_a_server_fault() {
         let err: Box<dyn std::error::Error> = "store unreachable".into();
         let mapped = classify_onboard_error(err.as_ref());
-        assert!(!mapped.conflict, "an ordinary fault must map to 500");
+        assert_eq!(
+            mapped.kind,
+            FactoryErrorKind::Internal,
+            "an ordinary fault must map to 500"
+        );
         assert_eq!(mapped.message, "store unreachable");
     }
 }
@@ -379,7 +388,7 @@ mod onboard_error_classification_tests {
 #[cfg(test)]
 mod onboard_scaffold_cleanup_tests {
     use super::{onboard_project, unique_id};
-    use coxagent_presentation::NewProjectReq;
+    use coxagent_presentation::{FactoryErrorKind, NewProjectReq};
     use std::path::PathBuf;
 
     fn request(alias: &str) -> NewProjectReq {
@@ -404,9 +413,10 @@ mod onboard_scaffold_cleanup_tests {
         let Err(err) = onboard_project(base.path(), &registry, req, None).await else {
             panic!("an unsupported git scheme must refuse the onboarding");
         };
-        assert!(
-            !err.conflict,
-            "a bad git URL is a fault, not a 409 conflict"
+        assert_eq!(
+            err.kind,
+            FactoryErrorKind::BadRequest,
+            "a bad git URL is the client's bad input (400), not a 409 conflict or a 500 fault"
         );
         assert!(
             !base.path().join("qab136").exists(),
@@ -919,7 +929,10 @@ async fn scaffold_onboarded_project(
                 || url.starts_with("https://")
                 || url.starts_with("http://"))
             {
-                return Err(FactoryError::internal(
+                // CXA-B139: an unsupported scheme is the CLIENT's bad input —
+                // the request can never succeed, so it must be classified as
+                // a bad request (400), not a server fault (500).
+                return Err(FactoryError::bad_request(
                     "git URL must start with git@, https:// or http://",
                 ));
             }

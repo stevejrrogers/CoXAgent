@@ -61,6 +61,18 @@ pub(super) async fn list_projects(State(app): State<AppState>) -> impl IntoRespo
     Json(out)
 }
 
+/// Map a classified factory failure onto its HTTP response (CXA-B129/CXA-B139):
+/// an expected client conflict (the target workspace already holds tickets) is
+/// 409, invalid input (an unsupported git URL scheme) is 400, and only a
+/// genuine fault stays a 500.
+fn factory_error_response(e: &FactoryError) -> axum::response::Response {
+    match e.kind {
+        FactoryErrorKind::Conflict => conflict_error(&e.message),
+        FactoryErrorKind::BadRequest => bad_request_error(&e.message),
+        FactoryErrorKind::Internal => internal_error(&e.message),
+    }
+}
+
 /// Onboard a new project from the dashboard (greenfield, or brownfield import
 /// with `existing`, optionally seeded with a `goal`) via the injected factory.
 pub(super) async fn create_project(
@@ -151,11 +163,7 @@ pub(super) async fn create_project(
     .await
     {
         Ok(h) => h,
-        // CXA-B129: the factory classifies its failures — an expected client
-        // conflict (the target workspace already holds tickets) reaches the
-        // client as 409, everything else stays a 500.
-        Err(e) if e.conflict => return conflict_error(&e.message),
-        Err(e) => return internal_error(&e.message),
+        Err(e) => return factory_error_response(&e),
     };
     let id = handle.id.clone();
     {
