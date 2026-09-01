@@ -43,13 +43,17 @@ pub type ProjectRemover =
     Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>;
 
 /// A project-factory failure, classified at the source so the HTTP layer can
-/// map an expected client conflict to 409 instead of a 500 (CXA-B129).
+/// map an expected client conflict to 409 instead of a 500 (CXA-B129) and a
+/// refused request to 400 instead of a 500 (CXA-B138).
 #[derive(Debug, Clone)]
 pub struct FactoryError {
     pub message: String,
     /// True when the failure is an expected client-side conflict — the target
     /// workspace already holds tickets — mapped to HTTP 409, not 500.
     pub conflict: bool,
+    /// True when the REQUEST itself was refused before any IO — malformed
+    /// input such as a path-traversing alias (CXA-B138) — mapped to HTTP 400.
+    pub bad_request: bool,
 }
 
 impl FactoryError {
@@ -58,6 +62,7 @@ impl FactoryError {
         Self {
             message: message.into(),
             conflict: false,
+            bad_request: false,
         }
     }
 
@@ -66,6 +71,16 @@ impl FactoryError {
         Self {
             message: message.into(),
             conflict: true,
+            bad_request: false,
+        }
+    }
+
+    /// A refused client request (HTTP 400, CXA-B138).
+    pub fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            conflict: false,
+            bad_request: true,
         }
     }
 }
