@@ -352,6 +352,74 @@ mod onboard_error_classification_tests {
     }
 }
 
+/// CXA-B136: `onboard_project` scaffolds `state/` (+ `codebase/`) BEFORE the
+/// conflict checks run, so a refused/failed onboarding used to leave half-built
+/// workspace dirs behind — debris that occupies the derived id (forcing
+/// `-2`-suffixed recreates) and reads as a real project to ops.
+#[cfg(test)]
+mod onboard_scaffold_cleanup_tests {
+    use super::{onboard_project, unique_id};
+    use coxagent_presentation::NewProjectReq;
+    use std::path::PathBuf;
+
+    fn request(alias: &str) -> NewProjectReq {
+        NewProjectReq {
+            name: "QA B136 Debris".to_owned(),
+            alias: Some(alias.to_owned()),
+            ..Default::default()
+        }
+    }
+
+    /// An unsupported git scheme is refused after `state/` exists but before
+    /// any network work — the exact "created then failed" shape. The workspace
+    /// must be gone afterwards and the id free for the next recreate.
+    #[tokio::test]
+    async fn a_failed_onboarding_removes_the_workspace_it_scaffolded() {
+        let base = tempfile::tempdir().expect("tmp");
+        let registry = base.path().join("registry.json");
+        let req = NewProjectReq {
+            git_url: Some("ftp://example.invalid/repo.git".to_owned()),
+            ..request("QAB136")
+        };
+        let Err(err) = onboard_project(base.path(), &registry, req, None).await else {
+            panic!("an unsupported git scheme must refuse the onboarding");
+        };
+        assert!(
+            !err.conflict,
+            "a bad git URL is a fault, not a 409 conflict"
+        );
+        assert!(
+            !base.path().join("qab136").exists(),
+            "the failed onboarding must not leave the scaffolded workspace behind"
+        );
+        assert_eq!(
+            unique_id(base.path(), "qab136"),
+            "qab136",
+            "the id must be free again — no `-2` suffix on the next recreate"
+        );
+    }
+
+    /// A brownfield adoption of a missing codebase fails inside
+    /// `onboard::brownfield`, after the store was built — the same cleanup
+    /// must apply to every error path, not just the URL check.
+    #[tokio::test]
+    async fn a_brownfield_onboard_of_a_missing_codebase_leaves_no_debris() {
+        let base = tempfile::tempdir().expect("tmp");
+        let registry = base.path().join("registry.json");
+        let req = NewProjectReq {
+            existing: Some(PathBuf::from("/nonexistent/qab136/codebase")),
+            ..request("QAB136")
+        };
+        assert!(onboard_project(base.path(), &registry, req, None)
+            .await
+            .is_err());
+        assert!(
+            !base.path().join("qab136").exists(),
+            "the failed adoption must not leave the scaffolded workspace behind"
+        );
+    }
+}
+
 #[cfg(test)]
 mod shim_script_tests {
     use super::{shim_script, SHIM_CMDS};
@@ -771,17 +839,47 @@ async fn onboard_project(
     req: coxagent_presentation::NewProjectReq,
     auth: Option<&Arc<dyn coxagent_application::auth::AuthPort>>,
 ) -> Result<coxagent_presentation::ProjectHandle, FactoryError> {
-    let name = req.name.trim();
     let derived = req
         .alias
         .clone()
-        .unwrap_or_else(|| coxagent_application::state::derive_alias(name));
+        .unwrap_or_else(|| coxagent_application::state::derive_alias(req.name.trim()));
     let id = unique_id(base, &derived.to_lowercase());
     let proj_dir = base.join(&id);
+
+    // `unique_id` only returns an id whose directory does not exist, so the
+    // scaffold creates a fresh workspace. EVERY failure inside it — a refused
+    // re-onboard (409), a rejected git URL, a store fault — must remove the
+    // scaffold again: a surviving empty dir keeps the derived id occupied
+    // (forcing `-2`-suffixed recreates) and reads as a real project to ops
+    // (CXA-B136).
+    let outcome = scaffold_onboarded_project(base, registry_path, &proj_dir, &id, req, auth).await;
+    if outcome.is_err() && proj_dir.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&proj_dir) {
+            tracing::warn!(
+                "onboard: could not remove the half-scaffolded workspace {}: {e}",
+                proj_dir.display()
+            );
+        }
+    }
+    outcome
+}
+
+/// The scaffold half of [`onboard_project`]: `proj_dir` must not exist yet
+/// ([`unique_id`] guarantees it). Kept separate so the failure unwinding —
+/// discarding the half-built workspace — has exactly one place to live.
+async fn scaffold_onboarded_project(
+    base: &Path,
+    registry_path: &Path,
+    proj_dir: &Path,
+    id: &str,
+    req: coxagent_presentation::NewProjectReq,
+    auth: Option<&Arc<dyn coxagent_application::auth::AuthPort>>,
+) -> Result<coxagent_presentation::ProjectHandle, FactoryError> {
+    let name = req.name.trim();
     let state_dir = proj_dir.join("state");
     std::fs::create_dir_all(&state_dir).map_err(|e| FactoryError::internal(e.to_string()))?;
 
-    let store = make_store(&id, &state_dir)
+    let store = make_store(id, &state_dir)
         .await
         .map_err(|e| FactoryError::internal(e.to_string()))?;
 
@@ -857,15 +955,21 @@ async fn onboard_project(
 
     // Assign a unique host port so this project's `docker compose` deploy does
     // not clash with the others on this host.
-    assign_host_port(base, registry_path, &proj_dir)
+    assign_host_port(base, registry_path, proj_dir)
         .map_err(|e| FactoryError::internal(e.to_string()))?;
 
-    append_registry(registry_path, &id, &proj_dir)
+    append_registry(registry_path, id, proj_dir)
         .map_err(|e| FactoryError::internal(e.to_string()))?;
 
-    build_project(&id, &state_dir, work_dir, auth)
+    // The registry entry is already on disk: a failed build must drop it again,
+    // or a restart would re-register a project whose workspace the caller just
+    // discarded.
+    build_project(id, &state_dir, work_dir, auth)
         .await
-        .map_err(|e| FactoryError::internal(e.to_string()))
+        .map_err(|e| {
+            let _ = remove_from_registry(registry_path, id);
+            FactoryError::internal(e.to_string())
+        })
 }
 
 /// Pick an id not already taken by a workspace directory under `base`.
