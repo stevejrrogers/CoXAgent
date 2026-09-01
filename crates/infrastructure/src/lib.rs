@@ -6,6 +6,7 @@
 
 pub mod audit_sink;
 pub mod auth;
+pub mod backup_archive;
 pub mod cleanup;
 pub mod deploy;
 pub mod deps_discovery;
@@ -28,6 +29,7 @@ pub mod workspace_files;
 
 pub use audit_sink::{MemoryAuditSink, SqlAuditSink};
 pub use auth::FileAuthService;
+pub use backup_archive::JsonHubArchive;
 pub use cleanup::OsProcessJanitor;
 pub use deploy::DockerComposeDeploy;
 pub use deps_discovery::FsLockfileDiscovery;

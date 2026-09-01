@@ -31,6 +31,9 @@ impl WorkspaceFilesPort for MemFiles {
     async fn read(&self, path: &Path) -> Option<String> {
         self.0.get(path).cloned()
     }
+    async fn read_bytes(&self, path: &Path) -> Option<Vec<u8>> {
+        self.0.get(path).map(String::as_bytes).map(<[u8]>::to_vec)
+    }
     async fn write(&self, _p: &Path, _c: &str) -> bool {
         false
     }

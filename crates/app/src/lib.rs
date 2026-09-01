@@ -29,6 +29,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+mod backup;
 mod builders;
 mod config_load;
 mod host_port;
@@ -197,6 +198,25 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             load_coordination(registry.parent().unwrap_or_else(|| Path::new(".")));
             run_hub(&registry, port).await?;
             Ok(String::new())
+        }
+        Command::Backup {
+            hub_dir,
+            out,
+            include_secrets,
+        } => {
+            // Same pickup as Hub: coordination.json DSNs must show up in the
+            // backup's "not captured (externally backed)" warnings.
+            load_coordination(&hub_dir);
+            backup::run_backup(&hub_dir, out, include_secrets).await
+        }
+        Command::Restore {
+            archive,
+            hub_dir,
+            force,
+            dry_run,
+        } => {
+            load_coordination(&hub_dir);
+            backup::run_restore(&archive, &hub_dir, force, dry_run).await
         }
         Command::Run {
             work_dir,
@@ -801,6 +821,9 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
         // without a restart.
         recoveries: Some(recoveries),
     };
+    // CXA-F262: scheduled workspace backups run on the same code path as
+    // `coxagent backup`, so a live-serving capture is exercised continuously.
+    backup::spawn_scheduled(base.clone());
     coxagent_presentation::serve_full(projects, port, audit, extras).await?;
     Ok(())
 }

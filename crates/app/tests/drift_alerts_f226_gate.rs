@@ -104,6 +104,9 @@ impl WorkspaceFilesPort for FixedFiles {
     async fn read(&self, _: &Path) -> Option<String> {
         None
     }
+    async fn read_bytes(&self, _: &Path) -> Option<Vec<u8>> {
+        None
+    }
     async fn write(&self, _: &Path, _: &str) -> bool {
         false
     }
