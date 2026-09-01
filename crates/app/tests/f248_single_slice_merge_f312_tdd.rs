@@ -156,8 +156,7 @@ fn git_ok(args: &[&str]) -> bool {
         .args(args)
         .current_dir(repo_root())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 /// One merge commit reachable from HEAD.
@@ -320,6 +319,8 @@ fn ac1_the_reviewer_panel_anchor_opens_the_recorded_reproduction() {
 /// domain refuses a blank write outright.
 #[test]
 fn ac2_an_unresolvable_route_is_omitted_never_a_guessed_or_dead_link() {
+    const AC: &str = "Toggling autosave shows a saved indicator";
+
     // The resolver: no base, no path, no link. Never a guess.
     assert_eq!(
         live_repro_url("/settings", None),
@@ -350,7 +351,6 @@ fn ac2_an_unresolvable_route_is_omitted_never_a_guessed_or_dead_link() {
 
     // The record: a verdict whose route cannot be mapped leaves the case's
     // evidence link-free — omitted, not fabricated.
-    const AC: &str = "Toggling autosave shows a saved indicator";
     let mut state = ProjectState::default();
     let mut ticket = Ticket::new(
         TicketId::new("F248").expect("id"),
@@ -408,7 +408,7 @@ fn ac2_an_unresolvable_route_is_omitted_never_a_guessed_or_dead_link() {
         ticket.test_cases()[0]
             .evidence
             .as_ref()
-            .map_or(true, |e| e.repro.is_none()),
+            .is_none_or(|e| e.repro.is_none()),
         "a refused blank write leaves the field absent — no placeholder link"
     );
 }
@@ -428,21 +428,19 @@ fn ac2_opening_a_ticket_with_an_unresolvable_route_emits_no_anchor() {
         .expect("the e2e state fixture is valid JSON")
         .get("tickets")
         .and_then(|t| t.as_array())
-        .map(|tickets| {
+        .is_some_and(|tickets| {
             tickets.iter().any(|t| {
                 t.get("test_cases")
                     .and_then(|c| c.as_array())
-                    .map(|cases| {
+                    .is_some_and(|cases| {
                         cases.iter().any(|c| {
                             c.get("evidence")
                                 .and_then(|e| e.as_object())
-                                .map_or(false, |ev| ev.get(FIELD).is_none())
+                                .is_some_and(|ev| ev.get(FIELD).is_none())
                         })
                     })
-                    .unwrap_or(false)
             })
-        })
-        .unwrap_or(false);
+        });
     assert!(
         shape_exists,
         "no fixture ticket carries evidence WITHOUT a resolved `{FIELD}` — the \
