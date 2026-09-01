@@ -247,8 +247,8 @@ fn verified_config(root_cert: Option<&PathBuf>) -> Result<rustls::ClientConfig, 
     let mut roots = rustls::RootCertStore::empty();
     match root_cert {
         Some(path) => {
-            let pem = std::fs::read(path)
-                .map_err(|e| format!("sslrootcert {}: {e}", path.display()))?;
+            let pem =
+                std::fs::read(path).map_err(|e| format!("sslrootcert {}: {e}", path.display()))?;
             let mut pem = std::io::BufReader::new(pem.as_slice());
             for cert in rustls_pemfile::certs(&mut pem) {
                 let cert = cert.map_err(|e| format!("sslrootcert {}: {e}", path.display()))?;
@@ -375,7 +375,10 @@ mod tests {
     fn sslrootcert_is_extracted_bare_and_url_encoded() {
         let bare = tls_plan("postgres://u:p@db/db?sslmode=verify-full&sslrootcert=/etc/cox/ca.crt")
             .unwrap();
-        assert_eq!(bare.root_cert.as_deref(), Some(std::path::Path::new("/etc/cox/ca.crt")));
+        assert_eq!(
+            bare.root_cert.as_deref(),
+            Some(std::path::Path::new("/etc/cox/ca.crt"))
+        );
         let encoded =
             tls_plan("postgres://u:p@db/db?sslmode=verify-full&sslrootcert=%2Fetc%2Fcox%2Fca.crt")
                 .unwrap();
@@ -440,9 +443,13 @@ mod tests {
         assert_eq!(cfg.get_dbname(), Some("cox"));
         assert_eq!(cfg.get_application_name(), Some("hub"));
         // And a DSN whose sslmode tokio does know parses with the param intact.
-        let plain: tokio_postgres::Config =
-            "postgres://u:p@127.0.0.1:5432/cox?sslmode=require".parse().unwrap();
-        assert_eq!(plain.get_ssl_mode(), tokio_postgres::config::SslMode::Require);
+        let plain: tokio_postgres::Config = "postgres://u:p@127.0.0.1:5432/cox?sslmode=require"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            plain.get_ssl_mode(),
+            tokio_postgres::config::SslMode::Require
+        );
     }
 
     // --- pool: the build-time contract ---------------------------------------
@@ -477,7 +484,10 @@ mod tests {
         let err = pool("postgres://u:p@127.0.0.1:1/db?sslmode=requre", "state")
             .await
             .unwrap_err();
-        assert!(err.starts_with("state pool: "), "failure is not labeled: {err}");
+        assert!(
+            err.starts_with("state pool: "),
+            "failure is not labeled: {err}"
+        );
         assert!(err.contains("requre"), "unclear failure: {err}");
     }
 
@@ -504,7 +514,10 @@ mod tests {
     async fn an_empty_root_cert_bundle_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("empty.crt");
-        std::fs::File::create(&path).unwrap().write_all(b"").unwrap();
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(b"")
+            .unwrap();
         let err = pool(
             &format!(
                 "postgres://u:p@127.0.0.1:1/db?sslmode=verify-ca&sslrootcert={}",
