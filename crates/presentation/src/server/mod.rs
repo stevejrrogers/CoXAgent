@@ -55,6 +55,7 @@ mod goals;
 mod guards;
 mod hub_docs;
 mod inbox;
+mod lessons;
 mod manage;
 mod meetings;
 mod metrics_admin;
@@ -155,6 +156,9 @@ const APP_JS: &[(&str, &str)] = &[
         "approval_policy.js",
         include_str!("../web/js/approval_policy.js"),
     ),
+    // Lesson efficacy panel (CXA-F306) — the Overview recurrence view; loads
+    // before shell.js like every view helper.
+    ("lessons.js", include_str!("../web/js/lessons.js")),
     ("shell.js", include_str!("../web/js/shell.js")),
 ];
 
@@ -854,6 +858,14 @@ pub async fn serve_full(
         .route(
             "/api/projects/:pid/approval-policy/release",
             post(approval_policy_release_ep),
+        )
+        .route(
+            "/api/projects/:pid/lessons/dismiss",
+            post(lessons::lessons_dismiss_ep),
+        )
+        .route(
+            "/api/projects/:pid/lessons/escalate",
+            post(lessons::lessons_escalate_ep),
         )
         .route("/api/projects/:pid/sprint/goal", post(set_sprint_goal_ep))
         .route("/api/projects/:pid/sprint/close", post(sprint_close_ep))

@@ -3125,6 +3125,95 @@ async fn rollbacks_post_mortems_target_the_incidents_channel_and_notify_distinct
     );
 }
 
+/// CXA-F306 AC1, behaviorally: a post-mortem whose summary matches an
+/// existing project lesson above the similarity threshold increments that
+/// lesson's recurrence count exactly once for the incident — anchored to the
+/// incident's own stamp — while an unrelated lesson stays untouched. A second
+/// incident of the same class counts again (once per incident, not once ever).
+#[tokio::test]
+async fn a_recurring_failure_increments_the_matching_lessons_recurrence_once() {
+    const FAILING: &str = "deploy failed: docker build fails when the base image tag moves";
+    let deploy = Arc::new(ScriptedDeploy::new(vec![
+        crate::ports::outbound::DeployReport {
+            failure_bundle: None,
+            success: false,
+            deployed: true,
+            summary: FAILING.to_owned(),
+        },
+        crate::ports::outbound::DeployReport {
+            failure_bundle: None,
+            success: true,
+            deployed: true,
+            summary: "rollback redeploy ok".to_owned(),
+        },
+        crate::ports::outbound::DeployReport {
+            failure_bundle: None,
+            success: false,
+            deployed: true,
+            summary: FAILING.to_owned(),
+        },
+        crate::ports::outbound::DeployReport {
+            failure_bundle: None,
+            success: true,
+            deployed: true,
+            summary: "rollback redeploy ok".to_owned(),
+        },
+    ]));
+    let notifier = Arc::new(SpyNotifier {
+        ..Default::default()
+    });
+    let (store, _git, uc) = rollback_uc(true, &deploy, &notifier);
+    // One lesson the failing summary repeats, one it shares nothing with.
+    {
+        let mut s = store.state.lock().expect("lock");
+        s.record_lesson(
+            "docker build fails when the base image tag moves — pin the base image version",
+        );
+        s.record_lesson("route PRs that touch gating files to their human approver at open");
+    }
+
+    Box::pin(uc.run_cycle(1)).await;
+
+    let recurrence_of = |state: &ProjectState| {
+        state
+            .lesson_records
+            .iter()
+            .find(|r| r.text.contains("pin the base image"))
+            .expect("the seeded lesson stays tracked")
+            .recurrences
+            .clone()
+    };
+    let state = store.load().await.expect("load");
+    let recurrences = recurrence_of(&state);
+    assert_eq!(
+        recurrences.len(),
+        1,
+        "one incident, exactly one recurrence — got {recurrences:?}"
+    );
+    assert!(
+        !recurrences[0].incident_at.is_empty() && recurrences[0].incident_reason == "deploy failed",
+        "the recurrence is anchored to its incident"
+    );
+    assert!(
+        state
+            .lesson_records
+            .iter()
+            .find(|r| r.text.contains("gating files"))
+            .is_some_and(|r| r.recurrences.is_empty()),
+        "the unrelated lesson must not be dragged into the match"
+    );
+
+    Box::pin(uc.run_cycle(2)).await;
+
+    let state = store.load().await.expect("load");
+    let recurrences = recurrence_of(&state);
+    assert_eq!(recurrences.len(), 2, "a second incident of the class counts again");
+    assert_ne!(
+        recurrences[0].incident_at, recurrences[1].incident_at,
+        "each recurrence carries its own incident"
+    );
+}
+
 /// A human hold is absolute for the bulk sweep too: PR #329 (touching
 /// .github/workflows) was parked for a person, and merge_sweep steamrolled it.
 /// The sweep must skip any PR in `human_holds`, whatever its CI/mergeable state.

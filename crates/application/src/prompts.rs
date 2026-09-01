@@ -1104,6 +1104,11 @@ pub fn hub_lessons_path() -> std::path::PathBuf {
 /// Record a lesson into the hub-wide store (dedup, newest last, capped at 30
 /// so the block stays prompt-sized). Best-effort: IO errors are swallowed —
 /// a lesson lost beats a crashed retro.
+///
+/// CXA-F306: eviction is no longer silent loss. Entries pushed past the cap
+/// move to the sidecar retention shelf (`hub_lessons::retain_evicted`) with
+/// any recurrence history they carry, so a lesson evicted today that matches
+/// a later incident is re-surfaced instead of gone.
 pub async fn record_hub_lesson(
     files: Option<&dyn crate::ports::outbound::WorkspaceFilesPort>,
     lesson: &str,
@@ -1137,7 +1142,16 @@ pub async fn record_hub_lesson(
     lines.push(entry);
     let overflow = lines.len().saturating_sub(30);
     if overflow > 0 {
-        lines.drain(0..overflow);
+        let evicted: Vec<String> = lines.drain(0..overflow).collect();
+        // Retain, don't lose: the evicted bullets (and their recurrence
+        // history, if any) stay matchable for later incidents (CXA-F306 AC4).
+        crate::hub_lessons::retain_evicted(
+            Some(files),
+            &path,
+            &evicted,
+            &crate::state::now_rfc3339(),
+        )
+        .await;
     }
     let _ = files.write(&path, &(lines.join("\n") + "\n")).await;
 }

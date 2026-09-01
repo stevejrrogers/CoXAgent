@@ -257,8 +257,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // when IT failed at the compose level.
         // CXA-F289: the failed attempt's forensics triggered this rollback.
         // A SUCCESSFUL rollback overwrites the deploy record below, so the
-        // bundle must ride the rollback record to stay visible.
-        let trigger_bundle = state.deploy.as_ref().and_then(|d| d.failure_bundle.clone());
+        // bundle must ride the rollback record to stay visible — and the
+        // failure's one-line summary must be captured NOW too (CXA-F306):
+        // it is the failure-class text the lesson-efficacy matcher keys on,
+        // and after the overwrite only the rollback's own summary remains.
+        let trigger = state.deploy.as_ref();
+        let trigger_bundle = trigger.and_then(|d| d.failure_bundle.clone());
+        let trigger_summary = trigger.map(|d| d.summary.clone());
         let path = self.rollback_worktree_path();
         let _ = git.worktree_remove(&self.work_dir, &path).await;
         let (ok, summary, own_bundle) =
@@ -300,6 +305,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             &good.sha,
             ok,
             summary,
+            trigger_summary,
             record_bundle,
             report,
         )
@@ -340,6 +346,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         good_sha: &str,
         ok: bool,
         summary: String,
+        // The FAILING deploy's own summary (CXA-F306), captured before the
+        // rollback overwrote the deploy record — `None` when the failure's
+        // text was unavailable and the rollback summary is all there is.
+        failure_summary: Option<String>,
         failure_bundle: Option<crate::state::DeployFailureBundle>,
         report: &mut CycleReport,
     ) {
@@ -397,8 +407,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
 
         // A successful rollback is an incident worth learning from — run the
         // post-mortem loop exactly once for this revision.
-        self.post_mortem(reason, failed_sha, good_sha, false, summary.clone(), report)
-            .await;
+        self.post_mortem(
+            reason,
+            failed_sha,
+            good_sha,
+            false,
+            summary.clone(),
+            failure_summary,
+            report,
+        )
+        .await;
     }
     /// Record a rollback that was deliberately NOT attempted (stale target or
     /// a migration in the way) — distinct from an attempt that failed. The
@@ -440,12 +458,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         )
         .await;
         // A skipped rollback is still an incident — record its post-mortem once.
+        // No deploy-failure summary exists to match (nothing was attempted), so
+        // the skip explanation is the post-mortem's only text.
         self.post_mortem(
             reason,
             failed_sha,
             to_sha,
             true,
             summary.to_string(),
+            None,
             report,
         )
         .await;
@@ -461,6 +482,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     ///
     /// Best-effort throughout: none of these failures may break or stall a run,
     /// and there must never be more than one post-mortem per revision.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn post_mortem(
         &self,
         reason: &str,
@@ -468,12 +490,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         target_sha: &str,
         rolled_forward: bool,
         summary: String,
+        // The failure-class text for the lesson-efficacy matcher (CXA-F306):
+        // what the failing deploy itself said, not the rollback's own outcome
+        // line. Falls back to `summary` when unavailable.
+        failure_summary: Option<String>,
         _report: &mut CycleReport,
     ) {
         use crate::state::{INCIDENTS_CHANNEL, MAX_INCIDENTS};
 
         let failed = failed_sha.clone().unwrap_or_default();
         let short_target = short_sha(target_sha);
+        let incident_at = crate::state::now_rfc3339();
         let mood = if rolled_forward {
             "rolled-forward/stale"
         } else {
@@ -485,14 +512,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         );
 
         // Blacklist + durable record + #incidents surface in ONE state mutation:
-        // they describe the same incident and must land atomically.
+        // they describe the same incident and must land atomically. The stamp
+        // is minted once: it is also the once-per-incident identity the lesson
+        // efficacy loop dedupes and dismisses on (CXA-F306).
         crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
             if !failed.is_empty() {
                 s.rolled_back_commits.insert(failed.clone());
             }
             s.post_chat_in("SM", &body, INCIDENTS_CHANNEL, Vec::new());
             s.incidents.push(crate::state::IncidentRecord {
-                at: crate::state::now_rfc3339(),
+                at: incident_at.clone(),
                 reason: reason.to_owned(),
                 failed_sha: failed.clone(),
                 to_sha: target_sha.to_owned(),
@@ -525,6 +554,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         })
         .await
         .ok();
+
+        // CXA-F306: does this failure class ALREADY have a lesson? Match the
+        // FAILURE's own summary against existing project + hub lessons and
+        // increment the hit's recurrence count (once per incident). Best-
+        // effort like the rest of this path — a matching failure never
+        // delays the cycle.
+        let match_text = failure_summary
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| summary.clone());
+        self.match_lesson_recurrence(&match_text, reason, &incident_at)
+            .await;
     }
     /// File a High bug when a rollback attempt itself fails (deduped on an
     /// open one) — the root-cause failure already filed its own bug via
