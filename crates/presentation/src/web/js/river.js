@@ -88,7 +88,7 @@ function handleRiverEvent(d){
     RIVER_STATES[d.project_id]={name:d.name,alias:"",broken:true,error:d.error,config_path:d.config_path};
     renderRiverStrip();
   }else if(d.type==="project_state"){
-    RIVER_STATES[d.project_id]={name:d.name,alias:d.alias,runner:d.runner,needs_human:!!d.needs_human,holds:d.human_holds||{},insufficient:!!d.insufficient_data,viewers:d.viewers};
+    RIVER_STATES[d.project_id]={name:d.name,alias:d.alias,runner:d.runner,needs_human:!!d.needs_human,holds:d.human_holds||{},insufficient:!!d.insufficient_data,online:d.viewers||d.online||[]};
     renderRiverStrip();
     riverLive(true);
     setConn(true);
@@ -139,10 +139,17 @@ function riverRow(d){
   const feed=document.getElementById("river-feed");if(!feed)return;
   const first=feed.querySelector(".riv-empty, .empty");if(first)first.remove();
   const e=d.entry||{};
+  // An SSE reconnect (hub redeploy, network blip) replays the recent
+  // backlog into a feed that may still hold the same rows from the previous
+  // stream session — key each row by its event identity so a replayed event
+  // never renders twice ("two sessions bleeding into each other").
+  const k=[d.project_id,e.at,e.agent,e.action,e.ticket||""].join("|");
+  for(const r of feed.children){if(r.dataset&&r.dataset.k===k)return;}
   const p=(RIVER_PROJECTS.find(x=>x.id===d.project_id)||{name:d.project_id});
   const col=cvar(AC[e.agent]||"--muted");
   const row=document.createElement("div");
   row.className="riv-row";
+  row.dataset.k=k;
   row.innerHTML=`<div class="tl-node" style="--nc:${col}"><i class="ti ti-${actIcon(e.action)}"></i></div>
     <div class="tl-body"><div class="tl-line">
       <span class="riv-who" style="color:${col}">${esc(e.agent||"—")}</span>

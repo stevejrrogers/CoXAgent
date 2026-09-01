@@ -22,12 +22,14 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use coxagent_application::config::BudgetCaps;
-use coxagent_application::ports::outbound::{AgentEnginePort, AgentOutcome, AgentRequest, StateStorePort};
+use coxagent_application::ports::outbound::{
+    AgentEnginePort, AgentOutcome, AgentRequest, StateStorePort,
+};
 use coxagent_application::state::DocPage;
 use coxagent_application::{PortError, ProjectState, GENERAL_CHANNEL};
 use coxagent_domain::{Complexity, Priority, Ticket, TicketId, TicketType};
 use coxagent_presentation::ProjectHandle;
-use rest_store_support::{boot, MEMBER_BEARER, StubAuth};
+use rest_store_support::{boot, StubAuth, MEMBER_BEARER};
 
 /// Ports unique across this crate's hub-booting tests (see the registry note
 /// in rest_store_support: 47_735-47_738, 47_712+, 47_841).
@@ -124,11 +126,7 @@ fn seeded_state() -> ProjectState {
     s
 }
 
-async fn get(
-    client: &reqwest::Client,
-    url: &str,
-    bearer: Option<&str>,
-) -> reqwest::Response {
+async fn get(client: &reqwest::Client, url: &str, bearer: Option<&str>) -> reqwest::Response {
     let mut req = client.get(url);
     if let Some(token) = bearer {
         req = req.header("Authorization", format!("Bearer {token}"));
@@ -138,7 +136,12 @@ async fn get(
 
 #[tokio::test]
 async fn search_endpoint_gates_membership_and_serves_the_hit_shape() {
-    let _dir = boot(PORT, vec![handle("demo", seeded_state())], Some(Arc::new(StubAuth))).await;
+    let _dir = boot(
+        PORT,
+        vec![handle("demo", seeded_state())],
+        Some(Arc::new(StubAuth)),
+    )
+    .await;
     let client = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{PORT}/api/search");
 
@@ -146,40 +149,77 @@ async fn search_endpoint_gates_membership_and_serves_the_hit_shape() {
     let resp = get(&client, &format!("{base}?q=payment"), None).await;
     assert_eq!(resp.status().as_u16(), 401, "anonymous search is refused");
     // A bearer the auth store does not know is refused the same way.
-    let resp = get(&client, &format!("{base}?q=payment"), Some("bearer-unknown")).await;
+    let resp = get(
+        &client,
+        &format!("{base}?q=payment"),
+        Some("bearer-unknown"),
+    )
+    .await;
     assert_eq!(resp.status().as_u16(), 401, "unknown bearer is refused");
 
     // A member of `demo` searches their project: 200, bare array, full shape.
-    let resp = get(&client, &format!("{base}?q=payment&pid=demo"), Some(MEMBER_BEARER)).await;
+    let resp = get(
+        &client,
+        &format!("{base}?q=payment&pid=demo"),
+        Some(MEMBER_BEARER),
+    )
+    .await;
     assert_eq!(resp.status().as_u16(), 200);
     let hits: serde_json::Value = resp.json().await.unwrap();
     let hits = hits.as_array().expect("bare array (SA contract)");
-    assert!(!hits.is_empty(), "the seeded needle matches all three kinds");
+    assert!(
+        !hits.is_empty(),
+        "the seeded needle matches all three kinds"
+    );
     let kinds: Vec<&str> = hits.iter().map(|h| h["kind"].as_str().unwrap()).collect();
-    assert!(kinds.contains(&"ticket") && kinds.contains(&"page") && kinds.contains(&"message"),
-        "all three kinds surface: {kinds:?}");
+    assert!(
+        kinds.contains(&"ticket") && kinds.contains(&"page") && kinds.contains(&"message"),
+        "all three kinds surface: {kinds:?}"
+    );
     for hit in hits {
         for field in ["kind", "id", "ref", "label", "snippet", "sub", "at", "link"] {
-            assert!(hit.get(field).is_some(), "hit shape carries `{field}`: {hit}");
+            assert!(
+                hit.get(field).is_some(),
+                "hit shape carries `{field}`: {hit}"
+            );
         }
     }
 
     // AC2 on the wire: the same member asking for a project they are NOT a
     // member of gets the per-project routes' 403 — the handler enforces what
     // auth_mw cannot see (the pid rides in the query string).
-    let resp = get(&client, &format!("{base}?q=payment&pid=secret"), Some(MEMBER_BEARER)).await;
+    let resp = get(
+        &client,
+        &format!("{base}?q=payment&pid=secret"),
+        Some(MEMBER_BEARER),
+    )
+    .await;
     assert_eq!(resp.status().as_u16(), 403, "non-member pid is refused");
 
     // No pid: the sweep covers the projects the caller may view (demo only).
     let resp = get(&client, &format!("{base}?q=payment"), Some(MEMBER_BEARER)).await;
     assert_eq!(resp.status().as_u16(), 200);
     let swept: serde_json::Value = resp.json().await.unwrap();
-    assert!(!swept.as_array().unwrap().is_empty(), "the member's own project is swept");
+    assert!(
+        !swept.as_array().unwrap().is_empty(),
+        "the member's own project is swept"
+    );
 
     // AC4 on the wire: a sub-2-character query is an explicit empty array.
-    let resp = get(&client, &format!("{base}?q=p&pid=demo"), Some(MEMBER_BEARER)).await;
+    let resp = get(
+        &client,
+        &format!("{base}?q=p&pid=demo"),
+        Some(MEMBER_BEARER),
+    )
+    .await;
     assert_eq!(resp.status().as_u16(), 200);
-    assert!(resp.json::<serde_json::Value>().await.unwrap().as_array().unwrap().is_empty());
+    assert!(resp
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .is_empty());
 
     // The route is registered in the OpenAPI document (CXA-C005 drift guard).
     let doc: serde_json::Value = client
@@ -204,11 +244,16 @@ async fn search_endpoint_runs_open_when_no_auth_is_configured() {
     let _dir = boot(OPEN_PORT, vec![handle("demo", seeded_state())], None).await;
     let client = reqwest::Client::new();
     let resp = client
-        .get(format!("http://127.0.0.1:{OPEN_PORT}/api/search?q=payment&pid=demo"))
+        .get(format!(
+            "http://127.0.0.1:{OPEN_PORT}/api/search?q=payment&pid=demo"
+        ))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
     let hits: serde_json::Value = resp.json().await.unwrap();
-    assert!(!hits.as_array().unwrap().is_empty(), "open mode sees the seeded project");
+    assert!(
+        !hits.as_array().unwrap().is_empty(),
+        "open mode sees the seeded project"
+    );
 }

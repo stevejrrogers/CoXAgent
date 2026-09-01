@@ -22,7 +22,12 @@ pub struct ApprovalSample {
 }
 
 /// What the learner concluded about one shape.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serialized snake_case so the policy panel (CXA-F303) can show the rule
+/// exactly as the gate holds it: `"keep_asking"`, or an externally-tagged
+/// `{"auto_approve":{..}}` / `{"preflight_fix":{..}}` object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Rule {
     /// Enough consistent approvals: stop asking, announce instead.
     AutoApprove { by: String, samples: usize },

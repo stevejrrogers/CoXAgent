@@ -311,6 +311,14 @@ pub struct WorkflowConfig {
     /// a multi-hour stall is one alert, not one per sweep.
     #[serde(default)]
     pub stall_hub_timeout_secs: u64,
+    /// Brief screening (CXA-F305, default on): every block of the DEV brief is
+    /// provenance-tagged (`human | agent | external`) and untrusted text is
+    /// pattern-screened for prompt injection before it enters the task prompt;
+    /// journal/hub-lesson writes that trip the screen are withheld and flagged
+    /// as `injection_flagged` in the team chat. Set `false` to roll back to
+    /// untagged, unscreened briefs — existing configs deserialize unchanged.
+    #[serde(default = "default_true")]
+    pub brief_screening: bool,
 }
 
 /// How often the periodic phases run. Zeros mean "use the built-in default" so
@@ -577,6 +585,7 @@ impl Default for WorkflowConfig {
             stall_watchdog: true,
             stall_timeout_secs: 0,
             stall_hub_timeout_secs: 0,
+            brief_screening: true,
         }
     }
 }

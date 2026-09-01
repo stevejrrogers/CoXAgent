@@ -1,9 +1,14 @@
 name: CI
 
+# Cost discipline (2026-09): CI runs ONCE per change — on the merge to main —
+# not on every PR push. Every merge is already verified locally (clippy, full
+# test suite, Playwright) by the SA review lane before it lands; the Actions
+# run on main is the independent record, and workflow_dispatch covers ad-hoc
+# runs. This halves billed minutes without weakening the merge bar.
 on:
   push:
     branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -58,6 +63,7 @@ jobs:
     # a developer can run the same gate locally.
     name: docker compose smoke (app answers on 8101)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -70,3 +76,26 @@ jobs:
       - name: Tear down
         if: always()
         run: docker compose down -v
+
+  # CXA-F286: merge-blocking is enactable from repo state alone —
+  # branch protection on main must require BOTH gate jobs as required status
+  # checks, matched by their check-run display names exactly —
+  #   - docker compose smoke (app answers on 8101)  (the availability gate)
+  #   - ownership + CI wiring guards                (this job)
+  # ci_availability_gate.rs fails if a name drifts or this documentation
+  # disappears, so a rename can never silently dangle a required check.
+  #
+  # Docker-free by construction: every test here is a pure decision over
+  # names, labels and workflow text — no compose stack, no daemon — so a
+  # docker-less runner can never silently skip the guard.
+  guard-tests:
+    name: ownership + CI wiring guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Reclaimable teardown policy (protected infra stays protected)
+        run: cargo test -p coxagent-infrastructure --lib reclaimable
+      - name: CI wiring guards (jobs exist, ungated, real commands)
+        run: cargo test -p coxagent-app --test deploy_smoke --test ci_availability_gate

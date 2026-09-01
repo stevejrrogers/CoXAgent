@@ -27,6 +27,11 @@ pub struct DeployReport {
     pub deployed: bool,
     /// A short human summary for the activity log.
     pub summary: String,
+    /// CXA-F289: when this attempt failed, the size-capped forensics bundle
+    /// (compose stderr tail + recent per-container logs) captured at the
+    /// failure site by the adapter that ran the deploy. `None` for
+    /// successful and skipped deploys.
+    pub failure_bundle: Option<crate::state::DeployFailureBundle>,
 }
 
 /// Lint gate measurement: the error count, a bounded sample of the actual
@@ -231,6 +236,7 @@ pub trait DeployPort: Send + Sync {
         _seed_modules: Option<&Path>,
     ) -> Result<DeployReport, PortError> {
         Ok(DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: false,
             summary: "no e2e runner".to_owned(),
@@ -240,6 +246,7 @@ pub trait DeployPort: Send + Sync {
     async fn run_tests(&self, work_dir: &Path) -> Result<DeployReport, PortError> {
         let _ = work_dir;
         Ok(DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: false,
             summary: "no test runner".to_owned(),

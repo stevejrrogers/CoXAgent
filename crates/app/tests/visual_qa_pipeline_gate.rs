@@ -93,21 +93,22 @@ fn workflow_exists_and_is_valid_with_one_check_job() {
 }
 
 #[test]
-fn triggers_on_pull_request_open_and_sync() {
-    // Criterion 1 · Screenshots run when a pull request opens or syncs,
-    // not just manually via workflow_dispatch or by editing something else.
+fn triggers_on_merge_to_main_plus_dispatch() {
+    // Criterion 1 (revised, cost discipline 2026-09): screenshots run once
+    // per landed change — on the push to main — because the SA review lane
+    // already runs the full Playwright suite on every PR before it merges.
+    // workflow_dispatch stays for ad-hoc runs.
     let doc = load();
-    let types_node = doc["on"]["pull_request"]["types"]
+    let branches = doc["on"]["push"]["branches"]
         .as_sequence()
-        .expect("must declare pull_request.types");
-    let types: Vec<String> = types_node
-        .iter()
-        .map(|t| t.as_str().unwrap().to_string())
-        .collect();
-    assert!(types.iter().any(|t| t == "opened"), "must fire on opened");
+        .expect("must declare push.branches");
     assert!(
-        types.iter().any(|t| t == "synchronize"),
-        "must fire on synchronize"
+        branches.iter().any(|b| b.as_str() == Some("main")),
+        "must fire on pushes to main"
+    );
+    assert!(
+        doc["on"].get("workflow_dispatch").is_some(),
+        "must allow manual workflow_dispatch"
     );
 }
 

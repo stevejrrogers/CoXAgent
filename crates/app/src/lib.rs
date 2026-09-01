@@ -342,13 +342,14 @@ mod project_id_tests {
     }
 }
 
-/// CXA-B129: the onboarding refusal must arrive at the API classified as a
-/// client conflict — the glue between [`onboard::OnboardConflict`] and the
+/// CXA-B129/CXA-B139: onboarding failures must arrive at the API classified —
+/// the glue between [`onboard::OnboardConflict`] / input validation and the
 /// presentation layer's [`FactoryError`].
 #[cfg(test)]
 mod onboard_error_classification_tests {
     use super::classify_onboard_error;
     use crate::onboard::OnboardConflict;
+    use coxagent_presentation::FactoryErrorKind;
 
     #[test]
     fn the_re_onboard_refusal_is_classified_as_a_conflict() {
@@ -356,7 +357,11 @@ mod onboard_error_classification_tests {
             "workspace already has tickets; refusing to re-onboard".into(),
         ));
         let mapped = classify_onboard_error(err.as_ref());
-        assert!(mapped.conflict, "the refusal must map to 409 material");
+        assert_eq!(
+            mapped.kind,
+            FactoryErrorKind::Conflict,
+            "the refusal must map to 409 material"
+        );
         assert_eq!(
             mapped.message,
             "workspace already has tickets; refusing to re-onboard"
@@ -367,7 +372,11 @@ mod onboard_error_classification_tests {
     fn any_other_onboarding_failure_stays_a_server_fault() {
         let err: Box<dyn std::error::Error> = "store unreachable".into();
         let mapped = classify_onboard_error(err.as_ref());
-        assert!(!mapped.conflict, "an ordinary fault must map to 500");
+        assert_eq!(
+            mapped.kind,
+            FactoryErrorKind::Internal,
+            "an ordinary fault must map to 500"
+        );
         assert_eq!(mapped.message, "store unreachable");
     }
 }
@@ -379,7 +388,7 @@ mod onboard_error_classification_tests {
 #[cfg(test)]
 mod onboard_scaffold_cleanup_tests {
     use super::{onboard_project, unique_id};
-    use coxagent_presentation::NewProjectReq;
+    use coxagent_presentation::{FactoryErrorKind, NewProjectReq};
     use std::path::PathBuf;
 
     fn request(alias: &str) -> NewProjectReq {
@@ -401,12 +410,13 @@ mod onboard_scaffold_cleanup_tests {
             git_url: Some("ftp://example.invalid/repo.git".to_owned()),
             ..request("QAB136")
         };
-        let Err(err) = onboard_project(base.path(), &registry, req, None).await else {
+        let Err(err) = Box::pin(onboard_project(base.path(), &registry, req, None)).await else {
             panic!("an unsupported git scheme must refuse the onboarding");
         };
-        assert!(
-            !err.conflict,
-            "a bad git URL is a fault, not a 409 conflict"
+        assert_eq!(
+            err.kind,
+            FactoryErrorKind::BadRequest,
+            "a bad git URL is the client's bad input (400), not a 409 conflict or a 500 fault"
         );
         assert!(
             !base.path().join("qab136").exists(),
@@ -430,12 +440,100 @@ mod onboard_scaffold_cleanup_tests {
             existing: Some(PathBuf::from("/nonexistent/qab136/codebase")),
             ..request("QAB136")
         };
-        assert!(onboard_project(base.path(), &registry, req, None)
+        assert!(Box::pin(onboard_project(base.path(), &registry, req, None))
             .await
             .is_err());
         assert!(
             !base.path().join("qab136").exists(),
             "the failed adoption must not leave the scaffolded workspace behind"
+        );
+    }
+}
+
+/// CXA-B138: the alias becomes the workspace directory id (`base.join(id)`),
+/// so `../name` used to scaffold — and DELETE `rm -rf` — OUTSIDE the hub's
+/// workspace base (on the docker deploy, at container root). The port must
+/// refuse such an alias before any IO and classify it bad-request (HTTP 400),
+/// not a server fault.
+#[cfg(test)]
+mod onboard_alias_traversal_tests {
+    use super::onboard_project;
+    use coxagent_presentation::{FactoryErrorKind, NewProjectReq};
+
+    fn request(alias: &str) -> NewProjectReq {
+        NewProjectReq {
+            name: "QA Trav".to_owned(),
+            alias: Some(alias.to_owned()),
+            ..Default::default()
+        }
+    }
+
+    /// The ticket's repro, at the port: nothing may be created inside OR
+    /// outside the workspace base, and the registry must stay untouched.
+    #[tokio::test]
+    async fn a_traversing_alias_is_refused_before_any_directory_is_created() {
+        let root = tempfile::tempdir().expect("tmp");
+        let base = root.path().join("workspaces");
+        std::fs::create_dir_all(&base).expect("workspace base");
+        let registry = base.join("registry.json");
+
+        let Err(err) = Box::pin(onboard_project(
+            &base,
+            &registry,
+            request("../qatrav-esc"),
+            None,
+        ))
+        .await
+        else {
+            panic!("a traversing alias must refuse the onboarding");
+        };
+        assert_eq!(
+            err.kind,
+            FactoryErrorKind::BadRequest,
+            "a refused alias is client input, not a server fault"
+        );
+        assert!(
+            !root.path().join("qatrav-esc").exists(),
+            "no workspace may be scaffolded outside the base"
+        );
+        let created: Vec<String> = std::fs::read_dir(&base)
+            .expect("base listing")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            created.is_empty(),
+            "nothing may be scaffolded inside the base either: {created:?}"
+        );
+        assert!(!registry.exists(), "the registry must not gain an entry");
+    }
+
+    /// Every traversal shape the ticket names is refused the same way —
+    /// including `\`, which only escapes on Windows hosts.
+    #[tokio::test]
+    async fn every_path_separator_shape_is_refused_as_bad_request() {
+        let base = tempfile::tempdir().expect("tmp");
+        let registry = base.path().join("registry.json");
+        for alias in ["..\\qatrav-esc", "qa/../trav", "a/b", "..", ".hidden"] {
+            let Err(err) = Box::pin(onboard_project(
+                base.path(),
+                &registry,
+                request(alias),
+                None,
+            ))
+            .await
+            else {
+                panic!("alias {alias:?} must refuse the onboarding");
+            };
+            assert_eq!(
+                err.kind,
+                FactoryErrorKind::BadRequest,
+                "alias {alias:?} must classify bad-request"
+            );
+        }
+        assert!(
+            !registry.exists(),
+            "no refused attempt may register anything"
         );
     }
 }
@@ -754,9 +852,9 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
             let base = base.clone();
             let registry_path = registry_path.clone();
             let auth = auth.clone();
-            Box::pin(
-                async move { onboard_project(&base, &registry_path, req, auth.as_ref()).await },
-            )
+            Box::pin(async move {
+                Box::pin(onboard_project(&base, &registry_path, req, auth.as_ref())).await
+            })
         }
     });
     let remover: coxagent_presentation::ProjectRemover = Arc::new({
@@ -866,6 +964,15 @@ async fn onboard_project(
         .alias
         .clone()
         .unwrap_or_else(|| coxagent_application::state::derive_alias(req.name.trim()));
+    // CXA-B138: the id becomes the workspace directory (`base.join(id)`), so a
+    // path-traversing alias must be refused before ANY filesystem work — the
+    // HTTP layer rejects it first; this keeps the port itself safe for every
+    // caller. (An empty derived id keeps the unique_id "project" fallback.)
+    if !derived.is_empty() && !coxagent_application::state::is_safe_workspace_id(&derived) {
+        return Err(FactoryError::bad_request(format!(
+            "alias {derived:?} must not contain '/', '\\', '..' or leading dots"
+        )));
+    }
     let id = unique_id(base, &derived.to_lowercase());
     let proj_dir = base.join(&id);
 
@@ -919,7 +1026,10 @@ async fn scaffold_onboarded_project(
                 || url.starts_with("https://")
                 || url.starts_with("http://"))
             {
-                return Err(FactoryError::internal(
+                // CXA-B139: an unsupported scheme is the CLIENT's bad input —
+                // the request can never succeed, so it must be classified as
+                // a bad request (400), not a server fault (500).
+                return Err(FactoryError::bad_request(
                     "git URL must start with git@, https:// or http://",
                 ));
             }
@@ -1717,7 +1827,7 @@ pub(crate) fn worktree_at(work_dir: PathBuf, slug: &str) -> PathBuf {
 ///   1. deletes stray files dumped in the worktrees root (agent scratch);
 ///   2. removes husk dirs git no longer lists as worktrees;
 ///   3. `git worktree remove --force`s registered trees idle > 48 h;
-///   4. deletes the `target/` of trees idle > 6 h (rebuilt on next use).
+///   4. deletes the `target/` of trees idle > 2 h (rebuilt on next use).
 ///
 /// Best-effort throughout: a busy tree just gets skipped this round.
 pub(crate) fn spawn_worktree_janitor(work_dir: std::path::PathBuf) {
@@ -1730,7 +1840,10 @@ pub(crate) fn spawn_worktree_janitor(work_dir: std::path::PathBuf) {
                     reclaimed / (1024 * 1024)
                 );
             }
-            tokio::time::sleep(std::time::Duration::from_secs(6 * 3600)).await;
+            // Hourly, not 6-hourly: a busy night refills ~40 GB of worktree
+            // targets in under two hours — a 6 h cadence let free space fall
+            // to 56 GB four times in one night of manual cleanups.
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
         }
     });
 }
@@ -1826,7 +1939,7 @@ fn worktree_janitor_sweep(work_dir: &std::path::Path) -> u64 {
         }
         // Idle trees lose their target outright; a busy tree is size-capped
         // or stale-trimmed (cargo never garbage-collects; 65 GB seen).
-        reclaimed += sweep_target_dir(&path.join("target"), now, idle >= 6);
+        reclaimed += sweep_target_dir(&path.join("target"), now, idle >= 2);
     }
     let _ = std::process::Command::new("git")
         .arg("-C")

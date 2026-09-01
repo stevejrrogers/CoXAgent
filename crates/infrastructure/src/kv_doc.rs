@@ -7,8 +7,7 @@
 use async_trait::async_trait;
 use coxagent_application::ports::outbound::KvDocPort;
 use coxagent_application::PortError;
-use deadpool_postgres::{Config, Pool, Runtime};
-use tokio_postgres::NoTls;
+use deadpool_postgres::Pool;
 
 const INIT_SQL: &str = "
 CREATE TABLE IF NOT EXISTS app_kv (
@@ -33,11 +32,7 @@ impl PgKvDoc {
     /// # Errors
     /// Returns a message if the pool cannot be built or migration fails.
     pub async fn connect(dsn: &str) -> Result<Self, String> {
-        let mut cfg = Config::new();
-        cfg.url = Some(dsn.to_owned());
-        let pool = cfg
-            .create_pool(Some(Runtime::Tokio1), NoTls)
-            .map_err(|e| format!("kv pool: {e}"))?;
+        let pool = crate::pg::pool(dsn, "kv").await?;
         let svc = Self { pool };
         svc.client()
             .await?

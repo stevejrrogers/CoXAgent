@@ -35,6 +35,7 @@ use crate::middleware::{
 };
 
 mod alerts;
+mod approval_policy;
 mod assets;
 mod auth;
 mod background;
@@ -76,6 +77,7 @@ mod tunecockpit;
 mod work;
 
 use alerts::*;
+use approval_policy::*;
 use assets::*;
 use auth::*;
 use background::*;
@@ -147,6 +149,12 @@ const APP_JS: &[(&str, &str)] = &[
     ("inbox.js", include_str!("../web/js/inbox.js")),
     ("drift.js", include_str!("../web/js/drift.js")),
     ("alerts.js", include_str!("../web/js/alerts.js")),
+    // Approval-policy transparency panel (CXA-F303) — extends the Settings
+    // Workflow tab; loads before shell.js like every view helper.
+    (
+        "approval_policy.js",
+        include_str!("../web/js/approval_policy.js"),
+    ),
     ("shell.js", include_str!("../web/js/shell.js")),
 ];
 
@@ -208,7 +216,7 @@ pub struct ProjectHandle {
 /// composition root so the presentation layer stays free of infrastructure.
 /// The contract lives in [`factory`]; re-exported here because every
 /// submodule globs `super::*` and `lib.rs` re-exports the names.
-pub use factory::{FactoryError, NewProjectReq, ProjectFactory, ProjectRemover};
+pub use factory::{FactoryError, FactoryErrorKind, NewProjectReq, ProjectFactory, ProjectRemover};
 
 /// Extract the project ID from a URL path like `/api/projects/:pid/...`.
 fn extract_pid_from_path(path: &str) -> Option<&str> {
@@ -835,6 +843,18 @@ pub async fn serve_full(
             "/api/projects/:pid/brakes/:brake/hold",
             post(brake_hold_ep).delete(brake_hold_clear_ep),
         )
+        .route(
+            "/api/projects/:pid/approval-policy",
+            get(approval_policy_ep),
+        )
+        .route(
+            "/api/projects/:pid/approval-policy/ask-again",
+            post(approval_policy_ask_again_ep),
+        )
+        .route(
+            "/api/projects/:pid/approval-policy/release",
+            post(approval_policy_release_ep),
+        )
         .route("/api/projects/:pid/sprint/goal", post(set_sprint_goal_ep))
         .route("/api/projects/:pid/sprint/close", post(sprint_close_ep))
         .route("/api/projects/:pid/sprint-queue", post(queue_sprint_ep))
@@ -1328,8 +1348,21 @@ fn conflict_error(msg: &str) -> axum::response::Response {
         .into_response()
 }
 
+/// Invalid client input (CXA-B138, CXA-B139): the same JSON error shape, but
+/// 400 so the client learns the request itself was bad — retrying can never
+/// succeed.
+fn bad_request_error(msg: &str) -> axum::response::Response {
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": msg })),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod alerts_tests;
+#[cfg(test)]
+mod approval_policy_tests;
 #[cfg(test)]
 mod avatar_media_security_tests;
 #[cfg(test)]
