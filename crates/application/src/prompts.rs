@@ -766,6 +766,15 @@ pub fn extract_brief_notes(stdout: &str) -> Vec<String> {
         .collect()
 }
 
+/// CXA-F305: [`extract_brief_notes`] composed with the injection screen — a
+/// note that trips the screen is withheld from the journal (it would otherwise
+/// replay into every future run as PRIOR WORK) and reported so the run can
+/// flag it to the operator as an `injection_flagged` item.
+#[must_use]
+pub fn extract_brief_notes_screened(stdout: &str) -> crate::brief_screening::ScreenedNotes {
+    crate::brief_screening::screen_notes(extract_brief_notes(stdout))
+}
+
 #[must_use]
 pub fn ask_protocol_block(state: &crate::state::ProjectState, ticket: &str) -> String {
     use std::fmt::Write as _;
@@ -1105,6 +1114,13 @@ pub async fn record_hub_lesson(
     if lesson.is_empty() {
         return;
     }
+    // CXA-F305: a lesson is agent-derived text replayed into EVERY project's
+    // brief — an injection-shaped line never enters the hub-wide store (the
+    // drop is silent, per the ticket's write-path contract).
+    let Some(lesson) = crate::brief_screening::screen_brief_note(lesson).cleaned else {
+        tracing::debug!("hub lesson withheld by brief screening at write time");
+        return;
+    };
     let path = hub_lessons_path();
     let mut lines: Vec<String> = files
         .read(&path)
@@ -1127,9 +1143,13 @@ pub async fn record_hub_lesson(
 }
 
 /// Prompt block with the most recent hub-wide lessons (max 8). Empty when the
-/// store is empty/absent.
+/// store is empty/absent. With `screening` on (CXA-F305), each line is
+/// screened before it enters any project's brief: a lesson that trips the
+/// screen is withheld until reviewed, and the withholding is announced in the
+/// block itself.
 pub async fn hub_lessons_block(
     files: Option<&dyn crate::ports::outbound::WorkspaceFilesPort>,
+    screening: bool,
 ) -> String {
     let Some(files) = files else {
         return String::new();
@@ -1144,11 +1164,46 @@ pub async fn hub_lessons_block(
     if recent.is_empty() {
         return String::new();
     }
+    let mut kept: Vec<String> = Vec::new();
+    let mut withheld = 0_usize;
+    for l in recent.iter().rev() {
+        if !screening {
+            kept.push((*l).to_owned());
+            continue;
+        }
+        let screened = crate::brief_screening::screen_brief_note(l.trim());
+        if let Some(clean) = screened.cleaned {
+            kept.push(clean);
+        } else {
+            withheld += 1;
+            tracing::debug!(
+                reasons = %crate::brief_screening::reasons_label(&screened.reasons),
+                "hub lesson withheld by brief screening"
+            );
+        }
+    }
+    if withheld == recent.len() {
+        // Everything withheld: keep the block alive so the withholding itself
+        // is announced rather than the lessons silently vanishing.
+        return format!(
+            "\n\n## Lessons from OTHER projects on this hub (hard-won — honour them):\n\
+             (all {withheld} lesson(s) withheld by brief screening — injection-shaped, \
+             pending security review.)\n"
+        );
+    }
     let mut out =
         String::from("\n\n## Lessons from OTHER projects on this hub (hard-won — honour them):\n");
-    for l in recent.iter().rev() {
+    for l in &kept {
         out.push_str(l);
         out.push('\n');
+    }
+    if withheld > 0 {
+        use std::fmt::Write as _;
+        let _ = writeln!(
+            out,
+            "({withheld} lesson(s) withheld by brief screening — injection-shaped, pending \
+             security review.)"
+        );
     }
     out
 }
@@ -1417,7 +1472,7 @@ mod tests {
         let n = text.lines().count();
         assert_eq!(n, 30, "capped at 30");
         assert!(!text.contains("lesson 0"), "oldest evicted");
-        let block = super::hub_lessons_block(Some(fs)).await;
+        let block = super::hub_lessons_block(Some(fs), true).await;
         assert!(block.contains("OTHER projects"));
         assert!(block.contains("lesson 34"));
         assert_eq!(block.matches("- lesson").count(), 8, "block caps at 8");
