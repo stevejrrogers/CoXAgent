@@ -5,9 +5,9 @@
 //! real run in CI, and a private copy of the check drifts: the KV/doc contract
 //! tests shipped with no live-hub refusal at all while the SQL store contract
 //! grew a second probe of its own. So the guard — the env reads, the skip
-//! story, the cannot-verify error and the live-hub refusal — lives once, in
-//! `infrastructure/tests/common/mod.rs`, and this gate fails the build the day
-//! any gated test grows its own divergent copy again.
+//! story, the exported-DSN refusal and the fail-closed provisioning — lives
+//! once, in `infrastructure/tests/common/mod.rs`, and this gate fails the
+//! build the day any gated test grows its own divergent copy again.
 //!
 //! (The CI-level half — the `integration` job that runs these gated suites —
 //! is pinned in `ci_availability_gate.rs`.)
@@ -62,11 +62,12 @@ fn reads_env_directly(src: &str) -> bool {
     code.contains("COXAGENT_TEST_PG_DSN") || code.contains("COXAGENT_TEST_REDIS_URL")
 }
 
-/// CXA-F326 AC: the guard itself must fail closed and speak the three
-/// distinct outcomes — a live-hub refusal that names `COXAGENT_TEST_PG_DSN`,
-/// the explicit 'cannot verify the target is not a live hub' error, and a
-/// skip that says 'skipped' — so a skip stays an observable outcome distinct
-/// from both a pass and a refusal.
+/// CXA-F326 AC, synced to the CXA-F327 policy: the guard itself must fail
+/// closed and speak the distinct outcomes — an exported-DSN refusal that names
+/// the variable and refuses ANY operator-provided database (no liveness
+/// heuristic left to misclassify), provisioning/verification failures that are
+/// RED instead of green, and an explicit docker-absent skip — so a skip stays
+/// an observable outcome distinct from both a pass and a refusal.
 #[test]
 fn the_shared_guard_owns_the_fail_closed_messages() {
     let guard = code(&read(GUARD));
@@ -78,21 +79,28 @@ fn the_shared_guard_owns_the_fail_closed_messages() {
          the wrong thing"
     );
     assert!(
-        guard.contains("LIVE hub") && guard.contains("refus"),
-        "the shared guard must state that it refused a LIVE hub database — a \
-         printed refusal that reads like a skip is how the incident shipped"
+        guard.contains("refusing to run against an operator-provided"),
+        "the shared guard must refuse ANY operator-provided database outright — \
+         probing whether an exported DSN *looks* like a live hub is the \
+         misclassification that let the incident ship"
     );
     assert!(
-        guard.contains("cannot verify the target is not a live hub"),
-        "the shared guard must fail with 'cannot verify the target is not a live \
-         hub' on connection or probe error — answering 'not live' lets the \
-         destructive tests run against an unverified database"
+        guard.contains("CXA-F327 fail-closed policy"),
+        "the exported-DSN refusal must panic RED under the fail-closed policy \
+         prefix — a printed refusal that returns is indistinguishable from a \
+         real run, which is how the incident shipped"
+    );
+    assert!(
+        guard.contains("failed to come up") && guard.contains("not reachable/migratable"),
+        "a fixture stack that fails to come up, or a claimed database the harness \
+         cannot verify as reachable, must fail RED naming the cause — answering \
+         green lets destructive tests run against an unverified database"
     );
     assert!(
         guard.contains("skipped"),
-        "the shared guard must emit an explicit 'skipped' message when the env \
-         vars are unset — an explicit skip must stay a distinct, observable \
-         outcome from both a pass and a live-hub refusal"
+        "the shared guard must emit an explicit 'skipped' message when docker is \
+         absent — an explicit skip must stay a distinct, observable outcome from \
+         both a pass and a refusal"
     );
 }
 
