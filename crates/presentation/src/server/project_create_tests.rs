@@ -163,6 +163,54 @@ async fn a_path_traversing_alias_is_refused_with_400_before_the_factory_runs() {
     );
 }
 
+/// CXA-B140: a control character in the alias (the ticket's raw newline and
+/// JSON-escaped backspace repros) lands in the project id, its workspace
+/// directory name and registry.json, mangles every listing, and is
+/// non-obviously deletable — DELETE needs the byte percent-encoded to match.
+/// The route must refuse it with 400 BEFORE the factory is ever called — the
+/// factory below records every call, and the flag must stay false.
+#[tokio::test]
+async fn a_control_character_alias_is_refused_with_400_before_the_factory_runs() {
+    let factory_was_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = Arc::clone(&factory_was_called);
+    let app = hub_with_factory(Arc::new(move |_req| {
+        seen.store(true, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async {
+            Err::<ProjectHandle, FactoryError>(FactoryError::internal("must never run"))
+        })
+    }))
+    .await;
+
+    for alias in [
+        "bad\nid", // the ticket's newline repro
+        "a\u{8}",  // the ticket's backspace repro (JSON "\b")
+        "bad\rid",
+        "bad\tid",
+        "trailing\n",
+    ] {
+        let body = serde_json::to_string(&serde_json::json!({
+            "name": "NL Probe",
+            "alias": alias,
+        }))
+        .expect("json body");
+        let resp = post_create_with_body(app.clone(), &body).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "alias {alias:?} must be refused with 400"
+        );
+        let body = body_json(resp).await;
+        assert!(
+            body["error"].as_str().unwrap_or_default().contains("alias"),
+            "the refusal must say why: {body}"
+        );
+    }
+    assert!(
+        !factory_was_called.load(std::sync::atomic::Ordering::SeqCst),
+        "the factory must never see a control-character alias"
+    );
+}
+
 /// The honest counterpart: a plain alias still reaches the factory untouched.
 #[tokio::test]
 async fn a_plain_alias_still_reaches_the_factory() {
