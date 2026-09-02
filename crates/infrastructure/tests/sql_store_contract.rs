@@ -1,8 +1,11 @@
 //! `SqlStateStore` runs the same `StateStorePort` contract as the JSON store —
-//! Liskov substitutability against a real Postgres. Skipped unless
-//! `COXAGENT_TEST_PG_DSN` is set (no database in ordinary CI), so it is a no-op
-//! by default and a full integration check when a DSN is provided.
+//! Liskov substitutability against a real Postgres. Every test claims its own
+//! ephemeral database from the shared compose fixture (`common::TestDb`,
+//! CXA-F327): no exported DSN is honored, an unprovisionable database fails
+//! red naming the fixture, and a docker-less environment skips explicitly.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+mod common;
 
 use coxagent_application::ports::outbound::StateStorePort;
 use coxagent_application::state::ProjectState;
@@ -23,51 +26,24 @@ fn sample_ticket(id: &str) -> Ticket {
     .expect("valid ticket")
 }
 
-/// The contract tests connect in parallel; on a FRESH database their
-/// concurrent `CREATE TABLE IF NOT EXISTS` races the catalog and one loses
-/// with "migrate: db error". Run the first migration once, alone.
-static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
-
-/// Refuse to run destructive contract tests against a database that already
-/// holds a real hub project. A dedicated test database has no `cxa` row; a
-/// live hub's `cxa` row always carries revision > 0. This closed a real
-/// incident: an exported COXAGENT_TEST_PG_DSN pointing at the production
-/// store filled it with `test-<pid>` project rows.
-async fn is_live_hub_db(dsn: &str) -> bool {
-    let Ok(probe) = SqlStateStore::connect(dsn, "cxa").await else {
-        return false;
-    };
-    matches!(probe.current_version().await, Ok(Some(v)) if v > 0)
-}
-
-async fn connect_store(dsn: &str, pid: &str) -> SqlStateStore {
-    MIGRATED
-        .get_or_init(|| async {
-            SqlStateStore::connect(dsn, "schema-init")
-                .await
-                .expect("initial migrate");
-        })
-        .await;
-    SqlStateStore::connect(dsn, pid)
+async fn connect_store(db: &common::TestDb, project: &str) -> SqlStateStore {
+    // The fixture ran the schema-init migration alone at claim time, so
+    // concurrent connects here never race the catalog.
+    SqlStateStore::connect(&db.dsn(), project)
         .await
-        .expect("connect + migrate")
+        .expect("connect + migrate against the ephemeral test database")
 }
 
 #[tokio::test]
 async fn sql_store_satisfies_contract() {
-    let Ok(dsn) = std::env::var("COXAGENT_TEST_PG_DSN") else {
-        eprintln!("COXAGENT_TEST_PG_DSN unset — skipping Postgres contract test");
+    // `None` is the docker-absent explicit skip — the only lawful green
+    // non-run, with its reason already printed by the fixture.
+    let Some(db) = common::claim_or_skip().await else {
         return;
     };
-    if is_live_hub_db(&dsn).await {
-        eprintln!(
-            "COXAGENT_TEST_PG_DSN points at a LIVE hub database — refusing the contract test"
-        );
-        return;
-    }
     // Unique project id per run so repeated runs against the same DB are clean.
     let pid = format!("test-{}", std::process::id());
-    let store = connect_store(&dsn, &pid).await;
+    let store = connect_store(&db, &pid).await;
 
     // 1. Empty store loads the default state.
     assert_eq!(
@@ -101,7 +77,7 @@ async fn sql_store_satisfies_contract() {
     );
 
     // 5. Isolation: a different project id sees its own (default) state.
-    let other = connect_store(&dsn, &format!("{pid}-other")).await;
+    let other = connect_store(&db, &format!("{pid}-other")).await;
     assert_eq!(
         other.load().await.expect("other load"),
         ProjectState::default()
@@ -115,16 +91,11 @@ async fn sql_store_satisfies_contract() {
 /// converges after seeing a conflict.
 #[tokio::test]
 async fn sql_store_rejects_stale_revision_write_with_conflict() {
-    let Ok(dsn) = std::env::var("COXAGENT_TEST_PG_DSN") else {
-        eprintln!("COXAGENT_TEST_PG_DSN unset — skipping Postgres OCC test");
+    let Some(db) = common::claim_or_skip().await else {
         return;
     };
-    if is_live_hub_db(&dsn).await {
-        eprintln!("COXAGENT_TEST_PG_DSN points at a LIVE hub database — refusing the OCC test");
-        return;
-    }
     let pid = format!("occ-test-{}", std::process::id());
-    let store = connect_store(&dsn, &pid).await;
+    let store = connect_store(&db, &pid).await;
 
     // An unwritten project exposes baseline revision 0.
     assert_eq!(
@@ -190,16 +161,11 @@ async fn sql_store_rejects_stale_revision_write_with_conflict() {
 /// adopting the deleted team's tickets, spend and desired-run state.
 #[tokio::test]
 async fn sql_store_delete_purges_state_and_coordination_for_the_project_only() {
-    let Ok(dsn) = std::env::var("COXAGENT_TEST_PG_DSN") else {
-        eprintln!("COXAGENT_TEST_PG_DSN unset — skipping Postgres delete test");
+    let Some(db) = common::claim_or_skip().await else {
         return;
     };
-    if is_live_hub_db(&dsn).await {
-        eprintln!("COXAGENT_TEST_PG_DSN points at a LIVE hub database — refusing the delete test");
-        return;
-    }
     let pid = format!("del-test-{}", std::process::id());
-    let store = connect_store(&dsn, &pid).await;
+    let store = connect_store(&db, &pid).await;
 
     // Seed everything a lived-in project leaves behind: the aggregate, the
     // operator's persistent desired-run state, and a worker-registry beat.
@@ -224,7 +190,7 @@ async fn sql_store_delete_purges_state_and_coordination_for_the_project_only() {
         .expect("heartbeat");
 
     // A neighbour project must be untouched by this project's delete.
-    let other = connect_store(&dsn, &format!("{pid}-other")).await;
+    let other = connect_store(&db, &format!("{pid}-other")).await;
     let other_state = ProjectState {
         tickets: vec![sample_ticket("B130-OTHER")],
         ..ProjectState::default()

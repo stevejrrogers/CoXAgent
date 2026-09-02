@@ -4,10 +4,13 @@
 //! while the revision stays monotonic across guarded AND legacy writes — the
 //! `sql_store_contract.rs` CXA-F003 suite, mirrored for hub-wide KV docs.
 //!
-//! The Postgres halves are skipped unless `COXAGENT_TEST_PG_DSN` is set (no
-//! database in ordinary CI), so they are no-ops by default and a full
-//! integration check when a DSN is provided.
+//! The Postgres halves claim their own ephemeral database from the shared
+//! compose fixture (`common::TestDb`, CXA-F327): no exported DSN is honored,
+//! an unprovisionable database fails red naming the fixture, and a
+//! docker-less environment skips explicitly.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+mod common;
 
 use async_trait::async_trait;
 use coxagent_application::ports::outbound::KvDocPort;
@@ -67,18 +70,12 @@ fn same_json(a: &str, b: &str) -> bool {
         == serde_json::from_str::<serde_json::Value>(b).ok()
 }
 
-/// The gated tests connect in parallel; on a FRESH database their concurrent
-/// `CREATE TABLE IF NOT EXISTS` races the catalog and one loses with
-/// "migrate: db error". Run the first migration once, alone.
-static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
-
-async fn connect_store(dsn: &str) -> PgKvDoc {
-    MIGRATED
-        .get_or_init(|| async {
-            PgKvDoc::connect(dsn).await.expect("initial migrate");
-        })
-        .await;
-    PgKvDoc::connect(dsn).await.expect("connect + migrate")
+async fn connect_store(db: &common::TestDb) -> PgKvDoc {
+    // The fixture ran the schema-init migration alone at claim time, so
+    // concurrent connects here never race the catalog.
+    PgKvDoc::connect(&db.dsn())
+        .await
+        .expect("connect + migrate against the ephemeral test database")
 }
 
 /// CXA-C017: a stale guarded write is rejected with [`PortError::Conflict`]
@@ -86,13 +83,14 @@ async fn connect_store(dsn: &str) -> PgKvDoc {
 /// exactly how an optimistic retry recovers after seeing a conflict.
 #[tokio::test]
 async fn kv_doc_rejects_stale_revision_write_with_conflict() {
-    let Ok(dsn) = std::env::var("COXAGENT_TEST_PG_DSN") else {
-        eprintln!("COXAGENT_TEST_PG_DSN unset — skipping Postgres KV contract test");
+    // `None` is the docker-absent explicit skip — the only lawful green
+    // non-run, with its reason already printed by the fixture.
+    let Some(db) = common::claim_or_skip().await else {
         return;
     };
     // Unique key per run so repeated runs against the same DB are clean.
     let key = format!("kv-contract-test-{}", std::process::id());
-    let store = connect_store(&dsn).await;
+    let store = connect_store(&db).await;
 
     // 1. An absent key exposes baseline revision 0 — its first write lands at 1.
     assert_eq!(
@@ -169,12 +167,11 @@ async fn kv_doc_rejects_stale_revision_write_with_conflict() {
 /// concurrent guard invalidates that guard, it never slips beneath it.
 #[tokio::test]
 async fn kv_doc_legacy_save_keeps_the_revision_monotonic_under_a_guard() {
-    let Ok(dsn) = std::env::var("COXAGENT_TEST_PG_DSN") else {
-        eprintln!("COXAGENT_TEST_PG_DSN unset — skipping Postgres KV contract test");
+    let Some(db) = common::claim_or_skip().await else {
         return;
     };
     let key = format!("kv-monotonic-test-{}", std::process::id());
-    let store = connect_store(&dsn).await;
+    let store = connect_store(&db).await;
 
     // Absent key -> baseline 0; the first guarded write lands at 1.
     assert_eq!(

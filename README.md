@@ -260,6 +260,10 @@ file and restart the hub.
 
 ```sh
 cargo test && cargo clippy --all-targets && cargo fmt --all
-# Postgres adapter contract (needs a database):
-COXAGENT_TEST_PG_DSN='postgres://…' cargo test -p coxagent-infrastructure --test sql_store_contract
+# Postgres-backed integration suites: each test provisions its own ephemeral
+# Postgres/Redis through the shared compose fixture (needs docker; without it
+# the suites skip explicitly, and an exported DSN is refused fail-closed):
+cargo test -p coxagent-infrastructure \
+  --test sql_store_contract --test kv_doc_contract \
+  --test distributed_coord --test sql_auth_token_harvest
 ```
