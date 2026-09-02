@@ -675,7 +675,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // phase: if the engine answers, the incident closes on the evidence
         // and the next cycle is full; if not, one fault, not eight.
         if self.engine_incident_open().await {
-            self.run_canary_probe(&mut report).await;
+            // Box::pin: the cycle future crossed the large-future bound once
+            // hygiene grew its WIP-checkpoint error channel (CXA-F318) —
+            // boxing this one branch keeps the whole future under it.
+            Box::pin(self.run_canary_probe(&mut report)).await;
             return report;
         }
 
@@ -747,8 +750,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // the LEADER tree dirty on a feature branch or its local base polluted,
         // and a SLOT worktree holding a branch hostage — then every later git
         // op this cycle fails in a chain (the 2026-08-16 all-D night). Clean
-        // up before anything touches git.
-        self.tree_hygiene().await;
+        // up before anything touches git. A failed slot-WIP checkpoint (CXA-F318)
+        // comes back as a run error: the errors==0 close gate blocks delivery
+        // until it is investigated.
+        for hygiene_error in self.tree_hygiene().await {
+            report.errors.push(hygiene_error);
+        }
         // Brake-hold reconciliation BEFORE any phase reads the brakes
         // (CXA-F238): an operator hold whose expiry bound elapsed must not
         // survive to gate this cycle's BA/DEV phases.

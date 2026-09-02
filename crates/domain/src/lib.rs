@@ -15,6 +15,7 @@ pub mod test_case;
 pub mod ticket;
 pub mod transitions;
 pub mod version;
+pub mod wip_checkpoint;
 
 pub use artifact::ArtifactVersion;
 pub use coverage::{CoverageEntry, CoverageStatus};
@@ -28,3 +29,4 @@ pub use ids::{GoalId, TicketId, WorkerId};
 pub use kinds::{Complexity, InterventionKind, Priority, Role, Status, TicketType};
 pub use ticket::{Design, TechnicalDesign, Ticket, UxDesign};
 pub use version::{Bump, SemVer};
+pub use wip_checkpoint::WipCheckpoint;
