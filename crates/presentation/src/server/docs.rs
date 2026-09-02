@@ -4,65 +4,6 @@
 //! The Wiki surface: pages, folders, AI edits, and the docs websocket.
 
 use super::*;
-use coxagent_infrastructure::deploy::reclaimable_compose_project;
-
-/// Docker janitor: agents deploy a lot — the host must not silt up. Hourly:
-/// any reclaimable compose project whose containers are ALL stopped gets a full
-/// `down --remove-orphans` (dead previews, stale deploys), any PR preview
-/// still running past [`PREVIEW_TTL`] is reclaimed, then dangling build images
-/// are pruned. Which projects are reclaimable is decided by the single shared
-/// policy [`reclaimable_compose_project`]: it excludes our own live hub and
-/// backing services, so a janitor tick can never take production down.
-pub(super) async fn docker_janitor() {
-    loop {
-        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-        let Ok(out) = tokio::process::Command::new("docker")
-            .args(["compose", "ls", "-a", "--format", "json"])
-            .stdin(std::process::Stdio::null())
-            .output()
-            .await
-        else {
-            continue;
-        };
-        let Ok(list) = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout) else {
-            continue;
-        };
-        for p in &list {
-            let name = p
-                .get("Name")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
-            let status = p
-                .get("Status")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
-            // Only OUR projects — and only ones this pass may safely reclaim.
-            if !reclaimable_compose_project(name) {
-                continue;
-            }
-            let mut reason = "dead";
-            if status.contains("running") {
-                if !name.starts_with(PREVIEW_PROJECT_PREFIX)
-                    || !preview_is_stale(name, PREVIEW_TTL).await
-                {
-                    continue;
-                }
-                reason = "expired preview";
-            }
-            let _ = tokio::process::Command::new("docker")
-                .args(["compose", "-p", name, "down", "--remove-orphans"])
-                .stdin(std::process::Stdio::null())
-                .output()
-                .await;
-            tracing::info!("docker janitor: removed {reason} compose project {name}");
-        }
-        let _ = tokio::process::Command::new("docker")
-            .args(["image", "prune", "-f"])
-            .stdin(std::process::Stdio::null())
-            .output()
-            .await;
-    }
-}
 
 /// List the project's documentation pages.
 pub(super) async fn docs_list_ep(

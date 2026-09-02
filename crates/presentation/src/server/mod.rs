@@ -44,6 +44,7 @@ mod channels;
 mod chat;
 mod comments;
 mod deps;
+mod docker_janitor;
 mod docs;
 mod downloads;
 mod duplicate_radar;
@@ -630,7 +631,7 @@ pub async fn serve_full(
         // the checker runs HERE, outside the unit that can hang.
         tokio::spawn(liveness_watchdog(state.clone()));
         // Keep the docker host clean of dead agent deploys.
-        tokio::spawn(docker_janitor());
+        tokio::spawn(docker_janitor::docker_janitor());
     }
     // Cross-instance realtime: bridge the local chat broadcast onto Redis
     // pub/sub so N hub instances fan out the same events (no-op without Redis).
