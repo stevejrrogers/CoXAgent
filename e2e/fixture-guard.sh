@@ -104,6 +104,33 @@ await_port_free() {
   return 0
 }
 
+# Pick a free loopback port for THIS boot's metrics admin listener (CXA-B151):
+# the hub binds that listener on 127.0.0.1:9010 by default, so a fixture
+# booted beside a live hub silently loses its metrics endpoint (the hub
+# continues without it by design — metrics_admin.rs's documented fail-open).
+# Asking the kernel (bind port 0, read the assignment, release) is
+# collision-free against the hub, the sibling suite, and anything else on the
+# host — a hardcoded pin would just move the squatter flake to a new port.
+# The socket is released before the fixture server binds, leaving a
+# millisecond-scale rebind race we accept for a fixture boot. node is
+# already a suite dependency (playwright), so no new tool is introduced.
+# Callers must assign its result with a PLAIN assignment (`V="$(pick…)") so a
+# failure aborts under set -e — `export V="$(pick…)"` masks it on some /bin/sh.
+pick_free_loopback_port() {
+  if ! command -v node >/dev/null 2>&1; then
+    echo "pick_free_loopback_port: node is required to pick a free metrics port" >&2
+    return 1
+  fi
+  _pf_port="$(node -e 'const s=require("node:net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')"
+  case "$_pf_port" in
+    ''|*[!0-9]*)
+      echo "pick_free_loopback_port: node returned no usable port ($_pf_port)" >&2
+      return 1
+      ;;
+  esac
+  printf '%s\n' "$_pf_port"
+}
+
 # Prove the thing that just answered /api/health is THIS repo's hub before any
 # spec talks to it. Bounded: on failure the boot dies here with the identity
 # diagnostic instead of the suite failing deep inside its specs. The budget
