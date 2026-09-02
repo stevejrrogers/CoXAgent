@@ -1,16 +1,8 @@
 //! `SqlStateStore` runs the same `StateStorePort` contract as the JSON store —
-//! Liskov substitutability against a real Postgres. The tests are `#[ignore]`d
-//! (ordinary CI without a database skips them explicitly) and run only through
-//! the fail-closed guard in `tests/common/mod.rs`, which refuses any target
-//! but an ephemeral `cxa_test*` Postgres — never a live hub, never an
-//! unverified one (CXA-F326).
-//!
-//! Run with an ephemeral database (README → Integration test environment):
-//!
-//! ```sh
-//! COXAGENT_TEST_PG_DSN='postgres://cox:test@localhost:55432/cxa_test' \
-//!   cargo test -p coxagent-infrastructure --test sql_store_contract -- --ignored
-//! ```
+//! Liskov substitutability against a real Postgres. Every test claims its own
+//! ephemeral database from the shared compose fixture (`common::TestDb`,
+//! CXA-F327): no exported DSN is honored, an unprovisionable database fails
+//! red naming the fixture, and a docker-less environment skips explicitly.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
@@ -34,21 +26,24 @@ fn sample_ticket(id: &str) -> Ticket {
     .expect("valid ticket")
 }
 
-/// The guard already ran the first migration alone (its probe serializes the
-/// initial `CREATE TABLE` through a process-wide cell), so a plain connect
-/// never races the catalog even though the contract tests run in parallel.
-async fn connect_store(dsn: &str, pid: &str) -> SqlStateStore {
-    SqlStateStore::connect(dsn, pid)
+async fn connect_store(db: &common::TestDb, project: &str) -> SqlStateStore {
+    // The fixture ran the schema-init migration alone at claim time, so
+    // concurrent connects here never race the catalog.
+    SqlStateStore::connect(&db.dsn(), project)
         .await
-        .expect("connect + migrate")
+        .expect("connect + migrate against the ephemeral test database")
 }
 
 #[tokio::test]
-#[ignore = "skipped: needs an ephemeral cxa_test* Postgres — see README (Integration test environment)"]
 async fn sql_store_satisfies_contract() {
-    let pg = common::pg("sql_store_contract").await;
-    let pid = pg.project("contract");
-    let store = connect_store(&pg.dsn, &pid).await;
+    // `None` is the docker-absent explicit skip — the only lawful green
+    // non-run, with its reason already printed by the fixture.
+    let Some(db) = common::claim_or_skip().await else {
+        return;
+    };
+    // Unique project id per run so repeated runs against the same DB are clean.
+    let pid = format!("test-{}", std::process::id());
+    let store = connect_store(&db, &pid).await;
 
     // 1. Empty store loads the default state.
     assert_eq!(
@@ -82,14 +77,11 @@ async fn sql_store_satisfies_contract() {
     );
 
     // 5. Isolation: a different project id sees its own (default) state.
-    let other = connect_store(&pg.dsn, &format!("{pid}-other")).await;
+    let other = connect_store(&db, &format!("{pid}-other")).await;
     assert_eq!(
         other.load().await.expect("other load"),
         ProjectState::default()
     );
-
-    // Teardown: the namespaced fixtures must not outlive the test.
-    store.delete().await.expect("teardown sweep");
 }
 
 /// CXA-F003 AC4: optimistic concurrency is stronger than "reload latest at
@@ -98,11 +90,12 @@ async fn sql_store_satisfies_contract() {
 /// the current revision still commits — exactly how an optimistic retry
 /// converges after seeing a conflict.
 #[tokio::test]
-#[ignore = "skipped: needs an ephemeral cxa_test* Postgres — see README (Integration test environment)"]
 async fn sql_store_rejects_stale_revision_write_with_conflict() {
-    let pg = common::pg("sql_store_contract").await;
-    let pid = pg.project("occ");
-    let store = connect_store(&pg.dsn, &pid).await;
+    let Some(db) = common::claim_or_skip().await else {
+        return;
+    };
+    let pid = format!("occ-test-{}", std::process::id());
+    let store = connect_store(&db, &pid).await;
 
     // An unwritten project exposes baseline revision 0.
     assert_eq!(
@@ -160,9 +153,6 @@ async fn sql_store_rejects_stale_revision_write_with_conflict() {
         .save_expecting(&ours_stale, Some(2))
         .await
         .expect("retry with current revision succeeds");
-
-    // Teardown: the namespaced fixtures must not outlive the test.
-    store.delete().await.expect("teardown sweep");
 }
 
 /// CXA-B130: `delete` must purge the project's ENTIRE persisted footprint in
@@ -170,11 +160,12 @@ async fn sql_store_rejects_stale_revision_write_with_conflict() {
 /// project recreated under the same id starts fresh instead of silently
 /// adopting the deleted team's tickets, spend and desired-run state.
 #[tokio::test]
-#[ignore = "skipped: needs an ephemeral cxa_test* Postgres — see README (Integration test environment)"]
 async fn sql_store_delete_purges_state_and_coordination_for_the_project_only() {
-    let pg = common::pg("sql_store_contract").await;
-    let pid = pg.project("delete");
-    let store = connect_store(&pg.dsn, &pid).await;
+    let Some(db) = common::claim_or_skip().await else {
+        return;
+    };
+    let pid = format!("del-test-{}", std::process::id());
+    let store = connect_store(&db, &pid).await;
 
     // Seed everything a lived-in project leaves behind: the aggregate, the
     // operator's persistent desired-run state, and a worker-registry beat.
@@ -199,7 +190,7 @@ async fn sql_store_delete_purges_state_and_coordination_for_the_project_only() {
         .expect("heartbeat");
 
     // A neighbour project must be untouched by this project's delete.
-    let other = connect_store(&pg.dsn, &format!("{pid}-other")).await;
+    let other = connect_store(&db, &format!("{pid}-other")).await;
     let other_state = ProjectState {
         tickets: vec![sample_ticket("B130-OTHER")],
         ..ProjectState::default()
@@ -271,10 +262,4 @@ async fn sql_store_delete_purges_state_and_coordination_for_the_project_only() {
 
     // Idempotent: deleting an already-purged project is a clean success.
     store.delete().await.expect("second delete");
-
-    // Teardown: the neighbour's namespaced fixtures must not outlive the test.
-    other
-        .delete()
-        .await
-        .expect("teardown sweep for the neighbour");
 }
