@@ -118,8 +118,10 @@ pub(super) fn river_scope(
 /// Whether this caller may see a broken project's marker. Broken records are
 /// deliberately NOT in the live registry, so membership is checked against the
 /// caller's own assignment list — the same visibility rule as [`river_scope`],
-/// applied to a project the hub could not load.
-fn may_see_broken(user: Option<&coxagent_application::AuthUser>, id: &str) -> bool {
+/// applied to a project the hub could not load. `pub(super)`: the project list
+/// endpoint scopes its broken entries by the same rule (CXA-B141) — a
+/// security decision gets ONE definition, not a drifting copy.
+pub(super) fn may_see_broken(user: Option<&coxagent_application::AuthUser>, id: &str) -> bool {
     match user {
         // Open mode (no auth configured): everything is visible.
         None => true,

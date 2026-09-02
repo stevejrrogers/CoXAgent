@@ -1400,6 +1400,8 @@ mod pr_review_gate_tests;
 #[cfg(test)]
 mod project_create_tests;
 #[cfg(test)]
+mod project_list_scoping_tests;
+#[cfg(test)]
 mod repro_url_tests;
 #[cfg(test)]
 mod share_link_tests;
