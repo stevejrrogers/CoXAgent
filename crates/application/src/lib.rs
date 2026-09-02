@@ -38,6 +38,7 @@ pub mod release_candidates;
 pub mod repo_map;
 pub mod repro_url;
 pub mod selection;
+pub mod slot_collision_radar;
 pub mod sprint;
 pub mod state;
 pub mod system_chat;

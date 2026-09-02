@@ -41,12 +41,21 @@ unset COXAGENT_DB_DSN COXAGENT_AUTH_DSN COXAGENT_REDIS_URL COXAGENT_REMOTE_STORE
 # account on boot, which is RBAC on, which is the login wall again. The auth
 # suite sets these itself (run-server-auth.sh); this one must not inherit them.
 unset COXAGENT_ADMIN_USER COXAGENT_ADMIN_PASSWORD 2>/dev/null || true
+# And the same hermeticity one listener over (CXA-B151): the metrics admin
+# listener defaults to 127.0.0.1:9010, which the live hub on a dev host
+# already owns — without a pin the fixture boots WITHOUT its metrics
+# endpoint, announced only by one easy-to-miss error line. Pin a kernel-
+# assigned free port so the suite's server always has the listener. The pin
+# overrides any ambient COXAGENT_METRICS_PORT on purpose (hermetic, like the
+# unsets above); the plain assignment makes a pick failure abort the boot.
+METRICS_PORT="$(pick_free_loopback_port)"
+echo "fixture metrics admin port: $METRICS_PORT" >&2
 # The old `exec` made identity checking impossible — once exec'd, nothing of
 # the wrapper is left to probe with. Run the server as a child, prove its
 # identity, then hold the wrapper open for Playwright's webServer contract.
 # If the wrapper is ever SIGKILLed past this trap, the orphan is exactly the
 # stale fixture the guard evicts on the next boot — the loop stays closed.
-COXAGENT_PORT="$PORT" "$BIN" --state-dir "$STATE" serve --work-dir "$HERE/.." &
+COXAGENT_PORT="$PORT" COXAGENT_METRICS_PORT="$METRICS_PORT" "$BIN" --state-dir "$STATE" serve --work-dir "$HERE/.." &
 SERVER_PID=$!
 trap 'kill -TERM "$SERVER_PID" 2>/dev/null || true' EXIT INT TERM
 await_identity "$PORT" "$SERVER_PID"

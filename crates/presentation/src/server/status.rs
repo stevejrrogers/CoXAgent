@@ -126,7 +126,25 @@ pub(super) fn lite_state_value(state: &coxagent_application::ProjectState) -> se
     // change. A project with nothing to report emits no `derived` key at all,
     // so clients treat absence as an empty radar rather than an error.
     let radar = coxagent_application::dependency_radar::radar(state);
-    let derived = serde_json::to_value(&radar).unwrap_or_default();
+    let mut derived = serde_json::to_value(&radar).unwrap_or_default();
+    // Slot collision radar (CXA-F329): read-only derived summary on the SAME
+    // snapshot — which InProgress tickets in parallel slots declare the same
+    // files (pairs) and which running tickets declare none at all
+    // (unknown_files, radar-blind). Additive `collisions` key inside the same
+    // `derived` object, present ONLY when there is something to report:
+    // absence stays an empty radar for every existing client.
+    let collisions = serde_json::to_value(
+        coxagent_application::slot_collision_radar::collision_radar(state),
+    )
+    .unwrap_or_default();
+    if collisions.as_object().is_some_and(|o| !o.is_empty()) {
+        if !derived.is_object() {
+            derived = serde_json::json!({});
+        }
+        if let Some(obj) = derived.as_object_mut() {
+            obj.insert("collisions".into(), collisions);
+        }
+    }
     if derived.as_object().is_some_and(|o| !o.is_empty()) {
         if let Some(obj) = v.as_object_mut() {
             obj.insert("derived".into(), derived);
@@ -538,6 +556,33 @@ mod radar_state_tests {
         }
     }
 
+    /// An InProgress feature declaring `files` — the slot-collision radar's
+    /// subject (CXA-F329): the SA-declared touch surface.
+    fn running_feature(id: &str, files: &[&str]) -> Ticket {
+        let mut t = Ticket::new(
+            tid(id),
+            TicketType::Feature,
+            format!("feature {id}"),
+            "fixture",
+            Priority::Medium,
+            Complexity::Medium,
+            false,
+        )
+        .expect("ticket");
+        t.set_technical_design(
+            Role::Sa,
+            TechnicalDesign {
+                files: files.iter().map(|f| (*f).to_owned()).collect(),
+                ..TechnicalDesign::default()
+            },
+        )
+        .expect("attach design");
+        t.transition_to(Role::Sa, Status::Ready).expect("ready");
+        t.transition_to(Role::DevFeature, Status::InProgress)
+            .expect("in progress");
+        t
+    }
+
     /// The wire contract the backlog badge depends on (CXA-F237): a blocked
     /// Ready ticket surfaces `derived.blocked` with its full blocking chain.
     #[test]
@@ -577,5 +622,59 @@ mod radar_state_tests {
             ready_feature("FEAT-B", &[]),
         ]));
         assert!(v.get("derived").is_none(), "unblocked work is no finding");
+        // The collision radar obeys the same omission rule: running tickets
+        // on disjoint files are two silent slots, no `derived` key either.
+        let v = lite_state_value(&state_with(vec![
+            running_feature("FEAT-A", &["crates/app/src/main.rs"]),
+            running_feature("FEAT-B", &["web/app.css"]),
+        ]));
+        assert!(v.get("derived").is_none(), "disjoint slots stay silent");
+    }
+
+    /// The wire contract the board badge depends on (CXA-F329): two running
+    /// slots declaring the same file surface `derived.collisions.pairs` with
+    /// both ticket ids and the shared files.
+    #[test]
+    fn a_collision_between_running_slots_rides_the_snapshot_as_derived_collisions() {
+        let v = lite_state_value(&state_with(vec![
+            running_feature("FEAT-A", &["crates/app/src/main.rs"]),
+            running_feature("FEAT-B", &["crates/app/src/main.rs"]),
+        ]));
+        let collisions = v
+            .get("derived")
+            .and_then(|d| d.get("collisions"))
+            .expect("the collision radar must ride the snapshot");
+        let pairs = collisions
+            .get("pairs")
+            .and_then(serde_json::Value::as_array)
+            .expect("pairs list");
+        assert_eq!(pairs.len(), 1, "one overlapping pair");
+        assert_eq!(pairs[0].get("a").and_then(|i| i.as_str()), Some("FEAT-A"));
+        assert_eq!(pairs[0].get("b").and_then(|i| i.as_str()), Some("FEAT-B"));
+        assert_eq!(
+            pairs[0]
+                .get("files")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
+    }
+
+    /// A running ticket whose design declares no files is radar-blind — it
+    /// must surface in `unknown_files`, never silently read as safe.
+    #[test]
+    fn a_running_ticket_with_no_declared_files_is_radar_blind_on_the_snapshot() {
+        let v = lite_state_value(&state_with(vec![
+            running_feature("FEAT-A", &[]),
+            running_feature("FEAT-B", &["web/app.css"]),
+        ]));
+        let unknown = v
+            .get("derived")
+            .and_then(|d| d.get("collisions"))
+            .and_then(|c| c.get("unknown_files"))
+            .and_then(serde_json::Value::as_array)
+            .expect("unknown_files list");
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].as_str(), Some("FEAT-A"));
     }
 }

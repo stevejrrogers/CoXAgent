@@ -116,49 +116,6 @@ fn refused_alias(alias: Option<&String>) -> Option<axum::response::Response> {
     })
 }
 
-/// Validate brownfield import path: must be under the hub's workspace root
-/// or under /tmp (safe sandbox). Reject paths pointing to system directories.
-fn refused_import_path(existing: Option<&String>) -> Option<axum::response::Response> {
-    let existing = existing?;
-    if existing.trim().is_empty() {
-        return None;
-    }
-    let p = std::path::Path::new(existing.trim());
-    // Resolve to absolute canonical path to prevent symlink tricks.
-    let real = p.canonicalize().ok()?;
-    // Allow under /tmp or under $HOME (typical user repos).
-    // Block system directories.
-    let path_str = real.to_string_lossy();
-    // Block if path equals a blocked directory, or if it starts with
-    // a blocked directory plus '/', to catch `/private/etc/foo` etc.
-    let blocked_prefixes = [
-        "/etc",
-        "/private/etc",
-        "/root",
-        "/var/run",
-        "/var/log",
-        "/usr/lib",
-        "/usr/sbin",
-        "/bin",
-        "/sbin",
-        "/dev",
-        "/proc",
-        "/sys",
-    ];
-    let blocked = blocked_prefixes.iter().any(|pfx| {
-        path_str == *pfx
-            || path_str.starts_with(pfx)
-                && path_str.as_bytes().get(pfx.len()).copied() == Some(b'/')
-    });
-    blocked.then(|| {
-        (
-            StatusCode::FORBIDDEN,
-            "cannot import from this path".to_owned(),
-        )
-            .into_response()
-    })
-}
-
 /// Onboard a new project from the dashboard (greenfield, or brownfield import
 /// with `existing`, optionally seeded with a `goal`) via the injected factory.
 pub(super) async fn create_project(
@@ -203,6 +160,11 @@ pub(super) async fn create_project(
         return refusal;
     }
     if let Some(refusal) = refused_import_path(req.existing.as_ref()) {
+        return refusal;
+    }
+    // CXA-B145: the path must not be a codebase a registered project already
+    // owns — two runners over one tree corrupt each other.
+    if let Some(refusal) = refused_import_owned_by_registered(&app, req.existing.as_ref()).await {
         return refusal;
     }
     let handle = match factory(NewProjectReq {

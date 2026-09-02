@@ -44,6 +44,7 @@ mod channels;
 mod chat;
 mod comments;
 mod deps;
+mod docker_janitor;
 mod docs;
 mod downloads;
 mod duplicate_radar;
@@ -64,6 +65,7 @@ mod openapi;
 mod people;
 mod pr_listing;
 mod preflight;
+mod project_import;
 mod projects;
 mod realtime;
 mod repro_url;
@@ -223,6 +225,10 @@ pub struct ProjectHandle {
 /// The contract lives in [`factory`]; re-exported here because every
 /// submodule globs `super::*` and `lib.rs` re-exports the names.
 pub use factory::{FactoryError, FactoryErrorKind, NewProjectReq, ProjectFactory, ProjectRemover};
+
+/// Brownfield import admission for `POST /api/projects` (CXA-B145), split into
+/// its own file — re-exported here because every submodule globs `super::*`.
+use project_import::{refused_import_owned_by_registered, refused_import_path};
 
 /// Extract the project ID from a URL path like `/api/projects/:pid/...`.
 fn extract_pid_from_path(path: &str) -> Option<&str> {
@@ -625,7 +631,7 @@ pub async fn serve_full(
         // the checker runs HERE, outside the unit that can hang.
         tokio::spawn(liveness_watchdog(state.clone()));
         // Keep the docker host clean of dead agent deploys.
-        tokio::spawn(docker_janitor());
+        tokio::spawn(docker_janitor::docker_janitor());
     }
     // Cross-instance realtime: bridge the local chat broadcast onto Redis
     // pub/sub so N hub instances fan out the same events (no-op without Redis).
