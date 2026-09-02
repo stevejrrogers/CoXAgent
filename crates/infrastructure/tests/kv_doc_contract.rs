@@ -4,10 +4,23 @@
 //! while the revision stays monotonic across guarded AND legacy writes — the
 //! `sql_store_contract.rs` CXA-F003 suite, mirrored for hub-wide KV docs.
 //!
-//! The Postgres halves are skipped unless `COXAGENT_TEST_PG_DSN` is set (no
-//! database in ordinary CI), so they are no-ops by default and a full
-//! integration check when a DSN is provided.
+//! The Postgres halves are `#[ignore]`d (ordinary CI without a database skips
+//! them explicitly) and run only through the fail-closed guard in
+//! `tests/common/mod.rs`, which refuses any target but an ephemeral
+//! `cxa_test*` Postgres — never a live hub, never an unverified one
+//! (CXA-F326). Keys are namespaced per run via `pg.kv_key`; the KV port has
+//! no delete, so the namespaced leftovers are reclaimed when the ephemeral
+//! database is torn down.
+//!
+//! Run with an ephemeral database (README → Integration test environment):
+//!
+//! ```sh
+//! COXAGENT_TEST_PG_DSN='postgres://cox:test@localhost:55432/cxa_test' \
+//!   cargo test -p coxagent-infrastructure --test kv_doc_contract -- --ignored
+//! ```
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+mod common;
 
 use async_trait::async_trait;
 use coxagent_application::ports::outbound::KvDocPort;
@@ -67,9 +80,10 @@ fn same_json(a: &str, b: &str) -> bool {
         == serde_json::from_str::<serde_json::Value>(b).ok()
 }
 
-/// The gated tests connect in parallel; on a FRESH database their concurrent
-/// `CREATE TABLE IF NOT EXISTS` races the catalog and one loses with
-/// "migrate: db error". Run the first migration once, alone.
+/// The guard prepared the state tables, but `app_kv` is its own table: the
+/// gated tests connect in parallel and their concurrent `CREATE TABLE IF NOT
+/// EXISTS` for it would still race the catalog. Run the first migration
+/// once, alone.
 static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
 async fn connect_store(dsn: &str) -> PgKvDoc {
@@ -85,14 +99,11 @@ async fn connect_store(dsn: &str) -> PgKvDoc {
 /// and persists nothing, and a retry at the current revision converges —
 /// exactly how an optimistic retry recovers after seeing a conflict.
 #[tokio::test]
+#[ignore = "skipped: needs an ephemeral cxa_test* Postgres — see README (Integration test environment)"]
 async fn kv_doc_rejects_stale_revision_write_with_conflict() {
-    let Ok(dsn) = std::env::var("COXAGENT_TEST_PG_DSN") else {
-        eprintln!("COXAGENT_TEST_PG_DSN unset — skipping Postgres KV contract test");
-        return;
-    };
-    // Unique key per run so repeated runs against the same DB are clean.
-    let key = format!("kv-contract-test-{}", std::process::id());
-    let store = connect_store(&dsn).await;
+    let pg = common::pg("kv_doc_contract").await;
+    let key = pg.kv_key("contract");
+    let store = connect_store(&pg.dsn).await;
 
     // 1. An absent key exposes baseline revision 0 — its first write lands at 1.
     assert_eq!(
@@ -168,13 +179,11 @@ async fn kv_doc_rejects_stale_revision_write_with_conflict() {
 /// writes must ALSO advance the revision — a blind write landing under a
 /// concurrent guard invalidates that guard, it never slips beneath it.
 #[tokio::test]
+#[ignore = "skipped: needs an ephemeral cxa_test* Postgres — see README (Integration test environment)"]
 async fn kv_doc_legacy_save_keeps_the_revision_monotonic_under_a_guard() {
-    let Ok(dsn) = std::env::var("COXAGENT_TEST_PG_DSN") else {
-        eprintln!("COXAGENT_TEST_PG_DSN unset — skipping Postgres KV contract test");
-        return;
-    };
-    let key = format!("kv-monotonic-test-{}", std::process::id());
-    let store = connect_store(&dsn).await;
+    let pg = common::pg("kv_doc_contract").await;
+    let key = pg.kv_key("monotonic");
+    let store = connect_store(&pg.dsn).await;
 
     // Absent key -> baseline 0; the first guarded write lands at 1.
     assert_eq!(

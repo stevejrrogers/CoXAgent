@@ -98,4 +98,50 @@ jobs:
       - name: Reclaimable teardown policy (protected infra stays protected)
         run: cargo test -p coxagent-infrastructure --lib reclaimable
       - name: CI wiring guards (jobs exist, ungated, real commands)
-        run: cargo test -p coxagent-app --test deploy_smoke --test ci_availability_gate
+        run: cargo test -p coxagent-app --test deploy_smoke --test ci_availability_gate --test test_env_guard_f326_gate
+
+  # CXA-F326: the DSN-gated Postgres/Redis integration tests are #[ignore]d —
+  # this job is the only sanctioned way to run them. It brings its own
+  # ephemeral service containers (lifecycle-bound to the job, never a deployed
+  # hub), names the database `cxa_test` exactly as the shared guard demands,
+  # and exports both env vars explicitly (nothing inherited). The guard in
+  # crates/infrastructure/tests/common/mod.rs still refuses a live hub and
+  # fails closed on any probe error — this job proves the suites keep passing
+  # against the ephemeral shape they will always be given. Ordinary CI without
+  # a database (the `check` job) skips them explicitly and stays green.
+  integration:
+    name: integration (ephemeral cxa_test postgres + redis)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: cxa_test
+          POSTGRES_USER: cox
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cox -d cxa_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      COXAGENT_TEST_PG_DSN: postgres://cox:test@localhost:5432/cxa_test
+      COXAGENT_TEST_REDIS_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run the DSN-gated integration tests
+        run: cargo test -p coxagent-infrastructure --test sql_store_contract --test kv_doc_contract --test sql_auth_token_harvest --test distributed_coord -- --ignored
