@@ -134,17 +134,18 @@ fn ac1_the_colliding_pair_is_reported_with_partner_and_files() {
     ]);
 
     // The claim-time view: the claiming candidate's radar names the partner
-    // and the shared files — that block lands in the agent's brief.
+    // and the shared files — that block lands in the agent's brief. Pairs
+    // carry the SAME a<b id invariant the board wire serves.
     let for_candidate = collisions_for(&state, &tid("FEAT-B"));
     assert_eq!(
         for_candidate,
         vec![coxagent_application::slot_collision_radar::CollisionPair {
-            a: tid("FEAT-B"),
-            b: tid("FEAT-A"),
+            a: tid("FEAT-A"),
+            b: tid("FEAT-B"),
             files: vec!["crates/app/src/main.rs".to_owned()],
         }],
         "AC1: the candidate is paired against the OTHER running slot with the \
-         exact shared file"
+         exact shared file, ids in the same a<b shape the board serves"
     );
     let warning = claim_warning(&state, &tid("FEAT-B"));
     assert!(

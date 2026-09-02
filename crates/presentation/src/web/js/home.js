@@ -285,13 +285,16 @@ function blockedBadge(s,t){
 function collisionBadge(s,t){
   if(t.status!=="in_progress")return"";
   const c=(s.derived||{}).collisions||{};
-  const hit=(c.pairs||[]).find(p=>p.a===t.id||p.b===t.id);
-  if(hit){
-    const other=hit.a===t.id?hit.b:hit.a;
-    const files=(hit.files||[]).join(", ");
-    return ` <span title="slot collision: ${esc(other)} (another slot) declares the same files: ${esc(files)}" style="display:inline-flex;align-items:center;gap:3px;padding:1px 8px;border-radius:20px;font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;background:color-mix(in srgb,var(--amber) 16%,transparent);color:var(--amber)"><i class="ti ti-arrows-exchange" style="font-size:10px"></i>COLLISION ${esc(other)}</span>`;
+  // A slot can collide with SEVERAL others (three slots on one file produce
+  // three pairs): name every partner and the union of shared files, not just
+  // the first pair found.
+  const hits=(c.pairs||[]).filter(p=>p.a===t.id||p.b===t.id);
+  if(hits.length){
+    const others=hits.map(p=>p.a===t.id?p.b:p.a);
+    const files=[...new Set(hits.flatMap(p=>p.files||[]))].join(", ");
+    return ` <span title="${escAttr("slot collision: "+others.join(", ")+" (other slot"+(others.length===1?"":"s")+") declares the same files: "+files)}" style="display:inline-flex;align-items:center;gap:3px;padding:1px 8px;border-radius:20px;font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;background:color-mix(in srgb,var(--amber) 16%,transparent);color:var(--amber)"><i class="ti ti-arrows-exchange" style="font-size:10px"></i>COLLISION ${esc(others.join(", "))}</span>`;
   }
-  if((c.unknown_files||[]).includes(t.id))return ` <span title="declares no files — the collision radar cannot check it (low confidence)" style="display:inline-flex;align-items:center;gap:3px;padding:1px 8px;border-radius:20px;font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;background:color-mix(in srgb,var(--muted) 14%,transparent);color:var(--muted)"><i class="ti ti-eye-off" style="font-size:10px"></i>UNMAPPED</span>`;
+  if((c.unknown_files||[]).includes(t.id))return ` <span title="${escAttr("declares no files — the collision radar cannot check it (low confidence)")}" style="display:inline-flex;align-items:center;gap:3px;padding:1px 8px;border-radius:20px;font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;background:color-mix(in srgb,var(--muted) 14%,transparent);color:var(--muted)"><i class="ti ti-eye-off" style="font-size:10px"></i>UNMAPPED</span>`;
   return"";
 }
 // Collapsed-section memory for the Jira-style backlog (keys: "active", "q<id>").

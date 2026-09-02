@@ -91,10 +91,21 @@ pub fn collisions_for(state: &ProjectState, candidate: &TicketId) -> Vec<Collisi
                 .intersection(&cand_files)
                 .cloned()
                 .collect();
-            (!shared.is_empty()).then(|| CollisionPair {
-                a: candidate.clone(),
-                b: t.id().clone(),
-                files: shared,
+            (!shared.is_empty()).then(|| {
+                // Same pair shape as `collision_radar`: `a` < `b`, so every
+                // producer of a CollisionPair honors the type's documented
+                // invariant and callers never guess which side is which.
+                let other = t.id();
+                let (a, b) = if candidate.as_str() <= other.as_str() {
+                    (candidate, other)
+                } else {
+                    (other, candidate)
+                };
+                CollisionPair {
+                    a: a.clone(),
+                    b: b.clone(),
+                    files: shared,
+                }
             })
         })
         .collect()
@@ -112,20 +123,22 @@ pub fn collision_radar(state: &ProjectState) -> CollisionRadar {
         .iter()
         .filter(|t| t.status() == Status::InProgress)
         .collect();
+    // One touch surface per running ticket, computed once: the pairwise loop
+    // below runs on EVERY 1 Hz snapshot, so the sets must not be rebuilt per
+    // pair.
+    let surfaces: Vec<(&Ticket, BTreeSet<String>)> =
+        running.iter().map(|&t| (t, declared_files(t))).collect();
     let mut pairs = Vec::new();
-    for (i, a) in running.iter().enumerate() {
-        for b in &running[i + 1..] {
-            let shared: Vec<String> = declared_files(a)
-                .intersection(&declared_files(b))
-                .cloned()
-                .collect();
+    for (i, (a, fa)) in surfaces.iter().enumerate() {
+        for (b, fb) in &surfaces[i + 1..] {
+            let shared: Vec<String> = fa.intersection(fb).cloned().collect();
             if shared.is_empty() {
                 continue;
             }
             let (a, b) = if a.id().as_str() <= b.id().as_str() {
-                (a, b)
+                (*a, *b)
             } else {
-                (b, a)
+                (*b, *a)
             };
             pairs.push(CollisionPair {
                 a: a.id().clone(),
@@ -136,10 +149,10 @@ pub fn collision_radar(state: &ProjectState) -> CollisionRadar {
     }
     pairs.sort_by(|x, y| (x.a.as_str(), x.b.as_str()).cmp(&(y.a.as_str(), y.b.as_str())));
     pairs.dedup();
-    let mut unknown_files: Vec<TicketId> = running
+    let mut unknown_files: Vec<TicketId> = surfaces
         .iter()
-        .filter(|t| declared_files(t).is_empty())
-        .map(|t| t.id().clone())
+        .filter(|(_, f)| f.is_empty())
+        .map(|(t, _)| t.id().clone())
         .collect();
     unknown_files.sort();
     CollisionRadar {
@@ -172,12 +185,15 @@ pub fn claim_warning(state: &ProjectState, candidate: &TicketId) -> String {
         use std::fmt::Write as _;
         let mut w = String::new();
         for c in &collisions {
+            // Pairs are id-sorted (a < b), so the partner is whichever side
+            // is not the candidate.
+            let partner = if c.a == *candidate { &c.b } else { &c.a };
             let _ = write!(
                 w,
                 "\nWARNING: slot collision — {} (running in another slot) declares the same \
                  files: {}. Touch them only where your ticket requires, expect the other \
                  slot's edits there, and coordinate to avoid a conflicted merge.",
-                c.b,
+                partner,
                 c.files.join(", ")
             );
         }
@@ -279,6 +295,35 @@ mod tests {
         assert!(
             collisions_for(&state, &tid("FEAT-A")).is_empty(),
             "one running ticket is nobody's collision — there is no other slot"
+        );
+    }
+
+    #[test]
+    fn a_three_way_overlap_yields_all_three_pairs_not_just_the_first() {
+        // Three slots on one file: the board must name BOTH partners of each
+        // ticket, so the radar emits every running pair — A-B, A-C, B-C.
+        let files = ["crates/app/src/main.rs"];
+        let state = state_with(vec![
+            feature_at("FEAT-B", Status::InProgress, &files),
+            feature_at("FEAT-A", Status::InProgress, &files),
+            feature_at("FEAT-C", Status::InProgress, &files),
+        ]);
+        let pairs = collision_radar(&state).pairs;
+        let across: Vec<(&str, &str)> =
+            pairs.iter().map(|p| (p.a.as_str(), p.b.as_str())).collect();
+        assert_eq!(
+            across,
+            vec![
+                ("FEAT-A", "FEAT-B"),
+                ("FEAT-A", "FEAT-C"),
+                ("FEAT-B", "FEAT-C")
+            ],
+            "every InProgress pair, sorted across, none dropped"
+        );
+        assert_eq!(
+            collisions_for(&state, &tid("FEAT-A")).len(),
+            2,
+            "the candidate's own view sees both of its partners"
         );
     }
 
