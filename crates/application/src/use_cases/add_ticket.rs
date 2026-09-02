@@ -21,6 +21,11 @@ pub struct AddTicketInput {
     /// creation path — so a ticket can never declare a goal the project has
     /// not stated, or one whose gate has retired.
     pub goal: Option<GoalId>,
+    /// Optional bounded-context service tag (CXA-F253): the BA authors it for
+    /// shared-infrastructure proposals, so the cross-project duplicate radar
+    /// can tell legitimately-repeated infra from accidental duplication.
+    /// Blank/whitespace values are dropped here, not stored.
+    pub service_tag: Option<String>,
 }
 
 /// Marker prefix on the duplicate-refusal error, so best-effort callers that
@@ -134,6 +139,12 @@ impl<S: StateStorePort + ?Sized> AddTicketUseCase<S> {
             // machine's bookkeeping authority for this mechanical bind.
             ticket.set_goal_id(coxagent_domain::Role::System, gid)?;
         }
+        if let Some(tag) = input.service_tag.as_deref() {
+            // Same bookkeeping bind as the goal above: the BA authored the tag
+            // in its proposal, the shared creation path stamps it verbatim
+            // (trimmed; blank collapses to no tag).
+            ticket.set_service_tag(coxagent_domain::Role::System, tag)?;
+        }
         state.tickets.push(ticket);
 
         state.validate().map_err(crate::error::PortError::Corrupt)?;
@@ -217,6 +228,7 @@ mod tests {
             has_ui: false,
             acceptance_criteria: Vec::new(),
             goal: None,
+            service_tag: None,
         }
     }
 
@@ -244,6 +256,23 @@ mod tests {
         let s = store.load().await.expect("load");
         let t = s.ticket(&id).expect("ticket");
         assert_eq!(t.goal_id().map(GoalId::as_str), Some("G001"));
+    }
+
+    #[tokio::test]
+    async fn stamps_the_ba_declared_service_tag_at_creation() {
+        let store = Arc::new(MemStore::default());
+        let uc = AddTicketUseCase::new(Arc::clone(&store));
+        let mut inp = input_titled(TicketType::Feature, "Shared retry queue");
+        inp.service_tag = Some("  infra  ".to_owned());
+        let id = uc.execute(inp).await.expect("added");
+        let s = store.load().await.expect("load");
+        assert_eq!(s.ticket(&id).expect("t").service_tag(), Some("infra"));
+        // A blank tag is dropped, not stored as an empty string.
+        let mut blank = input_titled(TicketType::Chore, "Rotate deploy keys");
+        blank.service_tag = Some("   ".to_owned());
+        let id = uc.execute(blank).await.expect("added");
+        let s = store.load().await.expect("load");
+        assert_eq!(s.ticket(&id).expect("t").service_tag(), None);
     }
 
     #[tokio::test]

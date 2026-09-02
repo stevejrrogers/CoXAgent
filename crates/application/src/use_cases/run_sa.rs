@@ -451,6 +451,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
                     has_ui: ui,
                     acceptance_criteria: ac,
                     goal: None,
+                    service_tag: None,
                 })
                 .await
                 .ok()?;
@@ -625,6 +626,7 @@ mod tests {
                 has_ui,
                 acceptance_criteria: Vec::new(),
                 goal: None,
+                service_tag: None,
             })
             .await
             .expect("seed");

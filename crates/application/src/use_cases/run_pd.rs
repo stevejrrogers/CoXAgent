@@ -584,6 +584,7 @@ mod tests {
                 has_ui: true,
                 acceptance_criteria: Vec::new(),
                 goal: None,
+                service_tag: None,
             })
             .await
             .expect("seed");

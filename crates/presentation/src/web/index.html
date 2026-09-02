@@ -95,6 +95,7 @@
     <nav class="nav" id="ws-nav">
       <a data-v="home" id="nav-home" onclick="nav('home')"><i class="ti ti-home"></i> Home</a>
       <a data-v="river" onclick="nav('river')"><i class="ti ti-ripple"></i> Fleet river</a>
+      <a data-v="dupes" onclick="nav('dupes')"><i class="ti ti-copy"></i> Dupes radar</a>
       <a data-v="overview" class="on" onclick="nav('overview')"><i class="ti ti-layout-dashboard"></i> Overview</a>
       <a data-v="team" onclick="nav('team')"><i class="ti ti-robot"></i> Agents</a>
       <a data-v="inbox" onclick="nav('inbox')"><i class="ti ti-inbox"></i> Inbox <span id="inbox-badge" style="display:none;margin-left:auto;background:var(--red);color:#fff;border-radius:9px;font-size:10px;font-weight:700;padding:1px 6px;line-height:14px">0</span></a>
@@ -195,6 +196,7 @@
         </div>
       </div>
       <div class="view" id="view-river"><div id="river-body" style="max-width:900px"></div></div>
+      <div class="view" id="view-dupes"><div id="dupes-body" style="max-width:900px"></div></div>
       <div class="view on" id="view-overview">
         <div id="ov-drain"></div>
         <div id="ov-alerts"></div>

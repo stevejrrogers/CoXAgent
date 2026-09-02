@@ -176,6 +176,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         .to_owned(),
                 ],
                 goal: None,
+                // Machine-filed prevention ticket: no BA-authored
+                // shared-infrastructure tag exists here.
+                service_tag: None,
             })
             .await
             .ok()

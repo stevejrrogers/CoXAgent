@@ -527,7 +527,7 @@ fn ac1_project_lessons_track_recurrence() {
     assert!(
         hit.is_some(),
         "no project-lesson recurrence state exists in {PROJECT_LESSON_HOMES:?} — AC1's \
-         recurrence count has nothing to increment for project lessons",
+         recurrence count has nothing to increment for project lessons"
     );
 }
 
@@ -545,7 +545,7 @@ fn ac1_hub_lessons_track_recurrence() {
     assert!(
         hit.is_some(),
         "no hub-lesson recurrence state exists in {HUB_LESSON_HOMES:?} — AC1's recurrence \
-         count has nothing to increment for hub lessons",
+         count has nothing to increment for hub lessons"
     );
 }
 

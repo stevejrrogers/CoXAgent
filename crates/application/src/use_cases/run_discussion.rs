@@ -136,6 +136,7 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunDiscussionUseCa
                         has_ui: false,
                         acceptance_criteria: Vec::new(),
                         goal: None,
+                        service_tag: None,
                     })
                     .await?;
                 self.post(

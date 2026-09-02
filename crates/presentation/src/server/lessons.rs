@@ -182,6 +182,9 @@ pub(super) async fn lessons_escalate_ep(
                     .to_owned(),
             ],
             goal: None,
+            // Escalation tickets are machine/ops-filed: no BA-authored
+            // shared-infrastructure tag exists here.
+            service_tag: None,
         })
         .await
     {

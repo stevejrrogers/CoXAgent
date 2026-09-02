@@ -152,7 +152,10 @@ fn rm_targets(code: &str) -> Vec<(String, String)> {
         let Some(flag) = ["rm -rf", "rm -f"].iter().find(|f| line.contains(**f)) else {
             continue;
         };
-        let args = line.split_whitespace().skip(1).filter(|t| !t.starts_with('-'));
+        let args = line
+            .split_whitespace()
+            .skip(1)
+            .filter(|t| !t.starts_with('-'));
         for arg in args {
             out.push(((*flag).to_string(), resolve(arg, &vars)));
         }
@@ -176,9 +179,11 @@ fn release_wait(src: &str) -> Result<(), String> {
     let window = &after_kill[..boot_at];
     let loops = window.contains("until") || window.contains("while");
     let probes = window.contains("lsof") || window.contains("nc -z");
-    let bounded = ["for ", "seq ", "-le ", "-lt ", "-gt ", "i=0", "i=1", "attempts", "tries"]
-        .iter()
-        .any(|m| window.contains(m));
+    let bounded = [
+        "for ", "seq ", "-le ", "-lt ", "-gt ", "i=0", "i=1", "attempts", "tries",
+    ]
+    .iter()
+    .any(|m| window.contains(m));
     if !(loops && probes && bounded) {
         return Err(format!(
             "no bounded release wait between killing the squatter and exec: loop={loops} \
@@ -252,7 +257,9 @@ fn open_app_body(src: &str) -> String {
         return String::new();
     };
     let rest = &src[start..];
-    let end = rest[10..].find("\nexport ").map_or(rest.len(), |rel| 10 + rel);
+    let end = rest[10..]
+        .find("\nexport ")
+        .map_or(rest.len(), |rel| 10 + rel);
     rest[..end].to_owned()
 }
 
@@ -263,7 +270,9 @@ fn await_state_snapshot_body(src: &str) -> String {
         return String::new();
     };
     let rest = &src[start..];
-    let end = rest[10..].find("\nexport ").map_or(rest.len(), |rel| 10 + rel);
+    let end = rest[10..]
+        .find("\nexport ")
+        .map_or(rest.len(), |rel| 10 + rel);
     rest[..end].to_owned()
 }
 
@@ -292,7 +301,9 @@ fn routes_through_snapshot_wait(src: &str) -> Result<(), String> {
 fn snapshot_wait_is_the_real_gate(src: &str) -> Result<(), String> {
     let def = await_state_snapshot_body(src);
     if def.is_empty() {
-        return Err("no exported awaitStateSnapshot — the hydration gate is not defined".to_owned());
+        return Err(
+            "no exported awaitStateSnapshot — the hydration gate is not defined".to_owned(),
+        );
     }
     let waits = def.contains("waitForFunction") || def.contains("expect.poll");
     let on_state = def.contains("STATE") && def.contains("tickets");
@@ -332,8 +343,8 @@ fn no_sse_starvable_barrier(body: &str) -> Result<(), String> {
 /// app state — an explicit thrown error, not Playwright's bare function
 /// timeout, which reads as an unrelated spec bug. Pure over the text.
 fn names_unhydrated_state(body: &str) -> Result<(), String> {
-    let names_it = body.contains("new Error")
-        && (body.contains("snapshot") || body.contains("hydrat"));
+    let names_it =
+        body.contains("new Error") && (body.contains("snapshot") || body.contains("hydrat"));
     if !names_it {
         return Err(
             "the readiness wait carries no failure naming the unhydrated app state — \
@@ -426,8 +437,7 @@ fn ac1_the_release_wait_predicate_accepts_a_bounded_release_probe() {
 
 #[test]
 fn ac1_the_guard_kills_only_attributed_holders_and_fails_fast_on_foreign_ones() {
-    attributed_eviction(&read(GUARD))
-        .unwrap_or_else(|why| panic!("{GUARD}: {why}"));
+    attributed_eviction(&read(GUARD)).unwrap_or_else(|why| panic!("{GUARD}: {why}"));
 }
 
 #[test]
@@ -520,7 +530,10 @@ fn ac3_retries_stay_disabled_and_each_suite_boots_a_fresh_fixture_server() {
     // configured" — a retry would mask the race instead of fixing it.
     for config in [OPEN_CONFIG, AUTH_CONFIG] {
         let src = read(config);
-        assert!(src.contains("retries: 0"), "{config} enabled retries — the SSE race must be fixed, not papered over");
+        assert!(
+            src.contains("retries: 0"),
+            "{config} enabled retries — the SSE race must be fixed, not papered over"
+        );
         assert!(
             src.contains("reuseExistingServer: false"),
             "{config} reuses an existing server — the fresh-boot contract (AC1) needs a real boot"
@@ -533,8 +546,7 @@ fn ac3_every_spec_touching_ticket_data_routes_through_a_hydration_gate_in_its_ow
     // (a) The gate itself, in BOTH helpers: both suites' apps hydrate over
     // the same 1 Hz snapshot stream, and both suites' specs call openApp.
     for helper in [OPEN_HELPER, AUTH_HELPER] {
-        routes_through_snapshot_wait(&read(helper))
-            .unwrap_or_else(|why| panic!("{helper}: {why}"));
+        routes_through_snapshot_wait(&read(helper)).unwrap_or_else(|why| panic!("{helper}: {why}"));
     }
     // The shared wait is defined ONCE (open suite) and imported by the auth
     // suite — two private copies would drift.
@@ -582,16 +594,14 @@ fn ac3_the_snapshot_wait_predicate_tells_a_real_gate_from_a_stub() {
                 await page.waitForFunction(() => typeof STATE !== 'undefined' && \
                 STATE.tickets.length > 0, null, { timeout: 15000 });\n\
                 }\n";
-    snapshot_wait_is_the_real_gate(real)
-        .unwrap_or_else(|why| panic!("real gate rejected: {why}"));
+    snapshot_wait_is_the_real_gate(real).unwrap_or_else(|why| panic!("real gate rejected: {why}"));
 }
 
 #[test]
 fn ac3_openapp_never_waits_on_a_barrier_the_persistent_sse_stream_can_starve() {
     for helper in [OPEN_HELPER, AUTH_HELPER] {
         let body = open_app_body(&read(helper));
-        no_sse_starvable_barrier(&body)
-            .unwrap_or_else(|why| panic!("{helper}: {why}"));
+        no_sse_starvable_barrier(&body).unwrap_or_else(|why| panic!("{helper}: {why}"));
     }
 }
 
