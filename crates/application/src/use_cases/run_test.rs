@@ -148,6 +148,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
                     has_ui: bug.has_ui,
                     acceptance_criteria: Vec::new(),
                     goal: None,
+                    service_tag: None,
                 })
                 .await?;
             filed.push(id);

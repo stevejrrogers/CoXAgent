@@ -964,6 +964,25 @@
   .riv-empty i{font-size:34px;color:var(--accent2);opacity:.7}
   .riv-empty-t{font-size:15px;font-weight:600;color:var(--muted);margin:10px 0 4px}
   .riv-empty-s{font-size:12.5px;color:var(--dim)}
+  /* Cross-project duplicate radar (CXA-F253): one card per duplicated ask,
+     the home ticket on top, each duplicate below with its verdict buttons. */
+  .dupe-empty{text-align:center;padding:34px 16px}
+  .dupe-empty i{font-size:34px;color:var(--accent2);opacity:.7}
+  .dupe-empty-t{font-size:15px;font-weight:600;color:var(--muted);margin:10px 0 4px}
+  .dupe-empty-s{font-size:12.5px;color:var(--dim)}
+  .dupe-card{margin-bottom:12px}
+  .dupe-head{display:flex;gap:10px;align-items:flex-start;padding-bottom:12px;border-bottom:1px solid var(--border)}
+  .dupe-badge{flex:none;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--amber);background:color-mix(in srgb,var(--amber) 14%,transparent);border-radius:20px;padding:2px 8px;margin-top:2px}
+  .dupe-row{display:flex;gap:10px;align-items:flex-start;padding:12px 0 0 24px;border-top:1px dashed var(--border)}
+  .dupe-row:first-of-type{border-top:none}
+  .dupe-main{flex:1;min-width:0}
+  .dupe-title{font-size:13px;font-weight:600;line-height:1.4}
+  .dupe-proj{display:inline-flex;margin-left:6px;font-size:10.5px;font-weight:600;color:var(--muted);background:var(--card2);border:1px solid var(--border);border-radius:20px;padding:1px 8px;white-space:nowrap;vertical-align:1px}
+  .dupe-scope{font-size:12px;color:var(--muted);margin-top:3px;line-height:1.5;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+  .dupe-meta{display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap}
+  .dupe-tid,.dupe-score{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--dim)}
+  .dupe-score{color:var(--accent2)}
+  .dupe-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
   .filters{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:center}
   .fchip{background:var(--card);border:1px solid var(--border);border-radius:20px;padding:6px 13px;font-size:12px;color:var(--muted);cursor:pointer;font-weight:500}
   .seg{display:inline-flex;background:var(--card2);border:1px solid var(--border2);border-radius:10px;padding:3px;gap:2px}

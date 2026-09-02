@@ -38,6 +38,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 has_ui: false,
                 acceptance_criteria: vec!["The full test suite passes".to_owned()],
                 goal: None,
+                service_tag: None,
             })
             .await
             .ok()
@@ -376,6 +377,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     has_ui: true,
                     acceptance_criteria: Vec::new(),
                     goal: None,
+                    service_tag: None,
                 })
                 .await
             {

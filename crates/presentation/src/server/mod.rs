@@ -46,6 +46,7 @@ mod comments;
 mod deps;
 mod docs;
 mod downloads;
+mod duplicate_radar;
 mod engines;
 mod factory;
 mod fleet;
@@ -89,6 +90,7 @@ use chat::*;
 use comments::*;
 use docs::*;
 use downloads::*;
+use duplicate_radar::*;
 use engines::*;
 use fleet::*;
 use fleet_spend::*;
@@ -785,6 +787,16 @@ pub async fn serve_full(
         // project's runner phase + activity in ONE SSE stream, filterable by
         // project id and agent phase (see fleet.rs).
         .route("/api/fleet/river", get(fleet_river_ep))
+        // Cross-project duplicate radar (CXA-F253): pairs of active tickets
+        // in DIFFERENT projects that match under the existing similarity
+        // predicate, resolved by a human (redirect / reject / allow) — see
+        // duplicate_radar.rs. Auth via auth_mw; scoped to the caller's
+        // visible projects.
+        .route("/api/workspace/duplicates", get(duplicates_ep))
+        .route(
+            "/api/workspace/duplicates/action",
+            post(duplicates_action_ep),
+        )
         // Fleet spend cockpit (CXA-F278): hub-level cross-project cost
         // aggregation with cap headroom + the soft-ceiling setting (see
         // fleet_spend.rs). Super admin; visibility-only by design.

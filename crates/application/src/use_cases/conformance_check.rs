@@ -113,6 +113,7 @@ impl<S: StateStorePort> RunConformanceUseCase<S> {
                     has_ui: false,
                     acceptance_criteria: Vec::new(),
                     goal: None,
+                    service_tag: None,
                 })
                 .await;
             match outcome {
