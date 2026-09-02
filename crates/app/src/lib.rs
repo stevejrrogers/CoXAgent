@@ -579,6 +579,145 @@ mod onboard_alias_traversal_tests {
     }
 }
 
+/// CXA-B146: the alias is trimmed like every other input — a whitespace-only
+/// alias used to pass the safety guard and become the project id AND workspace
+/// directory name (`"   "`, deletable only via percent-encoded DELETE).
+#[cfg(test)]
+mod onboard_alias_trim_tests {
+    use super::{normalize_alias, onboard_project};
+    use coxagent_presentation::{FactoryErrorKind, NewProjectReq};
+
+    fn request(name: &str, alias: &str) -> NewProjectReq {
+        NewProjectReq {
+            name: name.to_owned(),
+            alias: Some(alias.to_owned()),
+            ..Default::default()
+        }
+    }
+
+    /// The ticket's repro, at the decision point: a blank alias normalizes to
+    /// absent, so the derive-from-name fallback applies and it can never
+    /// become an id. NBSP pins the Unicode-whitespace boundary.
+    #[test]
+    fn a_whitespace_only_alias_is_normalized_to_absent() {
+        for alias in ["   ", " \t\n", "\u{a0}"] {
+            assert_eq!(
+                normalize_alias(Some(alias.to_owned())),
+                None,
+                "{alias:?} must normalize to absent"
+            );
+        }
+        assert_eq!(normalize_alias(Some(String::new())), None);
+        assert_eq!(normalize_alias(None), None);
+    }
+
+    /// A padded alias keeps its content, minus the surrounding whitespace —
+    /// interior whitespace is content, not padding.
+    #[test]
+    fn a_padded_alias_is_trimmed_to_its_content() {
+        assert_eq!(
+            normalize_alias(Some("  QATRAV  ".to_owned())),
+            Some("QATRAV".to_owned())
+        );
+        assert_eq!(
+            normalize_alias(Some("qa trav".to_owned())),
+            Some("qa trav".to_owned())
+        );
+    }
+
+    /// End to end at the port: whatever the scaffold's fate in this
+    /// environment (it refuses inside agent worktrees, and any failure cleans
+    /// up after itself), no whitespace-named directory may ever be created or
+    /// left behind — the id is the one derived from the name (`QA Space` →
+    /// `QAS` → `qas`).
+    #[tokio::test]
+    async fn a_whitespace_only_alias_never_becomes_the_workspace_directory() {
+        let base = tempfile::tempdir().expect("tmp");
+        let registry = base.path().join("registry.json");
+        let _ = Box::pin(onboard_project(
+            base.path(),
+            &registry,
+            request("QA Space", "   "),
+            None,
+        ))
+        .await;
+        let created: Vec<String> = std::fs::read_dir(base.path())
+            .expect("base listing")
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            created.iter().all(|d| d == "qas"),
+            "the workspace id must derive from the name (qas), never the blank alias: {created:?}"
+        );
+        assert!(
+            !created.iter().any(|d| d.trim().is_empty()),
+            "a whitespace-named directory must never exist: {created:?}"
+        );
+    }
+
+    /// Same pin for a padded alias: its spaces must not reach the id.
+    #[tokio::test]
+    async fn a_padded_alias_trims_before_it_becomes_the_id() {
+        let base = tempfile::tempdir().expect("tmp");
+        let registry = base.path().join("registry.json");
+        let _ = Box::pin(onboard_project(
+            base.path(),
+            &registry,
+            request("QA Trav", "  QATRAV  "),
+            None,
+        ))
+        .await;
+        let created: Vec<String> = std::fs::read_dir(base.path())
+            .expect("base listing")
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            created.iter().all(|d| d == "qatrav"),
+            "the id must be the trimmed, lowercased alias: {created:?}"
+        );
+    }
+
+    /// Trimming must not defeat the safety guard: the padding hides the
+    /// leading dot from the raw guard, and the trimmed `.hidden` would
+    /// scaffold a HIDDEN workspace directory. The guard on the trimmed seed
+    /// must refuse it before anything is created or registered.
+    #[tokio::test]
+    async fn a_padded_leading_dot_alias_is_refused_not_scaffolded_hidden() {
+        let base = tempfile::tempdir().expect("tmp");
+        let registry = base.path().join("registry.json");
+        let Err(err) = Box::pin(onboard_project(
+            base.path(),
+            &registry,
+            request("QA Trav", " .hidden "),
+            None,
+        ))
+        .await
+        else {
+            panic!("a padded leading-dot alias must refuse the onboarding");
+        };
+        assert_eq!(
+            err.kind,
+            FactoryErrorKind::BadRequest,
+            "a hidden-dir id is client input, not a server fault"
+        );
+        let created: Vec<String> = std::fs::read_dir(base.path())
+            .expect("base listing")
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            created.is_empty(),
+            "no workspace may be scaffolded, hidden or not: {created:?}"
+        );
+        assert!(!registry.exists(), "the registry must not gain an entry");
+    }
+}
+
 #[cfg(test)]
 mod shim_script_tests {
     use super::{shim_script, SHIM_CMDS};
@@ -992,6 +1131,13 @@ fn classify_onboard_error(e: &(dyn std::error::Error + 'static)) -> FactoryError
     }
 }
 
+/// CXA-B146: an alias is trimmed like every other input — a blank one is
+/// absent. Pure, so the whitespace-only repro (`"   "` becoming the workspace
+/// id) is decided here, testable without touching the filesystem.
+fn normalize_alias(alias: Option<String>) -> Option<String> {
+    alias.map(|a| a.trim().to_owned()).filter(|a| !a.is_empty())
+}
+
 /// Scaffold a new project workspace under `base`, seed it, append it to the hub
 /// registry, and build a live [`ProjectHandle`]. Used by the dashboard's
 /// "new project" flow.
@@ -1001,7 +1147,8 @@ async fn onboard_project(
     req: coxagent_presentation::NewProjectReq,
     auth: Option<&Arc<dyn coxagent_application::auth::AuthPort>>,
 ) -> Result<coxagent_presentation::ProjectHandle, FactoryError> {
-    let derived = req
+    let mut req = req;
+    let raw_seed = req
         .alias
         .clone()
         .unwrap_or_else(|| coxagent_application::state::derive_alias(req.name.trim()));
@@ -1009,8 +1156,27 @@ async fn onboard_project(
     // (`base.join(id)`), so a path-traversing alias must be refused before ANY
     // filesystem work, and a control character in it would mangle listings and
     // be non-obviously deletable — the HTTP layer rejects both first; this
-    // keeps the port itself safe for every caller. (An empty derived id keeps
-    // the unique_id "project" fallback.)
+    // keeps the port itself safe for every caller. This guard runs on the
+    // UNTRIMMED seed: trimming first could smuggle `"trailing\n"` through as
+    // `"trailing"`. (An empty seed keeps the unique_id "project" fallback.)
+    if !raw_seed.is_empty() && !coxagent_application::state::is_safe_workspace_id(&raw_seed) {
+        return Err(FactoryError::bad_request(format!(
+            "alias {raw_seed:?} must not contain '/', '\\', '..', leading dots or control characters"
+        )));
+    }
+    // CXA-B146: the alias is trimmed like every other input — a blank one is
+    // absent, so the derive-from-name fallback applies and a whitespace-only
+    // or padded alias can never become the workspace id (or the persisted
+    // ticket alias used by greenfield/brownfield below).
+    req.alias = normalize_alias(req.alias.take());
+    let derived = req
+        .alias
+        .clone()
+        .unwrap_or_else(|| coxagent_application::state::derive_alias(req.name.trim()));
+    // The trim above can itself produce a value the first guard never saw:
+    // padding hides a leading dot from it (`" .hidden "` is trim-safe raw but
+    // becomes the HIDDEN directory `.hidden`). Guard the seed that will
+    // actually become the id.
     if !derived.is_empty() && !coxagent_application::state::is_safe_workspace_id(&derived) {
         return Err(FactoryError::bad_request(format!(
             "alias {derived:?} must not contain '/', '\\', '..', leading dots or control characters"
