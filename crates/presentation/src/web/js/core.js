@@ -660,6 +660,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
       document.getElementById("ov-activity").innerHTML='<div class="empty">activity appears as agents work</div>';
       document.getElementById("ov-changelog").innerHTML='<div class="empty">no releases yet</div>';
       const gov=document.getElementById("ov-attention");if(gov)gov.innerHTML='';
+      const eff=document.getElementById("ov-lessons");if(eff)eff.innerHTML='';
       return;
     }
     const m=metricsFrom(s);
@@ -679,6 +680,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
       ${rollbackOutcomeHtml(s.last_rollback)}</div>`:"";
     document.getElementById("ov-charts").innerHTML=chartsHtml(s);
     loadGovernanceAttention();
+    if(typeof loadLessonEfficacy==="function")loadLessonEfficacy();
     document.getElementById("ov-design").innerHTML=designSystemHtml(s.design_system);
     const act=[...(s.activity||[])].reverse().slice(0,7);
     document.getElementById("ov-activity").innerHTML=act.length?act.map(actItem).join(""):'<div class="empty">no activity yet</div>';

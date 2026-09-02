@@ -188,7 +188,10 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
                 .ok()
                 .and_then(|v| v.trim().parse::<u16>().ok())
                 .unwrap_or(port);
-            serve_with_runner(&args.state_dir, work_dir, port).await?;
+            // Box::pin: the serve future crossed the large-future bound when
+            // ProjectState grew its CXA-F306 lesson-efficacy fields — boxing
+            // keeps the branch under it (the cycle/mod.rs convention).
+            Box::pin(serve_with_runner(&args.state_dir, work_dir, port)).await?;
             Ok(String::new())
         }
         Command::Hub { registry, port } => {
@@ -982,7 +985,18 @@ async fn onboard_project(
     // scaffold again: a surviving empty dir keeps the derived id occupied
     // (forcing `-2`-suffixed recreates) and reads as a real project to ops
     // (CXA-B136).
-    let outcome = scaffold_onboarded_project(base, registry_path, &proj_dir, &id, req, auth).await;
+    // Box::pin: same large-future bound as the serve branch above — the
+    // scaffold future grew past 16KB when ProjectState gained the CXA-F306
+    // lesson-efficacy fields.
+    let outcome = Box::pin(scaffold_onboarded_project(
+        base,
+        registry_path,
+        &proj_dir,
+        &id,
+        req,
+        auth,
+    ))
+    .await;
     if outcome.is_err() && proj_dir.exists() {
         if let Err(e) = std::fs::remove_dir_all(&proj_dir) {
             tracing::warn!(

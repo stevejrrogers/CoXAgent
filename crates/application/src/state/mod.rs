@@ -12,6 +12,7 @@ mod drift;
 mod goals;
 mod governance;
 mod integrity;
+mod lessons;
 mod ops;
 mod outbox;
 mod provenance;
@@ -23,6 +24,7 @@ pub use drift::*;
 pub use goals::*;
 pub use governance::*;
 pub use integrity::*;
+pub use lessons::*;
 pub use ops::*;
 pub use outbox::*;
 pub use provenance::*;
@@ -204,6 +206,19 @@ pub struct ProjectState {
     /// the team actually improves over time (kept bounded, newest last).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lessons: Vec<String>,
+    /// Per-lesson efficacy ledger (CXA-F306): recorded-at, re-recordings,
+    /// recurrences anchored to their incidents, escalation. Bounded at
+    /// [`lessons::MAX_LESSON_RECORDS`]; see [`lessons::LessonRecord`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lesson_records: Vec<LessonRecord>,
+    /// Incident→lesson matches a reviewer dismissed (CXA-F306 AC3) — persisted
+    /// so a dismissed match never increments a recurrence count again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dismissed_matches: Vec<DismissedMatch>,
+    /// UTC day (`YYYY-MM-DD`) the CXA-F306 lesson-efficacy sweep last ran, so
+    /// the daily forcing sweep files each repeater's structural ticket once.
+    #[serde(default)]
+    pub lesson_sweep_day: String,
     /// The team's durable decisions & conventions (ADR-style one-liners): the
     /// architecture calls, tech choices, and "how we do X" every agent should
     /// honour — so parallel LLM calls stay consistent instead of contradicting.
@@ -577,6 +592,9 @@ impl Default for ProjectState {
             doc_refresh: std::collections::BTreeMap::new(),
             cycle_scores: Vec::new(),
             lessons: Vec::new(),
+            lesson_records: Vec::new(),
+            dismissed_matches: Vec::new(),
+            lesson_sweep_day: String::new(),
             decisions: Vec::new(),
             refactor_mode: false,
             sprint_cycle: 0,
@@ -1155,20 +1173,7 @@ impl ProjectState {
             .count()
     }
 
-    /// Record a retro lesson (deduped, newest last, capped at 12).
-    pub fn add_lesson(&mut self, lesson: &str) {
-        let lesson = lesson.trim();
-        if lesson.is_empty() || self.lessons.iter().any(|l| l == lesson) {
-            return;
-        }
-        self.lessons.push(lesson.to_owned());
-        let overflow = self.lessons.len().saturating_sub(12);
-        if overflow > 0 {
-            self.lessons.drain(0..overflow);
-        }
-    }
-
-    /// Record a durable team decision / convention (deduped, newest last, capped
+    /// Record a team decision / convention (deduped, newest last, capped
     /// at 20). Trimmed to one line so it reads as an ADR entry.
     pub fn add_decision(&mut self, decision: &str) {
         let d = decision.trim().replace('\n', " ");

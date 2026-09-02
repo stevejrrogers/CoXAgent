@@ -18,6 +18,8 @@ pub mod error;
 pub mod faults;
 pub mod fleet;
 pub mod forensics;
+pub mod hub_lessons;
+pub mod lesson_efficacy;
 pub mod liveness;
 pub mod metrics;
 pub mod metrics_brakes;
