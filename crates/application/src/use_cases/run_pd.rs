@@ -398,7 +398,31 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
 /// deliberately conservative about the real corruption patterns rather than
 /// attempting full XML validation.
 fn renderable_svg(body: &str) -> bool {
-    let trimmed = body.trim_start();
+    // An XML prolog, comments, or a DOCTYPE before the root element are all
+    // valid SVG — PD writes `<?xml version="1.0"?>` headers and the gate was
+    // rejecting every real mockup as "malformed" (live incident: 9 valid
+    // 7-11 KB files bounced). Skip leading non-root nodes to find <svg>.
+    let mut trimmed = body.trim_start();
+    loop {
+        if trimmed.starts_with("<?") {
+            match trimmed.find("?>") {
+                Some(i) => trimmed = trimmed[i + 2..].trim_start(),
+                None => return false,
+            }
+        } else if trimmed.starts_with("<!--") {
+            match trimmed.find("-->") {
+                Some(i) => trimmed = trimmed[i + 3..].trim_start(),
+                None => return false,
+            }
+        } else if trimmed.starts_with("<!") {
+            match trimmed.find('>') {
+                Some(i) => trimmed = trimmed[i + 1..].trim_start(),
+                None => return false,
+            }
+        } else {
+            break;
+        }
+    }
     if !trimmed.starts_with("<svg") {
         return false;
     }
@@ -599,6 +623,16 @@ mod tests {
     async fn nothing_needing_ux_returns_none() {
         let store = Arc::new(MemStore::default());
         assert!(uc(store, "{}").execute().await.expect("run").is_none());
+    }
+
+    #[test]
+    fn renderable_svg_accepts_xml_prolog_and_comments() {
+        let svg = "<?xml version=\"1.0\"?>\n<!-- mockup -->\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"><rect width=\"5\" height=\"5\"/></svg>";
+        assert!(
+            renderable_svg(svg),
+            "XML prolog + comment before <svg> is valid"
+        );
+        assert!(!renderable_svg("<?xml version=\"1.0\"?><div></div>"));
     }
 
     #[test]

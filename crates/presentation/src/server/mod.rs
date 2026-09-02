@@ -35,6 +35,7 @@ use crate::middleware::{
 };
 
 mod alerts;
+mod approval_policy;
 mod assets;
 mod auth;
 mod background;
@@ -55,6 +56,7 @@ mod goals;
 mod guards;
 mod hub_docs;
 mod inbox;
+mod lessons;
 mod manage;
 mod meetings;
 mod metrics_admin;
@@ -77,6 +79,7 @@ mod tunecockpit;
 mod work;
 
 use alerts::*;
+use approval_policy::*;
 use assets::*;
 use auth::*;
 use background::*;
@@ -149,6 +152,15 @@ const APP_JS: &[(&str, &str)] = &[
     ("inbox.js", include_str!("../web/js/inbox.js")),
     ("drift.js", include_str!("../web/js/drift.js")),
     ("alerts.js", include_str!("../web/js/alerts.js")),
+    // Approval-policy transparency panel (CXA-F303) — extends the Settings
+    // Workflow tab; loads before shell.js like every view helper.
+    (
+        "approval_policy.js",
+        include_str!("../web/js/approval_policy.js"),
+    ),
+    // Lesson efficacy panel (CXA-F306) — the Overview recurrence view; loads
+    // before shell.js like every view helper.
+    ("lessons.js", include_str!("../web/js/lessons.js")),
     ("shell.js", include_str!("../web/js/shell.js")),
 ];
 
@@ -847,6 +859,26 @@ pub async fn serve_full(
             "/api/projects/:pid/brakes/:brake/hold",
             post(brake_hold_ep).delete(brake_hold_clear_ep),
         )
+        .route(
+            "/api/projects/:pid/approval-policy",
+            get(approval_policy_ep),
+        )
+        .route(
+            "/api/projects/:pid/approval-policy/ask-again",
+            post(approval_policy_ask_again_ep),
+        )
+        .route(
+            "/api/projects/:pid/approval-policy/release",
+            post(approval_policy_release_ep),
+        )
+        .route(
+            "/api/projects/:pid/lessons/dismiss",
+            post(lessons::lessons_dismiss_ep),
+        )
+        .route(
+            "/api/projects/:pid/lessons/escalate",
+            post(lessons::lessons_escalate_ep),
+        )
         .route("/api/projects/:pid/sprint/goal", post(set_sprint_goal_ep))
         .route("/api/projects/:pid/sprint/close", post(sprint_close_ep))
         .route("/api/projects/:pid/sprint-queue", post(queue_sprint_ep))
@@ -1353,6 +1385,8 @@ fn bad_request_error(msg: &str) -> axum::response::Response {
 
 #[cfg(test)]
 mod alerts_tests;
+#[cfg(test)]
+mod approval_policy_tests;
 #[cfg(test)]
 mod avatar_media_security_tests;
 #[cfg(test)]

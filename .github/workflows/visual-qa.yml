@@ -14,16 +14,13 @@ name: Visual QA
 #
 # Together they form one gate per relevant event -> one unambiguous green-or-red merge gate,
 # plus actionable follow-up when it goes red.
+# Cost discipline (2026-09): golden-screenshot regression now runs on the
+# merge to main (once per change) plus manual dispatch — PR pushes are
+# already gated by the same Playwright suite run locally by the SA lane.
 on:
-  pull_request:
-    types:
-      - opened
-      - synchronize
-    branches:
-      - main
   push:
-    branches:
-      - main
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read

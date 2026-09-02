@@ -3,6 +3,7 @@
 pub mod add_ticket;
 pub mod analyze_attachment;
 pub mod approval_memory;
+pub mod approval_policy;
 pub mod approval_risk;
 pub mod backup;
 pub mod ceremony;
@@ -43,6 +44,11 @@ pub mod scan_deps;
 
 pub use add_ticket::{AddTicketInput, AddTicketUseCase};
 pub use analyze_attachment::{AnalyzeAttachmentUseCase, ReadableAttachment};
+pub use approval_memory::{announce, rule_for, ApprovalSample, Rule};
+pub use approval_policy::{
+    gate_allows, policy_overview, ExpiredApproval, GateDecision, PolicyOverview, ShapePolicy,
+    ShapeSamples, UndoableApproval,
+};
 pub use backup::{
     is_excluded, path_stamp, rel_from, secret_statement, BackupOutcome, BackupRequest,
     BackupWorkspaceUseCase,

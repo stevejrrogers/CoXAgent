@@ -10,7 +10,7 @@
 //! shipped `.github/workflows/visual-qa.yml`:
 //!
 //!   1. Workflow exists at `.github/workflows/visual-qa.yml`
-//!   2. Workflow triggers on pull_request (opened/synchronize)
+//!   2. Workflow triggers on merge to main (+ manual dispatch)
 //!   3. Playwright tests run in a headless CI environment (Chromium)
 //!   4. Passing PRs: green check, no PR comment
 //!   5. Failing PRs: red check with failure count, PR comment with diff images or
@@ -78,15 +78,24 @@ fn workflow_exists_and_is_valid_yaml() {
 }
 
 #[test]
-fn triggers_on_pull_request_opened_and_synchronize() {
+fn triggers_on_merge_to_main_and_manual_dispatch() {
+    // Cost discipline (2026-09): billed Actions run ONCE per change — on the
+    // merge to main — because every PR is already verified locally (full
+    // Playwright suite) by the SA review lane before it lands. Manual
+    // dispatch stays available for ad-hoc runs.
     let doc = load();
     // Note: YAML's unquoted `on:` key deserializes as the string "on".
-    let types_node = doc["on"]["pull_request"]["types"]
+    let branches = doc["on"]["push"]["branches"]
         .as_sequence()
-        .expect("must declare pull_request.types");
-    let types: Vec<&str> = types_node.iter().map(|t| t.as_str().unwrap()).collect();
-    assert!(types.contains(&"opened"), "must fire on opened");
-    assert!(types.contains(&"synchronize"), "must fire on synchronize");
+        .expect("must declare push.branches");
+    assert!(
+        branches.iter().any(|b| b.as_str() == Some("main")),
+        "must fire on pushes to main"
+    );
+    assert!(
+        doc["on"].get("workflow_dispatch").is_some(),
+        "must allow manual workflow_dispatch"
+    );
 }
 
 #[test]

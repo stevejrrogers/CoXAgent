@@ -2440,6 +2440,8 @@ async function loadSettings(){
         <div class="fr"><span class="lbl">Question SLA</span><input id="hu-sla" type="number" min="0" value="${hu.question_sla_minutes??60}" style="width:90px"/><span class="hint">minutes before an unanswered agent question escalates</span></div>
       </div>
       <div class="set-note">The three dials, weakest to strongest autonomy: <b>Ready gate off</b> (no approval at all) → <b>Auto-approve on</b> (routine auto, exceptions asked) → <b>Auto-approve off</b> (every ticket asked). Applies on the next restart.</div>
+      <div class="sec" style="margin-top:18px">What the gate learned</div>
+      <div class="panel" style="padding:0"><div id="approval-policy-panel"></div></div>
     </div>
     <div class="settab" data-p="git" hidden>
       ${toolingHtml}
@@ -2500,6 +2502,7 @@ async function loadSettings(){
       </div>
     </div>
     <div class="set-footer"><button class="save" onclick="saveSettings()"><i class="ti ti-device-floppy"></i> Save changes</button><span id="save-note"></span><span class="set-foothint">Engine &amp; model changes apply on the next cycle — no restart</span></div>`;
+  renderApprovalPolicy(); // CXA-F303: fill the "what the gate learned" panel
   setSetTab(window._setTab==="workspace"?"engines":(window._setTab||"engines"));}
 function copyText(btn,text){navigator.clipboard&&navigator.clipboard.writeText(text);
   const old=btn.innerHTML;btn.innerHTML='<i class="ti ti-check"></i>';setTimeout(()=>{btn.innerHTML=old;},1200);}

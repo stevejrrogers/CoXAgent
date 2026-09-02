@@ -513,14 +513,36 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             Ok(o) if o.succeeded() => {
                 // Persist any BRIEF: notes the agent left for the next
                 // role/engine on this ticket — durable memory that outlives the
-                // engine session (Tầng 2 of per-ticket context reuse).
-                let briefs = crate::prompts::extract_brief_notes(&o.stdout);
-                if !briefs.is_empty() {
-                    let (key, role_tag, briefs) =
-                        (id.to_string(), self.role_name().to_owned(), briefs);
+                // engine session (Tầng 2 of per-ticket context reuse) — but
+                // screened first (CXA-F305): an injection-shaped note would
+                // replay into every future run as PRIOR WORK, so it is
+                // withheld here and flagged to the operator.
+                let screened = crate::prompts::extract_brief_notes_screened(&o.stdout);
+                if !screened.kept.is_empty() || !screened.dropped.is_empty() {
+                    let (key, role_tag, kept, dropped) = (
+                        id.to_string(),
+                        self.role_name().to_owned(),
+                        screened.kept,
+                        screened.dropped,
+                    );
                     let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
-                        for b in &briefs {
+                        for b in &kept {
                             s.journal_note(&key, &format!("{role_tag}: {b}"));
+                        }
+                        if !dropped.is_empty() {
+                            let project = crate::brief_screening::project_label(
+                                &s.alias,
+                                s.display_name.as_deref(),
+                            );
+                            let msg = crate::brief_screening::injection_flagged_message(
+                                &project, &role_tag, &key, &dropped,
+                            );
+                            s.post_chat_in(
+                                "SYSTEM",
+                                &msg,
+                                crate::state::AGENTS_CHANNEL,
+                                Vec::new(),
+                            );
                         }
                         Ok(())
                     })
@@ -1523,6 +1545,7 @@ mod tests {
             _work_dir: &std::path::Path,
         ) -> Result<crate::ports::outbound::DeployReport, PortError> {
             Ok(crate::ports::outbound::DeployReport {
+                failure_bundle: None,
                 success: true,
                 deployed: false,
                 summary: String::new(),
@@ -1537,6 +1560,7 @@ mod tests {
                 .scoped_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(crate::ports::outbound::DeployReport {
+                failure_bundle: None,
                 success: call == 0,
                 deployed: true,
                 summary: if call == 0 {

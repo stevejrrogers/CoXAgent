@@ -12,11 +12,10 @@ use async_trait::async_trait;
 use coxagent_application::auth::{
     AuthPort, AuthRole, AuthUser, LoginResult, SessionInfo, TokenInfo,
 };
-use deadpool_postgres::{Config, Pool, Runtime};
+use deadpool_postgres::Pool;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tokio_postgres::NoTls;
 
 use crate::auth::{hash_password, mint_token, now_rfc3339, sha256_hex, unix_now};
 
@@ -110,11 +109,7 @@ impl SqlAuthService {
     /// # Errors
     /// Returns a message if the pool cannot be built or migration fails.
     pub async fn connect(dsn: &str) -> Result<Self, String> {
-        let mut cfg = Config::new();
-        cfg.url = Some(dsn.to_owned());
-        let pool = cfg
-            .create_pool(Some(Runtime::Tokio1), NoTls)
-            .map_err(|e| format!("auth pool: {e}"))?;
+        let pool = crate::pg::pool(dsn, "auth").await?;
         let svc = Self {
             pool,
             sessions: Mutex::new(HashMap::new()),

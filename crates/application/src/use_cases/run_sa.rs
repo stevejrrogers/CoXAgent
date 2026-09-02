@@ -217,13 +217,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
             .into());
         }
         // Persist any BRIEF: notes SA left for the next role/engine (durable,
-        // engine-agnostic ticket memory).
-        let briefs = crate::prompts::extract_brief_notes(&outcome.stdout);
-        if !briefs.is_empty() {
-            let (key, briefs) = (id.to_string(), briefs);
+        // engine-agnostic ticket memory) — screened first (CXA-F305):
+        // injection-shaped notes are withheld and flagged to the operator.
+        let screened = crate::prompts::extract_brief_notes_screened(&outcome.stdout);
+        if !screened.kept.is_empty() || !screened.dropped.is_empty() {
+            let (key, kept, dropped) = (id.to_string(), screened.kept, screened.dropped);
             let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
-                for b in &briefs {
+                for b in &kept {
                     s.journal_note(&key, &format!("SA: {b}"));
+                }
+                if !dropped.is_empty() {
+                    let project =
+                        crate::brief_screening::project_label(&s.alias, s.display_name.as_deref());
+                    let msg = crate::brief_screening::injection_flagged_message(
+                        &project, "SA", &key, &dropped,
+                    );
+                    s.post_chat_in("SYSTEM", &msg, crate::state::AGENTS_CHANNEL, Vec::new());
                 }
                 Ok(())
             })

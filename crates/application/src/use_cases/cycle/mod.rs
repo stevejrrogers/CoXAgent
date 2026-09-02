@@ -35,6 +35,7 @@ mod forge;
 mod forge_feedback;
 mod forge_merge;
 mod forge_review;
+mod lesson_sweep;
 mod ops;
 mod qa_evidence;
 mod recovery;
@@ -773,7 +774,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 }
             }
             // Scrum: open/roll over the sprint at the start of the cycle.
-            self.advance_sprint_if_scrum(cycle).await;
+            // Box::pin: the run_cycle future crossed the large-future bound
+            // once the deploy attempt carried its forensics bundle (CXA-F289)
+            // — boxing this one branch keeps the whole future under it.
+            Box::pin(self.advance_sprint_if_scrum(cycle)).await;
             // SM supervision (deterministic, zero tokens): police the sprint
             // scope, route stalled committed work to the role that unblocks
             // it, and descope what will not ship — the SM orchestrates the
@@ -794,6 +798,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.memory_hygiene().await;
             // Self-tuning: react to our own evals (daily) — quality/intake brakes.
             self.self_tune().await;
+            // Lesson efficacy (CXA-F306, daily): force lessons with 2+
+            // recurrences into structural fixes — chore first, then a bug
+            // when a closed chore failed to stop the recurrence.
+            self.lesson_efficacy_sweep().await;
             // Forge hygiene: rebase open PRs onto the moving base + learn
             // from PRs a human closed without merging.
             self.forge_hygiene().await;
@@ -1125,6 +1133,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                                 &summary,
                                 attempt_sha.clone(),
                                 health_check,
+                                r.failure_bundle,
                             )
                             .await;
                             let kind = if success {
@@ -1178,7 +1187,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         Err(e) => {
                             deploy_bad = true;
                             let summary = format!("deploy failed: {e}");
-                            self.record_deploy(false, &summary, attempt_sha.clone(), None)
+                            // A spawn/timeout error produced no compose run at
+                            // all — no forensics exist to capture (CXA-F289).
+                            self.record_deploy(false, &summary, attempt_sha.clone(), None, None)
                                 .await;
                             self.notify("deploy_failed", summary.clone()).await;
                             if let Some(id) = self.file_deploy_bug(&summary).await {

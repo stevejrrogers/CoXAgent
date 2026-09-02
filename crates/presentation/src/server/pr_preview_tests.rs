@@ -74,6 +74,7 @@ struct DeployWithDeadPort;
 impl DeployPort for DeployWithDeadPort {
     async fn deploy(&self, _work_dir: &std::path::Path) -> Result<DeployReport, PortError> {
         Ok(DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "docker compose up -d --build succeeded".to_owned(),
@@ -89,6 +90,7 @@ struct HealthyDeploy;
 impl DeployPort for HealthyDeploy {
     async fn deploy(&self, _work_dir: &std::path::Path) -> Result<DeployReport, PortError> {
         Ok(DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "docker compose up -d --build succeeded".to_owned(),
