@@ -232,11 +232,11 @@ async fn a_plain_alias_still_reaches_the_factory() {
     );
 }
 
-/// Pin the empty-alias contract: "" stays on the derive-from-name fallback —
-/// the refusal filter skips it and the port's guard exempts it, so neither
-/// layer may turn `{"alias":""}` into a 400.
+/// Pin the empty-alias contract: "" is normalized to ABSENT like every other
+/// optional field (CXA-B146 — trim, blank→absent), so it is never a 400 and
+/// the factory sees `None` — the port then derives the alias from the name.
 #[tokio::test]
-async fn an_empty_alias_falls_through_to_the_factory_unchanged() {
+async fn an_empty_alias_reaches_the_factory_as_absent() {
     let seen = Arc::new(std::sync::Mutex::new(None));
     let recorder = Arc::clone(&seen);
     let app = hub_with_factory(Arc::new(move |req| {
@@ -249,7 +249,69 @@ async fn an_empty_alias_falls_through_to_the_factory_unchanged() {
 
     let resp = post_create_with_body(app, r#"{"name":"QA Trav","alias":""}"#).await;
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(*seen.lock().expect("poisoned"), Some(Some(String::new())));
+    assert_eq!(*seen.lock().expect("poisoned"), Some(None));
+}
+
+/// CXA-B146 regression: a whitespace-only alias used to pass validation raw,
+/// become the project id and scaffold a workspace directory named `"   "` —
+/// deletable only via percent-encoded DELETE. It is trimmed like every other
+/// input: the factory sees `None` (absent → derive-from-name), never the
+/// spaces, and nothing is refused (a blank optional is absent, not an error).
+#[tokio::test]
+async fn a_whitespace_only_alias_reaches_the_factory_as_absent() {
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let recorder = Arc::clone(&seen);
+    let app = hub_with_factory(Arc::new(move |req| {
+        *recorder.lock().expect("poisoned") = Some(req.alias);
+        Box::pin(async {
+            Err::<ProjectHandle, FactoryError>(FactoryError::internal("stop after capture"))
+        })
+    }))
+    .await;
+
+    // NBSP pins the Unicode-whitespace boundary. A blank made of CONTROL
+    // characters (e.g. " \t\n") is deliberately NOT here: the B140 guard runs
+    // on the raw alias before the trim, so that shape is refused with 400.
+    for alias in ["   ", "\u{a0}"] {
+        let body = serde_json::to_string(&serde_json::json!({
+            "name": "QA Space",
+            "alias": alias,
+        }))
+        .expect("json body");
+        let resp = post_create_with_body(app.clone(), &body).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a blank alias is absent, not refused: {alias:?}"
+        );
+        assert_eq!(
+            *seen.lock().expect("poisoned"),
+            Some(None),
+            "the factory must never see the whitespace-only alias {alias:?}"
+        );
+    }
+}
+
+/// CXA-B146: a padded alias is trimmed before the factory sees it, so its
+/// spaces can never become part of the workspace id.
+#[tokio::test]
+async fn a_padded_alias_is_trimmed_before_the_factory_sees_it() {
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let recorder = Arc::clone(&seen);
+    let app = hub_with_factory(Arc::new(move |req| {
+        *recorder.lock().expect("poisoned") = Some(req.alias);
+        Box::pin(async {
+            Err::<ProjectHandle, FactoryError>(FactoryError::internal("stop after capture"))
+        })
+    }))
+    .await;
+
+    let resp = post_create_with_body(app, r#"{"name":"QA Trav","alias":"  QATRAV  "}"#).await;
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        *seen.lock().expect("poisoned"),
+        Some(Some("QATRAV".to_owned()))
+    );
 }
 
 /// A hub with one registered project (`default`) whose working tree is
