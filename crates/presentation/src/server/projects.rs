@@ -101,14 +101,19 @@ fn factory_error_response(e: &FactoryError) -> axum::response::Response {
     }
 }
 
-/// CXA-B138: the alias becomes the workspace directory id (`base.join(id)`),
-/// so a path-traversing alias would scaffold — and DELETE rm -rf — outside
-/// the workspace base. Refuse it HERE, before the factory touches the
-/// filesystem. (Empty/absent keeps the derive-from-name fallback.)
+/// CXA-B138/CXA-B140: the alias becomes the workspace directory id
+/// (`base.join(id)`), so a path-traversing alias would scaffold — and DELETE
+/// rm -rf — outside the workspace base, and a control character in it mangles
+/// every listing and is non-obviously deletable. Refuse it HERE, before the
+/// factory touches the filesystem. (Empty/absent keeps the derive-from-name
+/// fallback.)
 fn refused_alias(alias: Option<&String>) -> Option<axum::response::Response> {
     let alias = alias.map(String::as_str).filter(|a| !a.is_empty())?;
-    (!coxagent_application::state::is_safe_workspace_id(alias))
-        .then(|| bad_request_error("alias must not contain '/', '\\', '..' or leading dots"))
+    (!coxagent_application::state::is_safe_workspace_id(alias)).then(|| {
+        bad_request_error(
+            "alias must not contain '/', '\\', '..', leading dots or control characters",
+        )
+    })
 }
 
 /// Validate brownfield import path: must be under the hub's workspace root

@@ -17,6 +17,7 @@ mod ops;
 mod outbox;
 mod provenance;
 mod work;
+mod workspace_id;
 
 pub use chat::*;
 pub use docs::*;
@@ -29,6 +30,7 @@ pub use ops::*;
 pub use outbox::*;
 pub use provenance::*;
 pub use work::*;
+pub use workspace_id::*;
 
 /// Current on-disk schema version. Bumped when the serialized shape changes;
 /// the store refuses to silently load a newer version than it understands.
@@ -1579,35 +1581,6 @@ pub fn unix_now_secs() -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
-/// Derive a short uppercase alias from a project name: its capital letters
-/// (`CoXChat` -> `CXC`), else the first three alphanumerics uppercased.
-#[must_use]
-pub fn derive_alias(name: &str) -> String {
-    let caps: String = name.chars().filter(char::is_ascii_uppercase).collect();
-    if caps.len() >= 2 {
-        return caps.chars().take(4).collect();
-    }
-    name.chars()
-        .filter(char::is_ascii_alphanumeric)
-        .take(3)
-        .collect::<String>()
-        .to_uppercase()
-}
-
-/// CXA-B138: a project alias becomes a workspace directory id under the hub's
-/// workspace base (`base.join(id)`), so any path separator or dot component
-/// lets an alias like `../name` scaffold — and DELETE `rm -rf` — OUTSIDE the
-/// base. A safe id is a single non-hidden path component: never empty, no '/',
-/// no '\', no ".." anywhere, no leading dot.
-#[must_use]
-pub fn is_safe_workspace_id(id: &str) -> bool {
-    !id.is_empty()
-        && !id.contains('/')
-        && !id.contains('\\')
-        && !id.contains("..")
-        && !id.starts_with('.')
-}
-
 impl ProjectState {
     /// Find a ticket by id.
     #[must_use]
@@ -1770,47 +1743,7 @@ mod dependency_tests {
 }
 
 #[cfg(test)]
-mod alias_tests {
-    use super::{derive_alias, is_safe_workspace_id};
-
-    #[test]
-    fn derives_from_capitals() {
-        assert_eq!(derive_alias("CoXChat"), "CXC");
-        assert_eq!(derive_alias("CoXAgent"), "CXA");
-    }
-
-    /// CXA-B138: every traversal shape the ticket names must be refused —
-    /// an unsafe id would be `base.join`-ed outside the workspace base.
-    #[test]
-    fn path_traversing_ids_are_never_safe() {
-        for id in [
-            "../qatrav-esc",
-            "..\\qatrav",
-            "qa/../x",
-            "a\\b",
-            "..",
-            ".",
-            ".hidden",
-            "",
-        ] {
-            assert!(!is_safe_workspace_id(id), "{id:?} must be refused");
-        }
-    }
-
-    /// Ordinary single-component ids — the only kind onboarding may use.
-    #[test]
-    fn plain_component_ids_are_safe() {
-        for id in ["qatrav", "QATRAV", "qa-trav_2", "cxa"] {
-            assert!(is_safe_workspace_id(id), "{id:?} must be accepted");
-        }
-    }
-
-    #[test]
-    fn falls_back_to_first_letters() {
-        assert_eq!(derive_alias("quotes"), "QUO");
-        assert_eq!(derive_alias("my app"), "MYA");
-    }
-
+mod state_bound_tests {
     #[test]
     fn journal_note_bounded_and_capped() {
         let mut st = super::ProjectState::default();
