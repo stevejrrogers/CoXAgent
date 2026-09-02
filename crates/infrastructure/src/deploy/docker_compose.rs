@@ -1216,6 +1216,11 @@ impl DeployPort for DockerComposeDeploy {
     }
 
     async fn down(&self, work_dir: &Path) -> Result<(), PortError> {
+        // Deliberately WITHOUT `-v`: callers use this to PAUSE a project (the
+        // forge preview swap/restore stops the main build and brings it back
+        // later), so the pgdata volume must survive the pause (CXA-B115).
+        // Dormant volumes of genuinely-destroyed projects are the janitor
+        // sweep's job (CXA-B143).
         let proj = compose_project_name(work_dir);
         let _ = Command::new("docker")
             .args(["compose", "-p", &proj, "down", "--remove-orphans"])
@@ -1329,6 +1334,10 @@ impl DeployPort for DockerComposeDeploy {
         // ports, so `up` fails with "port is already allocated" — a recurring,
         // self-inflicted deploy blocker. `down --remove-orphans` releases the
         // project's own ports (and orphaned services) so `up` starts clean.
+        // Deliberately WITHOUT `-v`: this is a REDEPLOY, not a teardown — the
+        // pgdata volume must survive so the stored secrets keep matching the
+        // initialised database (CXA-B115/B032). Dormant-volume hygiene for
+        // genuinely-destroyed projects is the janitor's sweep (CXA-B143).
         let proj = compose_project_name(work_dir);
         // Safety: `compose_project_name` always yields `cox-<parent>-<dir>`,
         // but double-check it can never collide with the live hub project
@@ -1408,8 +1417,11 @@ impl DeployPort for DockerComposeDeploy {
                 if !reclaimable_compose_project(&project) {
                     break;
                 }
+                // `-v`: eviction DESTROYS this project — containers, networks
+                // and volumes alike. Leaving the volumes behind is how dormant
+                // pgdata/workspace residue accumulated on the host (CXA-B143).
                 let _ = Command::new("docker")
-                    .args(["compose", "-p", &project, "down", "--remove-orphans"])
+                    .args(["compose", "-p", &project, "down", "-v", "--remove-orphans"])
                     .stdin(std::process::Stdio::null())
                     .kill_on_drop(true)
                     .output()
