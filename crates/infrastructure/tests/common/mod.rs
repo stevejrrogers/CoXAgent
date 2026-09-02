@@ -85,8 +85,10 @@ pub fn external_dsn_refusal(value: Option<&str>) -> Option<String> {
         Some(_) => Some(format!(
             "an external test-database URL is exported ({EXPORTED_DSN_VAR} or \
              {EXPORTED_REDIS_VAR}) — refusing to run against an operator-provided \
-             database. This closes the incident where an exported DSN pointing at \
-             the production store was filled with test-<pid> rows. Unset the \
+             database: the guard cannot verify the target is not a live hub, so it \
+             refuses ANY exported target outright instead of probing it (a LIVE hub \
+             DSN once slipped through the old probe and the production store was \
+             filled with test-<pid> rows — this closes that incident). Unset the \
              variable; the shared compose fixture ({}) provisions a dedicated \
              ephemeral test database automatically (CXA-F327)",
             test_pg_compose_file().display()
