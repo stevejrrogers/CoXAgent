@@ -207,7 +207,16 @@ pub(super) async fn create_project(
     }
     let handle = match factory(NewProjectReq {
         name,
-        alias: req.alias,
+        // CXA-B146: the alias is trimmed like every other optional input
+        // (space/existing/git_url/goal above) — a blank one is absent, so the
+        // port's derive-from-name fallback applies and a whitespace-only or
+        // padded alias never reaches the workspace id. The refusal checks
+        // above deliberately run on the RAW alias: trimming first could
+        // smuggle `"trailing\n"` through as `"trailing"`.
+        alias: req
+            .alias
+            .map(|a| a.trim().to_owned())
+            .filter(|a| !a.is_empty()),
         existing: req
             .existing
             .filter(|s| !s.trim().is_empty())
