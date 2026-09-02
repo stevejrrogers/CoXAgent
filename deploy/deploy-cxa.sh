@@ -7,6 +7,11 @@
 # Usage:
 #   ./deploy/deploy-cxa.sh <worktree_root> [--restart]
 #
+# CXA-B150: the build is only deployable if it is reproducible from the repo,
+# so the worktree must be on a NAMED ref with a clean tree — a binary cut from
+# a detached HEAD or uncommitted edits matches no commit, and QA probes
+# against it mislead in both directions.
+#
 # NOTE: NEVER bind port 4000 here. The hub is started by the desktop app shell;
 # we only TERM the existing hub PID and let the shell respawn it. Killing the
 # old hub PID is optional (--restart); if you only need a windows-based swap,
@@ -15,12 +20,25 @@ set -euo pipefail
 
 WORKTREE="${1:?worktree root required}"
 BUNDLE_BIN="/Users/luton/Projects/CoXAgent/desktop/build/CoXAgent.app/Contents/MacOS/cox-server"
-LOG="/Users/luton/Projects/CoXAgent/deploy/deploy.log"
+LOG="${COX_DEPLOY_LOG:-/Users/luton/Projects/CoXAgent/deploy/deploy.log}"
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" | tee -a "$LOG"; }
 
+# 0. Ref hygiene: refuse anything the provenance line could not name.
+git -C "$WORKTREE" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+  log "[deploy] FAIL: $WORKTREE is not a git worktree"; exit 1;
+}
+BRANCH=$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD) || {
+  log "[deploy] FAIL: $WORKTREE is on a detached HEAD — cut deploy builds from a named ref (git switch <branch>)";
+  exit 1;
+}
+if [ -n "$(git -C "$WORKTREE" status --porcelain)" ]; then
+  log "[deploy] FAIL: $WORKTREE has uncommitted changes — the build would match no commit"
+  exit 1
+fi
+log "[deploy] building $BRANCH @ $(git -C "$WORKTREE" rev-parse HEAD) in $WORKTREE"
+
 # 1. Build release binary from the worktree (already contains the code).
-log "[deploy] building release in $WORKTREE"
 (cd "$WORKTREE" && cargo build --release --bin coxagent) 2>&1 | tail -5
 SRC_BIN="$WORKTREE/target/release/coxagent"
 [ -f "$SRC_BIN" ] || { log "[deploy] FAIL: build produced no binary"; exit 1; }
