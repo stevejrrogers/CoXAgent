@@ -218,7 +218,7 @@ async fn sweep_orphaned_images() {
         if !image_sweep_candidate(&repository, &existing) {
             continue;
         }
-        let referenced = run_docker(&[
+        let referenced = match run_docker(&[
             "ps",
             "-a",
             "-q",
@@ -226,8 +226,13 @@ async fn sweep_orphaned_images() {
             &format!("ancestor={repository}"),
         ])
         .await
-        // No answer → assume referenced, keep the image.
-        .is_some_and(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty());
+        {
+            // Fail-closed: only a successful, empty answer proves no container
+            // references the image — a probe that could not be answered (CLI
+            // gone, daemon dying mid-sweep) counts as referenced.
+            Some(o) if o.status.success() => !String::from_utf8_lossy(&o.stdout).trim().is_empty(),
+            _ => true,
+        };
         if !orphaned_compose_image(&repository, referenced, &existing) {
             continue;
         }

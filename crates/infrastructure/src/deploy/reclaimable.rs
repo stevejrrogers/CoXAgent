@@ -1,9 +1,12 @@
 //! The single source of truth for which docker resources an automated pass
-//! may tear down: compose projects via [`reclaimable_compose_project`] and
-//! raw, label-less containers via [`reclaimable_raw_container`].
+//! may tear down: compose projects via [`reclaimable_compose_project`], their
+//! dormant volumes via [`reclaimable_volume`], their orphaned tagged images
+//! via [`image_sweep_candidate`] / [`orphaned_compose_image`], and raw,
+//! label-less containers via [`reclaimable_raw_container`].
 //!
 //! Both the deploy port-eviction self-heal (see [`docker_compose`]) and the
-//! hourly docker janitor (see `crates/presentation/src/server/docs.rs`) decide
+//! hourly docker janitor (see
+//! `crates/presentation/src/server/docker_janitor.rs`) decide
 //! what they may reclaim. They used to each carry their own private copy of
 //! that policy, and drift between them was a standing foot-gun: if one side
 //! ever started treating the live hub or shared infra as reclaimable, an agent
@@ -95,15 +98,7 @@ pub fn orphaned_compose_image(
     referenced_by_container: bool,
     existing_projects: &[String],
 ) -> bool {
-    if referenced_by_container {
-        return false;
-    }
-    if !reclaimable_name(repository) {
-        return false;
-    }
-    !existing_projects
-        .iter()
-        .any(|p| repository.starts_with(format!("{p}-").as_str()))
+    !referenced_by_container && image_sweep_candidate(repository, existing_projects)
 }
 
 /// The cheap namespace precheck in front of the orphaned-image sweep
@@ -389,7 +384,14 @@ mod tests {
             &containers(&["cox-cxa-codebase"]),
         ));
         // Base images and foreign/protected names never reach the probe.
-        for repo in ["rust", "postgres", "nginx", "coxagent-hub", "cox-infra-redis", ""] {
+        for repo in [
+            "rust",
+            "postgres",
+            "nginx",
+            "coxagent-hub",
+            "cox-infra-redis",
+            "",
+        ] {
             assert!(
                 !image_sweep_candidate(repo, &containers(&[])),
                 "`{repo}` is not a sweep candidate"
