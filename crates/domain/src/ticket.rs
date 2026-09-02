@@ -99,6 +99,11 @@ pub struct Ticket {
     /// as brand new or ancient.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     created_at: Option<String>,
+    /// Where uncommitted slot work was parked when a run died or the slot was
+    /// reclaimed (CXA-F318). Guarded mutations live in `wip_checkpoint.rs`,
+    /// which keeps the list capped; serde-defaulted so old tickets load clean.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    wip_checkpoints: Vec<crate::wip_checkpoint::WipCheckpoint>,
     /// Optional bounded-context service tag (CXA-F253): the BA stamps it when
     /// filing shared-infrastructure work (e.g. `"infra"`, `"ci"`) that may
     /// legitimately exist in several projects at once. `None` for ordinary
@@ -151,6 +156,7 @@ impl Ticket {
             assignee: None,
             goal_id: None,
             created_at: None,
+            wip_checkpoints: Vec::new(),
             service_tag: None,
         })
     }
@@ -246,6 +252,19 @@ impl Ticket {
 
     pub(crate) fn test_case_list_mut(&mut self) -> &mut Vec<TestCase> {
         &mut self.test_cases
+    }
+
+    /// Crate-internal handles for the WIP-checkpoint seam (`wip_checkpoint.rs`)
+    /// to read and bound the parked-WIP history. Deliberately not `pub`:
+    /// outside the domain crate the aggregate stays opaque.
+    pub(crate) fn wip_checkpoint_list(&self) -> &[crate::wip_checkpoint::WipCheckpoint] {
+        &self.wip_checkpoints
+    }
+
+    pub(crate) fn wip_checkpoint_list_mut(
+        &mut self,
+    ) -> &mut Vec<crate::wip_checkpoint::WipCheckpoint> {
+        &mut self.wip_checkpoints
     }
 
     // --- Accessors ---

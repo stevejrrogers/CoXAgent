@@ -306,6 +306,89 @@ impl GitPort for SystemGit {
             .map(|_| ())
     }
 
+    async fn checkpoint_tree(
+        &self,
+        work_dir: &Path,
+        ref_name: &str,
+        message: &str,
+        author: &GitAuthor,
+    ) -> Result<Option<String>, PortError> {
+        // Park = stage everything (tracked edits + untracked files; ignored
+        // files are never parked), snapshot the index as a tree, and commit it
+        // straight to `ref_name` via plumbing — HEAD, the branch and the
+        // working tree never move.
+        git(work_dir, &["add", "-A"]).await?;
+        // Nothing staged → clean tree → nothing to park, no ref.
+        if git(work_dir, &["diff", "--cached", "--quiet"])
+            .await
+            .is_ok()
+        {
+            return Ok(None);
+        }
+        let tree = git(work_dir, &["write-tree"]).await?;
+        // Parent on the current HEAD when one exists; a repo with no commits
+        // yet parks an orphan root commit instead of failing.
+        let head = git(work_dir, &["rev-parse", "--verify", "--quiet", "HEAD"])
+            .await
+            .ok();
+        let name_cfg = format!("user.name={}", author.name);
+        let email_cfg = format!("user.email={}", author.email);
+        let sha = match head.as_deref() {
+            Some(parent) => {
+                git(
+                    work_dir,
+                    &[
+                        "-c",
+                        &name_cfg,
+                        "-c",
+                        &email_cfg,
+                        "commit-tree",
+                        &tree,
+                        "-p",
+                        parent,
+                        "-m",
+                        message,
+                    ],
+                )
+                .await?
+            }
+            None => {
+                git(
+                    work_dir,
+                    &[
+                        "-c",
+                        &name_cfg,
+                        "-c",
+                        &email_cfg,
+                        "commit-tree",
+                        &tree,
+                        "-m",
+                        message,
+                    ],
+                )
+                .await?
+            }
+        };
+        git(work_dir, &["update-ref", ref_name, &sha]).await?;
+        // Unstage: the caller's tree reads exactly as it did before the park
+        // (dirty, at the same HEAD) — the work lives only on the ref.
+        match head {
+            Some(_) => git(work_dir, &["reset", "--quiet"]).await.map(|_| ())?,
+            None => git(work_dir, &["rm", "-r", "--cached", "--quiet", "."])
+                .await
+                .map(|_| ())?,
+        }
+        Ok(Some(sha))
+    }
+
+    async fn restore_tree(&self, work_dir: &Path, ref_name: &str) -> Result<(), PortError> {
+        // Overlay (checkout-path default): parked files land on top of the
+        // current tree; HEAD/index state of unrelated paths is untouched.
+        git(work_dir, &["checkout", ref_name, "--", "."])
+            .await
+            .map(|_| ())
+    }
+
     async fn worktree_add(&self, work_dir: &Path, path: &Path, sha: &str) -> Result<(), PortError> {
         let path = path.to_string_lossy();
         git(work_dir, &["worktree", "add", "--detach", &path, sha])
@@ -500,6 +583,173 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resolved, head, "ref now points at the given sha");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_tree_parks_a_dirty_tree_without_moving_head_or_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = SystemGit::new();
+        init_repo(tmp.path()).await;
+        fs::write(tmp.path().join("a.txt"), "base").unwrap();
+        g.commit_all(tmp.path(), "feat: base", &author())
+            .await
+            .unwrap();
+        let head_before = g.head_sha(tmp.path()).await.unwrap();
+
+        // Engine died mid-edit: a tracked edit plus a brand-new untracked file.
+        fs::write(tmp.path().join("a.txt"), "half-finished edit").unwrap();
+        fs::write(tmp.path().join("new_untracked.rs"), "fn wip() {}").unwrap();
+
+        let sha = g
+            .checkpoint_tree(
+                tmp.path(),
+                "refs/coxagent/wip/X-1",
+                "WIP checkpoint: X-1",
+                &author(),
+            )
+            .await
+            .unwrap()
+            .expect("dirty tree parks a commit");
+
+        // The ref resolves to the parked commit — in the SHARED repo, not the
+        // slot's stash — and the commit carries both the edit and the untracked file.
+        assert_eq!(
+            git(tmp.path(), &["rev-parse", "refs/coxagent/wip/X-1"])
+                .await
+                .unwrap(),
+            sha
+        );
+        let parked_files = git(
+            tmp.path(),
+            &["ls-tree", "-r", "--name-only", "refs/coxagent/wip/X-1"],
+        )
+        .await
+        .unwrap();
+        assert!(parked_files.contains("a.txt") && parked_files.contains("new_untracked.rs"));
+
+        // HEAD/branch unmoved, working tree STILL dirty — nothing visible changed.
+        assert_eq!(g.head_sha(tmp.path()).await.unwrap(), head_before);
+        assert_eq!(g.current_branch(tmp.path()).await.unwrap(), "main");
+        let (_, status) = g.raw(tmp.path(), &["status", "--porcelain"]).await;
+        assert!(!status.trim().is_empty(), "tree stays dirty after the park");
+
+        // The parked commit is reachable ONLY via the ref: HEAD has no path to it.
+        let (is_ancestor, _) = g
+            .raw(
+                tmp.path(),
+                &["merge-base", "--is-ancestor", &sha, &head_before],
+            )
+            .await;
+        assert!(
+            !is_ancestor,
+            "the parked commit must not be reachable from HEAD"
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_tree_on_a_clean_tree_parks_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = SystemGit::new();
+        init_repo(tmp.path()).await;
+        fs::write(tmp.path().join("a.txt"), "committed").unwrap();
+        g.commit_all(tmp.path(), "feat: base", &author())
+            .await
+            .unwrap();
+
+        let parked = g
+            .checkpoint_tree(tmp.path(), "refs/coxagent/wip/X-1", "noop", &author())
+            .await
+            .unwrap();
+        assert!(parked.is_none(), "clean tree must not create a checkpoint");
+        assert!(
+            git(
+                tmp.path(),
+                &["rev-parse", "--verify", "--quiet", "refs/coxagent/wip/X-1"]
+            )
+            .await
+            .is_err(),
+            "no ref is created for a clean tree"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_tree_overlays_parked_content_over_a_moved_base() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = SystemGit::new();
+        init_repo(tmp.path()).await;
+        fs::write(tmp.path().join("a.txt"), "base").unwrap();
+        g.commit_all(tmp.path(), "feat: base", &author())
+            .await
+            .unwrap();
+
+        fs::write(tmp.path().join("a.txt"), "parked work").unwrap();
+        g.checkpoint_tree(tmp.path(), "refs/coxagent/wip/X-1", "park", &author())
+            .await
+            .unwrap()
+            .expect("dirty tree parks");
+
+        // The tree is wiped back to base, then the base MOVES forward.
+        let (_, _) = g.raw(tmp.path(), &["checkout", "."]).await;
+        let (_, _) = g.raw(tmp.path(), &["clean", "-fd"]).await;
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("a.txt")).unwrap(),
+            "base"
+        );
+        fs::write(tmp.path().join("baseMoved.txt"), "newer base").unwrap();
+        g.commit_all(tmp.path(), "feat: base moved on", &author())
+            .await
+            .unwrap();
+        let moved_head = g.head_sha(tmp.path()).await.unwrap();
+
+        g.restore_tree(tmp.path(), "refs/coxagent/wip/X-1")
+            .await
+            .unwrap();
+        // Parked content is back, the newer base file survives the overlay,
+        // and HEAD never moved.
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("a.txt")).unwrap(),
+            "parked work"
+        );
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("baseMoved.txt")).unwrap(),
+            "newer base"
+        );
+        assert_eq!(g.head_sha(tmp.path()).await.unwrap(), moved_head);
+    }
+
+    #[tokio::test]
+    async fn park_wipe_restore_round_trip_recovers_the_parked_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = SystemGit::new();
+        init_repo(tmp.path()).await;
+        fs::write(tmp.path().join("a.txt"), "v1").unwrap();
+        g.commit_all(tmp.path(), "feat: base", &author())
+            .await
+            .unwrap();
+
+        fs::write(tmp.path().join("a.txt"), "v2 wip").unwrap();
+        fs::write(tmp.path().join("wip_new.txt"), "brand new").unwrap();
+        g.checkpoint_tree(tmp.path(), "refs/coxagent/wip/X-1", "park", &author())
+            .await
+            .unwrap()
+            .expect("park");
+
+        // Full wipe (what slot hygiene does once the work is parked).
+        let (_, _) = g.raw(tmp.path(), &["checkout", "."]).await;
+        let (_, _) = g.raw(tmp.path(), &["clean", "-fd"]).await;
+        assert!(!tmp.path().join("wip_new.txt").exists());
+
+        g.restore_tree(tmp.path(), "refs/coxagent/wip/X-1")
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("a.txt")).unwrap(),
+            "v2 wip"
+        );
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("wip_new.txt")).unwrap(),
+            "brand new"
+        );
     }
 
     #[tokio::test]
