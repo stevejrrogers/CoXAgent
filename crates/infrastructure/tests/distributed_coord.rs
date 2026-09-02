@@ -2,10 +2,19 @@
 //! Live integration test for the distributed coordination path: Postgres for
 //! durable state + transactional ticket claims, Redis for leader/stage leases.
 //!
-//! Skipped unless both are provided:
-//!   COXAGENT_TEST_PG_DSN=postgres://cox:test@localhost:55432/coxagent \
-//!   COXAGENT_TEST_REDIS_URL=redis://localhost:56379 \
-//!   cargo test -p coxagent-infrastructure --test distributed_coord -- --nocapture
+//! The tests are `#[ignore]`d (ordinary CI without databases skips them
+//! explicitly) and run only through the fail-closed guard in
+//! `tests/common/mod.rs`, which demands an explicit ephemeral `cxa_test*`
+//! Postgres AND an explicit `COXAGENT_TEST_REDIS_URL`, and refuses a live hub
+//! or an unverified target (CXA-F326).
+//!
+//! Run with ephemeral databases (README → Integration test environment):
+//!
+//! ```sh
+//! COXAGENT_TEST_PG_DSN='postgres://cox:test@localhost:55432/cxa_test' \
+//!   COXAGENT_TEST_REDIS_URL='redis://localhost:56379' \
+//!   cargo test -p coxagent-infrastructure --test distributed_coord -- --ignored
+//! ```
 
 use coxagent_application::ports::outbound::{GitCheck, StateStorePort, WorkerCaps};
 
@@ -16,29 +25,14 @@ use coxagent_domain::{
 };
 use coxagent_infrastructure::state::SqlStateStore;
 
-fn env(k: &str) -> Option<String> {
-    std::env::var(k).ok().filter(|v| !v.is_empty())
-}
-
-/// The tests connect in parallel; on a FRESH database their concurrent
-/// `CREATE TABLE IF NOT EXISTS` races the catalog and one loses with
-/// "migrate: db error". Run the first migration once, alone.
-static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
-
-async fn store(project: &str) -> SqlStateStore {
-    let dsn = env("COXAGENT_TEST_PG_DSN").expect("dsn");
-    let redis = env("COXAGENT_TEST_REDIS_URL").expect("redis");
-    MIGRATED
-        .get_or_init(|| async {
-            SqlStateStore::connect(&dsn, "schema-init")
-                .await
-                .expect("initial migrate");
-        })
-        .await;
-    SqlStateStore::connect(&dsn, project)
+/// The guard already ran the first migration alone (its probe serializes the
+/// initial `CREATE TABLE` through a process-wide cell), so a plain connect
+/// never races the catalog even though the tests run in parallel.
+async fn store(pg: &common::TestPg, redis: &str, project: &str) -> SqlStateStore {
+    SqlStateStore::connect(&pg.dsn, project)
         .await
         .expect("connect pg")
-        .with_redis(&redis)
+        .with_redis(redis)
         .expect("attach redis")
 }
 
@@ -60,29 +54,15 @@ fn ready_feature(id: &str) -> Ticket {
 }
 
 #[tokio::test]
+#[ignore = "skipped: needs an ephemeral cxa_test* Postgres + an explicit Redis URL — see README (Integration test environment)"]
 async fn distributed_coordination_across_two_hubs() {
-    if env("COXAGENT_TEST_PG_DSN").is_none() || env("COXAGENT_TEST_REDIS_URL").is_none() {
-        eprintln!("skipping: set COXAGENT_TEST_PG_DSN + COXAGENT_TEST_REDIS_URL");
-        return;
-    }
-    if common::is_live_hub_db(&env("COXAGENT_TEST_PG_DSN").expect("dsn")).await {
-        eprintln!(
-            "COXAGENT_TEST_PG_DSN points at a LIVE hub database — refusing the coordination test"
-        );
-        return;
-    }
+    let (pg, redis) = common::pg_and_redis("distributed_coord").await;
     // Unique project id per run so reruns start clean.
-    let project = format!(
-        "test-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    );
+    let project = pg.project("coord");
 
     // Two stores on the same PG + Redis = two machines/hubs.
-    let hub_a = store(&project).await;
-    let hub_b = store(&project).await;
+    let hub_a = store(&pg, &redis, &project).await;
+    let hub_b = store(&pg, &redis, &project).await;
     let now = "2026-07-15T00:00:00Z";
 
     // Seed two ready features into the shared state.
@@ -129,6 +109,10 @@ async fn distributed_coordination_across_two_hubs() {
     assert!(hub_b.claim_ticket(&id2, "luffy@b", now).await.unwrap());
 
     worker_registry_carries_machine_capabilities(&hub_a, &hub_b, now).await;
+
+    // Teardown: the namespaced fixtures must not outlive the test — the
+    // sweep covers the Postgres aggregate AND the project's Redis keyspace.
+    hub_a.delete().await.expect("teardown sweep");
 }
 
 /// CXA-B130: a project's delete must also sweep its Redis keyspace. The
@@ -137,25 +121,11 @@ async fn distributed_coordination_across_two_hubs() {
 /// auto-resume the deleted project's runner the moment a new project reuses
 /// the id.
 #[tokio::test]
+#[ignore = "skipped: needs an ephemeral cxa_test* Postgres + an explicit Redis URL — see README (Integration test environment)"]
 async fn delete_sweeps_the_project_redis_keyspace_including_desired_state() {
-    if env("COXAGENT_TEST_PG_DSN").is_none() || env("COXAGENT_TEST_REDIS_URL").is_none() {
-        eprintln!("skipping: set COXAGENT_TEST_PG_DSN + COXAGENT_TEST_REDIS_URL");
-        return;
-    }
-    if common::is_live_hub_db(&env("COXAGENT_TEST_PG_DSN").expect("dsn")).await {
-        eprintln!(
-            "COXAGENT_TEST_PG_DSN points at a LIVE hub database — refusing the coordination test"
-        );
-        return;
-    }
-    let project = format!(
-        "del-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    );
-    let store = store(&project).await;
+    let (pg, redis) = common::pg_and_redis("distributed_coord").await;
+    let project = pg.project("delete-sweep");
+    let store = store(&pg, &redis, &project).await;
 
     store
         .set_desired("op@host", true)

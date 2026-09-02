@@ -35,6 +35,14 @@
 //! `if: always()` conditions inside a job are legitimate and must NOT read
 //! as a job gate — `job_gate` keys on the exact four-space indentation of a
 //! job-level key, the edge case the real workflow exercises.
+//!
+//! F326 adds the last pin: the `integration` job is the only sanctioned way
+//! to run the `#[ignore]`d DSN-gated Postgres/Redis suites, so it must exist,
+//! be ungated, bring its own ephemeral postgres+redis service containers
+//! (database named `cxa_test`, exactly what the shared guard demands), export
+//! `COXAGENT_TEST_PG_DSN` and `COXAGENT_TEST_REDIS_URL` explicitly, and run
+//! the gated suites with `--ignored` — without which cargo silently runs
+//! nothing and the job paints a green over zero executed tests.
 
 #![allow(clippy::unwrap_used)]
 
@@ -71,8 +79,14 @@ const GUARD_TESTS_JOB: &str = "guard-tests";
 /// The gate commands the guard job must run, as exact run-payload substrings.
 const GUARD_TESTS_STEPS: [&str; 2] = [
     "cargo test -p coxagent-infrastructure --lib reclaimable",
-    "cargo test -p coxagent-app --test deploy_smoke --test ci_availability_gate",
+    "cargo test -p coxagent-app --test deploy_smoke --test ci_availability_gate \
+     --test test_env_guard_f326_gate",
 ];
+
+/// The job that runs the `#[ignore]`d DSN-gated integration tests (F326) —
+/// the CI-level half of the fail-closed test-environment guard. It must
+/// carry its own ephemeral service containers, never touch a deployed hub.
+const INTEGRATION_JOB: &str = "integration";
 
 /// The check-run display names (the jobs' `name:` fields) that branch
 /// protection on main must require as status checks, so merge-blocking is
@@ -265,6 +279,85 @@ fn why_check_names_not_enactable(src: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A job's exported env value: the first `VAR: value` line in the block.
+fn env_value(block: &str, var: &str) -> Option<String> {
+    block.lines().find_map(|l| {
+        l.trim()
+            .strip_prefix(var)
+            .and_then(|rest| rest.strip_prefix(':'))
+            .map(str::trim)
+            .map(ToOwned::to_owned)
+    })
+}
+
+/// Why would CI never run the DSN-gated integration tests (F326)? `Ok` only
+/// when the `integration` job exists, is ungated, brings its own ephemeral
+/// postgres+redis service containers, exports `COXAGENT_TEST_PG_DSN` at a
+/// `cxa_test*` database plus `COXAGENT_TEST_REDIS_URL` explicitly, and runs
+/// the gated suites with `--ignored` — the tests refuse to decide safety on
+/// their own, so a job without any of these runs nothing (or fails loudly).
+fn why_integration_tests_not_wired(src: &str) -> Result<(), String> {
+    let block = job_block(src, INTEGRATION_JOB).ok_or_else(|| {
+        format!(
+            "no `{INTEGRATION_JOB}` job in the workflow — the #[ignore]d \
+             DSN-gated integration tests would never run"
+        )
+    })?;
+    if let Some(gate) = job_gate(&block) {
+        return Err(format!(
+            "`{INTEGRATION_JOB}` is disabled by a job-level `{gate}` — the \
+             integration tests never run"
+        ));
+    }
+    for service in ["image: postgres", "image: redis"] {
+        if !block.contains(service) {
+            return Err(format!(
+                "`{INTEGRATION_JOB}` lost its `{service}` service container — \
+                 the gated tests refuse to run against anything but an \
+                 ephemeral target the job itself owns"
+            ));
+        }
+    }
+    let dsn = env_value(&block, "COXAGENT_TEST_PG_DSN").ok_or_else(|| {
+        format!(
+            "`{INTEGRATION_JOB}` no longer exports COXAGENT_TEST_PG_DSN — the \
+             shared guard fails closed on an unset env, so the job would run \
+             nothing but refusals"
+        )
+    })?;
+    if !dsn.contains("cxa_test") {
+        return Err(format!(
+            "COXAGENT_TEST_PG_DSN must name a cxa_test* database (got `{dsn}`) — \
+             the shared guard refuses anything else, and a live-hub-shaped DSN \
+             is exactly what the guard exists to refuse"
+        ));
+    }
+    if env_value(&block, "COXAGENT_TEST_REDIS_URL").is_none() {
+        return Err(format!(
+            "`{INTEGRATION_JOB}` no longer exports COXAGENT_TEST_REDIS_URL — the \
+             coordination tests demand it explicitly and the guard fails closed \
+             without it"
+        ));
+    }
+    let run = run_payloads(&block)
+        .into_iter()
+        .find(|r| r.contains("--test sql_store_contract"))
+        .ok_or_else(|| {
+            format!(
+                "`{INTEGRATION_JOB}` never runs the DSN-gated suites (no \
+                 `--test sql_store_contract` in any run step)"
+            )
+        })?;
+    if !run.contains("--ignored") {
+        return Err(
+            "the DSN-gated tests are #[ignore]d — without `--ignored` the \
+             integration job runs nothing and reports green over zero tests"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -305,6 +398,15 @@ fn required_check_names_are_exposed_and_documented() {
             "{CI_WORKFLOW} does not make merge-blocking enactable from repo \
              state alone: {why}"
         );
+    }
+}
+
+#[test]
+fn ci_runs_the_dsn_gated_integration_tests() {
+    let path = repo_root().join(CI_WORKFLOW);
+    let src = std::fs::read_to_string(&path).unwrap();
+    if let Err(why) = why_integration_tests_not_wired(&src) {
+        panic!("{CI_WORKFLOW} no longer wires up the DSN-gated integration tests: {why}");
     }
 }
 
@@ -457,8 +559,8 @@ jobs:
     assert!(why.contains("no `check` job"), "unhelpful: {why}");
 }
 
-/// A minimal workflow that satisfies every F286 rule — the positive control
-/// each `..._is_caught` fixture below mutates.
+/// A minimal workflow that satisfies every F286 + F326 rule — the positive
+/// control each `..._is_caught` fixture below mutates.
 fn wired_workflow() -> String {
     "\
 # Merge-blocking from repo state alone: branch protection on main must
@@ -487,7 +589,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: cargo test -p coxagent-infrastructure --lib reclaimable
-      - run: cargo test -p coxagent-app --test deploy_smoke --test ci_availability_gate
+      - run: cargo test -p coxagent-app --test deploy_smoke --test ci_availability_gate --test test_env_guard_f326_gate
+  integration:
+    name: integration (ephemeral cxa_test postgres + redis)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: cxa_test
+        ports:
+          - 5432:5432
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+    env:
+      COXAGENT_TEST_PG_DSN: postgres://cox:test@localhost:5432/cxa_test
+      COXAGENT_TEST_REDIS_URL: redis://localhost:6379
+    steps:
+      - run: cargo test -p coxagent-infrastructure --test sql_store_contract --test kv_doc_contract --test sql_auth_token_harvest --test distributed_coord -- --ignored
 "
     .to_owned()
 }
@@ -500,6 +621,8 @@ fn a_fully_wired_workflow_passes_every_f286_rule() {
         .unwrap_or_else(|why| panic!("guard half of the control: {why}"));
     why_check_names_not_enactable(&src)
         .unwrap_or_else(|why| panic!("check-name half of the control: {why}"));
+    why_integration_tests_not_wired(&src)
+        .unwrap_or_else(|why| panic!("integration half of the control: {why}"));
 }
 
 #[test]
@@ -544,7 +667,8 @@ fn dropping_a_guard_command_is_caught() {
     assert!(why.contains("--lib reclaimable"), "unhelpful: {why}");
 
     let no_wiring = wired_workflow().replace(
-        "      - run: cargo test -p coxagent-app --test deploy_smoke --test ci_availability_gate\n",
+        "      - run: cargo test -p coxagent-app --test deploy_smoke --test \
+         ci_availability_gate --test test_env_guard_f326_gate\n",
         "",
     );
     let why = why_guard_tests_not_wired(&no_wiring).unwrap_err();
@@ -613,4 +737,92 @@ fn a_drifted_or_undocumented_check_name_is_caught() {
     );
     let why = why_check_names_not_enactable(&no_context).unwrap_err();
     assert!(why.contains("branch protection"), "unhelpful: {why}");
+}
+
+/// F326: the integration job missing, `if:`-gated, or `continue-on-error`ed
+/// is caught — all three leave the gated suites unexecuted while CI reports
+/// green.
+#[test]
+fn an_integration_job_missing_gated_or_silently_failing_is_caught() {
+    let missing = wired_workflow()
+        .split("  integration:")
+        .next()
+        .unwrap()
+        .to_owned();
+    let why = why_integration_tests_not_wired(&missing).unwrap_err();
+    assert!(why.contains("no `integration` job"), "unhelpful: {why}");
+
+    let gated = wired_workflow().replace(
+        "  integration:\n    name:",
+        "  integration:\n    if: false\n    name:",
+    );
+    let why = why_integration_tests_not_wired(&gated).unwrap_err();
+    assert!(why.contains("disabled by a job-level"), "unhelpful: {why}");
+
+    let coe = wired_workflow().replace(
+        "  integration:\n    name:",
+        "  integration:\n    continue-on-error: true\n    name:",
+    );
+    let why = why_integration_tests_not_wired(&coe).unwrap_err();
+    assert!(why.contains("disabled by a job-level"), "unhelpful: {why}");
+    assert!(why.contains("continue-on-error"), "unhelpful: {why}");
+}
+
+/// F326: dropping an ephemeral service container is caught — the gated tests
+/// refuse to run against anything the job does not own.
+#[test]
+fn dropping_a_service_container_is_caught() {
+    let no_postgres = wired_workflow().replace("        image: postgres:16-alpine\n", "");
+    let why = why_integration_tests_not_wired(&no_postgres).unwrap_err();
+    assert!(why.contains("image: postgres"), "unhelpful: {why}");
+
+    let no_redis = wired_workflow().replace("        image: redis:7-alpine\n", "");
+    let why = why_integration_tests_not_wired(&no_redis).unwrap_err();
+    assert!(why.contains("image: redis"), "unhelpful: {why}");
+}
+
+/// F326: dropping the DSN export, or renaming the database off `cxa_test*`,
+/// is caught — the guard fails closed on the first and refuses the second.
+#[test]
+fn dropping_or_renaming_the_test_dsn_is_caught() {
+    let dropped = wired_workflow().replace(
+        "      COXAGENT_TEST_PG_DSN: postgres://cox:test@localhost:5432/cxa_test\n",
+        "",
+    );
+    let why = why_integration_tests_not_wired(&dropped).unwrap_err();
+    assert!(why.contains("no longer exports"), "unhelpful: {why}");
+
+    let renamed = wired_workflow().replace("localhost:5432/cxa_test", "localhost:5432/coxagent");
+    let why = why_integration_tests_not_wired(&renamed).unwrap_err();
+    assert!(why.contains("cxa_test"), "unhelpful: {why}");
+
+    let no_redis = wired_workflow().replace(
+        "      COXAGENT_TEST_REDIS_URL: redis://localhost:6379\n",
+        "",
+    );
+    let why = why_integration_tests_not_wired(&no_redis).unwrap_err();
+    assert!(why.contains("COXAGENT_TEST_REDIS_URL"), "unhelpful: {why}");
+}
+
+/// F326: dropping `--ignored` from the integration run step is caught — the
+/// gated tests are `#[ignore]`d, so the job would report green over zero
+/// executed tests.
+#[test]
+fn dropping_ignored_from_the_integration_run_is_caught() {
+    let dropped = wired_workflow().replace(" -- --ignored", "");
+    let why = why_integration_tests_not_wired(&dropped).unwrap_err();
+    assert!(why.contains("--ignored"), "unhelpful: {why}");
+}
+
+/// Step-level `if: failure()` / `if: always()` in the integration job are
+/// legitimate (log collection, teardown) and must not read as a job gate.
+#[test]
+fn step_level_conditions_in_the_integration_job_are_not_a_gate() {
+    let src = wired_workflow().replace(
+        "      - run: cargo test -p coxagent-infrastructure --test sql_store_contract",
+        "      - name: logs\n        if: failure()\n        run: echo fell over\n      \
+         - run: cargo test -p coxagent-infrastructure --test sql_store_contract",
+    );
+    why_integration_tests_not_wired(&src)
+        .unwrap_or_else(|why| panic!("step conditions read as a gate: {why}"));
 }
