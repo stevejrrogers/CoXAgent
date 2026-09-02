@@ -3,8 +3,10 @@
 //! (never an elevation), and then goes idempotent - later calls return None
 //! rather than re-minting or re-issuing the plaintext secret.
 //!
-//! Runs against a real Postgres; skipped unless COXAGENT_TEST_PG_DSN is set
-//! (mirrors sql_store_contract.rs - no database in ordinary CI).
+//! Runs against its own ephemeral Postgres claimed from the shared compose
+//! fixture (`common::TestDb`, CXA-F327) - no exported DSN is honored, an
+//! unprovisionable database fails red naming the fixture, and a docker-less
+//! environment skips explicitly.
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 
@@ -15,17 +17,12 @@ use coxagent_infrastructure::SqlAuthService;
 
 #[tokio::test]
 async fn auto_issue_mints_once_and_stays_idempotent() {
-    let Ok(dsn) = std::env::var("COXAGENT_TEST_PG_DSN") else {
-        eprintln!("COXAGENT_TEST_PG_DSN unset - skipping Postgres auth harvest test");
+    // `None` is the docker-absent explicit skip — the only lawful green
+    // non-run, with its reason already printed by the fixture.
+    let Some(db) = common::claim_or_skip().await else {
         return;
     };
-    if common::is_live_hub_db(&dsn).await {
-        eprintln!(
-            "COXAGENT_TEST_PG_DSN points at a LIVE hub database — refusing the auth harvest test"
-        );
-        return;
-    }
-    let svc = SqlAuthService::connect(&dsn)
+    let svc = SqlAuthService::connect(&db.dsn())
         .await
         .expect("connect + migrate");
 

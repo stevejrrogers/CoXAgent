@@ -2,9 +2,10 @@
 //! Live integration test for the distributed coordination path: Postgres for
 //! durable state + transactional ticket claims, Redis for leader/stage leases.
 //!
-//! Skipped unless both are provided:
-//!   COXAGENT_TEST_PG_DSN=postgres://cox:test@localhost:55432/coxagent \
-//!   COXAGENT_TEST_REDIS_URL=redis://localhost:56379 \
+//! Every test claims its own ephemeral Postgres + Redis pair from the shared
+//! compose fixture (`common::TestDb`, CXA-F327): no exported DSN is honored,
+//! an unprovisionable database fails red naming the fixture, and a
+//! docker-less environment skips explicitly. Run:
 //!   cargo test -p coxagent-infrastructure --test distributed_coord -- --nocapture
 
 use coxagent_application::ports::outbound::{GitCheck, StateStorePort, WorkerCaps};
@@ -16,29 +17,13 @@ use coxagent_domain::{
 };
 use coxagent_infrastructure::state::SqlStateStore;
 
-fn env(k: &str) -> Option<String> {
-    std::env::var(k).ok().filter(|v| !v.is_empty())
-}
-
-/// The tests connect in parallel; on a FRESH database their concurrent
-/// `CREATE TABLE IF NOT EXISTS` races the catalog and one loses with
-/// "migrate: db error". Run the first migration once, alone.
-static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
-
-async fn store(project: &str) -> SqlStateStore {
-    let dsn = env("COXAGENT_TEST_PG_DSN").expect("dsn");
-    let redis = env("COXAGENT_TEST_REDIS_URL").expect("redis");
-    MIGRATED
-        .get_or_init(|| async {
-            SqlStateStore::connect(&dsn, "schema-init")
-                .await
-                .expect("initial migrate");
-        })
-        .await;
-    SqlStateStore::connect(&dsn, project)
+/// The fixture ran the schema-init migration alone at claim time, so
+/// concurrent connects here never race the catalog.
+async fn store(db: &common::TestDb, project: &str) -> SqlStateStore {
+    SqlStateStore::connect(&db.dsn(), project)
         .await
         .expect("connect pg")
-        .with_redis(&redis)
+        .with_redis(&db.redis_url())
         .expect("attach redis")
 }
 
@@ -61,16 +46,11 @@ fn ready_feature(id: &str) -> Ticket {
 
 #[tokio::test]
 async fn distributed_coordination_across_two_hubs() {
-    if env("COXAGENT_TEST_PG_DSN").is_none() || env("COXAGENT_TEST_REDIS_URL").is_none() {
-        eprintln!("skipping: set COXAGENT_TEST_PG_DSN + COXAGENT_TEST_REDIS_URL");
+    // `None` is the docker-absent explicit skip — the only lawful green
+    // non-run, with its reason already printed by the fixture.
+    let Some(db) = common::claim_or_skip().await else {
         return;
-    }
-    if common::is_live_hub_db(&env("COXAGENT_TEST_PG_DSN").expect("dsn")).await {
-        eprintln!(
-            "COXAGENT_TEST_PG_DSN points at a LIVE hub database — refusing the coordination test"
-        );
-        return;
-    }
+    };
     // Unique project id per run so reruns start clean.
     let project = format!(
         "test-{}",
@@ -81,8 +61,8 @@ async fn distributed_coordination_across_two_hubs() {
     );
 
     // Two stores on the same PG + Redis = two machines/hubs.
-    let hub_a = store(&project).await;
-    let hub_b = store(&project).await;
+    let hub_a = store(&db, &project).await;
+    let hub_b = store(&db, &project).await;
     let now = "2026-07-15T00:00:00Z";
 
     // Seed two ready features into the shared state.
@@ -138,16 +118,9 @@ async fn distributed_coordination_across_two_hubs() {
 /// the id.
 #[tokio::test]
 async fn delete_sweeps_the_project_redis_keyspace_including_desired_state() {
-    if env("COXAGENT_TEST_PG_DSN").is_none() || env("COXAGENT_TEST_REDIS_URL").is_none() {
-        eprintln!("skipping: set COXAGENT_TEST_PG_DSN + COXAGENT_TEST_REDIS_URL");
+    let Some(db) = common::claim_or_skip().await else {
         return;
-    }
-    if common::is_live_hub_db(&env("COXAGENT_TEST_PG_DSN").expect("dsn")).await {
-        eprintln!(
-            "COXAGENT_TEST_PG_DSN points at a LIVE hub database — refusing the coordination test"
-        );
-        return;
-    }
+    };
     let project = format!(
         "del-{}",
         std::time::SystemTime::now()
@@ -155,7 +128,7 @@ async fn delete_sweeps_the_project_redis_keyspace_including_desired_state() {
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     );
-    let store = store(&project).await;
+    let store = store(&db, &project).await;
 
     store
         .set_desired("op@host", true)

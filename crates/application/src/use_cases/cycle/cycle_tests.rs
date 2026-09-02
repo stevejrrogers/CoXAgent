@@ -6,7 +6,7 @@ use crate::ports::outbound::{AgentOutcome, AgentRequest};
 use crate::ports::outbound::{GitAuthor, SandboxStatus};
 use crate::state::ProjectState;
 use crate::PortError;
-use coxagent_domain::Status;
+use coxagent_domain::{Role, Status};
 use std::sync::Mutex;
 
 #[derive(Default)]
@@ -815,11 +815,34 @@ const GOOD_SHA: &str = "cafef00d";
 /// A `GitPort` double for rollback tests: reports a fixed HEAD, records
 /// every worktree op so a test can assert rollback NEVER touches the live
 /// `work_dir` (only the dedicated rollback path), and reports no changed
-/// paths (no migration in the way) unless a test overrides it.
+/// paths (no migration in the way) unless a test overrides it. Also doubles
+/// for the slot-WIP checkpoint hygiene (CXA-F318): a configurable
+/// `status --porcelain`, a scriptable park outcome, and every `raw` git call
+/// recorded so a test can assert park/wipe/stash/prune behavior.
 #[derive(Default)]
 struct FakeGit {
     worktree_adds: Mutex<Vec<(std::path::PathBuf, String)>>,
     migration_paths: Vec<String>,
+    /// What `status --porcelain` reports ("" = clean tree).
+    status_output: String,
+    /// What `for-each-ref refs/coxagent/wip/` lists.
+    refs_output: String,
+    /// The sha `checkpoint_tree` returns (`None` = clean tree).
+    park_sha: Option<String>,
+    /// Set to fail the park outright (the git-lock case).
+    park_error: String,
+    parks: Mutex<Vec<String>>,
+    raw_calls: Mutex<Vec<String>>,
+}
+impl FakeGit {
+    fn raw_call_count(&self, needle: &str) -> usize {
+        self.raw_calls
+            .lock()
+            .expect("lock")
+            .iter()
+            .filter(|c| c.contains(needle))
+            .count()
+    }
 }
 #[async_trait::async_trait]
 impl GitPort for FakeGit {
@@ -859,6 +882,27 @@ impl GitPort for FakeGit {
     async fn update_ref(&self, _: &std::path::Path, _: &str, _: &str) -> Result<(), PortError> {
         Ok(())
     }
+    async fn raw(&self, _: &std::path::Path, args: &[&str]) -> (bool, String) {
+        self.raw_calls.lock().expect("lock").push(args.join(" "));
+        match args.first() {
+            Some(&"status") => (true, self.status_output.clone()),
+            Some(&"for-each-ref") => (true, self.refs_output.clone()),
+            _ => (true, String::new()),
+        }
+    }
+    async fn checkpoint_tree(
+        &self,
+        _: &std::path::Path,
+        ref_name: &str,
+        _: &str,
+        _: &GitAuthor,
+    ) -> Result<Option<String>, PortError> {
+        self.parks.lock().expect("lock").push(ref_name.to_owned());
+        if !self.park_error.is_empty() {
+            return Err(PortError::Backend(self.park_error.clone()));
+        }
+        Ok(self.park_sha.clone())
+    }
     async fn worktree_add(
         &self,
         _work_dir: &std::path::Path,
@@ -886,6 +930,218 @@ impl GitPort for FakeGit {
     ) -> Result<Vec<String>, PortError> {
         Ok(self.migration_paths.clone())
     }
+}
+
+/// A cycle use case wired for slot-hygiene tests (CXA-F318): git enabled and
+/// a `work_dir` that looks like a concurrency slot worktree. The FakeGit does
+/// no filesystem IO, so the path need not exist — only its components matter.
+fn hygiene_uc(
+    initial: ProjectState,
+    git: &Arc<FakeGit>,
+) -> (Arc<MemStore>, RunCycleUseCase<MemStore, RoleAwareEngine>) {
+    let store = Arc::new(MemStore {
+        state: Mutex::new(initial),
+    });
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let slot = tmp.path().join(".coxagent-worktrees/slot-1");
+    let mut cfg = Config::default();
+    cfg.git.enabled = true;
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(RoleAwareEngine),
+        cfg,
+        slot,
+        "goal".to_owned(),
+    )
+    .with_git(Arc::clone(git) as Arc<dyn GitPort>);
+    (store, uc)
+}
+
+/// CXA-F318 AC1 (reclaim leg) + AC2: slot hygiene parks dirty residue on a
+/// durable checkpoint ref and wipes the tree — no anonymous stash when the
+/// park succeeded; a clean slot gets no checkpoint at all.
+#[tokio::test]
+async fn slot_hygiene_parks_residue_then_wipes_instead_of_stashing() {
+    let git = Arc::new(FakeGit {
+        status_output: " M a.rs\n?? b.rs\n".to_owned(),
+        park_sha: Some("wipsha1".to_owned()),
+        ..FakeGit::default()
+    });
+    let (_store, uc) = hygiene_uc(ProjectState::default(), &git);
+
+    let errors = uc.tree_hygiene().await;
+
+    assert!(
+        errors.is_empty(),
+        "a clean park records no run error: {errors:?}"
+    );
+    let parks = git.parks.lock().expect("lock").clone();
+    assert_eq!(parks.len(), 1, "exactly one checkpoint commit");
+    assert!(
+        parks[0].starts_with("refs/coxagent/wip/unattributed-"),
+        "unattributable residue gets an unattributed-<instant> ref: {}",
+        parks[0]
+    );
+    assert_eq!(
+        git.raw_call_count("reset --hard"),
+        1,
+        "parked residue is wiped from the slot"
+    );
+    assert_eq!(git.raw_call_count("clean -fd"), 1);
+    assert_eq!(
+        git.raw_call_count("stash push"),
+        0,
+        "no anonymous stash when the park succeeded"
+    );
+}
+
+/// CXA-F318 AC2: a clean slot releases with no checkpoint commit at all.
+#[tokio::test]
+async fn slot_hygiene_parks_nothing_for_a_clean_tree() {
+    let git = Arc::new(FakeGit::default());
+    let (_store, uc) = hygiene_uc(ProjectState::default(), &git);
+
+    let errors = uc.tree_hygiene().await;
+
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(git.parks.lock().expect("lock").is_empty());
+    assert_eq!(git.raw_call_count("stash push"), 0);
+}
+
+/// CXA-F318 AC3: a failed checkpoint still releases the slot (stash fallback)
+/// and surfaces as a run error, so the errors==0 close gate blocks delivery.
+#[tokio::test]
+async fn slot_hygiene_checkpoint_failure_stashes_and_records_a_run_error() {
+    let git = Arc::new(FakeGit {
+        status_output: " M a.rs".to_owned(),
+        park_error: "git add failed: index.lock: unable to create".to_owned(),
+        ..FakeGit::default()
+    });
+    let (_store, uc) = hygiene_uc(ProjectState::default(), &git);
+
+    let errors = uc.tree_hygiene().await;
+
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].starts_with("WIP checkpoint:") && errors[0].contains("index.lock"),
+        "{}",
+        errors[0]
+    );
+    assert_eq!(
+        git.raw_call_count("stash push"),
+        1,
+        "the work still survives in the shared stash"
+    );
+    assert_eq!(
+        git.parks.lock().expect("lock").len(),
+        1,
+        "the park was attempted exactly once (and failed)"
+    );
+}
+
+/// CXA-F318 AC5: checkpoint refs whose ticket is closed or gone are pruned,
+/// live tickets' refs stay, and the unattributed namespace is bounded to the
+/// newest few.
+#[tokio::test]
+async fn wip_refs_of_closed_or_gone_tickets_are_pruned() {
+    use coxagent_domain::{Complexity, Priority, TicketId, TicketType};
+    let mut done = coxagent_domain::Ticket::new(
+        TicketId::new("DONE-1").expect("id"),
+        TicketType::Bug,
+        "d",
+        "",
+        Priority::High,
+        Complexity::Small,
+        false,
+    )
+    .expect("t");
+    done.transition_to(Role::DevBug, Status::InProgress)
+        .expect("claimed");
+    done.transition_to(Role::DevBug, Status::Fixed)
+        .expect("fixed");
+    done.transition_to(Role::Test, Status::Verified)
+        .expect("verified");
+    let mut live = coxagent_domain::Ticket::new(
+        TicketId::new("LIVE-1").expect("id"),
+        TicketType::Bug,
+        "l",
+        "",
+        Priority::High,
+        Complexity::Small,
+        false,
+    )
+    .expect("t");
+    live.transition_to(Role::DevBug, Status::InProgress)
+        .expect("claimed");
+    // Pre-seed checkpoint records on BOTH tickets so the prune's aggregate
+    // bookkeeping is exercised for real: the closed ticket's pointers must be
+    // cleared with its ref; the live ticket's history must survive.
+    let seeded = |ref_name: &str| coxagent_domain::WipCheckpoint {
+        ref_name: ref_name.to_owned(),
+        sha: "seededsha".to_owned(),
+        note: "branch main".to_owned(),
+        recorded_at: "2026-09-02T00:00:00Z".to_owned(),
+    };
+    done.record_wip_checkpoint(Role::System, seeded("refs/coxagent/wip/DONE-1"))
+        .expect("seed done");
+    live.record_wip_checkpoint(Role::System, seeded("refs/coxagent/wip/LIVE-1"))
+        .expect("seed live");
+    let initial = ProjectState {
+        tickets: vec![done, live],
+        ..ProjectState::default()
+    };
+
+    let git = Arc::new(FakeGit {
+        refs_output: [
+            "refs/coxagent/wip/LIVE-1",
+            "refs/coxagent/wip/DONE-1",
+            "refs/coxagent/wip/GONE-9",
+            "refs/coxagent/wip/unattributed-20260101T000000Z",
+            "refs/coxagent/wip/unattributed-20260102T000000Z",
+            "refs/coxagent/wip/unattributed-20260103T000000Z",
+            "refs/coxagent/wip/unattributed-20260104T000000Z",
+        ]
+        .join("\n"),
+        ..FakeGit::default()
+    });
+    let (store, uc) = hygiene_uc(initial, &git);
+
+    let errors = uc.tree_hygiene().await;
+    assert!(errors.is_empty(), "{errors:?}");
+
+    // Clean tree in this test (status_output "") — but the PRUNE deletes the
+    // dead refs through `update-ref -d`; assert exactly which ones.
+    let deletes: Vec<String> = git
+        .raw_calls
+        .lock()
+        .expect("lock")
+        .iter()
+        .filter(|c| c.contains("update-ref -d"))
+        .cloned()
+        .collect();
+    let has = |needle: &str| deletes.iter().any(|d| d.contains(needle));
+    assert!(!has("LIVE-1"), "a live ticket keeps its checkpoint ref");
+    assert!(has("DONE-1"), "a closed ticket's ref is pruned");
+    assert!(has("GONE-9"), "an absent ticket's ref is pruned");
+    assert!(
+        has("unattributed-20260101T000000Z"),
+        "the oldest unattributed ref is pruned"
+    );
+    assert!(
+        !has("unattributed-20260102T000000Z"),
+        "newer unattributed refs survive the cap"
+    );
+    // The closed ticket's aggregate pointers go with its refs; the live
+    // ticket's checkpoint history survives untouched.
+    let state = store.load().await.expect("load");
+    let done_t = state
+        .ticket(&TicketId::new("DONE-1").expect("id"))
+        .expect("done ticket");
+    assert!(done_t.wip_checkpoints().is_empty(), "cleared with its ref");
+    let live_t = state
+        .ticket(&TicketId::new("LIVE-1").expect("id"))
+        .expect("live ticket");
+    assert_eq!(live_t.wip_checkpoints().len(), 1, "live history stays");
 }
 
 /// A cycle that will complete a fresh feature (so the deploy step runs),
