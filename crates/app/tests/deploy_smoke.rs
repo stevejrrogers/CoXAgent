@@ -109,12 +109,15 @@ impl HolderDecision {
     fn evict(&self) {
         match self {
             HolderDecision::EvictComposeProject(project) => {
+                // `-v` mirrors the production eviction (CXA-B143): a project
+                // torn down to free the port must not leave dormant volumes.
                 let _ = Command::new("docker")
                     .args([
                         "compose",
                         "-p",
                         project.as_str(),
                         "down",
+                        "-v",
                         "--remove-orphans",
                     ])
                     .output();
@@ -303,7 +306,10 @@ impl Stack {
     }
 
     fn down(&self) {
-        let _ = compose(&self.root, &["down", "-v"]);
+        // `--rmi local`: this fixture's throwaway BUILD image (`<project>-coxagent`,
+        // ~375 MB) used to outlive every run because `down` never removes
+        // images — the CXA-B143 image-residue class, reaped at the source.
+        let _ = compose(&self.root, &["down", "-v", "--rmi", "local"]);
     }
 }
 
