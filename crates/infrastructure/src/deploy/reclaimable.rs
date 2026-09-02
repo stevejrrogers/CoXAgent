@@ -106,6 +106,21 @@ pub fn orphaned_compose_image(
         .any(|p| repository.starts_with(format!("{p}-").as_str()))
 }
 
+/// The cheap namespace precheck in front of the orphaned-image sweep
+/// (CXA-B149): whether a repository is even worth the expensive
+/// `docker ps -a --filter ancestor=` probe. Base images (`rust`, `postgres`),
+/// the protected hub/infra names, and anything a still-existing project could
+/// own are rejected here without a probe; everything else goes to
+/// [`orphaned_compose_image`], which makes the final call with the reference
+/// evidence. Pure so the candidate grammar is testable without a daemon.
+#[must_use]
+pub fn image_sweep_candidate(repository: &str, existing_projects: &[String]) -> bool {
+    reclaimable_name(repository)
+        && !existing_projects
+            .iter()
+            .any(|p| repository.starts_with(format!("{p}-").as_str()))
+}
+
 /// Whether an automated pass may stop a raw (non-compose) container by id.
 ///
 /// A label-less container carries no compose-project label, so its NAME is the
@@ -126,8 +141,8 @@ pub fn reclaimable_raw_container(container_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        orphaned_compose_image, reclaimable_compose_project, reclaimable_raw_container,
-        reclaimable_volume,
+        image_sweep_candidate, orphaned_compose_image, reclaimable_compose_project,
+        reclaimable_raw_container, reclaimable_volume,
     };
 
     #[test]
@@ -361,6 +376,30 @@ mod tests {
             ),
             "a longer dead project's image shadowed by a shorter alive one is kept too"
         );
+    }
+
+    /// The cheap precheck admits exactly what the sweep may ever probe: our
+    /// namespace, nothing an existing project could own. Base images and the
+    /// protected names are rejected without a probe.
+    #[test]
+    fn image_sweep_candidates_are_namespace_and_ownership_checked() {
+        // The B143 residue shape: a dead worktree stack's built tag.
+        assert!(image_sweep_candidate(
+            "cox--coxagent-worktrees-cxa-slot-2-88a7821f-coxagent",
+            &containers(&["cox-cxa-codebase"]),
+        ));
+        // Base images and foreign/protected names never reach the probe.
+        for repo in ["rust", "postgres", "nginx", "coxagent-hub", "cox-infra-redis", ""] {
+            assert!(
+                !image_sweep_candidate(repo, &containers(&[])),
+                "`{repo}` is not a sweep candidate"
+            );
+        }
+        // A repo an existing project could own is skipped without a probe.
+        assert!(!image_sweep_candidate(
+            "cox-cxa-codebase-coxagent",
+            &containers(&["cox-cxa-codebase"]),
+        ));
     }
 
     /// The namespace rule reads through image repositories as well: the live
