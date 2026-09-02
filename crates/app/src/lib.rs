@@ -453,6 +453,63 @@ mod onboard_scaffold_cleanup_tests {
     }
 }
 
+/// CXA-B142: a valid-scheme git URL that fails to clone (unresolvable host,
+/// refused connection, auth rejection) is the CLIENT's bad input — the request
+/// can never succeed as issued — so it must be classified bad-request (400),
+/// not a server fault, and the raw git stderr must stay out of the response
+/// body (it would hand any write-tier account a DNS-probe oracle).
+#[cfg(test)]
+mod onboard_clone_failure_tests {
+    use super::{onboard_project, unique_id};
+    use coxagent_presentation::{FactoryErrorKind, NewProjectReq};
+
+    fn request(url: &str) -> NewProjectReq {
+        NewProjectReq {
+            name: "QA B142 Clone".to_owned(),
+            alias: Some("QAB142".to_owned()),
+            git_url: Some(url.to_owned()),
+            ..Default::default()
+        }
+    }
+
+    /// A scheme-valid URL git can never clone. Loopback port 1: connection
+    /// refused instantly, deterministically, with no DNS and no network.
+    #[tokio::test]
+    async fn a_clone_failure_is_bad_request_and_never_leaks_git_stderr() {
+        let base = tempfile::tempdir().expect("tmp");
+        let registry = base.path().join("registry.json");
+        let Err(err) = Box::pin(onboard_project(
+            base.path(),
+            &registry,
+            request("http://127.0.0.1:1/no-such-repo.git"),
+            None,
+        ))
+        .await
+        else {
+            panic!("an unclonable git URL must refuse the onboarding");
+        };
+        assert_eq!(
+            err.kind,
+            FactoryErrorKind::BadRequest,
+            "a failed clone of the client's URL is bad input (400), not a 500 fault"
+        );
+        assert!(
+            !err.message.contains("127.0.0.1") && !err.message.contains("fatal"),
+            "the response must not echo git's raw stderr: {:?}",
+            err.message
+        );
+        assert!(
+            !base.path().join("qab142").exists(),
+            "the failed clone must not leave the scaffolded workspace behind (CXA-B136)"
+        );
+        assert_eq!(
+            unique_id(base.path(), "qab142"),
+            "qab142",
+            "the id must be free again — no `-2` suffix on the next recreate"
+        );
+    }
+}
+
 /// CXA-B138: the alias becomes the workspace directory id (`base.join(id)`),
 /// so `../name` used to scaffold — and DELETE `rm -rf` — OUTSIDE the hub's
 /// workspace base (on the docker deploy, at container root). The port must
@@ -1262,11 +1319,23 @@ async fn scaffold_onboarded_project(
                 .await
                 .map_err(|e| FactoryError::internal(format!("spawn git clone: {e}")))?;
             if !out.status.success() {
-                let err = String::from_utf8_lossy(&out.stderr);
-                return Err(FactoryError::internal(format!(
-                    "git clone failed: {}",
-                    err.lines().last().unwrap_or("unknown error")
-                )));
+                // CXA-B142: a failed clone of a user-supplied URL is the
+                // CLIENT's bad input — the request can never succeed as
+                // issued — so it must be classified as a bad request (400),
+                // one layer deeper than the scheme check above. The raw git
+                // stderr must not reach the response body either: it would
+                // hand any write-tier account a DNS-probe oracle against
+                // internal names. The detail goes to the hub log for the
+                // operator instead (git's stderr already redacts embedded
+                // credentials, the raw URL is deliberately NOT logged).
+                tracing::warn!(
+                    "onboard: git clone of the supplied URL failed ({}): {}",
+                    out.status,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+                return Err(FactoryError::bad_request(
+                    "git clone failed: the supplied git URL could not be cloned; check the URL and any credentials (details are in the hub log)",
+                ));
             }
             Some(wd)
         }
