@@ -64,6 +64,7 @@ mod openapi;
 mod people;
 mod pr_listing;
 mod preflight;
+mod project_import;
 mod projects;
 mod realtime;
 mod repro_url;
@@ -223,6 +224,10 @@ pub struct ProjectHandle {
 /// The contract lives in [`factory`]; re-exported here because every
 /// submodule globs `super::*` and `lib.rs` re-exports the names.
 pub use factory::{FactoryError, FactoryErrorKind, NewProjectReq, ProjectFactory, ProjectRemover};
+
+/// Brownfield import admission for `POST /api/projects` (CXA-B145), split into
+/// its own file — re-exported here because every submodule globs `super::*`.
+use project_import::{refused_import_owned_by_registered, refused_import_path};
 
 /// Extract the project ID from a URL path like `/api/projects/:pid/...`.
 fn extract_pid_from_path(path: &str) -> Option<&str> {
