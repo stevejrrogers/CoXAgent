@@ -152,6 +152,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 )
             }
         };
+        // CXA-F329: slot collision radar — claim-time advisory. The claim has
+        // already succeeded (this state is reloaded post-claim, so the
+        // candidate is InProgress here): the radar pairs it against every
+        // OTHER running ticket's declared files. '' when clean; advisory
+        // only, never a refusal.
+        let collision_warning = crate::slot_collision_radar::claim_warning(state, id);
         // Orientation block: the facts every DEV session otherwise SPENDS API
         // rounds discovering by hand (`git status`, `ls`, probing the design's
         // files one by one — four exploratory rounds observed per session,
@@ -285,7 +291,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             // exists only for UI tickets) belongs in the task prompt below.
             system_prompt: prompts::system_prompt(prompts::DEV),
             task_prompt: format!(
-                "Ticket {id}: {title}\n{brief}{stale_design}{orientation}\nImplement it \
+                "Ticket {id}: {title}\n{brief}{stale_design}{collision_warning}{orientation}\nImplement it \
                  now.{preamble}{stack}{deploy}{design}{context_block}{focus_t}{history}{knowledge}{repo_map_t}{memory_t}{hub_t}{steering}{journal}{asking_t}{protocol_t}"
             ),
             work_dir: self.work_dir.clone(),
