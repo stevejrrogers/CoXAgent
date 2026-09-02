@@ -3,11 +3,10 @@
 //! (never an elevation), and then goes idempotent - later calls return None
 //! rather than re-minting or re-issuing the plaintext secret.
 //!
-//! The test is `#[ignore]`d (ordinary CI without a database skips it
-//! explicitly) and runs only through the fail-closed guard in
-//! `tests/common/mod.rs`, which refuses any target but an ephemeral
-//! `cxa_test*` Postgres - never a live hub, never an unverified one
-//! (CXA-F326). Teardown deletes the harvest user at test end.
+//! Runs against its own ephemeral Postgres claimed from the shared compose
+//! fixture (`common::TestDb`, CXA-F327) - no exported DSN is honored, an
+//! unprovisionable database fails red naming the fixture, and a docker-less
+//! environment skips explicitly.
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 
@@ -17,16 +16,19 @@ mod common;
 use coxagent_infrastructure::SqlAuthService;
 
 #[tokio::test]
-#[ignore = "skipped: needs an ephemeral cxa_test* Postgres — see README (Integration test environment)"]
 async fn auto_issue_mints_once_and_stays_idempotent() {
-    let pg = common::pg("sql_auth_token_harvest").await;
-    let svc = SqlAuthService::connect(&pg.dsn)
+    // `None` is the docker-absent explicit skip — the only lawful green
+    // non-run, with its reason already printed by the fixture.
+    let Some(db) = common::claim_or_skip().await else {
+        return;
+    };
+    let svc = SqlAuthService::connect(&db.dsn())
         .await
         .expect("connect + migrate");
 
-    // Namespace the username per run so repeated runs against the same DB
-    // are clean.
-    let username = pg.project("harvest");
+    // Unique username per run so repeated runs against the same DB are clean.
+    let pid = std::process::id();
+    let username = format!("harvest-{pid}");
     assert!(
         svc.create_user(&username, "ChangeMe12345!", AuthRole::Admin)
             .await
@@ -73,10 +75,4 @@ async fn auto_issue_mints_once_and_stays_idempotent() {
         })
         .collect();
     assert_eq!(still_mine.len(), 1);
-
-    // Teardown: the namespaced harvest user must not outlive the test.
-    assert!(
-        svc.delete_user(&username).await,
-        "teardown must delete the harvest user"
-    );
 }

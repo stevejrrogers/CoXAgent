@@ -4,20 +4,10 @@
 //! while the revision stays monotonic across guarded AND legacy writes — the
 //! `sql_store_contract.rs` CXA-F003 suite, mirrored for hub-wide KV docs.
 //!
-//! The Postgres halves are `#[ignore]`d (ordinary CI without a database skips
-//! them explicitly) and run only through the fail-closed guard in
-//! `tests/common/mod.rs`, which refuses any target but an ephemeral
-//! `cxa_test*` Postgres — never a live hub, never an unverified one
-//! (CXA-F326). Keys are namespaced per run via `pg.kv_key`; the KV port has
-//! no delete, so the namespaced leftovers are reclaimed when the ephemeral
-//! database is torn down.
-//!
-//! Run with an ephemeral database (README → Integration test environment):
-//!
-//! ```sh
-//! COXAGENT_TEST_PG_DSN='postgres://cox:test@localhost:55432/cxa_test' \
-//!   cargo test -p coxagent-infrastructure --test kv_doc_contract -- --ignored
-//! ```
+//! The Postgres halves claim their own ephemeral database from the shared
+//! compose fixture (`common::TestDb`, CXA-F327): no exported DSN is honored,
+//! an unprovisionable database fails red naming the fixture, and a
+//! docker-less environment skips explicitly.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
@@ -80,30 +70,27 @@ fn same_json(a: &str, b: &str) -> bool {
         == serde_json::from_str::<serde_json::Value>(b).ok()
 }
 
-/// The guard prepared the state tables, but `app_kv` is its own table: the
-/// gated tests connect in parallel and their concurrent `CREATE TABLE IF NOT
-/// EXISTS` for it would still race the catalog. Run the first migration
-/// once, alone.
-static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
-
-async fn connect_store(dsn: &str) -> PgKvDoc {
-    MIGRATED
-        .get_or_init(|| async {
-            PgKvDoc::connect(dsn).await.expect("initial migrate");
-        })
-        .await;
-    PgKvDoc::connect(dsn).await.expect("connect + migrate")
+async fn connect_store(db: &common::TestDb) -> PgKvDoc {
+    // The fixture ran the schema-init migration alone at claim time, so
+    // concurrent connects here never race the catalog.
+    PgKvDoc::connect(&db.dsn())
+        .await
+        .expect("connect + migrate against the ephemeral test database")
 }
 
 /// CXA-C017: a stale guarded write is rejected with [`PortError::Conflict`]
 /// and persists nothing, and a retry at the current revision converges —
 /// exactly how an optimistic retry recovers after seeing a conflict.
 #[tokio::test]
-#[ignore = "skipped: needs an ephemeral cxa_test* Postgres — see README (Integration test environment)"]
 async fn kv_doc_rejects_stale_revision_write_with_conflict() {
-    let pg = common::pg("kv_doc_contract").await;
-    let key = pg.kv_key("contract");
-    let store = connect_store(&pg.dsn).await;
+    // `None` is the docker-absent explicit skip — the only lawful green
+    // non-run, with its reason already printed by the fixture.
+    let Some(db) = common::claim_or_skip().await else {
+        return;
+    };
+    // Unique key per run so repeated runs against the same DB are clean.
+    let key = format!("kv-contract-test-{}", std::process::id());
+    let store = connect_store(&db).await;
 
     // 1. An absent key exposes baseline revision 0 — its first write lands at 1.
     assert_eq!(
@@ -179,11 +166,12 @@ async fn kv_doc_rejects_stale_revision_write_with_conflict() {
 /// writes must ALSO advance the revision — a blind write landing under a
 /// concurrent guard invalidates that guard, it never slips beneath it.
 #[tokio::test]
-#[ignore = "skipped: needs an ephemeral cxa_test* Postgres — see README (Integration test environment)"]
 async fn kv_doc_legacy_save_keeps_the_revision_monotonic_under_a_guard() {
-    let pg = common::pg("kv_doc_contract").await;
-    let key = pg.kv_key("monotonic");
-    let store = connect_store(&pg.dsn).await;
+    let Some(db) = common::claim_or_skip().await else {
+        return;
+    };
+    let key = format!("kv-monotonic-test-{}", std::process::id());
+    let store = connect_store(&db).await;
 
     // Absent key -> baseline 0; the first guarded write lands at 1.
     assert_eq!(
