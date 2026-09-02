@@ -9,9 +9,8 @@
 //! once, in `infrastructure/tests/common/mod.rs`, and this gate fails the
 //! build the day any gated test grows its own divergent copy again.
 //!
-//! (The CI-level half — the `integration` job that runs these DSN-gated
-//! suites against ephemeral service containers — is pinned in
-//! `ci_availability_gate.rs`.)
+//! (The CI-level half — the `integration` job that runs these gated suites —
+//! is pinned in `ci_availability_gate.rs`.)
 
 use std::path::PathBuf;
 
@@ -162,21 +161,24 @@ fn the_redis_gate_stays_an_explicit_named_skip() {
     );
 }
 
-/// CXA-F326 AC, synced to the CXA-F327 policy: every gated test routes its
-/// database claim through the shared guard's `claim_or_skip` — ordinary CI
-/// with docker runs each suite against a dedicated ephemeral database (RED
-/// when the claim fails), and docker-less CI hits the guard's explicit,
-/// un-captured skip instead of a silent false green. The `#[ignore]` gating
-/// this test previously pinned was replaced by that mechanism.
+/// CXA-F326 AC, mechanism moved by CXA-F327 (its TDD header convention: when
+/// an assertion's mechanism moves, move the guard with it): the gated tests
+/// no longer `#[ignore]` — ordinary CI runs them, each claiming its own
+/// ephemeral database through `common::claim_or_skip()`. The explicit-skip
+/// story this AC demanded now lives in the shared guard: docker absent is
+/// the ONLY lawful skip and its reason is printed un-captured into the run
+/// summary, so ordinary CI without a database still skips explicitly instead
+/// of silently passing.
 #[test]
-fn every_gated_test_claims_through_the_shared_guard_so_ordinary_ci_skips_explicitly() {
+fn every_gated_test_skips_explicitly_through_the_shared_claim_or_skip() {
     for file in GATED {
         let src = code(&read(file));
         assert!(
             src.contains("claim_or_skip"),
-            "{file} must claim its database through the shared guard's \
-             claim_or_skip — a suite that dials a database on its own bypasses \
-             the fail-closed barrier"
+            "{file} must gate through common::claim_or_skip — a test that \
+             silently returns when the database is missing is reported `ok` \
+             in CI, the exact false green CXA-F326 closes (CXA-F327 moved the \
+             explicit skip into the shared guard; route through it)"
         );
     }
 }

@@ -596,6 +596,44 @@ mod onboard_alias_traversal_tests {
             "no refused attempt may register anything"
         );
     }
+
+    /// CXA-B140: every control-character shape the ticket names is refused at
+    /// the port the same way — nothing scaffolded, nothing registered.
+    #[tokio::test]
+    async fn every_control_character_shape_is_refused_as_bad_request() {
+        let base = tempfile::tempdir().expect("tmp");
+        let registry = base.path().join("registry.json");
+        for alias in ["bad\nid", "a\u{8}", "bad\rid", "bad\tid", "trailing\n"] {
+            let Err(err) = Box::pin(onboard_project(
+                base.path(),
+                &registry,
+                request(alias),
+                None,
+            ))
+            .await
+            else {
+                panic!("alias {alias:?} must refuse the onboarding");
+            };
+            assert_eq!(
+                err.kind,
+                FactoryErrorKind::BadRequest,
+                "alias {alias:?} must classify bad-request"
+            );
+        }
+        let created: Vec<String> = std::fs::read_dir(base.path())
+            .expect("base listing")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            created.is_empty(),
+            "no refused attempt may scaffold anything: {created:?}"
+        );
+        assert!(
+            !registry.exists(),
+            "no refused attempt may register anything"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1024,13 +1062,15 @@ async fn onboard_project(
         .alias
         .clone()
         .unwrap_or_else(|| coxagent_application::state::derive_alias(req.name.trim()));
-    // CXA-B138: the id becomes the workspace directory (`base.join(id)`), so a
-    // path-traversing alias must be refused before ANY filesystem work — the
-    // HTTP layer rejects it first; this keeps the port itself safe for every
-    // caller. (An empty derived id keeps the unique_id "project" fallback.)
+    // CXA-B138/CXA-B140: the id becomes the workspace directory
+    // (`base.join(id)`), so a path-traversing alias must be refused before ANY
+    // filesystem work, and a control character in it would mangle listings and
+    // be non-obviously deletable — the HTTP layer rejects both first; this
+    // keeps the port itself safe for every caller. (An empty derived id keeps
+    // the unique_id "project" fallback.)
     if !derived.is_empty() && !coxagent_application::state::is_safe_workspace_id(&derived) {
         return Err(FactoryError::bad_request(format!(
-            "alias {derived:?} must not contain '/', '\\', '..' or leading dots"
+            "alias {derived:?} must not contain '/', '\\', '..', leading dots or control characters"
         )));
     }
     let id = unique_id(base, &derived.to_lowercase());
