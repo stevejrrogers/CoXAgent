@@ -1,2 +1,0 @@
-2026-08-15 17:49:52 [agent] started overnight loop; health=ok hub=alive(pid96475) workers=5 rejected_debt_sweep=0 no REGRESSION/HEAL-FAILED
-2026-08-15 17:50:17 [agent] baseline check: hub=alive(96475) v2.26.1 workers=5 total_tickets=91 rejected=24 rejected_debt_sweep=0 revision=79090. CLEAN. Checking runner activity.

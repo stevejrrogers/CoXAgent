@@ -36,7 +36,11 @@ if [ -n "$(git -C "$WORKTREE" status --porcelain)" ]; then
   log "[deploy] FAIL: $WORKTREE has uncommitted changes — the build would match no commit"
   exit 1
 fi
-log "[deploy] building $BRANCH @ $(git -C "$WORKTREE" rev-parse HEAD) in $WORKTREE"
+SHA=$(git -C "$WORKTREE" rev-parse HEAD 2>/dev/null) || {
+  log "[deploy] FAIL: $WORKTREE is on unborn branch '$BRANCH' — no commit to build from";
+  exit 1;
+}
+log "[deploy] building $BRANCH @ $SHA in $WORKTREE"
 
 # 1. Build release binary from the worktree (already contains the code).
 (cd "$WORKTREE" && cargo build --release --bin coxagent) 2>&1 | tail -5

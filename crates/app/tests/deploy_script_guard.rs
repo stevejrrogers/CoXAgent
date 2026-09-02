@@ -33,15 +33,26 @@ struct TempRepo {
 }
 
 impl TempRepo {
-    /// A fresh git repo with one commit on branch `main` and a clean tree.
-    fn new(tag: &str) -> Self {
+    /// A bare directory — no git repo at all.
+    fn plain(tag: &str) -> Self {
         let root = std::env::temp_dir().join(format!("cxa-b150-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
+        Self { root }
+    }
+
+    /// A fresh git repo with one commit on branch `main` and a clean tree.
+    /// The committed manifest is deliberately package-only: the deploy script's
+    /// `cargo build --release --bin coxagent` must fail fast and
+    /// deterministically inside the fixture (no bin target), never by walking
+    /// up to whatever workspace a parent directory might hold.
+    fn new(tag: &str) -> Self {
+        let repo = Self::plain(tag);
+        let root = &repo.root;
         let git = |args: &[&str]| {
             let out = Command::new("git")
                 .args(args)
-                .current_dir(&root)
+                .current_dir(root)
                 .env("GIT_AUTHOR_NAME", "test")
                 .env("GIT_AUTHOR_EMAIL", "test@example.com")
                 .env("GIT_COMMITTER_NAME", "test")
@@ -56,9 +67,14 @@ impl TempRepo {
         };
         git(&["init", "-q", "-b", "main"]);
         std::fs::write(root.join("README.md"), "deploy guard fixture\n").unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"deploy-guard-fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
         git(&["add", "."]);
         git(&["commit", "-q", "-m", "fixture"]);
-        Self { root }
+        repo
     }
 
     fn git(&self, args: &[&str]) {
@@ -152,7 +168,10 @@ fn a_deploy_from_a_named_clean_ref_logs_what_it_builds() {
 
     let (out, log) = repo.deploy();
 
-    assert!(!out.status.success(), "fixture build must fail (no manifest)");
+    assert!(
+        !out.status.success(),
+        "fixture build must fail (no manifest)"
+    );
     let text = combined(&out);
     assert!(
         !text.contains("detached HEAD") && !text.contains("uncommitted changes"),
@@ -164,6 +183,27 @@ fn a_deploy_from_a_named_clean_ref_logs_what_it_builds() {
         logged.contains(&expected),
         "provenance line `{expected}` missing from log: {logged}"
     );
+    // The failure came from the fixture build, before any swap could start.
+    assert!(!logged.contains("swapping binary"));
+}
+
+/// The guard cannot name a ref for a directory that is not a git repo —
+/// refuse rather than build something no commit could reproduce.
+#[test]
+fn a_deploy_from_a_non_git_directory_is_refused() {
+    let dir = TempRepo::plain("nongit");
+
+    let (out, log) = dir.deploy();
+
+    assert!(!out.status.success(), "non-git deploy must fail");
+    let text = combined(&out);
+    assert!(
+        text.contains("not a git worktree"),
+        "refusal must name the problem, got: {text}"
+    );
+    let logged = std::fs::read_to_string(&log).unwrap();
+    assert!(logged.contains("not a git worktree"));
+    assert!(!logged.contains("swapping binary"));
 }
 
 fn sha(repo: &TempRepo) -> String {
