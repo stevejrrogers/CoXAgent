@@ -67,7 +67,11 @@ fn attachments_prompt_block(atts: &[crate::state::Attachment]) -> String {
     let mut has_image = false;
     for a in atts {
         has_image |= a.mime.starts_with("image/");
-        let _ = writeln!(out, "- {} ({}, {} bytes) at {}", a.name, a.mime, a.size, a.url);
+        let _ = writeln!(
+            out,
+            "- {} ({}, {} bytes) at {}",
+            a.name, a.mime, a.size, a.url
+        );
     }
     if has_image {
         out.push_str(
@@ -1822,7 +1826,10 @@ mod tests {
         let block = super::attachments_prompt_block(&atts);
         assert!(block.contains("bug.png (image/png, 12345 bytes)"));
         assert!(block.contains("notes.txt (text/plain, 42 bytes)"));
-        assert!(block.contains("text-only"), "image demands acknowledgement text");
+        assert!(
+            block.contains("text-only"),
+            "image demands acknowledgement text"
+        );
         // No image -> no text-only lecture.
         let block2 = super::attachments_prompt_block(&atts[1..]);
         assert!(!block2.contains("text-only"));

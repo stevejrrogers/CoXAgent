@@ -3207,7 +3207,11 @@ async fn a_recurring_failure_increments_the_matching_lessons_recurrence_once() {
 
     let state = store.load().await.expect("load");
     let recurrences = recurrence_of(&state);
-    assert_eq!(recurrences.len(), 2, "a second incident of the class counts again");
+    assert_eq!(
+        recurrences.len(),
+        2,
+        "a second incident of the class counts again"
+    );
     assert_ne!(
         recurrences[0].incident_at, recurrences[1].incident_at,
         "each recurrence carries its own incident"
