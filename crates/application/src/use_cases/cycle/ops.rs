@@ -701,8 +701,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// - a SLOT worktree sitting on a named branch (worktrees must stay
     ///   detached, or they hold `main`/feature branches hostage) → detach;
     /// - a SLOT worktree with uncommitted residue (an engine died mid-edit)
-    ///   that would otherwise block every future checkout → stash the WIP with
-    ///   a named marker;
+    ///   that would otherwise block every future checkout → park the WIP on a
+    ///   durable checkpoint ref (CXA-F318), then wipe the tree; a FAILED park
+    ///   falls back to the anonymous stash and surfaces as a run error;
     /// - the LEADER tree dirty on a feature branch (half-written edits block
     ///   every checkout) → stash the WIP with a named marker and return to the
     ///   base branch;
@@ -710,13 +711,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     ///   agent merged a feature branch into local base by mistake) → keep them
     ///   on a `backup/…` branch and hard-reset base to origin.
     ///
-    /// Best-effort: every step logs what it did; a failure never stops the
-    /// cycle. Pure orchestration over `GitPort::raw` — no direct IO here.
-    pub(super) async fn tree_hygiene(&self) {
-        let Some(git) = &self.git else { return };
+    /// Returns the run errors recorded this pass (e.g. a failed WIP checkpoint)
+    /// so the cycle can push them into `report.errors` — the errors==0 close
+    /// gate then blocks delivery until investigated. Best-effort otherwise:
+    /// every step logs what it did; a failure never stops the cycle. Pure
+    /// orchestration over `GitPort::raw` — no direct IO here.
+    pub(super) async fn tree_hygiene(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        let Some(git) = &self.git else { return errors };
         let wd = &self.work_dir;
         if !self.config.git.enabled || !git.is_repo(wd).await {
-            return;
+            return errors;
         }
         let base = {
             let t = self.config.git.target_branch.trim();
@@ -727,9 +732,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
         };
         let branch = git.current_branch(wd).await.unwrap_or_default();
-        let is_slot = wd
-            .components()
-            .any(|c| c.as_os_str() == ".coxagent-worktrees");
+        let is_slot = crate::use_cases::run_dev::wip::is_slot_worktree(wd);
         if is_slot {
             // Slots must stay detached; holding a branch blocks every other
             // tree from checking it out.
@@ -745,10 +748,77 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // A slot left with uncommitted residue (an engine died mid-edit)
             // is the SAME trap as the leader tree: every later `checkout` of a
             // new branch fails with "local changes would be overwritten" and
-            // the ticket is mis-assigned forever. Stash the WIP with a named
-            // marker so the slot is clean for the next checkout.
+            // the ticket is mis-assigned forever.
             let (_, status) = git.raw(wd, &["status", "--porcelain"]).await;
             if !status.trim().is_empty() {
+                self.park_slot_residue(git, wd, &mut errors).await;
+            }
+        } else {
+            // Leader-tree hygiene lives in its own method to keep tree_hygiene lean.
+            self.tree_hygiene_leader(git, wd, &base, &branch).await;
+        }
+        // Checkpoint refs are inert once their ticket is done: prune the ones
+        // whose ticket is closed or gone, and bound the unattributed ones.
+        let pruned = crate::use_cases::run_dev::wip::prune_ticket_wip_refs(
+            git.as_ref(),
+            wd,
+            self.store.as_ref(),
+        )
+        .await;
+        if !pruned.is_empty() {
+            self.log_git(&format!(
+                "hygiene: pruned {} spent WIP checkpoint ref(s): {}",
+                pruned.len(),
+                pruned.join(", ")
+            ))
+            .await;
+        }
+        errors
+    }
+
+    /// Park a dirty slot's residue on a durable checkpoint ref (CXA-F318) and
+    /// wipe the tree — an anonymous `git stash` is exactly what
+    /// `git stash clear` loses (the recorded team lesson). A FAILED park falls
+    /// back to the stash so the work still survives somewhere, and surfaces as
+    /// a run error: the errors==0 close gate blocks delivery until it is
+    /// investigated. The slot releases either way.
+    async fn park_slot_residue(
+        &self,
+        git: &Arc<dyn GitPort>,
+        wd: &std::path::Path,
+        errors: &mut Vec<String>,
+    ) {
+        let author = crate::use_cases::run_dev::wip::bot_author(&self.config.git.commit_email);
+        match crate::use_cases::run_dev::wip::park_slot_wip(
+            git.as_ref(),
+            wd,
+            self.store.as_ref(),
+            None,
+            &author,
+        )
+        .await
+        {
+            Ok(Some(parked)) => {
+                let cp = &parked.checkpoint;
+                self.log_git(&format!(
+                    "hygiene: parked slot WIP on {} ({}) — {} — wiping residue",
+                    cp.ref_name, cp.sha, cp.note
+                ))
+                .await;
+                // The work is on the ref: the tree can be wiped.
+                let (reset, _) = git.raw(wd, &["reset", "--hard"]).await;
+                let (clean, _) = git.raw(wd, &["clean", "-fd"]).await;
+                if !(reset && clean) {
+                    errors.push(
+                        "WIP checkpoint: slot residue parked but the wipe failed — the tree \
+                         stays dirty"
+                            .to_owned(),
+                    );
+                }
+            }
+            // Nothing to park raced clean — leave the tree alone.
+            Ok(None) => {}
+            Err(e) => {
                 let (ok, _) = git
                     .raw(
                         wd,
@@ -757,19 +827,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             "push",
                             "-u",
                             "-m",
-                            "hygiene: slot WIP (engine died mid-edit)",
+                            "hygiene: slot WIP (checkpoint FAILED) — recover with \
+                             `git stash list`",
                         ],
                     )
                     .await;
                 if ok {
-                    self.log_git("hygiene: stashed slot WIP — recover with `git stash list`")
-                        .await;
+                    self.log_git(
+                        "hygiene: stashed slot WIP — checkpoint FAILED, recover with \
+                         `git stash list`",
+                    )
+                    .await;
                 }
+                errors.push(format!("WIP checkpoint: {e}"));
             }
-            return;
         }
-        // Leader-tree hygiene lives in its own method to keep tree_hygiene lean.
-        self.tree_hygiene_leader(git, wd, &base, &branch).await;
     }
 
     /// Leader-tree hygiene: orphan WIP on a feature branch -> stash + back to
