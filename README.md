@@ -260,6 +260,40 @@ file and restart the hub.
 
 ```sh
 cargo test && cargo clippy --all-targets && cargo fmt --all
-# Postgres adapter contract (needs a database):
-COXAGENT_TEST_PG_DSN='postgres://…' cargo test -p coxagent-infrastructure --test sql_store_contract
 ```
+
+### Integration test environment (fail-closed)
+
+The Postgres/Redis integration tests (`sql_store_contract`, `kv_doc_contract`,
+`sql_auth_token_harvest`, `distributed_coord`) are `#[ignore]`d: ordinary CI
+without a database skips them explicitly and stays green. They run only
+through the fail-closed guard in
+`crates/infrastructure/tests/common/mod.rs`, which **panics with a remedy** —
+never skips silently — unless *all* of these hold:
+
+- `COXAGENT_TEST_PG_DSN` is set explicitly to a `postgres://` URL whose
+  database name starts with `cxa_test` (ephemeral test databases only);
+- `COXAGENT_TEST_REDIS_URL` is set explicitly where the coordination tests
+  need Redis;
+- the target is verified fresh — the guard refuses a **live hub** (a `cxa`
+  row with revision > 0) and fails closed ("cannot verify the target is not a
+  live hub") when the probe cannot decide.
+
+Never point the DSN at a deployed hub or at the standing `cox-infra` stack
+(`deploy/local-infra/docker-compose.yml` serves the real `coxagent`
+database). Spin an ephemeral pair instead:
+
+```sh
+docker run --rm -d --name cxa-test-pg -p 55432:5432 \
+  -e POSTGRES_DB=cxa_test -e POSTGRES_USER=cox -e POSTGRES_PASSWORD=test \
+  postgres:16-alpine
+docker run --rm -d --name cxa-test-redis -p 56379:6379 redis:7-alpine
+
+COXAGENT_TEST_PG_DSN='postgres://cox:test@localhost:55432/cxa_test' \
+  cargo test -p coxagent-infrastructure --test sql_store_contract -- --ignored
+```
+
+CI runs the same suites in the `integration` job against lifecycle-bound
+service containers. Fixtures are namespaced `cxa-test-<pid>-<nanos>` and
+swept at test end (`store.delete()` / `delete_user`); whatever leaks dies
+with the ephemeral database.
