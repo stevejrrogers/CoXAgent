@@ -314,6 +314,185 @@ async fn a_padded_alias_is_trimmed_before_the_factory_sees_it() {
     );
 }
 
+/// A hub with one registered project (`default`) whose working tree is
+/// `work_dir`, plus the given factory — the CXA-B145 repro shape. The caller
+/// keeps `work_dir`'s TempDir alive: the ownership check canonicalises both
+/// sides, so the tree must exist.
+async fn hub_with_live_project(work_dir: &std::path::Path, factory: ProjectFactory) -> AppState {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_state(
+        vec![ProjectHandle {
+            id: "default".to_owned(),
+            name: "Default".to_owned(),
+            alias: "DEFAULT".to_owned(),
+            store: Arc::new(CountingStore::seeded(
+                coxagent_application::state::ProjectState::default(),
+            )),
+            runner: Arc::new(RunnerHandle::default()),
+            config_path: work_dir.join("coxagent.json"),
+            engine: Arc::new(UnusedEngine),
+            work_dir: work_dir.to_path_buf(),
+            outbox: None,
+            budget: Arc::new(std::sync::Mutex::new(
+                coxagent_application::config::BudgetCaps::default(),
+            )),
+            context_path: work_dir.join("project_context.md"),
+            forge: None,
+            deploy: None,
+            storage: None,
+            files: None,
+            deps_discovery: None,
+        }],
+        Arc::new(MemoryAuditSink::default()),
+        HubExtras {
+            factory: Some(factory),
+            hub_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// A factory stub that records that it ran — every CXA-B145 refusal must
+/// happen BEFORE the factory touches the filesystem.
+fn never_run_factory(flag: &Arc<std::sync::atomic::AtomicBool>) -> ProjectFactory {
+    let seen = Arc::clone(flag);
+    Arc::new(move |_req| {
+        seen.store(true, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async {
+            Err::<ProjectHandle, FactoryError>(FactoryError::internal("must never run"))
+        })
+    })
+}
+
+/// CXA-B145 repro: `POST /api/projects` adopting the working tree of a live
+/// registered project (`existing` = default's codebase) must be refused with
+/// 409 BEFORE the factory runs — two runners doing branch-per-ticket git,
+/// deploys and version bumps over one tree corrupt each other.
+#[tokio::test]
+async fn adopting_another_registered_projects_codebase_is_refused_with_409() {
+    let tree = tempfile::tempdir().expect("codebase dir");
+    let factory_was_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let app = hub_with_live_project(tree.path(), never_run_factory(&factory_was_called)).await;
+
+    let body = serde_json::to_string(&serde_json::json!({
+        "name": "QA Reonboard",
+        "alias": "qareonb",
+        "existing": tree.path().to_str().expect("utf8 path"),
+    }))
+    .expect("json body");
+    let resp = post_create_with_body(app, &body).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "the adoption must be a client conflict, not a 500"
+    );
+    let body = body_json(resp).await;
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("default"),
+        "the refusal must name the owning project: {body}"
+    );
+    assert!(
+        !factory_was_called.load(std::sync::atomic::Ordering::SeqCst),
+        "the factory must never adopt an owned codebase"
+    );
+}
+
+/// The owned tree reached through a symlink alias refuses too: both sides are
+/// canonicalised, so a link pointing into a live project's codebase is the
+/// same adoption (CXA-B145).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlink_into_a_registered_codebase_is_refused_with_409() {
+    let tree = tempfile::tempdir().expect("codebase dir");
+    let alias_dir = tempfile::tempdir().expect("alias dir");
+    std::os::unix::fs::symlink(tree.path(), alias_dir.path().join("alias"))
+        .expect("create symlink");
+    let factory_was_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let app = hub_with_live_project(tree.path(), never_run_factory(&factory_was_called)).await;
+
+    let body = serde_json::to_string(&serde_json::json!({
+        "name": "QA Reonboard",
+        "existing": alias_dir.path().join("alias").to_str().expect("utf8 path"),
+    }))
+    .expect("json body");
+    let resp = post_create_with_body(app, &body).await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    assert!(
+        !factory_was_called.load(std::sync::atomic::Ordering::SeqCst),
+        "the factory must never adopt an owned codebase through a link"
+    );
+}
+
+/// A path that cannot be resolved to a real directory (here: a ghost entry
+/// under the owned tree) is NOT the ownership guard's call — it falls through
+/// to the factory, whose honest "codebase path does not exist" refusal (and
+/// CXA-B136 cleanup) owns that case. The stub's 500 proves the guard stayed
+/// silent instead of inventing a verdict about a path it cannot see.
+#[tokio::test]
+async fn an_unresolvable_import_path_falls_through_to_the_factory() {
+    let tree = tempfile::tempdir().expect("default's codebase dir");
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let recorder = Arc::clone(&seen);
+    let app = hub_with_live_project(
+        tree.path(),
+        Arc::new(move |req| {
+            *recorder.lock().expect("poisoned") = Some(req.existing.clone());
+            Box::pin(async {
+                Err::<ProjectHandle, FactoryError>(FactoryError::internal("stop after capture"))
+            })
+        }),
+    )
+    .await;
+
+    let body = serde_json::to_string(&serde_json::json!({
+        "name": "Ghost Adopt",
+        "existing": tree.path().join("ghost").to_str().expect("utf8 path"),
+    }))
+    .expect("json body");
+    let resp = post_create_with_body(app, &body).await;
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        *seen.lock().expect("poisoned"),
+        Some(Some(tree.path().join("ghost")))
+    );
+}
+
+/// The honest counterpart: a codebase no registered project owns still
+/// reaches the factory with the path intact — the refusal must not over-fire.
+#[tokio::test]
+async fn an_unowned_codebase_still_reaches_the_factory() {
+    let tree = tempfile::tempdir().expect("default's codebase dir");
+    let other = tempfile::tempdir().expect("unrelated codebase dir");
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let recorder = Arc::clone(&seen);
+    let app = hub_with_live_project(
+        tree.path(),
+        Arc::new(move |req| {
+            *recorder.lock().expect("poisoned") = Some(req.existing.clone());
+            Box::pin(async {
+                Err::<ProjectHandle, FactoryError>(FactoryError::internal("stop after capture"))
+            })
+        }),
+    )
+    .await;
+
+    let body = serde_json::to_string(&serde_json::json!({
+        "name": "Fresh Adopt",
+        "existing": other.path().to_str().expect("utf8 path"),
+    }))
+    .expect("json body");
+    let resp = post_create_with_body(app, &body).await;
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        *seen.lock().expect("poisoned"),
+        Some(Some(other.path().to_path_buf()))
+    );
+}
+
 /// The port may also refuse a request itself (CXA-B138): a factory-classified
 /// bad request reaches the client as 400 with the JSON error shape, never 500.
 #[tokio::test]
