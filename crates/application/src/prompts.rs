@@ -427,9 +427,18 @@ pub fn system_prompt(role_section: &str) -> String {
     format!("{BASE}\n\n{ENGINEERING_STANDARDS}\n\n{role_section}")
 }
 
+/// Char budget for the repo-map block injected into agent briefs. The tiered
+/// map (see [`crate::repo_map`]) puts the tier-0 header — coverage line plus
+/// the top-level area rollup — first, so this budget always buys whole-tree
+/// directory coverage before any per-file detail.
+const REPO_MAP_BLOCK_CHARS: usize = 3000;
+
 /// A compact repo-map context block for code-touching agents: the file/symbol
 /// layout so they locate code without exploring blind (fewer tool calls / tokens).
-/// Empty when the token-saver is off or no map has been built yet.
+/// The map is compacted section-aware via [`crate::repo_map::prompt_slice`] —
+/// the tier-0 header always survives and dropped sections are counted in a
+/// footer — never a blind first-N-chars cut. Empty when the token-saver is off
+/// or no map has been built yet.
 pub async fn repo_map_block(
     files: Option<&dyn crate::ports::outbound::WorkspaceFilesPort>,
     work_dir: &std::path::Path,
@@ -442,7 +451,7 @@ pub async fn repo_map_block(
     let Some(map) = files.read(&path).await else {
         return String::new();
     };
-    let compact: String = map.chars().take(3000).collect();
+    let compact = crate::repo_map::prompt_slice(&map, REPO_MAP_BLOCK_CHARS);
     format!(
         "\n\n## Repo map — files & their symbols (use this to locate code fast, \
          don't re-scan the whole tree)\n{compact}\n"
