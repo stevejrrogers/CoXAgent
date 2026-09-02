@@ -10,11 +10,15 @@ prompting. Work in autonomous cycles until morning.
 - After changes, run `detect_changes()` before committing.
 
 ## Repo topology
-- Worktree (code + build): `/private/tmp/coxa-agent-main` (detached HEAD of
-  origin/main, contains fix #139). Build here, NEVER in the live repo.
+- Worktree (code + build): `/private/tmp/coxa-agent-main`. CXA-B150: deploy
+  builds must be reproducible from a NAMED ref — keep this worktree on a
+  branch (e.g. `git switch -c deploy/hub && git reset --hard origin/main`),
+  never detached, and commit before deploying. The deploy helper refuses a
+  detached or dirty worktree.
 - Live bundle binary: `/Users/luton/Projects/CoXAgent/desktop/build/CoXAgent.app/Contents/MacOS/cox-server`
 - Deploy helper: `/Users/luton/Projects/CoXAgent/deploy/deploy-cxa.sh` (does
-  build -> backup -> swap -> codesign -> optional restart -> verify). Use it.
+  ref-guard -> build -> backup -> swap -> codesign -> optional restart ->
+  verify, and logs `branch @ sha` for every build). Use it.
 - Hub is managed by the desktop app shell. NEVER bind port 4000 yourself.
   Restart by TERM-ing the hub PID; the shell respawns it.
 

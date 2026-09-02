@@ -36,6 +36,12 @@ sessions.json
 deploy/volume/**/backups/
 *.bak
 
+# Runtime logs appended by deploy/*.sh (deploy-cxa / watchdog / overnight
+# agent). They were once tracked, so every deploy run dirtied the tree — the
+# CXA-B150 ref-hygiene guard in deploy-cxa.sh rightly refuses a dirty
+# worktree, which would have wedged all deploys after the first.
+deploy/*.log
+
 # An MCP client config carries a live Bearer token for this install.
 cox-opencode.json
 
