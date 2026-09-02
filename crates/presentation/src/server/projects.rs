@@ -38,8 +38,25 @@ pub(super) async fn project_forge_account(app: &AppState, pid: &str) -> Option<S
 /// order, then the registered projects that failed to load — flagged `broken`
 /// with the reason, so a config error is visible in the dashboard instead of
 /// only in the hub log (COX-B043).
-pub(super) async fn list_projects(State(app): State<AppState>) -> impl IntoResponse {
-    let order = app.order.read().await.clone();
+///
+/// CXA-B141: the registry is enumerated PER CALLER. Super/Admin (and open
+/// mode, when no auth is configured) see every project; every other signed-in
+/// role — member tier, the lead tier, viewers — sees only its assigned
+/// projects. This is the SAME per-project membership rule `auth_mw` enforces
+/// on the `/api/projects/:pid/*` reads, so the list can never name a project
+/// the same account would be 403ed for opening (a bare list used to hand out
+/// every tenant's ids, names and sizes to any signed-in account).
+pub(super) async fn list_projects(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let principal = match &app.auth {
+        Some(auth) => resolve_principal(auth, &headers).await,
+        // Open mode (no accounts configured): the operator sees everything.
+        None => None,
+    };
+    let registered = app.order.read().await.clone();
+    let order = river_scope(principal.as_ref(), &registered);
     let mut out = Vec::new();
     for id in &order {
         if let Some(p) = app.project(id).await {
@@ -57,7 +74,18 @@ pub(super) async fn list_projects(State(app): State<AppState>) -> impl IntoRespo
             }));
         }
     }
-    out.extend(broken_entries(&app.broken.read().await));
+    // Broken projects are not in the live registry, so their visibility is
+    // decided against the caller's assignment list alone (`may_see_broken`) —
+    // the reason text and the config path are not other teams' business either.
+    let visible_broken: Vec<BrokenProject> = app
+        .broken
+        .read()
+        .await
+        .iter()
+        .filter(|b| may_see_broken(principal.as_ref(), &b.id))
+        .cloned()
+        .collect();
+    out.extend(broken_entries(&visible_broken));
     Json(out)
 }
 
