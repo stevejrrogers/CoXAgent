@@ -105,11 +105,9 @@ fn kernel_assigned_pick(src: &str) -> Result<(), String> {
 fn pin_routes_through_the_shared_helper(src: &str) -> Result<(), String> {
     let code = shell_code(src);
     if !code.contains("pick_free_loopback_port") {
-        return Err(
-            "script does not route the metrics port through the shared \
+        return Err("script does not route the metrics port through the shared \
              pick_free_loopback_port helper — duplicated picks drift"
-                .to_owned(),
-        );
+            .to_owned());
     }
     Ok(())
 }
@@ -121,9 +119,9 @@ fn pin_routes_through_the_shared_helper(src: &str) -> Result<(), String> {
 /// with a plain assignment (its failure aborts), export afterwards. Pure
 /// over script text.
 fn pick_failure_aborts_the_boot(src: &str) -> Result<(), String> {
-    let masked = shell_code(src).lines().any(|l| {
-        l.contains("export") && l.contains("COXAGENT_METRICS_PORT=") && l.contains("$(")
-    });
+    let masked = shell_code(src)
+        .lines()
+        .any(|l| l.contains("export") && l.contains("COXAGENT_METRICS_PORT=") && l.contains("$("));
     if masked {
         return Err(
             "export COXAGENT_METRICS_PORT=\"$(…)\" masks the pick's failure under set -e \
@@ -143,8 +141,7 @@ fn ac_both_fixture_scripts_pin_the_metrics_admin_port() {
         metrics_port_pinned(&read(script)).unwrap_or_else(|why| panic!("{script}: {why}"));
         pin_routes_through_the_shared_helper(&read(script))
             .unwrap_or_else(|why| panic!("{script}: {why}"));
-        pick_failure_aborts_the_boot(&read(script))
-            .unwrap_or_else(|why| panic!("{script}: {why}"));
+        pick_failure_aborts_the_boot(&read(script)).unwrap_or_else(|why| panic!("{script}: {why}"));
     }
 }
 
@@ -165,7 +162,10 @@ fn ac_the_pin_predicate_rejects_a_script_that_never_sets_the_port() {
     // The exact shape both scripts shipped in before CXA-B151.
     let before = "PORT=4517\nCOXAGENT_PORT=\"$PORT\" \"$BIN\" serve\n";
     let why = metrics_port_pinned(before).unwrap_err();
-    assert!(why.contains("never sets COXAGENT_METRICS_PORT"), "unhelpful: {why}");
+    assert!(
+        why.contains("never sets COXAGENT_METRICS_PORT"),
+        "unhelpful: {why}"
+    );
 }
 
 #[test]
