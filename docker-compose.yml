@@ -61,6 +61,11 @@ services:
       - "${APP_PORT:-8101}:4000"
     volumes:
       - workspace:/workspace
+      # The hub's docker features (deploy adapter, PR previews, the hourly
+      # janitor from CXA-B143) shell out to `docker` against the HOST daemon.
+      # Without this socket every probe fails and the fail-closed janitor
+      # skips every sweep, so deploy residue is never reclaimed (CXA-B153).
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 
 volumes:
