@@ -63,8 +63,9 @@ const STORE = `/api/projects/${PID}/store`;
 const VIEWER_USER = 'viewere2e';
 const VIEWER_PASSWORD = 'ViewerPass_12345';
 // CXA-F350 persona: a lead-tier member whose personal bearer token must
-// inherit the member's project memberships. Run-unique like every label
-// here — the token store persists across boots.
+// inherit the member's project memberships. The account itself is fixed
+// (create_user upserts hash/role across boots); only the minted token's
+// label is run-unique, because the token store persists across boots.
 const LEAD_USER = 'leade2e';
 const LEAD_PASSWORD = 'LeadPass_12345';
 

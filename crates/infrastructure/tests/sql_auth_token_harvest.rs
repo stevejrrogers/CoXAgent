@@ -134,3 +134,70 @@ async fn auto_issue_backfills_the_owner_on_a_pre_migration_personal_token() {
         "owner backfilled from the label"
     );
 }
+
+/// CXA-F350 review fix: usernames may contain `_` or `%` (`create_user` only
+/// rejects empty names), so the harvest's token lookup must never be a LIKE
+/// pattern built from the name — `a_b` would match `aXb` and the owner
+/// backfill would write THE WRONG MEMBER's identity onto another user's
+/// token, leaking that member's project reach to a stranger's bearer. Pin:
+/// harvesting `f350u<pid>_1` mints ITS OWN token and leaves the colliding
+/// `f350u<pid>x1` account's owner-less token exactly as it was.
+#[tokio::test]
+async fn a_username_with_like_wildcards_never_backfills_another_users_token() {
+    let Some(db) = common::claim_or_skip().await else {
+        return;
+    };
+    let svc = SqlAuthService::connect(&db.dsn())
+        .await
+        .expect("connect + migrate");
+
+    let pid = std::process::id();
+    let underscored = format!("f350u{pid}_1");
+    let colliding = format!("f350u{pid}x1");
+    // The underscore user owns proj-a; the colliding user owns nothing — a
+    // leaked owner would surface as proj-a on the colliding bearer.
+    assert!(
+        svc.create_user(&underscored, "ChangeMe12345!", AuthRole::TechLead)
+            .await
+    );
+    assert!(svc.assign_project(&underscored, "proj-a").await);
+    assert!(
+        svc.create_user(&colliding, "ChangeMe12345!", AuthRole::TechLead)
+            .await
+    );
+
+    // Pre-seed the colliding user's personal token the pre-migration way:
+    // minted by an admin, no owner recorded.
+    let colliding_secret = svc
+        .create_token(
+            &format!("user:{}:remote-store", colliding.to_lowercase()),
+            AuthRole::TechLead,
+        )
+        .await
+        .expect("pre-seed the colliding owner-less token");
+
+    // Harvest the underscore user: the old LIKE lookup matched the colliding
+    // label (`_` matches `x`) and suppressed the mint; prefix equality does
+    // not, so this user gets their own token.
+    let minted = svc
+        .auto_issue_personal_token(&underscored)
+        .await
+        .expect("the underscore user's harvest must mint their own token");
+    let mine = svc
+        .principal_for_bearer(&minted)
+        .await
+        .expect("resolve the fresh personal token");
+    assert_eq!(mine.projects, vec!["proj-a"], "own token inherits own reach");
+
+    // And the colliding token is untouched: still owner-less, so its bearer
+    // gains nothing from the underscore user's memberships.
+    let stranger = svc
+        .principal_for_bearer(&colliding_secret)
+        .await
+        .expect("resolve the colliding token");
+    assert!(
+        stranger.projects.is_empty(),
+        "a wildcard username must never backfill another user's token: {:?}",
+        stranger.projects
+    );
+}

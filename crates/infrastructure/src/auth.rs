@@ -1003,6 +1003,22 @@ mod tests {
             .await
             .expect("resolve service token");
         assert!(principal.projects.is_empty());
+
+        // The None-owner contract of create_token_for: minting without an
+        // owner is exactly a service token — no owner recorded, no projects
+        // inherited.
+        let unnamed = svc
+            .create_token_for("user:lead:none", AuthRole::TechLead, None)
+            .await
+            .expect("mint the ownerless token");
+        let unnamed_principal = svc
+            .principal_for_bearer(&unnamed)
+            .await
+            .expect("resolve the ownerless token");
+        assert!(
+            unnamed_principal.projects.is_empty(),
+            "create_token_for(None) must mint a service token"
+        );
     }
 
     /// A pre-F350 `auth.json` (tokens without an `owner` field) loads

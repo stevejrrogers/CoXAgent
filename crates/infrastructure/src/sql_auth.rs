@@ -750,11 +750,17 @@ impl AuthPort for SqlAuthService {
     async fn auto_issue_personal_token(&self, username: &str) -> Option<String> {
         let prefix = format!("user:{}:", username.to_ascii_lowercase());
         let client = self.client().await.ok()?;
-        // Idempotent: an existing personal token for this user wins; do not mint a duplicate.
+        // Match on exact prefix equality, never LIKE: `create_user` only
+        // rejects empty names, so a username may itself contain `_` or `%`,
+        // and a LIKE pattern built from it would match other users' tokens —
+        // fatal for the backfill below, which WRITES an owner onto what it
+        // matches. `left(label, char_length(prefix)) = prefix` is the same
+        // intent with no wildcard semantics.
         if client
             .query_opt(
-                "SELECT 1 FROM auth_tokens WHERE label LIKE $1",
-                &[&format!("{prefix}%")],
+                "SELECT 1 FROM auth_tokens
+                 WHERE left(label, char_length($1::text)) = $1::text",
+                &[&prefix],
             )
             .await
             .ok()
@@ -762,13 +768,14 @@ impl AuthPort for SqlAuthService {
             .is_some()
         {
             // Self-heal (CXA-F350): tokens minted before the owner column
-            // exist carry owner '' — backfill it from the label's namespace
+            // existed carry owner '' — backfill it from the label's namespace
             // so their bearer inherits the member's project reach too. Still
             // no re-mint, no secret re-issue.
             let _ = client
                 .execute(
-                    "UPDATE auth_tokens SET owner = $2 WHERE label LIKE $1 AND owner = ''",
-                    &[&format!("{prefix}%"), &username],
+                    "UPDATE auth_tokens SET owner = $2
+                     WHERE owner = '' AND left(label, char_length($1::text)) = $1::text",
+                    &[&prefix, &username],
                 )
                 .await;
             return None;
