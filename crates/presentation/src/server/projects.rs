@@ -101,18 +101,22 @@ fn factory_error_response(e: &FactoryError) -> axum::response::Response {
     }
 }
 
-/// CXA-B138/CXA-B140: the alias becomes the workspace directory id
+/// CXA-B138/CXA-B140/CXA-B147: the alias becomes the workspace directory id
 /// (`base.join(id)`), so a path-traversing alias would scaffold — and DELETE
-/// rm -rf — outside the workspace base, and a control character in it mangles
-/// every listing and is non-obviously deletable. Refuse it HERE, before the
-/// factory touches the filesystem. (Empty/absent keeps the derive-from-name
-/// fallback.)
+/// rm -rf — outside the workspace base, a control character in it mangles
+/// every listing, and an over-long one dies in `create_dir_all` with
+/// ENAMETOOLONG (os error 36) — a pure request-validation failure that must
+/// be a 400, never a 500. Refuse it HERE, before the factory touches the
+/// filesystem. (Empty/absent keeps the derive-from-name fallback.)
 fn refused_alias(alias: Option<&String>) -> Option<axum::response::Response> {
     let alias = alias.map(String::as_str).filter(|a| !a.is_empty())?;
     (!coxagent_application::state::is_safe_workspace_id(alias)).then(|| {
-        bad_request_error(
-            "alias must not contain '/', '\\', '..', leading dots or control characters",
-        )
+        // The reason comes from the shared predicate so the message names the
+        // actual defect — length vs separators — instead of one stale string.
+        bad_request_error(&format!(
+            "alias {}",
+            coxagent_application::state::workspace_id_refusal_reason(alias)
+        ))
     })
 }
 
