@@ -12,5 +12,7 @@ pub mod rate_limit;
 pub mod telemetry;
 
 pub use cors::cors_layer;
-pub use rate_limit::{rate_limit_mw, RateLimiter, AUTH_RATE_MAX, AUTH_RATE_WINDOW};
+pub use rate_limit::{
+    auth_rate_max, auth_rate_window, rate_limit_mw, RateLimiter, AUTH_RATE_MAX, AUTH_RATE_WINDOW,
+};
 pub use telemetry::telemetry_mw;

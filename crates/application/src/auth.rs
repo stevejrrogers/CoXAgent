@@ -494,6 +494,24 @@ pub trait AuthPort: Send + Sync {
     /// Returns `None` if the label is taken or persistence fails.
     async fn create_token(&self, label: &str, role: AuthRole) -> Option<String>;
 
+    /// Mint an API token bound to a minting member: `owner` names the account
+    /// whose project memberships the token's bearer inherits (resolved LIVE on
+    /// every bearer resolution, so membership changes and account deletion
+    /// take effect without re-minting); `None` mints a plain service token
+    /// that carries no projects. Same taken-label / `None` contract as
+    /// [`AuthPort::create_token`]. The default deliberately ignores `owner`
+    /// and delegates to [`AuthPort::create_token`], so stores that do not
+    /// model ownership — and every test double — keep their exact behaviour.
+    async fn create_token_for(
+        &self,
+        label: &str,
+        role: AuthRole,
+        owner: Option<&str>,
+    ) -> Option<String> {
+        let _ = owner;
+        self.create_token(label, role).await
+    }
+
     /// Harvest a personal bearer token for `username` at login time — mint-or-
     /// reuse on the self-service path used by `/my/tokens`
     /// (`user:{name}:{...}` prefix), bound to that user's own role (never an
