@@ -351,7 +351,7 @@ mod project_id_tests {
 #[cfg(test)]
 mod onboard_error_classification_tests {
     use super::classify_onboard_error;
-    use crate::onboard::OnboardConflict;
+    use crate::onboard::{OnboardConflict, OnboardMissingPath};
     use coxagent_presentation::FactoryErrorKind;
 
     #[test]
@@ -368,6 +368,26 @@ mod onboard_error_classification_tests {
         assert_eq!(
             mapped.message,
             "workspace already has tickets; refusing to re-onboard"
+        );
+    }
+
+    /// CXA-B157: a user-supplied `existing` path that does not exist can never
+    /// succeed as issued — the classifier must hand the API 400 material, and
+    /// the operator-facing message must survive the mapping.
+    #[test]
+    fn a_missing_codebase_path_is_classified_as_a_bad_request() {
+        let err: Box<dyn std::error::Error> = Box::new(OnboardMissingPath(
+            "codebase path does not exist: /tmp/definitely-not-there-qa".into(),
+        ));
+        let mapped = classify_onboard_error(err.as_ref());
+        assert_eq!(
+            mapped.kind,
+            FactoryErrorKind::BadRequest,
+            "a nonexistent codebase path is the client's bad input (400), not a 500 fault"
+        );
+        assert_eq!(
+            mapped.message,
+            "codebase path does not exist: /tmp/definitely-not-there-qa"
         );
     }
 
@@ -432,23 +452,39 @@ mod onboard_scaffold_cleanup_tests {
         );
     }
 
-    /// A brownfield adoption of a missing codebase fails inside
-    /// `onboard::brownfield`, after the store was built — the same cleanup
-    /// must apply to every error path, not just the URL check.
+    /// CXA-B157 regression, at the port: a brownfield adoption of a missing
+    /// codebase is the CLIENT's bad input — classified bad-request (400), not
+    /// a 500 fault — and still leaves no debris behind.
     #[tokio::test]
-    async fn a_brownfield_onboard_of_a_missing_codebase_leaves_no_debris() {
+    async fn a_brownfield_onboard_of_a_missing_codebase_is_bad_request_and_leaves_no_debris() {
         let base = tempfile::tempdir().expect("tmp");
         let registry = base.path().join("registry.json");
         let req = NewProjectReq {
             existing: Some(PathBuf::from("/nonexistent/qab136/codebase")),
             ..request("QAB136")
         };
-        assert!(Box::pin(onboard_project(base.path(), &registry, req, None))
-            .await
-            .is_err());
+        let Err(err) = Box::pin(onboard_project(base.path(), &registry, req, None)).await else {
+            panic!("a nonexistent codebase path must refuse the onboarding");
+        };
+        assert_eq!(
+            err.kind,
+            FactoryErrorKind::BadRequest,
+            "a missing codebase path is the client's bad input (400), not a 409 conflict or a \
+             500 fault"
+        );
+        assert!(
+            err.message.contains("codebase path does not exist"),
+            "the operator-facing refusal must survive the classification: {:?}",
+            err.message
+        );
         assert!(
             !base.path().join("qab136").exists(),
             "the failed adoption must not leave the scaffolded workspace behind"
+        );
+        assert_eq!(
+            unique_id(base.path(), "qab136"),
+            "qab136",
+            "the id must be free again — no `-2` suffix on the next recreate"
         );
     }
 }
@@ -1179,10 +1215,17 @@ fn remove_from_registry(registry_path: &Path, id: &str) -> Result<(), String> {
 
 /// Map an onboarding failure onto the factory's classified error (CXA-B129):
 /// the typed "workspace already has tickets" conflict becomes 409 material at
-/// the API; everything else stays a server fault.
+/// the API, the typed missing-codebase-path refusal becomes 400 material
+/// (CXA-B157, same client-input class as the B139/B142 refusals); everything
+/// else stays a server fault.
 fn classify_onboard_error(e: &(dyn std::error::Error + 'static)) -> FactoryError {
     if let Some(message) = onboard::conflict_message(e) {
         FactoryError::conflict(message)
+    } else if let Some(message) = onboard::missing_path_message(e) {
+        // CXA-B157: a user-supplied codebase path that does not exist can
+        // never succeed as issued — the CLIENT's bad input (400), not a
+        // server fault.
+        FactoryError::bad_request(message)
     } else {
         FactoryError::internal(e.to_string())
     }
