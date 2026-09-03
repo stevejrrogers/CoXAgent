@@ -486,8 +486,6 @@ mod onboard_scaffold_cleanup_tests {
             "qab136",
             "the id must be free again — no `-2` suffix on the next recreate"
         );
-<<<<<<< HEAD
-=======
     }
 
     /// CXA-B147 regression, at the port: a 300-char alias is a legal string
@@ -529,7 +527,6 @@ mod onboard_scaffold_cleanup_tests {
             0,
             "the guard fires before any filesystem work — the base stays empty"
         );
->>>>>>> origin/main
     }
 }
 
