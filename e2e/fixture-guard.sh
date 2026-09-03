@@ -121,7 +121,10 @@ pick_free_loopback_port() {
     echo "pick_free_loopback_port: node is required to pick a free metrics port" >&2
     return 1
   fi
-  _pf_port="$(node -e 'const s=require("node:net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')"
+  # The port goes out as a STRING: node >= 24 honours FORCE_COLOR (which
+  # Playwright's webServer sets on this script) and would otherwise emit the
+  # number ANSI-wrapped, failing the numeric guard below on a healthy port.
+  _pf_port="$(node -e 'const s=require("node:net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(String(s.address().port));s.close()})')"
   case "$_pf_port" in
     ''|*[!0-9]*)
       echo "pick_free_loopback_port: node returned no usable port ($_pf_port)" >&2
