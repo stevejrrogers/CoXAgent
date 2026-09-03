@@ -62,27 +62,46 @@ fn ships_docker_cli(dockerfile_src: &str) -> Result<(), String> {
     ))
 }
 
+/// The short-form mount `HOST:CONTAINER[:MODE]` puts the socket at the ONE
+/// container path the docker CLI probes (`/var/run/docker.sock`) and leaves it
+/// writable. Anything else — a `:ro` mode, or a different container target —
+/// is the same silent death wearing a mount.
+fn short_form_socket_mount_ok(mount: &str) -> bool {
+    let mut parts = mount.splitn(3, ':');
+    let host = parts.next().unwrap_or_default();
+    let container = parts.next().unwrap_or_default();
+    let mode = parts.next();
+    host == "/var/run/docker.sock"
+        && container == "/var/run/docker.sock"
+        && match mode {
+            None => true,
+            Some(m) => m.eq_ignore_ascii_case("rw"),
+        }
+}
+
 /// Why the service cannot reach the host daemon; `None` when it can.
 fn unreachable_host_docker_reason(svc: &serde_yaml::Value) -> Option<String> {
     let no_volumes: Vec<serde_yaml::Value> = Vec::new();
     for volume in svc["volumes"].as_sequence().unwrap_or(&no_volumes) {
         if let Some(mount) = volume.as_str() {
-            // Short syntax `HOST:CONTAINER[:MODE]`: no mode suffix and an
-            // explicit `:rw` are both writable; only `:ro` is not.
-            if mount.starts_with("/var/run/docker.sock:") && !mount.ends_with(":ro") {
+            if short_form_socket_mount_ok(mount) {
                 return None;
             }
         }
         // Long syntax: {type: bind, source: HOST, target: CONTAINER, read_only: BOOL}.
+        // The target must be the probed path too — a socket mounted anywhere
+        // else is invisible to the CLI.
         if volume["source"].as_str() == Some("/var/run/docker.sock")
+            && volume["target"].as_str() == Some("/var/run/docker.sock")
             && volume["read_only"].as_bool() != Some(true)
         {
             return None;
         }
     }
     Some(
-        "no writable /var/run/docker.sock mount — every docker probe fails and the \
-         fail-closed janitor skips every sweep (CXA-B153)"
+        "no writable /var/run/docker.sock:/var/run/docker.sock mount — the docker CLI \
+         probes the fixed container path /var/run/docker.sock, so every probe fails \
+         and the fail-closed janitor skips every sweep (CXA-B153)"
             .to_string(),
     )
 }
@@ -173,7 +192,8 @@ fn a_read_only_socket_mount_is_caught() {
     assert!(why.contains("writable"), "unhelpful message: {why}");
 }
 
-/// The shipped, fixed shape must pass cleanly.
+/// The shipped, fixed shape must pass cleanly — bare and with an explicit
+/// `:rw` (compose's default mode, spelled out).
 #[test]
 fn a_writable_socket_mount_passes() {
     let src = compose_with_hub_volumes(Some("/var/run/docker.sock:/var/run/docker.sock"));
@@ -181,6 +201,12 @@ fn a_writable_socket_mount_passes() {
         hub_docker_reachability(&src),
         Ok(()),
         "the fixed mount must pass"
+    );
+    let src = compose_with_hub_volumes(Some("/var/run/docker.sock:/var/run/docker.sock:RW"));
+    assert_eq!(
+        hub_docker_reachability(&src),
+        Ok(()),
+        "an explicit :rw mount must pass"
     );
 }
 
@@ -201,6 +227,27 @@ fn a_long_form_read_only_mount_is_caught() {
                \x20   - \"8101:4000\"\n    volumes:\n      - type: bind\n\
                \x20       source: /var/run/docker.sock\n\
                \x20       target: /var/run/docker.sock\n        read_only: true\n";
+    let why = hub_docker_reachability(src).unwrap_err();
+    assert!(why.contains("writable"), "unhelpful message: {why}");
+}
+
+/// A socket mounted at any OTHER container path is invisible to the docker
+/// CLI, which probes the fixed path /var/run/docker.sock — the bug in
+/// disguise, and it must not pass the guard.
+#[test]
+fn a_short_form_mount_at_the_wrong_container_path_is_caught() {
+    let src = compose_with_hub_volumes(Some("/var/run/docker.sock:/tmp/host-docker.sock"));
+    let why = hub_docker_reachability(&src).unwrap_err();
+    assert!(why.contains("writable"), "unhelpful message: {why}");
+}
+
+/// The long syntax must pin the target too, not just the source.
+#[test]
+fn a_long_form_mount_at_the_wrong_container_path_is_caught() {
+    let src = "services:\n  coxagent:\n    image: coxagent\n    ports:\n\
+               \x20   - \"8101:4000\"\n    volumes:\n      - type: bind\n\
+               \x20       source: /var/run/docker.sock\n\
+               \x20       target: /run/host-services/docker.sock\n";
     let why = hub_docker_reachability(src).unwrap_err();
     assert!(why.contains("writable"), "unhelpful message: {why}");
 }
