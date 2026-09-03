@@ -211,6 +211,92 @@ async fn a_control_character_alias_is_refused_with_400_before_the_factory_runs()
     );
 }
 
+/// CXA-B144: a bidi override in the alias (the ticket's U+202E repro) is a
+/// Cf format char, invisible to `char::is_control`, so it used to slip past
+/// the B140 refusal and land in the project id and workspace directory name —
+/// every listing renders visually reordered (a spoofable name) and the
+/// project is non-obviously deletable (DELETE needs the byte
+/// percent-encoded). The route must refuse it with 400 BEFORE the factory is
+/// ever called — the factory below records every call, and the flag must
+/// stay false.
+#[tokio::test]
+async fn a_bidi_override_alias_is_refused_with_400_before_the_factory_runs() {
+    let factory_was_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = Arc::clone(&factory_was_called);
+    let app = hub_with_factory(Arc::new(move |_req| {
+        seen.store(true, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async {
+            Err::<ProjectHandle, FactoryError>(FactoryError::internal("must never run"))
+        })
+    }))
+    .await;
+
+    for alias in ["qa\u{202E}gpd", "qa\u{202D}gpd", "trailing\u{202E}"] {
+        let body = serde_json::to_string(&serde_json::json!({
+            "name": "QA Bidi",
+            "alias": alias,
+        }))
+        .expect("json body");
+        let resp = post_create_with_body(app.clone(), &body).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "alias {alias:?} must be refused with 400"
+        );
+        let body = body_json(resp).await;
+        assert!(
+            body["error"].as_str().unwrap_or_default().contains("alias"),
+            "the refusal must say why: {body}"
+        );
+    }
+    assert!(
+        !factory_was_called.load(std::sync::atomic::Ordering::SeqCst),
+        "the factory must never see a bidi-override alias"
+    );
+}
+
+/// CXA-B147: a 300-char alias is a legal string but an impossible directory
+/// name — it used to pass the character checks, reach `base.join(id)`/
+/// `create_dir_all` and die with ENAMETOOLONG (os error 36), a pure
+/// request-validation failure reported as a 500. The route must refuse it
+/// with 400 BEFORE the factory runs — the factory below records every call,
+/// and the flag must stay false.
+#[tokio::test]
+async fn an_over_long_alias_is_refused_with_400_before_the_factory_runs() {
+    let factory_was_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = Arc::clone(&factory_was_called);
+    let app = hub_with_factory(Arc::new(move |_req| {
+        seen.store(true, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async {
+            Err::<ProjectHandle, FactoryError>(FactoryError::internal("must never run"))
+        })
+    }))
+    .await;
+
+    let body = serde_json::to_string(&serde_json::json!({
+        "name": "QA Long",
+        "alias": "a".repeat(300), // the ticket's repro
+    }))
+    .expect("json body");
+    let resp = post_create_with_body(app, &body).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "an over-long alias can never succeed — 400, not a 500 'os error 36'"
+    );
+    let body = body_json(resp).await;
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(error.contains("alias"), "the refusal must say why: {body}");
+    assert!(
+        error.contains("bytes"),
+        "the refusal must name the length defect, not the separator rule: {body}"
+    );
+    assert!(
+        !factory_was_called.load(std::sync::atomic::Ordering::SeqCst),
+        "the factory must never see an over-long alias"
+    );
+}
+
 /// The honest counterpart: a plain alias still reaches the factory untouched.
 #[tokio::test]
 async fn a_plain_alias_still_reaches_the_factory() {

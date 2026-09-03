@@ -486,6 +486,50 @@ mod onboard_scaffold_cleanup_tests {
             "qab136",
             "the id must be free again — no `-2` suffix on the next recreate"
         );
+<<<<<<< HEAD
+=======
+    }
+
+    /// CXA-B147 regression, at the port: a 300-char alias is a legal string
+    /// but an impossible directory name — it must be refused as the CLIENT's
+    /// bad input (bad-request/400 material), never reach the filesystem, and
+    /// leave no debris behind.
+    #[tokio::test]
+    async fn an_over_long_alias_is_bad_request_and_leaves_no_debris() {
+        let base = tempfile::tempdir().expect("tmp");
+        let registry = base.path().join("registry.json");
+        let alias = "a".repeat(300);
+        let Err(err) = Box::pin(onboard_project(
+            base.path(),
+            &registry,
+            request(&alias),
+            None,
+        ))
+        .await
+        else {
+            panic!("an over-long alias must refuse the onboarding");
+        };
+        assert_eq!(
+            err.kind,
+            FactoryErrorKind::BadRequest,
+            "an over-long alias is the client's bad input (400), not a 409 conflict or a \
+             500 'File name too long' fault"
+        );
+        assert!(
+            err.message.contains("bytes"),
+            "the operator-facing refusal must name the length defect: {:?}",
+            err.message
+        );
+        assert!(
+            !base.path().join(&alias).exists(),
+            "the refused onboarding must not scaffold anything"
+        );
+        assert_eq!(
+            std::fs::read_dir(base.path()).expect("tmp base").count(),
+            0,
+            "the guard fires before any filesystem work — the base stays empty"
+        );
+>>>>>>> origin/main
     }
 }
 
@@ -1252,16 +1296,18 @@ async fn onboard_project(
         .alias
         .clone()
         .unwrap_or_else(|| coxagent_application::state::derive_alias(req.name.trim()));
-    // CXA-B138/CXA-B140: the id becomes the workspace directory
+    // CXA-B138/CXA-B140/CXA-B147: the id becomes the workspace directory
     // (`base.join(id)`), so a path-traversing alias must be refused before ANY
-    // filesystem work, and a control character in it would mangle listings and
-    // be non-obviously deletable — the HTTP layer rejects both first; this
-    // keeps the port itself safe for every caller. This guard runs on the
+    // filesystem work, a control character in it would mangle listings and
+    // be non-obviously deletable, and an over-long one dies in `create_dir_all`
+    // with ENAMETOOLONG — the HTTP layer rejects all three first; this keeps
+    // the port itself safe for every caller. This guard runs on the
     // UNTRIMMED seed: trimming first could smuggle `"trailing\n"` through as
     // `"trailing"`. (An empty seed keeps the unique_id "project" fallback.)
     if !raw_seed.is_empty() && !coxagent_application::state::is_safe_workspace_id(&raw_seed) {
         return Err(FactoryError::bad_request(format!(
-            "alias {raw_seed:?} must not contain '/', '\\', '..', leading dots or control characters"
+            "alias {raw_seed:?} {}",
+            coxagent_application::state::workspace_id_refusal_reason(&raw_seed)
         )));
     }
     // CXA-B146: the alias is trimmed like every other input — a blank one is
@@ -1279,7 +1325,8 @@ async fn onboard_project(
     // actually become the id.
     if !derived.is_empty() && !coxagent_application::state::is_safe_workspace_id(&derived) {
         return Err(FactoryError::bad_request(format!(
-            "alias {derived:?} must not contain '/', '\\', '..', leading dots or control characters"
+            "alias {derived:?} {}",
+            coxagent_application::state::workspace_id_refusal_reason(&derived)
         )));
     }
     let id = unique_id(base, &derived.to_lowercase());
