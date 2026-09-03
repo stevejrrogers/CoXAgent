@@ -468,6 +468,28 @@ pub fn conflict_message(err: &(dyn std::error::Error + 'static)) -> Option<Strin
     err.downcast_ref::<OnboardConflict>().map(|c| c.0.clone())
 }
 
+/// An expected onboarding input error: the user-supplied codebase path does
+/// not exist, so the request can never succeed as issued — a client-side bad
+/// input, not a server fault. Typed so the HTTP layer can map it to 400
+/// instead of 500 (CXA-B157, same class as the B139/B142 refusals).
+#[derive(Debug)]
+pub struct OnboardMissingPath(pub String);
+
+impl std::fmt::Display for OnboardMissingPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for OnboardMissingPath {}
+
+/// Classify an onboarding input failure (CXA-B157): `Some(message)` when it is
+/// the missing-codebase-path bad input, `None` otherwise. Pure.
+pub fn missing_path_message(err: &(dyn std::error::Error + 'static)) -> Option<String> {
+    err.downcast_ref::<OnboardMissingPath>()
+        .map(|c| c.0.clone())
+}
+
 /// Refuse re-onboarding over an active backlog (CXA-F003): scaffolding again
 /// on top of existing tickets would silently double-seed or lose state. Typed
 /// as [`OnboardConflict`] so the API layer returns 409, never 500 (CXA-B129).
@@ -552,10 +574,17 @@ pub async fn brownfield<S: StateStorePort + 'static>(
     alias: Option<String>,
     codebase: &Path,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    refuse_agent_scaffold()?;
+    // Input validation first (CXA-B157): a missing codebase path is the
+    // CLIENT's bad input and must be refused — typed — regardless of where
+    // the process runs, so it can never be shadowed by the environment guard
+    // below into an unclassified 500.
     if !codebase.exists() {
-        return Err(format!("codebase path does not exist: {}", codebase.display()).into());
+        return Err(Box::new(OnboardMissingPath(format!(
+            "codebase path does not exist: {}",
+            codebase.display()
+        ))));
     }
+    refuse_agent_scaffold()?;
     let mut state = store.load().await?;
     refuse_existing_tickets(&state)?;
 
@@ -1197,5 +1226,35 @@ mod re_onboard_conflict_tests {
     fn an_ordinary_onboarding_fault_is_not_classified_as_a_conflict() {
         let err: Box<dyn std::error::Error> = "store unreachable".into();
         assert!(conflict_message(err.as_ref()).is_none());
+    }
+}
+
+/// CXA-B157: the missing-codebase-path refusal is a TYPED client input error,
+/// classified so the API layer maps it to 400 instead of 500 — and never
+/// crosses into the 409 conflict class.
+#[cfg(test)]
+mod missing_path_input_tests {
+    use super::{conflict_message, missing_path_message, OnboardMissingPath};
+
+    #[test]
+    fn the_missing_path_refusal_is_typed_as_a_bad_input() {
+        let err: Box<dyn std::error::Error> = Box::new(OnboardMissingPath(
+            "codebase path does not exist: /tmp/definitely-not-there-qa".into(),
+        ));
+        assert_eq!(
+            missing_path_message(err.as_ref()).as_deref(),
+            Some("codebase path does not exist: /tmp/definitely-not-there-qa"),
+            "the API layer classifies by type, so the marker must survive the Box"
+        );
+        assert!(
+            conflict_message(err.as_ref()).is_none(),
+            "a bad input must never masquerade as a 409 conflict"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_onboarding_fault_is_not_classified_as_a_missing_path() {
+        let err: Box<dyn std::error::Error> = "store unreachable".into();
+        assert!(missing_path_message(err.as_ref()).is_none());
     }
 }
