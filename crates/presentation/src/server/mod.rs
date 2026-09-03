@@ -31,7 +31,7 @@ use tokio_stream::wrappers::IntervalStream;
 use tokio_stream::{Stream, StreamExt};
 
 use crate::middleware::{
-    cors_layer, rate_limit_mw, telemetry_mw, RateLimiter, AUTH_RATE_MAX, AUTH_RATE_WINDOW,
+    auth_rate_max, auth_rate_window, cors_layer, rate_limit_mw, telemetry_mw, RateLimiter,
 };
 
 mod alerts;
@@ -1110,8 +1110,8 @@ pub async fn serve_full(
             req,
             next,
             Arc::clone(&limiter),
-            AUTH_RATE_MAX,
-            AUTH_RATE_WINDOW,
+            auth_rate_max(),
+            auth_rate_window(),
             trust_proxy,
         )
     }));

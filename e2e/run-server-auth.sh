@@ -36,6 +36,11 @@ unset COXAGENT_DB_DSN COXAGENT_AUTH_DSN COXAGENT_REDIS_URL COXAGENT_REMOTE_STORE
 # XFF identity; every other spec sends no XFF and keeps the shared
 # socket-IP bucket, unchanged). No spec pins the 429 itself.
 export COXAGENT_TRUST_PROXY=1
+# CXA-F350: the suite is many independent clients behind one proxy IP and now
+# carries one more /api/auth POST budget (the lead-tier persona) — raise the
+# auth rate limit with the env override that same ticket added, instead of
+# starving logins into a 429 storm. No spec pins the 429 itself.
+export AUTH_RATE_MAX="${AUTH_RATE_MAX:-200}"
 export COXAGENT_PORT="$PORT"
 # CXA-B151: pin the metrics admin listener away from the default 127.0.0.1:9010
 # — on a dev host the live hub owns that port and the fixture would otherwise

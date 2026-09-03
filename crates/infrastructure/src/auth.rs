@@ -47,13 +47,19 @@ struct StoredUser {
 }
 
 /// One stored API token: label, role, SHA-256 hex of the secret, created-at.
-/// The secret itself is never persisted — only its hash.
+/// The secret itself is never persisted — only its hash. `owner` names the
+/// member a PERSONAL token belongs to (CXA-F350): the bearer inherits that
+/// account's project memberships, resolved live per request. Empty for
+/// service tokens minted by an admin — those stay hub-wide for their role.
+/// `serde(default)` keeps pre-existing `auth.json` files loading unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredToken {
     label: String,
     role: AuthRole,
     hash: String,
     created: String,
+    #[serde(default)]
+    owner: String,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -233,6 +239,42 @@ impl FileAuthService {
         if let Ok(mut map) = self.attempts.lock() {
             map.remove(username);
         }
+    }
+
+    /// Mint an API token under `label` with `role`, recording `owner` (empty
+    /// for a service token). Returns the plaintext secret exactly once, or
+    /// `None` when the label is taken or persistence fails.
+    fn mint_token(&self, label: &str, role: AuthRole, owner: &str) -> Option<String> {
+        let mut tokens = self.tokens.lock().ok()?;
+        if tokens.iter().any(|t| t.label == label) {
+            return None; // label already in use
+        }
+        let secret = mint_token();
+        tokens.push(StoredToken {
+            label: label.to_owned(),
+            role,
+            hash: sha256_hex(&secret),
+            created: now_rfc3339(),
+            owner: owner.to_owned(),
+        });
+        drop(tokens);
+        self.persist().ok()?;
+        Some(secret)
+    }
+
+    /// The project memberships `owner` holds right now, or empty when the
+    /// account is gone — a deleted member's personal token fails closed.
+    fn owner_projects(&self, owner: &str) -> Vec<String> {
+        self.users
+            .lock()
+            .ok()
+            .and_then(|users| {
+                users
+                    .iter()
+                    .find(|u| u.username == owner)
+                    .map(|u| u.projects.clone())
+            })
+            .unwrap_or_default()
     }
 
     /// The workspace-relative default location for the user file.
@@ -432,34 +474,40 @@ impl AuthPort for FileAuthService {
 
     async fn principal_for_bearer(&self, token: &str) -> Option<AuthUser> {
         let hash = sha256_hex(token);
-        let tokens = self.tokens.lock().ok()?;
-        let stored = tokens.iter().find(|t| ct_eq(&t.hash, &hash))?;
+        let stored = {
+            let tokens = self.tokens.lock().ok()?;
+            tokens.iter().find(|t| ct_eq(&t.hash, &hash))?.clone()
+        };
+        // A personal token resolves its owner's project memberships LIVE —
+        // never a mint-time snapshot — so unassigning a project (or deleting
+        // the owner's account) revokes the token's project reach on the very
+        // next call, with no re-mint. A missing owner fails closed to no
+        // projects. Service tokens (owner '') stay hub-wide for their role.
+        let projects = if stored.owner.is_empty() {
+            Vec::new()
+        } else {
+            self.owner_projects(&stored.owner)
+        };
         Some(AuthUser {
             username: format!("svc:{}", stored.label),
             name: String::new(),
             email: String::new(),
             role: stored.role,
-            projects: Vec::new(),
+            projects,
         })
     }
 
     async fn create_token(&self, label: &str, role: AuthRole) -> Option<String> {
-        {
-            let mut tokens = self.tokens.lock().ok()?;
-            if tokens.iter().any(|t| t.label == label) {
-                return None; // label already in use
-            }
-            let secret = mint_token();
-            tokens.push(StoredToken {
-                label: label.to_owned(),
-                role,
-                hash: sha256_hex(&secret),
-                created: now_rfc3339(),
-            });
-            drop(tokens);
-            self.persist().ok()?;
-            Some(secret)
-        }
+        self.mint_token(label, role, "")
+    }
+
+    async fn create_token_for(
+        &self,
+        label: &str,
+        role: AuthRole,
+        owner: Option<&str>,
+    ) -> Option<String> {
+        self.mint_token(label, role, owner.unwrap_or_default())
     }
 
     async fn list_tokens(&self) -> Vec<TokenInfo> {
@@ -898,5 +946,84 @@ mod tests {
         let dir = tempdir().unwrap();
         let svc = FileAuthService::open(&dir.path().join("nope.json")).unwrap();
         assert!(!svc.has_users());
+    }
+
+    /// CXA-F350: a member's personal token inherits the minting member's
+    /// project memberships, resolved LIVE — unassignment and account
+    /// deletion revoke the token's project reach on the next call with no
+    /// re-mint, while a service token (owner '') grants no projects at all,
+    /// even under a personal-looking label.
+    #[tokio::test]
+    async fn personal_tokens_inherit_their_owners_project_memberships_live() {
+        let dir = tempdir().unwrap();
+        let path = FileAuthService::default_path(dir.path());
+        let svc = FileAuthService::open(&path).unwrap();
+        assert!(svc.create_user("lead", "pw", AuthRole::TechLead).await);
+        assert!(svc.assign_project("lead", "proj-a").await);
+        assert!(svc.assign_project("lead", "proj-b").await);
+
+        // Minted exactly as create_my_token_ep mints: caller as owner.
+        let secret = svc
+            .create_token_for("user:lead:remote-store", AuthRole::TechLead, Some("lead"))
+            .await
+            .expect("mint the personal token");
+        let principal = svc.principal_for_bearer(&secret).await.expect("resolve");
+        assert_eq!(principal.username, "svc:user:lead:remote-store");
+        assert_eq!(principal.role, AuthRole::TechLead);
+        assert_eq!(principal.projects, vec!["proj-a", "proj-b"]);
+
+        // Live resolution: the same secret reflects the unassignment with no
+        // re-mint.
+        assert!(svc.unassign_project("lead", "proj-a").await);
+        let after = svc.principal_for_bearer(&secret).await.expect("resolve");
+        assert_eq!(after.projects, vec!["proj-b"]);
+
+        // Fail closed: deleting the owner leaves the token project-less.
+        assert!(svc.delete_user("lead").await);
+        let orphan = svc.principal_for_bearer(&secret).await.expect("resolve");
+        assert!(orphan.projects.is_empty(), "a deleted owner fails closed");
+    }
+
+    #[tokio::test]
+    async fn service_tokens_stay_projectless_even_with_a_personal_looking_label() {
+        let dir = tempdir().unwrap();
+        let svc = FileAuthService::open(&dir.path().join("auth.json")).unwrap();
+        assert!(svc.create_user("lead", "pw", AuthRole::TechLead).await);
+        assert!(svc.assign_project("lead", "proj-a").await);
+
+        // Admin-minted service token (create_token — owner '') wearing a
+        // label that looks personal: the owner field is the only input, so
+        // label-prefix spoofing grants nothing.
+        let service = svc
+            .create_token("user:lead:spoof", AuthRole::TechLead)
+            .await
+            .expect("mint the service token");
+        let principal = svc
+            .principal_for_bearer(&service)
+            .await
+            .expect("resolve service token");
+        assert!(principal.projects.is_empty());
+    }
+
+    /// A pre-F350 `auth.json` (tokens without an `owner` field) loads
+    /// unchanged and its tokens keep resolving — the serde default is what
+    /// makes the store backward compatible.
+    #[tokio::test]
+    async fn a_legacy_auth_json_without_owner_fields_loads_and_resolves() {
+        let dir = tempdir().unwrap();
+        let path = FileAuthService::default_path(dir.path());
+        let legacy = format!(
+            r#"{{"users":[{{"username":"root","hash":"x","role":"admin"}}],
+                "tokens":[{{"label":"ci","role":"admin","hash":"{}","created":"2026-01-01T00:00:00Z"}}]}}"#,
+            sha256_hex("legacy-secret")
+        );
+        std::fs::write(&path, legacy).unwrap();
+        let svc = FileAuthService::open(&path).unwrap();
+        let principal = svc
+            .principal_for_bearer("legacy-secret")
+            .await
+            .expect("legacy token still resolves");
+        assert_eq!(principal.username, "svc:ci");
+        assert!(principal.projects.is_empty());
     }
 }
