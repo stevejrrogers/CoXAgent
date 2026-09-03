@@ -36,6 +36,16 @@
 //! path; its projects are all named `cox-test-deps-*`, so
 //! `docker ps -a --filter name=cox-test-deps-` finds, and
 //! `docker compose -p <project> down -v` removes, anything left behind.
+//!
+//! Policy and pins move together (CXA-F340): any change to this guard — its
+//! refused-env contract, its compose fixture, its skip story — must land in
+//! the same PR as the matching updates to the CI `integration` job
+//! (.github/workflows/ci.yml) and both gate tests
+//! (crates/app/tests/ci_availability_gate.rs,
+//! crates/app/tests/test_env_guard_f326_gate.rs). The gate cross-checks the
+//! two sides against each other and fails the build when one moves without
+//! the other — a guard that drifts from its pins is how F327 shipped with a
+//! CI integration job that selected zero tests and painted green.
 #![allow(dead_code)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

@@ -100,48 +100,33 @@ jobs:
       - name: CI wiring guards (jobs exist, ungated, real commands)
         run: cargo test -p coxagent-app --test deploy_smoke --test ci_availability_gate --test test_env_guard_f326_gate
 
-  # CXA-F326: the DSN-gated Postgres/Redis integration tests are #[ignore]d —
-  # this job is the only sanctioned way to run them. It brings its own
-  # ephemeral service containers (lifecycle-bound to the job, never a deployed
-  # hub), names the database `cxa_test` exactly as the shared guard demands,
-  # and exports both env vars explicitly (nothing inherited). The guard in
-  # crates/infrastructure/tests/common/mod.rs still refuses a live hub and
-  # fails closed on any probe error — this job proves the suites keep passing
-  # against the ephemeral shape they will always be given. Ordinary CI without
-  # a database (the `check` job) skips them explicitly and stays green.
+  # CXA-F326 (job) x CXA-F327 (policy): the DB-backed Postgres/Redis suites run
+  # through the shared compose fixture in
+  # crates/infrastructure/tests/common/mod.rs — every test claims its own
+  # ephemeral postgres+redis, so this job exports NO database env vars (an
+  # exported COXAGENT_TEST_PG_DSN / COXAGENT_TEST_REDIS_URL is refused
+  # fail-closed by the fixture) and passes no `--ignored` (nothing is
+  # #[ignore]d; the flag would execute zero tests and paint green). The job is
+  # the focused record that the suites pass against the ephemeral shape they
+  # always get; `check` runs them too via `cargo test --all-features` wherever
+  # docker exists, and a docker-less environment skips them explicitly.
+  #
+  # Policy and pins move together (CXA-F340): any change to the shared
+  # fail-closed test-database guard (crates/infrastructure/tests/common/mod.rs)
+  # must move this integration job and both gate tests
+  # (crates/app/tests/ci_availability_gate.rs,
+  # crates/app/tests/test_env_guard_f326_gate.rs) in the same PR — the gate
+  # cross-checks the two sides against each other and fails the build when one
+  # moves without the other (that coupling is exactly what forced F327's
+  # follow-up sync: the F326 pins defended a dead contract and kept CI green
+  # over zero executed suites).
   integration:
-    name: integration (ephemeral cxa_test postgres + redis)
+    name: integration (ephemeral postgres + redis via compose fixture)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: cxa_test
-          POSTGRES_USER: cox
-          POSTGRES_PASSWORD: test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U cox -d cxa_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      COXAGENT_TEST_PG_DSN: postgres://cox:test@localhost:5432/cxa_test
-      COXAGENT_TEST_REDIS_URL: redis://localhost:6379
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Run the DSN-gated integration tests
-        run: cargo test -p coxagent-infrastructure --test sql_store_contract --test kv_doc_contract --test sql_auth_token_harvest --test distributed_coord -- --ignored
+      - name: Run the DB-backed integration suites (fixture self-provisions)
+        run: cargo test -p coxagent-infrastructure --test sql_store_contract --test kv_doc_contract --test sql_auth_token_harvest --test distributed_coord

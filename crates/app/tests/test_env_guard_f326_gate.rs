@@ -9,8 +9,19 @@
 //! once, in `infrastructure/tests/common/mod.rs`, and this gate fails the
 //! build the day any gated test grows its own divergent copy again.
 //!
-//! (The CI-level half — the `integration` job that runs these gated suites —
-//! is pinned in `ci_availability_gate.rs`.)
+//! F327 (merged) changed the policy's mechanism and this gate moved with it:
+//! the suites no longer gate on an exported `COXAGENT_TEST_PG_DSN` — every
+//! test claims its own ephemeral Postgres + Redis from the shared compose
+//! fixture, ANY exported database URL is refused fail-closed (the exported-DSN
+//! incident cannot recur because there is no operator-supplied target to
+//! misclassify), and the only lawful skip is docker-absent, reported
+//! explicitly. Nothing may be `#[ignore]`d: the suites run wherever docker
+//! exists, and an ignore would paint green over unexecuted suites.
+//!
+//! (The CI-level half — the `integration` job that runs these suites — is
+//! pinned in `ci_availability_gate.rs`, which also cross-checks this file's
+//! `GATED` roster against the workflow: policy and pins move together, in the
+//! same PR.)
 
 use std::path::PathBuf;
 
@@ -179,6 +190,14 @@ fn every_gated_test_skips_explicitly_through_the_shared_claim_or_skip() {
              silently returns when the database is missing is reported `ok` \
              in CI, the exact false green CXA-F326 closes (CXA-F327 moved the \
              explicit skip into the shared guard; route through it)"
+        );
+        assert!(
+            !src.contains("#[ignore"),
+            "{file} is #[ignore]d — the DB-backed suites run wherever docker \
+             exists, and an ignore attribute paints green over unexecuted \
+             suites in exactly the environments that CAN run them (the same \
+             false green CXA-F326 closed, in a new costume; the integration \
+             job passes no `--ignored` for the same reason)"
         );
     }
 }
