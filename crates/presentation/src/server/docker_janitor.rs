@@ -188,6 +188,27 @@ async fn sweep_dormant_volumes() {
     }
 }
 
+/// Which repositories from one `docker images --format {{.Repository}}` pass
+/// are worth the expensive per-repo `ps -a --filter ancestor=` probe: sorted
+/// and deduped, our namespace only, and nothing a still-existing project
+/// could own (the cheap namespace precheck runs BEFORE any probe). Pure, so
+/// the candidate half of the orphaned-image decision — the half that decides
+/// a tagged worktree image is even considered (CXA-B143/B156) — is testable
+/// without a daemon.
+#[must_use]
+fn repositories_to_probe(
+    raw_repositories: Vec<String>,
+    existing_projects: &[String],
+) -> Vec<String> {
+    let mut repositories = raw_repositories;
+    repositories.sort_unstable();
+    repositories.dedup();
+    repositories
+        .into_iter()
+        .filter(|repository| image_sweep_candidate(repository, existing_projects))
+        .collect()
+}
+
 /// Sweep 3: remove every tagged image the shared policy admits is orphaned —
 /// a reclaimable `<project>-<service>` repository whose project is gone and
 /// that no container (running or stopped) references. The ancestor probe is
@@ -204,20 +225,13 @@ async fn sweep_orphaned_images() {
     let Some(out) = run_docker(&["images", "--format", "{{.Repository}}"]).await else {
         return;
     };
-    let mut repositories: Vec<String> = String::from_utf8_lossy(&out.stdout)
+    let raw: Vec<String> = String::from_utf8_lossy(&out.stdout)
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && *l != "<none>")
         .map(ToOwned::to_owned)
         .collect();
-    repositories.sort_unstable();
-    repositories.dedup();
-    for repository in repositories {
-        // Cheap namespace precheck first: base images and everything an
-        // existing project could own are skipped without the probe.
-        if !image_sweep_candidate(&repository, &existing) {
-            continue;
-        }
+    for repository in repositories_to_probe(raw, &existing) {
         let referenced = match run_docker(&[
             "ps",
             "-a",
@@ -246,6 +260,94 @@ async fn sweep_orphaned_images() {
             ),
             None => tracing::debug!("docker janitor: docker unavailable, kept image {repository}"),
         }
+    }
+}
+
+/// CXA-B156 regression: the hourly sweep must reap orphaned TAGGED
+/// slot-worktree images — `image prune -f` alone (the pre-B143 sweep) never
+/// touches a tagged repository, which is how two 375 MB worktree stacks
+/// survived every pass. Each test composes the sweep's evidence chain the
+/// way `sweep_orphaned_images` does: candidate selection, then the shared
+/// policy's verdict over the reference probe's (fail-closed) answer.
+#[cfg(test)]
+mod orphaned_image_sweep_tests {
+    use super::{orphaned_compose_image, repositories_to_probe};
+
+    const SLOT_2: &str = "cox--coxagent-worktrees-cxa-slot-2-88a7821f-coxagent";
+    const SLOT_3: &str = "cox--coxagent-worktrees-cxa-slot-3-88a7821f-coxagent";
+
+    /// The host evidence CXA-B156 was filed with: both worktree tags present
+    /// (slot-2 under two tags), their compose projects gone from
+    /// `docker compose ls -a`, and `docker ps -a` showing nothing for them.
+    /// The sweep must reap exactly those two — the live hub, shared infra,
+    /// base images and our manual `cxa-` verification builds stay untouched.
+    #[test]
+    fn the_sweep_reaps_both_orphaned_slot_worktree_images_and_nothing_else() {
+        let raw = vec![
+            "coxagent-hub".to_owned(),
+            SLOT_2.to_owned(),
+            SLOT_2.to_owned(),
+            SLOT_3.to_owned(),
+            "rust".to_owned(),
+            "postgres".to_owned(),
+            "cxa-f029-linux-gate".to_owned(),
+        ];
+        let nothing_references_anything = |_repository: &str| false;
+        let reaped: Vec<String> = repositories_to_probe(raw, &[])
+            .into_iter()
+            .filter(|repository| {
+                orphaned_compose_image(repository, nothing_references_anything(repository), &[])
+            })
+            .collect();
+        assert_eq!(
+            reaped,
+            vec![SLOT_2.to_owned(), SLOT_3.to_owned()],
+            "both orphaned worktree tags are reaped exactly once; protected, base and manual-build names are kept"
+        );
+    }
+
+    /// Err on the side of keeping: while a project is still listed, its tag
+    /// survives even though nothing references it — only the truly gone
+    /// project's image is reaped.
+    #[test]
+    fn a_tagged_image_a_still_listed_project_could_own_is_kept() {
+        let raw = vec![SLOT_2.to_owned(), SLOT_3.to_owned()];
+        let slot_2_still_listed = vec!["cox--coxagent-worktrees-cxa-slot-2-88a7821f".to_owned()];
+        let referenced_by_nothing = |_repository: &str| false;
+        let reaped: Vec<String> = repositories_to_probe(raw, &slot_2_still_listed)
+            .into_iter()
+            .filter(|repository| {
+                orphaned_compose_image(
+                    repository,
+                    referenced_by_nothing(repository),
+                    &slot_2_still_listed,
+                )
+            })
+            .collect();
+        assert_eq!(
+            reaped,
+            vec![SLOT_3.to_owned()],
+            "slot-2's project still exists, so its tag is kept; slot-3's project is gone and its tag reaped"
+        );
+    }
+
+    /// The ancestor probe wins: with the project gone but a container (or an
+    /// unanswerable probe — the caller maps both to `true`) still referencing
+    /// the image, it is kept.
+    #[test]
+    fn a_referenced_worktree_image_is_kept_even_with_its_project_gone() {
+        let raw = vec![SLOT_2.to_owned()];
+        let referenced_by_a_container = |_repository: &str| true;
+        let reaped: Vec<String> = repositories_to_probe(raw, &[])
+            .into_iter()
+            .filter(|repository| {
+                orphaned_compose_image(repository, referenced_by_a_container(repository), &[])
+            })
+            .collect();
+        assert!(
+            reaped.is_empty(),
+            "the ancestor probe's verdict outranks the dead project's"
+        );
     }
 }
 
