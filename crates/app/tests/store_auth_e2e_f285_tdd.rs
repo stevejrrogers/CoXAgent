@@ -34,6 +34,13 @@
 //! `.claude/handoff-rest-runner.md`, section "/store caller inventory
 //! (CXA-F285)".)
 //!
+//! CXA-F350 extends the persona set with the lead-tier bearer: personal
+//! tokens now inherit their minting member's project memberships (resolved
+//! live), so a lead-tier member's runner passes the /store membership branch
+//! exactly where the member's own session does — while non-members, revoked
+//! memberships, deleted owners, and admin-minted service tokens still gain
+//! no project reach.
+//!
 //! The runner credential class is the personal API token presented as a
 //! bearer, so every persona here authenticates the way a runner does. The
 //! bearer-only restriction mirrors `rest_store_support::StubAuth` ("the
@@ -78,6 +85,11 @@ const MEMBER_BEARER: &str = "f285-member";
 /// Manage-tier bearer (Manager) whose ONLY membership is [`OTHER_PID`]:
 /// clears the manage bar but must trip the project-membership branch.
 const LEAD_OUTSIDER_BEARER: &str = "f285-lead-outsider";
+/// CXA-F350 persona: lead-tier (Manager) bearer that IS a member of [`PID`]
+/// — the membership branch must PASS it on every op (a bearer principal
+/// carrying the project membership is exactly what personal tokens now
+/// resolve to).
+const LEAD_MEMBER_BEARER: &str = "f285-lead-member";
 /// Super bearer with NO project memberships: the exemption AC2 pins — Super
 /// is above the membership gate by design.
 const SUPER_OUTSIDER_BEARER: &str = "f285-super-outsider";
@@ -195,6 +207,7 @@ impl AuthPort for BearerPersonas {
             ADMIN_BEARER => Some(persona("ops-admin", AuthRole::Admin, &[PID])),
             MEMBER_BEARER => Some(persona("carol", AuthRole::Be, &[PID])),
             LEAD_OUTSIDER_BEARER => Some(persona("morgan", AuthRole::Manager, &[OTHER_PID])),
+            LEAD_MEMBER_BEARER => Some(persona("lena", AuthRole::Manager, &[PID])),
             SUPER_OUTSIDER_BEARER => Some(persona("saul", AuthRole::Super, &[])),
             ADMIN_OUTSIDER_BEARER => Some(persona("ada", AuthRole::Admin, &[])),
             _ => None,
@@ -582,15 +595,13 @@ async fn full_round_trip(store: &RestStateStore) -> RoundTrip {
 /// member of :pid (`assign_project`), so the only thing under test is what
 /// the gateway does with that credential.
 ///
-/// The member's role is Admin on purpose, not timidity: a bearer principal
-/// resolves with NO project memberships by design (`FileAuthService` /
-/// `SqlAuthService` `principal_for_bearer` both return `projects: []` —
-/// service tokens are hub-wide for their role), so the membership branch of
-/// the /store gate passes only Super/Admin-tier tokens. A lead-tier
-/// (e.g. TechLead) member's token would be refused 403 "not a member of this
-/// project" even though the account itself is a member — flagged in the
-/// CXA-F285 caller inventory as a product decision for SA, not a bug fixed
-/// here.
+/// The member's role is Admin on purpose, not timidity: pre-CXA-F350 a bearer
+/// principal resolved with NO project memberships (`principal_for_bearer`
+/// returned `projects: []`), so the membership branch of the /store gate
+/// passed only Super/Admin-tier tokens — a lead-tier member's token was
+/// refused 403 "not a member of this project" even though the account itself
+/// was a member. F350 binds personal tokens to their minting member
+/// (`create_token_for`), which the next test pins for the lead tier.
 #[tokio::test]
 async fn ac3_personal_token_of_a_manage_tier_member_completes_the_full_round_trip() {
     // The manage-tier project member and their personal token.
@@ -637,6 +648,233 @@ async fn ac3_personal_token_of_a_manage_tier_member_completes_the_full_round_tri
             && with_auth.workers_seen == 1,
         "the full round trip must land every step: {with_auth:?}"
     );
+}
+
+/// CXA-F350 (the gate half): a lead-tier bearer that DOES carry the project
+/// membership passes the /store gate on the full runner round trip — exactly
+/// the reach the personal token now inherits (pinned against the real
+/// `FileAuthService` in the next test). The persona is the stub-isolated
+/// view of that principal: Manager (clears the manage bar) and a member of
+/// :pid.
+#[tokio::test]
+async fn f350_a_lead_tier_bearer_with_the_membership_passes_every_store_op() {
+    let (port, _dir) = boot(
+        Some(Arc::new(BearerPersonas)),
+        Arc::new(VersionedRegistryStore::new()),
+    )
+    .await;
+    let with_auth = full_round_trip(&rest_store(port, Some(LEAD_MEMBER_BEARER))).await;
+
+    // The same round trip with auth disabled — parity of the gate outcome.
+    let (open_port, _dir2) = boot(None, Arc::new(VersionedRegistryStore::new())).await;
+    let open = full_round_trip(&rest_store(open_port, None)).await;
+
+    assert_eq!(
+        with_auth, open,
+        "the lead-tier member's round trip must match the open-mode round trip exactly"
+    );
+    assert!(
+        with_auth.load_is_default
+            && with_auth.baseline_revision == Some(0)
+            && with_auth.save_with_revision_ok
+            && with_auth.revision_after_save == Some(1)
+            && with_auth.claim_won
+            && with_auth.stage_won
+            && with_auth.heartbeat_ok
+            && with_auth.workers_seen == 1,
+        "the full round trip must land every step: {with_auth:?}"
+    );
+}
+
+/// CXA-F350 (the mint half): a lead-tier member's PERSONAL token — minted on
+/// the real `FileAuthService` exactly as `create_my_token_ep` mints it, with
+/// the caller as owner — completes the full runner round trip. Before F350
+/// this persona was refused 403 "not a member of this project" on every op
+/// even though the account itself was a member.
+#[tokio::test]
+async fn f350_a_lead_tier_members_personal_token_completes_the_full_round_trip() {
+    let auth_dir = tempfile::tempdir().expect("auth dir");
+    let auth = FileAuthService::open(&auth_dir.path().join("users.json")).expect("auth service");
+    assert!(
+        auth.create_user("dev-lead", "pw", AuthRole::TechLead).await,
+        "the lead-tier member must be creatable"
+    );
+    assert!(
+        auth.assign_project("dev-lead", PID).await,
+        "the member must be assignable to the project"
+    );
+    let token = auth
+        .create_token_for(
+            "user:dev-lead:remote-store",
+            AuthRole::TechLead,
+            Some("dev-lead"),
+        )
+        .await
+        .expect("mint the personal token");
+
+    let (authed_port, _dir) = boot(
+        Some(Arc::new(auth)),
+        Arc::new(VersionedRegistryStore::new()),
+    )
+    .await;
+    let with_auth = full_round_trip(&rest_store(authed_port, Some(&token))).await;
+
+    // The same round trip with auth disabled — the parity half of the AC.
+    let (open_port, _dir2) = boot(None, Arc::new(VersionedRegistryStore::new())).await;
+    let open = full_round_trip(&rest_store(open_port, None)).await;
+
+    assert_eq!(
+        with_auth, open,
+        "the lead-tier authed round trip must match the open-mode round trip exactly"
+    );
+    assert!(
+        with_auth.load_is_default
+            && with_auth.baseline_revision == Some(0)
+            && with_auth.save_with_revision_ok
+            && with_auth.revision_after_save == Some(1)
+            && with_auth.claim_won
+            && with_auth.stage_won
+            && with_auth.heartbeat_ok
+            && with_auth.workers_seen == 1,
+        "the full round trip must land every step: {with_auth:?}"
+    );
+}
+
+/// Boot one hub behind `auth` and drive every store op with `token`,
+/// requiring the membership branch's 403 on each — the shared refusal shape
+/// of the F350 boundary sub-cases.
+async fn every_op_refused_not_a_member(auth: FileAuthService, token: &str) {
+    let (port, _dir) = boot(
+        Some(Arc::new(auth)),
+        Arc::new(VersionedRegistryStore::new()),
+    )
+    .await;
+    for (op, refused) in every_op_result(&rest_store(port, Some(token))).await {
+        let err = refused.unwrap_or_else(|| panic!("op {op} must be refused"));
+        assert!(
+            err.to_string().contains("not a member of this project"),
+            "op {op} must be refused by the membership branch — got: {err}"
+        );
+    }
+}
+
+/// CXA-F350's boundary: inheritance changes WHOSE memberships a personal
+/// token carries, nothing else. A lead-tier member of ANOTHER project is
+/// still refused by the membership branch; a membership revoked after
+/// minting bites on the very next call with the same secret (live
+/// resolution); a deleted owner fails closed; and an admin-minted SERVICE
+/// token gains nothing from a personal-looking label — the owner record, not
+/// the label, is the only inheritance input.
+#[tokio::test]
+async fn f350_a_personal_token_gains_no_reach_beyond_its_owner() {
+    // (a) Lead-tier member of the OTHER project only: same 403 as before.
+    let outsider_dir = tempfile::tempdir().expect("auth dir");
+    let outsider =
+        FileAuthService::open(&outsider_dir.path().join("users.json")).expect("auth service");
+    assert!(
+        outsider
+            .create_user("other-lead", "pw", AuthRole::TechLead)
+            .await
+    );
+    assert!(outsider.assign_project("other-lead", OTHER_PID).await);
+    let outsider_token = outsider
+        .create_token_for(
+            "user:other-lead:remote-store",
+            AuthRole::TechLead,
+            Some("other-lead"),
+        )
+        .await
+        .expect("mint the outsider personal token");
+    every_op_refused_not_a_member(outsider, &outsider_token).await;
+
+    // (b) The membership is revoked AFTER the token exists and has been
+    // used: the next call with the SAME secret is refused — live
+    // resolution, no re-mint.
+    let revoked_dir = tempfile::tempdir().expect("auth dir");
+    let revoked = Arc::new(
+        FileAuthService::open(&revoked_dir.path().join("users.json")).expect("auth service"),
+    );
+    assert!(
+        revoked
+            .create_user("revoked-lead", "pw", AuthRole::TechLead)
+            .await
+    );
+    assert!(revoked.assign_project("revoked-lead", PID).await);
+    let revoked_token = revoked
+        .create_token_for(
+            "user:revoked-lead:remote-store",
+            AuthRole::TechLead,
+            Some("revoked-lead"),
+        )
+        .await
+        .expect("mint the personal token");
+    let (port_b, _db) = boot(
+        Some(Arc::clone(&revoked) as Arc<dyn AuthPort>),
+        Arc::new(VersionedRegistryStore::new()),
+    )
+    .await;
+    let before = rest_store(port_b, Some(&revoked_token));
+    before
+        .load()
+        .await
+        .expect("the token passes while the membership stands");
+    assert!(
+        revoked.unassign_project("revoked-lead", PID).await,
+        "the membership must be revocable after minting"
+    );
+    for (op, refused) in every_op_result(&rest_store(port_b, Some(&revoked_token))).await {
+        let err = refused.unwrap_or_else(|| panic!("revoked op {op} must be refused"));
+        assert!(
+            err.to_string().contains("not a member of this project"),
+            "revoked op {op} must be refused by the membership branch — got: {err}"
+        );
+    }
+
+    // (c) The owner's account is deleted: the token fails closed to no
+    // project reach instead of retaining ghost memberships.
+    let deleted_dir = tempfile::tempdir().expect("auth dir");
+    let deleted = Arc::new(
+        FileAuthService::open(&deleted_dir.path().join("users.json")).expect("auth service"),
+    );
+    assert!(
+        deleted
+            .create_user("gone-lead", "pw", AuthRole::TechLead)
+            .await
+    );
+    assert!(deleted.assign_project("gone-lead", PID).await);
+    let deleted_token = deleted
+        .create_token_for(
+            "user:gone-lead:remote-store",
+            AuthRole::TechLead,
+            Some("gone-lead"),
+        )
+        .await
+        .expect("mint the personal token");
+    let (port_c, _dc) = boot(
+        Some(Arc::clone(&deleted) as Arc<dyn AuthPort>),
+        Arc::new(VersionedRegistryStore::new()),
+    )
+    .await;
+    assert!(deleted.delete_user("gone-lead").await);
+    for (op, refused) in every_op_result(&rest_store(port_c, Some(&deleted_token))).await {
+        let err = refused.unwrap_or_else(|| panic!("deleted-owner op {op} must be refused"));
+        assert!(
+            err.to_string().contains("not a member of this project"),
+            "deleted-owner op {op} must fail closed — got: {err}"
+        );
+    }
+
+    // (d) Admin-minted SERVICE token (owner '') wearing a personal-looking
+    // label: no inheritance — the label is not the input.
+    let spoof_dir = tempfile::tempdir().expect("auth dir");
+    let spoof = FileAuthService::open(&spoof_dir.path().join("users.json")).expect("auth service");
+    assert!(spoof.create_user("victim", "pw", AuthRole::TechLead).await);
+    assert!(spoof.assign_project("victim", PID).await);
+    let spoof_token = spoof
+        .create_token("user:victim:remote-store", AuthRole::TechLead)
+        .await
+        .expect("mint the admin service token");
+    every_op_refused_not_a_member(spoof, &spoof_token).await;
 }
 
 /// AC4: with auth NOT configured, /store still accepts unauthenticated ops
