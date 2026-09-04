@@ -221,10 +221,22 @@ function renderMgUsage(){
   const spMax=sp.length?Math.max(sp[0][1],0.01):1;
   const us=(MG.users||[]).map(u=>[u.name||u.username,u.spend||0]).filter(x=>x[1]>0).sort((a,b)=>b[1]-a[1]).slice(0,10);
   const usMax=us.length?Math.max(us[0][1],0.01):1;
-  el.innerHTML=`<div class="wssec">Spend by space</div>
-    <div class="panel" style="margin-bottom:18px">${sp.map(([n,c])=>bar(n,c,spMax,"var(--accent2)")).join("")||'<div class="empty">no spend yet</div>'}</div>
-    <div class="wssec">Top burners 🔥</div>
-    <div class="panel">${us.map(([n,c])=>bar(n,c,usMax,"var(--amber)")).join("")||'<div class="empty">no per-user spend yet</div>'}</div>`;
+  // Depth pass round 3: totals header, share-of-total on every bar, and the
+  // full contributor list behind a toggle instead of a silent top-10 cut.
+  const spTotal=sp.reduce((a,x)=>a+x[1],0);
+  const usAll=(MG.users||[]).map(u=>[u.name||u.username,u.spend||0]).filter(x=>x[1]>0).sort((a,b)=>b[1]-a[1]);
+  const usTotal=usAll.reduce((a,x)=>a+x[1],0);
+  const shown=window._mgUsageAll?usAll:us;
+  const pct=(c,t)=>t>0?" · "+(c/t*100).toFixed(c/t>=0.1?0:1)+"%":"";
+  const bar2=(n,c,max,color,t)=>`<div style="display:flex;align-items:center;gap:12px;padding:8px 0"><span style="min-width:150px;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(n)}</span>
+    <div style="flex:1;background:var(--card2);border-radius:6px;height:8px;overflow:hidden"><div style="width:${Math.max(3,Math.round(c/max*100))}%;height:100%;background:${color}"></div></div>
+    <span style="font-size:12px;font-family:ui-monospace,monospace;min-width:104px;text-align:right">${money(c)}<span style="color:var(--dim)">${pct(c,t)}</span></span></div>`;
+  const more=usAll.length>us.length;
+  el.innerHTML=`<div class="wssec">Spend by space <span style="font-weight:400;color:var(--dim);font-size:11.5px">· ${sp.length} space${sp.length===1?"":"s"} · ${money(spTotal)} total</span></div>
+    <div class="panel" style="margin-bottom:18px">${sp.map(([n,c])=>bar2(n,c,spMax,"var(--accent2)",spTotal)).join("")||'<div class="empty">no spend yet — engine calls attribute here as agents run</div>'}</div>
+    <div class="wssec">Burners 🔥 <span style="font-weight:400;color:var(--dim);font-size:11.5px">· ${usAll.length} contributor${usAll.length===1?"":"s"} · ${money(usTotal)} total</span></div>
+    <div class="panel">${shown.map(([n,c])=>bar2(n,c,usMax,"var(--amber)",usTotal)).join("")||'<div class="empty">no per-user spend yet</div>'}
+    ${more?`<div style="text-align:center;padding-top:8px"><button class="fchip" onclick="window._mgUsageAll=!window._mgUsageAll;renderMgUsage()">${window._mgUsageAll?"show top 10":"show all "+usAll.length}</button></div>`:""}</div>`;
 }
 // ---- Fleet spend cockpit (CXA-F278): cross-project burn · cap headroom · hub
 // soft ceiling. Visibility-only: the endpoint pauses nothing, and the ceiling

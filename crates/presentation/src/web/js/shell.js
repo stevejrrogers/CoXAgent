@@ -2459,3 +2459,32 @@ async function dupeAction(action,homeProjectId,homeTicketId,dupProjectId,dupTick
     renderDupes();
   }catch(_){toast("action failed","err");}
 }
+
+// ── Engine health card (depth pass round 3) ─────────────────────────────────
+// The wedge/failure picture the operator was reconstructing by hand from
+// hub.log, drawn from state the SSE snapshot already carries: open
+// engine_incidents (engine · role · reason · repeat count) and the tickets
+// with the most failed attempts. Pure client-side, refreshed on Team nav.
+function renderEngineHealth(){
+  const el=document.getElementById("team-enginehealth");if(!el)return;
+  const s=window.STATE||{};
+  const inc=Array.isArray(s.engine_incidents)?s.engine_incidents:[];
+  const fails=Object.entries(s.ticket_failures||{}).map(([id,v])=>[id,Array.isArray(v)?v.length:0])
+    .filter(x=>x[1]>0).sort((a,b)=>b[1]-a[1]).slice(0,5);
+  if(!inc.length&&!fails.length){el.innerHTML="";return;}
+  const incRows=inc.map(i=>`<div style="display:flex;gap:9px;align-items:baseline;padding:5px 0;border-bottom:1px solid var(--border)">
+    <span class="tk" style="background:color-mix(in srgb,var(--red) 14%,transparent);color:var(--red);flex:none">${esc(i.engine)}</span>
+    <span style="font-size:12px;font-weight:600;flex:none">${esc(i.role||"")}</span>
+    <span style="font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1" title="${esc(i.reason||"")}">${esc(i.reason||"")}</span>
+    <span style="font-size:11px;color:var(--dim);flex:none">×${i.count||1} since ${esc((i.since||"").slice(5,16).replace("T"," "))}</span></div>`).join("");
+  const failRows=fails.map(([id,n])=>`<div style="display:flex;gap:9px;align-items:center;padding:4px 0">
+    <span class="tk" style="cursor:pointer" onclick="showTicket('${esc(id)}')">${esc(id)}</span>
+    <div style="flex:1;background:var(--card2);border-radius:5px;height:7px;overflow:hidden"><div style="width:${Math.min(100,n*20)}%;height:100%;background:var(--amber)"></div></div>
+    <span style="font-size:11.5px;color:var(--muted);flex:none">${n} failed attempt${n>1?"s":""}</span></div>`).join("");
+  el.innerHTML=`<div class="panel" style="margin:10px 0 14px">
+    <h4><i class="ti ti-heart-rate-monitor" style="color:${inc.length?"var(--red)":"var(--green)"}"></i> Engine health
+      <span style="margin-left:auto;font-weight:400;font-size:12px;color:${inc.length?"var(--red)":"var(--green)"}">${inc.length?inc.length+" open incident"+(inc.length>1?"s":""):"no open incidents"}</span></h4>
+    ${incRows}
+    ${fails.length?`<div style="font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--dim);margin:10px 0 4px">Struggling tickets</div>${failRows}`:""}
+  </div>`;
+}
