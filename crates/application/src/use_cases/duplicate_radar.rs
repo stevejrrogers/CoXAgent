@@ -5,9 +5,12 @@
 //! and built in every project on the hub. This module runs the SAME similarity
 //! predicate the per-project gates use ([`crate::parsing::jaccard`]) over a
 //! cross-project registry of committed ticket titles + scopes, and reports the
-//! matching pairs. It never suppresses anything by itself: matches surface as
-//! radar entries a human resolves (redirect / reject / allow), and pairs the
-//! human allowed are excluded here via the persisted allowlist.
+//! matching pairs. Matches surface as radar entries a human resolves
+//! (redirect / reject / allow), and pairs the human allowed are excluded here
+//! via the persisted allowlist — nothing is auto-suppressed EXCEPT the AC4
+//! carve-out: same-service-tag pairs whose dissimilarity stays within
+//! [`crate::parsing::SAME_TAG_MAX_DISSIMILARITY`] are presumed
+//! legitimately-shared infrastructure (exact matches always are).
 //!
 //! Layering: no IO, no framework imports — the caller (the HTTP adapter)
 //! gathers [`TicketSnapshot`]s through `StateStorePort` and hands them in.
@@ -16,17 +19,15 @@
 use crate::parsing::{jaccard, normalize_title, title_tokens};
 use std::collections::HashMap;
 
-/// Similarity above which two titles are near-paraphrase duplicates — the
-/// exact bar [`crate::parsing::duplicates_existing`] enforces within one
-/// project, so "duplicate" means the same thing here as everywhere else.
-pub const DUPE_THRESHOLD: f64 = 0.6;
-
-/// Stricter bar for tickets that BOTH carry the same bounded-context service
-/// tag (AC4): shared infrastructure legitimately repeats across projects, so
-/// a paraphrase-level match is presumed legitimate and skipped — only a
-/// near-identical title still surfaces for a human decision (who can allow
-/// the pair permanently).
-pub const SAME_TAG_DUPE_THRESHOLD: f64 = 0.9;
+/// The similarity bars this radar judges by — the SAME constants
+/// [`crate::parsing::duplicates_existing`] enforces within one project,
+/// re-exported here so no caller forks an inline threshold (CXA-F254:
+/// [`crate::parsing::DUPLICATE_JACCARD_THRESHOLD`] is the per-project bar;
+/// [`crate::parsing::SAME_TAG_MAX_DISSIMILARITY`] is AC4's stricter
+/// dissimilarity bound for same-service-tag pairs).
+pub use crate::parsing::{
+    DUPLICATE_JACCARD_THRESHOLD as DUPE_THRESHOLD, SAME_TAG_MAX_DISSIMILARITY,
+};
 
 /// Normalized titles shorter than this are noise ("x", "ai") and never match.
 pub const MIN_TITLE_LEN: usize = 4;
@@ -95,6 +96,16 @@ fn same_service_tag(a: &TicketSnapshot, b: &TicketSnapshot) -> bool {
         (Some(x), Some(y)) => x.trim().eq_ignore_ascii_case(y.trim()),
         _ => false,
     }
+}
+
+/// AC4 carve-out: a pair whose tickets BOTH carry the same bounded-context
+/// service tag is presumed legitimately-shared infrastructure and exempt
+/// while its dissimilarity (`1 − similarity`) stays within
+/// [`SAME_TAG_MAX_DISSIMILARITY`] — exact matches (dissimilarity 0) are
+/// always exempt. An absent tag is no exemption. Past the bound the pair
+/// still surfaces for a human decision, like any other match.
+fn same_tag_exempt(a: &TicketSnapshot, b: &TicketSnapshot, score: f64) -> bool {
+    same_service_tag(a, b) && 1.0 - score <= SAME_TAG_MAX_DISSIMILARITY
 }
 
 struct Entry<'a> {
@@ -169,6 +180,12 @@ fn collapse_identical_titles(
             if m.project_id == home.project_id {
                 continue;
             }
+            // Identical titles carry dissimilarity 0, so a same-tag pair is
+            // ALWAYS exempt here (AC4) — shared infrastructure may repeat
+            // verbatim across projects without a human verdict.
+            if same_tag_exempt(home, m, 1.0) {
+                continue;
+            }
             if allowed_pairs.contains(&pair_key(
                 (&home.project_id, &home.ticket_id),
                 (&m.project_id, &m.ticket_id),
@@ -220,9 +237,10 @@ fn paraphrase_pairs(
                 continue;
             }
             // AC4 carve-out: both sides tagged with the SAME bounded-context
-            // tag are presumed legitimately-shared infrastructure unless they
-            // are near-identical beyond the stricter bar.
-            if same_service_tag(a.snap, b.snap) && score < SAME_TAG_DUPE_THRESHOLD {
+            // tag are presumed legitimately-shared infrastructure while
+            // their dissimilarity stays within the stricter bound; past it
+            // the drift still surfaces for a human decision.
+            if same_tag_exempt(a.snap, b.snap, score) {
                 continue;
             }
             if allowed_pairs.contains(&pair_key(
@@ -364,31 +382,24 @@ mod tests {
     }
 
     #[test]
-    fn ac4_same_tag_paraphrases_are_presumed_legitimate_shared_infra() {
-        // Same bounded-context tag, near-paraphrase titles (jaccard between
-        // DUPE_THRESHOLD and the stricter bar): skipped by the carve-out…
+    fn ac4_same_tag_pairs_stay_exempt_while_dissimilarity_is_within_the_bound() {
+        // Same bounded-context tag, near-identical titles one token apart
+        // (jaccard 0.8 ⇒ dissimilarity exactly the bound): presumed
+        // legitimately-shared infrastructure — exempt…
         let pair = vec![
+            tagged(snap("p1", "Alpha", "T-1", "Fix flaky login flow"), "infra"),
             tagged(
-                snap("p1", "Alpha", "T-1", "Add cycle performance dashboard"),
-                "infra",
-            ),
-            tagged(
-                snap(
-                    "p2",
-                    "Beta",
-                    "T-1",
-                    "Add cycle performance dashboard with alerts",
-                ),
+                snap("p2", "Beta", "T-1", "Fix flaky login flow for mobile"),
                 "infra",
             ),
         ];
         let j = jaccard(&title_tokens(&pair[0].title), &title_tokens(&pair[1].title));
         assert!(
-            (DUPE_THRESHOLD..SAME_TAG_DUPE_THRESHOLD).contains(&j),
-            "fixture must sit inside the carve-out band, got {j}"
+            (j - 0.8).abs() < 1e-12,
+            "fixture must sit exactly on the bound, got {j}"
         );
         assert!(find_cross_project_duplicates(&pair, &[]).is_empty());
-        // …but the SAME paraphrase without tags is a normal radar match.
+        // …the SAME near-identical pair without tags is a normal radar match…
         let untagged: Vec<TicketSnapshot> = pair
             .iter()
             .map(|s| TicketSnapshot {
@@ -397,8 +408,10 @@ mod tests {
             })
             .collect();
         assert_eq!(find_cross_project_duplicates(&untagged, &[]).len(), 1);
-        // …and DIFFERENT tags do not void the match either.
-        let mixed = vec![
+        // …and so is a same-tag pair whose wording drifted PAST the bound
+        // (jaccard 0.75 ⇒ dissimilarity 0.25): still a human decision, never
+        // a silent pass.
+        let drifted = vec![
             tagged(
                 snap("p1", "Alpha", "T-1", "Add cycle performance dashboard"),
                 "infra",
@@ -410,6 +423,22 @@ mod tests {
                     "T-1",
                     "Add cycle performance dashboard with alerts",
                 ),
+                "infra",
+            ),
+        ];
+        let jd = jaccard(&title_tokens(&drifted[0].title), &title_tokens(&drifted[1].title));
+        assert!((jd - 0.75).abs() < 1e-12);
+        assert!(
+            1.0 - jd > SAME_TAG_MAX_DISSIMILARITY,
+            "fixture must sit past the bound, dissimilarity {}",
+            1.0 - jd
+        );
+        assert_eq!(find_cross_project_duplicates(&drifted, &[]).len(), 1);
+        // …and DIFFERENT tags do not void the match either.
+        let mixed = vec![
+            tagged(snap("p1", "Alpha", "T-1", "Fix flaky login flow"), "infra"),
+            tagged(
+                snap("p2", "Beta", "T-1", "Fix flaky login flow for mobile"),
                 "ci",
             ),
         ];
@@ -417,19 +446,67 @@ mod tests {
     }
 
     #[test]
-    fn ac4_identical_same_tag_titles_still_surface_beyond_the_stricter_bar() {
-        // Exact-identical titles carry similarity 1.0, which exceeds the
-        // stricter test — they surface for a human decision, who can allow
-        // the pair permanently via the allowlist.
+    fn ac4_identical_same_tag_titles_are_always_exempt_at_dissimilarity_zero() {
+        // Exact-identical shared-infrastructure titles carry dissimilarity 0 —
+        // always within the bound — so a service filed verbatim in every
+        // project never queues a human verdict (AC4).
         let pair = vec![
             tagged(snap("p1", "Alpha", "T-1", "Add Redis cache layer"), "infra"),
             tagged(snap("p2", "Beta", "T-1", "Add Redis cache layer"), "infra"),
         ];
-        let out = find_cross_project_duplicates(&pair, &[]);
-        assert_eq!(out.len(), 1, "1.0 >= SAME_TAG_DUPE_THRESHOLD surfaces");
-        // The human allows it — the pair never comes back.
+        assert!(
+            find_cross_project_duplicates(&pair, &[]).is_empty(),
+            "same-tag exact matches are exempt without any operator action"
+        );
+        // The exemption is the TAG's doing: an untagged verbatim pair still
+        // surfaces, and the human's allow verdict then excludes it from
+        // future runs (AC3).
+        let untagged: Vec<TicketSnapshot> = pair
+            .iter()
+            .map(|s| TicketSnapshot {
+                service_tag: None,
+                ..s.clone()
+            })
+            .collect();
+        assert_eq!(find_cross_project_duplicates(&untagged, &[]).len(), 1);
         let key = pair_key(("p1", "T-1"), ("p2", "T-1"));
-        assert!(find_cross_project_duplicates(&pair, &[key]).is_empty());
+        assert!(find_cross_project_duplicates(&untagged, &[key]).is_empty());
+    }
+
+    #[test]
+    fn an_exempt_member_is_omitted_from_a_group_but_reportable_members_still_show() {
+        // Three projects filed the identical title; Alpha and Beta share the
+        // bounded-context tag, Gamma does not. The exempt Alpha–Beta pair is
+        // omitted (AC4), while Gamma — no tag, no exemption — still surfaces
+        // as the pair a human must resolve.
+        let snaps = vec![
+            tagged(snap("p1", "Alpha", "T-1", "Add Redis cache layer"), "infra"),
+            tagged(snap("p2", "Beta", "T-1", "Add Redis cache layer"), "infra"),
+            snap("p3", "Gamma", "T-1", "Add Redis cache layer"),
+        ];
+        let out = find_cross_project_duplicates(&snaps, &[]);
+        assert_eq!(out.len(), 1);
+        let dup_projects: Vec<&str> =
+            out[0].dups.iter().map(|d| d.project_name.as_str()).collect();
+        assert_eq!(
+            dup_projects,
+            vec!["Gamma"],
+            "the exempt same-tag member is omitted, reportable members stay"
+        );
+    }
+
+    #[test]
+    fn the_tag_comparison_is_trimmed_and_case_insensitive() {
+        // Tags are human-authored free text — a capitalization or padding
+        // difference must not silently void the AC4 carve-out.
+        let snaps = vec![
+            tagged(snap("p1", "Alpha", "T-1", "Add Redis cache layer"), "Infra"),
+            tagged(snap("p2", "Beta", "T-1", "Add Redis cache layer"), " infra "),
+        ];
+        assert!(
+            find_cross_project_duplicates(&snaps, &[]).is_empty(),
+            "same tag modulo trim/case stays exempt"
+        );
     }
 
     #[test]
@@ -490,7 +567,7 @@ mod tests {
         assert_eq!(out[0].home.project_name, "Alpha");
         let score = out[0].dups[0].score.expect("pair score");
         assert!(
-            (DUPE_THRESHOLD..SAME_TAG_DUPE_THRESHOLD).contains(&score),
+            (DUPE_THRESHOLD..1.0).contains(&score),
             "paraphrase sits below the identical-title collapse, got {score}"
         );
     }
