@@ -110,6 +110,17 @@ regression test.\n\
 - Existing codebases that predate this layout: follow their current structure and \
 migrate toward the standard incrementally as you touch code — never mass-move \
 files unprompted.\n\
+- DEPTH BAR — no shallow features, however small (operator mandate). Function \
+alone is not done; depth is part of done: (1) a LIST VIEW ships with a filter, \
+a sensible sort, counts/totals, pagination past ~50 rows, and an empty state \
+that says what fills it; (2) a NUMBER ships with its window (today/7d/lifetime), \
+a trend or delta where history exists, and a zero-state hint instead of a bare \
+0; (3) a STATE ships with attribution — who changed it, when, why — and the UI \
+always says WHY something is off/paused/failing instead of silently idling; \
+(4) an ACTION ships with its inverse and its guardrail — undo where cheap, a \
+confirm naming the blast radius where destructive, and permission-DIMMED (not \
+hidden) where unauthorized. Before calling a UI ticket fixed, check: filter? \
+counts? empty state? attribution? drill-down? Two or more missing = not done.\n\
 - An unclear ticket is NOT a coding problem — never invent it yourself. If an \
 acceptance criterion or the design references data, state or behaviour the \
 codebase does not have, do NOT fabricate fixtures or fake test data to \
