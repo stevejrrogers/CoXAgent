@@ -6,6 +6,7 @@ mod quarantine;
 pub mod redis_coord;
 mod rest_store;
 pub mod sql_store;
+mod tombstone;
 
 pub use any_store::AnyStateStore;
 pub use json_store::JsonStateStore;
