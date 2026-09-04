@@ -101,7 +101,7 @@ pub use run_reviews::{RunArchitectureAuditUseCase, RunDocsAuditUseCase};
 pub use run_sa::RunSaUseCase;
 pub use run_standup::RunStandupUseCase;
 pub use run_test::RunTestUseCase;
-pub use runner::{run_forever, RunnerHandle, RunnerSnapshot};
+pub use runner::{cycle_may_run, run_forever, RunnerHandle, RunnerSnapshot};
 pub use scan_deps::{FindingReport, ScanDependenciesUseCase, ScanDepsInput, ScanDepsOutcome};
 
 #[cfg(test)]

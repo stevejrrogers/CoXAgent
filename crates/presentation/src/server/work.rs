@@ -783,10 +783,74 @@ pub(super) async fn standup_ep(
     }
 }
 
+/// CXA-F356 tier 1: the workspace master switch. Admin-only — it idles every
+/// runner on every machine at its next cycle boundary (drain), and while off no
+/// per-machine switch can start anything. `?reason=` rides into the run-control
+/// UI and the activity feed.
+async fn workspace_control(
+    app: &AppState,
+    p: &super::ProjectHandle,
+    headers: &axum::http::HeaderMap,
+    account: &str,
+    action: &str,
+    q: &std::collections::HashMap<String, String>,
+) -> axum::response::Response {
+    let is_admin = match app.auth.clone() {
+        None => true, // open mode: single-user local
+        Some(auth) => resolve_principal(&auth, headers).await.is_some_and(|u| {
+            matches!(
+                u.role,
+                coxagent_application::auth::AuthRole::Super
+                    | coxagent_application::auth::AuthRole::Admin
+            )
+        }),
+    };
+    if !is_admin {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "only an admin can pause or resume the whole workspace"
+            })),
+        )
+            .into_response();
+    }
+    let running = action == "workspace-resume";
+    match p.store.load().await {
+        Ok(mut s) => {
+            s.workspace_run = coxagent_application::state::WorkspaceRun {
+                running,
+                by: account.to_owned(),
+                at: coxagent_application::state::now_rfc3339(),
+                reason: q.get("reason").cloned().unwrap_or_default(),
+            };
+            let verb = if running {
+                "resumed the workspace".to_owned()
+            } else if s.workspace_run.reason.is_empty() {
+                "paused the workspace (drain)".to_owned()
+            } else {
+                format!(
+                    "paused the workspace (drain) — \"{}\"",
+                    s.workspace_run.reason
+                )
+            };
+            s.log_activity(account, &verb, None);
+            match p.store.save(&s).await {
+                Ok(()) => Json(serde_json::json!({
+                    "ok": true, "workspace_run": s.workspace_run
+                }))
+                .into_response(),
+                Err(e) => internal_error(&e.to_string()),
+            }
+        }
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
 pub(super) async fn control_ep(
     State(app): State<AppState>,
     Path((pid, action)): Path<(String, String)>,
     headers: axum::http::HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> axum::response::Response {
     let Some(p) = app.project(&pid).await else {
         return not_found();
@@ -823,8 +887,28 @@ pub(super) async fn control_ep(
             })
         }
     };
+    if action == "workspace-pause" || action == "workspace-resume" {
+        return workspace_control(&app, &p, &headers, &account, &action, &q).await;
+    }
     match action.as_str() {
         "resume" => {
+            // CXA-F356: while the workspace master switch is off, a per-machine
+            // Start would silently idle at the gate and read as "it ignored
+            // me" — refuse loudly with who paused it instead.
+            if let Ok(s) = p.store.load().await {
+                if !s.workspace_run.running {
+                    let by = s.workspace_run.by;
+                    return (
+                        axum::http::StatusCode::CONFLICT,
+                        Json(serde_json::json!({
+                            "error": format!(
+                                "the workspace is paused by {by} — resume the workspace first"
+                            )
+                        })),
+                    )
+                        .into_response();
+                }
+            }
             if live && !owns {
                 // Someone else's run is live: just start MY operator.
                 let _ = p.store.set_desired(&operator, true).await;

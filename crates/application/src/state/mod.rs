@@ -47,6 +47,36 @@ pub struct ActivityEntry {
     pub ticket: Option<String>,
 }
 
+/// The workspace master run switch (CXA-F356): one flag every runner on every
+/// machine honours at its cycle boundary. `running` defaults to `true` so
+/// existing states load unchanged; the attribution fields are empty until an
+/// admin first flips it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceRun {
+    /// `false` = the whole workspace is paused (drain: in-flight work finishes).
+    pub running: bool,
+    /// Who flipped it last (username), for the "paused by X" attribution line.
+    #[serde(default)]
+    pub by: String,
+    /// RFC3339 timestamp of the last flip.
+    #[serde(default)]
+    pub at: String,
+    /// Optional human reason, surfaced in the run-control UI and audit line.
+    #[serde(default)]
+    pub reason: String,
+}
+
+impl Default for WorkspaceRun {
+    fn default() -> Self {
+        Self {
+            running: true,
+            by: String::new(),
+            at: String::new(),
+            reason: String::new(),
+        }
+    }
+}
+
 /// Keep the activity feed bounded.
 pub const MAX_ACTIVITY: usize = 60;
 
@@ -443,6 +473,13 @@ pub struct ProjectState {
     /// tracked so it files exactly one bug per outage and can announce recovery.
     #[serde(default)]
     pub ops_down: bool,
+    /// The workspace-wide master run switch (CXA-F356 tier 1). When off, every
+    /// runner on every machine idles at its next cycle boundary (drain
+    /// semantics: in-flight work finishes, nothing new starts) regardless of
+    /// each operator's own desired flag — and per-machine switches cannot
+    /// override it. Admin-only to flip; who/when/why is kept for the UI.
+    #[serde(default)]
+    pub workspace_run: WorkspaceRun,
     /// Consecutive unhealthy Ops-monitor probes (one per leader cycle) for the
     /// current outage — CXA-F240's "N consecutive checks" trigger: the
     /// live-health auto-rollback fires when this reaches
@@ -558,6 +595,7 @@ impl Default for ProjectState {
     fn default() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
+            workspace_run: WorkspaceRun::default(),
             queue_recovery: false,
             last_memory_hygiene_day: String::new(),
             jobs: Vec::new(),

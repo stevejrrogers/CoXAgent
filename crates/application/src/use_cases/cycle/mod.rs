@@ -985,7 +985,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     .push("cycle cut short — paused by user".to_owned());
                 return report;
             }
-            match self.dev(DevMode::Bug).execute().await {
+            match Box::pin(self.dev(DevMode::Bug).execute()).await {
                 Ok(id) => {
                     if let Some(tid) = &id {
                         self.commit_for_ticket(tid, "fix").await;
@@ -1043,7 +1043,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // Before building, make sure the next feature has a clear definition
             // of done — DEV raises unclear tickets and the BA fills them in.
             self.clarify_next_feature().await;
-            match self.dev(DevMode::Feature).execute().await {
+            match Box::pin(self.dev(DevMode::Feature).execute()).await {
                 Ok(id) => {
                     if let Some(tid) = &id {
                         self.commit_for_ticket(tid, "feat").await;
@@ -1456,7 +1456,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// fault instead of a phase-by-phase burn.
     async fn run_canary_probe(&self, report: &mut CycleReport) {
         self.report("DEV-BUG", "canary probe (engine incident open)");
-        match self.dev(DevMode::Bug).execute().await {
+        match Box::pin(self.dev(DevMode::Bug).execute()).await {
             Ok(Some(done)) => report.bug_fixed = Some(done),
             // Nothing to claim proves nothing about the engine — without a
             // fallback the incident could never close on an empty backlog.
