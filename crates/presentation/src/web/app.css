@@ -855,6 +855,16 @@
   .kpi{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:16px 17px}
   .kpi .ic{width:32px;height:32px;border-radius:9px;display:flex;align-items:center;justify-content:center;background:var(--accentbg);color:var(--accent2);margin-bottom:11px}
   .kpi .v{font-size:27px;font-weight:600;letter-spacing:-.02em;line-height:1} .kpi .k{font-size:12px;color:var(--muted);margin-top:5px}
+  /* KPI depth (CXA-F360): 14-day sparkline + signed delta vs the prior 14 days.
+     All colours are theme tokens, so the spark remaps with light/dark. */
+  .kpi .kd{font-weight:700} .kpi .kd.up{color:var(--green)} .kpi .kd.dn{color:var(--red)} .kpi .kd.z{color:var(--dim)}
+  .kpi .kwin{color:var(--dim);font-weight:400}
+  .kpi .spark{display:block;width:100%;height:28px;margin-top:10px}
+  .kpi .spark-a{fill:var(--accent2);opacity:.13}
+  .kpi .spark-l{fill:none;stroke:var(--accent2);stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+  .kpi .spark-d{fill:var(--accent2)}
+  /* Zero-state hint replaces the big number when a tile has nothing to chart. */
+  .kpi .vhint{font-size:12.5px;font-weight:500;line-height:1.55;color:var(--muted)}
   .row2{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:22px}
   .panel{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:17px}
   .panel h4{margin:0 0 13px;font-size:13px;font-weight:600;display:flex;align-items:center;gap:8px}
