@@ -64,7 +64,6 @@ function opencodeModelChange(sid){
 function onEngine(sid){const eng=document.getElementById("eng-"+sid).value;
   const list=MODELS[eng];const def=(list&&list.length)?list[0]:(OC_PROVIDERS[0]?.id||"anthropic")+"/"+(OC_MODELS[0]||"sonnet");
   document.getElementById("mc-"+sid).innerHTML=modelControl(eng,def,sid);}
-const KPI_IC={Shipped:"ti-rocket","In flight":"ti-plane-tilt","Open bugs":"ti-bug",Documented:"ti-book",Releases:"ti-versions",Cost:"ti-coin","Total spend":"ti-coin",Tokens:"ti-cpu",Runs:"ti-repeat","Agent actions":"ti-bolt","Tickets shipped":"ti-rocket","Bugs open":"ti-bug","Team cost":"ti-coin"};
 const money=n=>"$"+(Number(n)||0).toFixed(2);
 const fmtK=n=>{n=Number(n)||0;return n>=1e9?(n/1e9).toFixed(1)+"B":n>=1e6?(n/1e6).toFixed(1)+"M":n>=1000?(n/1000).toFixed(1)+"k":String(n);};
 const AC={BA:"--blue","DEV-FEATURE":"--green","DEV-BUG":"--red",SA:"--purple",TEST:"--teal",DOCS:"--blue",PO:"--amber",SM:"--teal",PD:"--purple",USER:"--accent"};
@@ -141,7 +140,6 @@ function metricsFrom(s){const t=s.tickets||[],h=s.history||[],isF=x=>x.type!=="b
 // repaints every few seconds, and identical rewrites restart CSS animations
 // (bars, pulses) making the whole page judder.
 function setHTML(el,html){if(!el)return;if(el.__h!==html){el.__h=html;el.innerHTML=html;}}
-function kpi(k,v,sub){return `<div class="kpi"><div class="ic"><i class="ti ${KPI_IC[k]||'ti-point'}"></i></div><div class="v">${v}</div><div class="k">${k}${sub?` <span style="color:var(--green);font-weight:600">· ${sub}</span>`:""}</div></div>`;}
 function alertsHtml(s,m,spend){
   const al=[];
   if(s.deploy&&!s.deploy.ok)al.push(["red","cloud-x","Last deployment failed",esc(s.deploy.summary)]);
@@ -667,7 +665,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
     const spend=s.spend||{};
     document.getElementById("ov-alerts").innerHTML=alertsHtml(s,m,spend);
     drainBanner("ov-drain");
-    document.getElementById("kpis").innerHTML=[kpi("Shipped",m.shipped),kpi("In flight",m.inflight),kpi("Documented",m.docd),kpi("Releases",m.releases),kpi("Cost",money(spend.total_cost_usd))].join("");
+    document.getElementById("kpis").innerHTML=overviewKpis(s);
     const ovv=document.getElementById("ov-velocity");if(ovv)ovv.innerHTML=velocityHtml(s);
     renderHealth(s);
     const dp=s.deploy;
