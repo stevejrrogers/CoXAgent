@@ -193,6 +193,18 @@ impl RunnerHandle {
 /// A reporter the cycle calls as it enters/leaves each agent phase.
 pub type PhaseReporter = std::sync::Arc<dyn Fn(Option<(String, String)>) + Send + Sync>;
 
+/// CXA-F356: whether an operator's next cycle may proceed, as a pure decision
+/// over a snapshot of the three switches. Tier 1 (`workspace_running`) is a
+/// hard override: when the workspace master switch is off nothing runs, no
+/// matter what any per-machine flag says. Tier 2/3 (`desired`) is this
+/// operator's own persisted Start/Stop: an explicit `false` idles the machine,
+/// an explicit `true` runs it, and `None` (never set) falls back to whether
+/// this process was told to wait for an explicit web Start.
+#[must_use]
+pub fn cycle_may_run(workspace_running: bool, desired: Option<bool>, wait_for_start: bool) -> bool {
+    workspace_running && desired.unwrap_or(!wait_for_start)
+}
+
 /// Drive the cycle loop under the handle's control until stopped. Waits while
 /// paused; runs one cycle per `step`; sleeps `sleep` between cycles when running.
 #[allow(clippy::too_many_lines)] // one linear supervision loop; splitting hurts readability
@@ -292,6 +304,25 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
                 }
             }
         };
+
+        // CXA-F356 tier-1 gate: the workspace master switch is read fresh at
+        // every cycle boundary, so an admin's workspace-pause reaches the hub's
+        // built-in runner within one interval (drain: the cycle in flight was
+        // already finished by the time we are here). An explicit Step is the
+        // human at the controls and bypasses it.
+        if !stepping {
+            let ws_running = match breaker_store.load().await {
+                Ok(s) => s.workspace_run.running,
+                Err(_) => true, // fail-open: a store blip must not stop the fleet
+            };
+            if !cycle_may_run(ws_running, Some(true), false) {
+                tokio::select! {
+                    () = tokio::time::sleep(sleep) => {}
+                    () = handle.resume.notified() => {}
+                }
+                continue;
+            }
+        }
 
         cycle += 1;
         // Hot-reload the engine/config at the cycle boundary when coxagent.json
@@ -509,5 +540,29 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
                 () = handle.resume.notified() => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cycle_gate_tests {
+    use super::cycle_may_run;
+
+    #[test]
+    fn the_workspace_master_switch_overrides_every_per_machine_flag() {
+        assert!(!cycle_may_run(false, Some(true), false));
+        assert!(!cycle_may_run(false, Some(false), false));
+        assert!(!cycle_may_run(false, None, false));
+    }
+
+    #[test]
+    fn with_the_workspace_on_the_operators_own_flag_decides() {
+        assert!(cycle_may_run(true, Some(true), true));
+        assert!(!cycle_may_run(true, Some(false), false));
+    }
+
+    #[test]
+    fn an_unset_flag_falls_back_to_the_wait_for_start_default() {
+        assert!(cycle_may_run(true, None, false));
+        assert!(!cycle_may_run(true, None, true));
     }
 }

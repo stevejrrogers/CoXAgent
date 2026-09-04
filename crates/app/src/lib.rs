@@ -1921,11 +1921,16 @@ async fn run_loop(
         // Honour this operator's per-user Start/Stop from the web: idle (without
         // exiting) when the user has stopped it — or, for an app-spawned operator,
         // until they first Start it — so no one's credentials are spent unbidden.
-        let idle_now = match store.get_desired(&operator).await {
-            Ok(Some(true)) => false,
-            Ok(Some(false)) => true,
-            _ => wait_for_start,
+        // CXA-F356: the workspace master switch outranks the per-operator flag —
+        // read fresh each cycle so an admin's workspace-pause reaches every
+        // machine within one interval (fail-open on a store blip).
+        let desired = store.get_desired(&operator).await.ok().flatten();
+        let ws_running = match store.load().await {
+            Ok(s) => s.workspace_run.running,
+            Err(_) => true,
         };
+        let idle_now =
+            !coxagent_application::use_cases::cycle_may_run(ws_running, desired, wait_for_start);
         if idle_now {
             shutdown.sleep_or_shutdown(sleep).await;
             continue;
