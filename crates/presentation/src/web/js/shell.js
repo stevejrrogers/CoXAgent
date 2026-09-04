@@ -1798,17 +1798,58 @@ async function mintToken(){
   }catch(e){box.innerHTML='<div style="color:var(--red);font-size:12px">Network error.</div>';}
 }
 async function revokeToken(label){try{await fetch("/api/auth/tokens/"+label,{method:"DELETE"});renderAccess();}catch(e){}}
+// Security-audit view (deepened per operator's no-shallow-features directive):
+// the endpoint returns the whole log; filtering, paging and CSV export are
+// client-side over that snapshot, so the server stays a dumb export.
+let AUDIT_ROWS=[],AUDIT_PAGE=0;
+const AUDIT_PER=50;
 function renderAudit(){
   fetch("/api/audit-log").then(r=>r.ok?r.json():[]).then(rows=>{
-    const el=document.getElementById("audit-body");
-    if(!Array.isArray(rows)||!rows.length){el.innerHTML='<div class="empty">no audited actions yet</div>';return;}
-    el.innerHTML=rows.map(e=>{
-      const bad=e.status>=400;const col=bad?"var(--red)":"var(--green)";
-      const ic=e.action.includes("login")?(bad?"lock-x":"login"):"pencil";
-      return `<div class="act"><div class="ad" style="background:${col}22;color:${col}"><i class="ti ti-${ic}" style="font-size:13px"></i></div>
-        <div class="atx"><span class="who">${esc(e.user)}</span> ${esc(e.action)} <span class="tk" style="background:${col}22;color:${col}">${e.status}</span></div>
-        <span class="tm">${esc((e.at||"").slice(5,16).replace("T"," "))}</span></div>`;}).join("");
+    AUDIT_ROWS=Array.isArray(rows)?rows:[];AUDIT_PAGE=0;renderAuditRows();
   }).catch(()=>{document.getElementById("audit-body").innerHTML='<div class="empty">unable to load audit log</div>';});
+}
+function auditFiltered(){
+  const q=(document.getElementById("audit-q")?.value||"").toLowerCase();
+  const kind=document.getElementById("audit-kind")?.value||"";
+  const days=document.getElementById("audit-range")?.value||"";
+  const cutoff=days?Date.now()-Number(days)*86400000:0;
+  return AUDIT_ROWS.filter(e=>{
+    if(q&&!(String(e.user||"").toLowerCase().includes(q)||String(e.action||"").toLowerCase().includes(q)))return false;
+    if(kind==="login"&&!String(e.action||"").includes("login"))return false;
+    if(kind==="mutation"&&String(e.action||"").includes("login"))return false;
+    if(kind==="fail"&&!(e.status>=400))return false;
+    if(cutoff&&new Date(e.at||0).getTime()<cutoff)return false;
+    return true;
+  });
+}
+function renderAuditRows(){
+  const el=document.getElementById("audit-body");if(!el)return;
+  const rows=auditFiltered();
+  const cnt=document.getElementById("audit-count");
+  if(cnt)cnt.textContent=rows.length+" / "+AUDIT_ROWS.length+" events";
+  if(!rows.length){el.innerHTML='<div class="empty">'+(AUDIT_ROWS.length?"nothing matches the filter":"no audited actions yet")+'</div>';const pg=document.getElementById("audit-pager");if(pg)pg.innerHTML="";return;}
+  const pages=Math.max(1,Math.ceil(rows.length/AUDIT_PER));
+  if(AUDIT_PAGE>=pages)AUDIT_PAGE=pages-1;
+  const page=rows.slice(AUDIT_PAGE*AUDIT_PER,(AUDIT_PAGE+1)*AUDIT_PER);
+  el.innerHTML=page.map(e=>{
+    const bad=e.status>=400;const col=bad?"var(--red)":"var(--green)";
+    const ic=String(e.action||"").includes("login")?(bad?"lock-x":"login"):"pencil";
+    return `<div class="act"><div class="ad" style="background:${col}22;color:${col}"><i class="ti ti-${ic}" style="font-size:13px"></i></div>
+      <div class="atx"><span class="who">${esc(e.user)}</span> ${esc(e.action)} <span class="tk" style="background:${col}22;color:${col}">${e.status}</span></div>
+      <span class="tm" title="${esc(e.at||"")}">${esc((e.at||"").slice(5,16).replace("T"," "))}</span></div>`;}).join("");
+  const pg=document.getElementById("audit-pager");
+  if(pg)pg.innerHTML=pages<=1?"":`
+    <button class="fchip" ${AUDIT_PAGE<=0?"disabled style='opacity:.4'":""} onclick="AUDIT_PAGE--;renderAuditRows()">‹ newer</button>
+    <span style="font-size:11.5px;color:var(--dim);align-self:center">page ${AUDIT_PAGE+1} / ${pages}</span>
+    <button class="fchip" ${AUDIT_PAGE>=pages-1?"disabled style='opacity:.4'":""} onclick="AUDIT_PAGE++;renderAuditRows()">older ›</button>`;
+}
+function exportAuditCsv(){
+  const rows=auditFiltered();
+  const q=v=>'"'+String(v??"").replace(/"/g,'""')+'"';
+  const csv="at,user,action,status\n"+rows.map(e=>[q(e.at),q(e.user),q(e.action),q(e.status)].join(",")).join("\n");
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
+  a.download="audit-log.csv";a.click();URL.revokeObjectURL(a.href);
 }
 function relTime(iso){if(!iso)return "never";const t=Date.parse(iso.replace(" ","T"));if(isNaN(t))return esc(iso.slice(5,16));
   const s=(Date.now()-t)/1000;if(s<90)return "just now";if(s<3600)return Math.round(s/60)+"m ago";if(s<86400)return Math.round(s/3600)+"h ago";return Math.round(s/86400)+"d ago";}

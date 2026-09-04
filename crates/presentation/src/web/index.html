@@ -371,9 +371,20 @@
         <div class="panel" style="margin-top:12px"><div id="people-body"></div></div>
       </div>
       <div class="view" id="view-audit">
-        <div class="filters"><span style="font-size:12px;color:var(--muted)">Security audit — authenticated mutations & sign-ins</span>
-          <div style="flex:1"></div><a onclick="window.open('/api/audit-log')" class="fchip" style="text-decoration:none;cursor:pointer"><i class="ti ti-download" style="font-size:14px"></i> Export</a></div>
-        <div class="panel"><div id="audit-body"></div></div>
+        <div class="filters">
+          <input id="audit-q" placeholder="filter by user or action…" style="background:var(--card);border:1px solid var(--border);border-radius:9px;padding:6px 11px;font-size:12px;color:var(--text);font-family:inherit;width:210px" oninput="AUDIT_PAGE=0;renderAuditRows()">
+          <select id="audit-kind" onchange="AUDIT_PAGE=0;renderAuditRows()" style="background:var(--card);border:1px solid var(--border);border-radius:9px;padding:6px 9px;font-size:12px;color:var(--text);font-family:inherit">
+            <option value="">all actions</option><option value="login">sign-ins</option><option value="mutation">mutations</option><option value="fail">failures only</option>
+          </select>
+          <select id="audit-range" onchange="AUDIT_PAGE=0;renderAuditRows()" style="background:var(--card);border:1px solid var(--border);border-radius:9px;padding:6px 9px;font-size:12px;color:var(--text);font-family:inherit">
+            <option value="">all time</option><option value="1">last 24h</option><option value="7">last 7 days</option><option value="30">last 30 days</option>
+          </select>
+          <span id="audit-count" style="font-size:11.5px;color:var(--dim)"></span>
+          <div style="flex:1"></div>
+          <a onclick="exportAuditCsv()" class="fchip" style="text-decoration:none;cursor:pointer"><i class="ti ti-download" style="font-size:14px"></i> CSV</a>
+          <a onclick="window.open('/api/audit-log')" class="fchip" style="text-decoration:none;cursor:pointer"><i class="ti ti-braces" style="font-size:14px"></i> JSON</a></div>
+        <div class="panel"><div id="audit-body"></div>
+          <div id="audit-pager" style="display:flex;justify-content:center;gap:8px;padding:10px 0 2px"></div></div>
       </div>
       <div class="view" id="view-access">
         <div class="acard">
