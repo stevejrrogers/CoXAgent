@@ -474,6 +474,42 @@ mod tests {
     }
 
     #[test]
+    fn an_exempt_member_is_omitted_from_a_group_but_reportable_members_still_show() {
+        // Three projects filed the identical title; Alpha and Beta share the
+        // bounded-context tag, Gamma does not. The exempt Alpha–Beta pair is
+        // omitted (AC4), while Gamma — no tag, no exemption — still surfaces
+        // as the pair a human must resolve.
+        let snaps = vec![
+            tagged(snap("p1", "Alpha", "T-1", "Add Redis cache layer"), "infra"),
+            tagged(snap("p2", "Beta", "T-1", "Add Redis cache layer"), "infra"),
+            snap("p3", "Gamma", "T-1", "Add Redis cache layer"),
+        ];
+        let out = find_cross_project_duplicates(&snaps, &[]);
+        assert_eq!(out.len(), 1);
+        let dup_projects: Vec<&str> =
+            out[0].dups.iter().map(|d| d.project_name.as_str()).collect();
+        assert_eq!(
+            dup_projects,
+            vec!["Gamma"],
+            "the exempt same-tag member is omitted, reportable members stay"
+        );
+    }
+
+    #[test]
+    fn the_tag_comparison_is_trimmed_and_case_insensitive() {
+        // Tags are human-authored free text — a capitalization or padding
+        // difference must not silently void the AC4 carve-out.
+        let snaps = vec![
+            tagged(snap("p1", "Alpha", "T-1", "Add Redis cache layer"), "Infra"),
+            tagged(snap("p2", "Beta", "T-1", "Add Redis cache layer"), " infra "),
+        ];
+        assert!(
+            find_cross_project_duplicates(&snaps, &[]).is_empty(),
+            "same tag modulo trim/case stays exempt"
+        );
+    }
+
+    #[test]
     fn allowed_pairs_are_excluded_but_unrelated_matches_survive() {
         let snaps = vec![
             snap("p1", "Alpha", "T-1", "Add dark mode toggle"),
