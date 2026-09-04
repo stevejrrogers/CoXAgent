@@ -2349,7 +2349,10 @@ boot();
 // loop uses. Each project's BA dedupes only against its own board, so the
 // same generic feature gets independently invented everywhere — this view is
 // where a human redirects, rejects, or explicitly allows a pair. Nothing is
-// auto-suppressed: a legitimately-shared infrastructure ticket stays allowed.
+// auto-suppressed except the one carve-out (CXA-F254 AC4): pairs whose
+// tickets share the same bounded-context service tag are presumed
+// legitimately-shared infrastructure and stay silent while their similarity
+// is within the stricter same-tag bound.
 async function renderDupes(){
   const el=document.getElementById("dupes-body");if(!el)return;
   el.innerHTML='<div class="empty">scanning the fleet…</div>';
