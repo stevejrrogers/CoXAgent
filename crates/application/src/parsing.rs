@@ -250,11 +250,28 @@ pub fn is_backlog_meta(title: &str) -> bool {
     ritual && about_backlog
 }
 
+/// Similarity above which two titles are near-paraphrase duplicates — the bar
+/// [`duplicates_existing`] enforces within one project and the cross-project
+/// duplicate radar (CXA-F253/F254) reuses, so "duplicate" means the same
+/// thing everywhere. One named constant here so no caller forks an inline
+/// threshold.
+pub const DUPLICATE_JACCARD_THRESHOLD: f64 = 0.6;
+
+/// Stricter DISSIMILARITY bound (`1 − similarity`) for a pair whose tickets
+/// BOTH carry the same bounded-context service tag (CXA-F254 AC4): shared
+/// infrastructure legitimately repeats across projects, so a same-tag pair
+/// stays exempt while its dissimilarity is within this bound — exact matches
+/// (dissimilarity 0) are always exempt — and only drift past it (wording that
+/// no longer reads as the same shared service) still surfaces for a human
+/// decision. Lives beside [`DUPLICATE_JACCARD_THRESHOLD`] so the radar and
+/// any future caller share one definition instead of forking thresholds.
+pub const SAME_TAG_MAX_DISSIMILARITY: f64 = 0.2;
+
 /// Whether `title` duplicates one of `existing` — either an exact normalised
-/// match or a near-paraphrase (Jaccard ≥ 0.6 on content tokens), or, for a
-/// backlog-ceremony ticket, any existing ceremony ticket at all. One place so
-/// the BA insert loop and any future caller agree on what "already covered"
-/// means.
+/// match or a near-paraphrase (Jaccard ≥ [`DUPLICATE_JACCARD_THRESHOLD`] on
+/// content tokens), or, for a backlog-ceremony ticket, any existing ceremony
+/// ticket at all. One place so the BA insert loop and any future caller agree
+/// on what "already covered" means.
 #[must_use]
 pub fn duplicates_existing(title: &str, existing: &[String]) -> bool {
     let norm = normalize_title(title);
@@ -266,7 +283,7 @@ pub fn duplicates_existing(title: &str, existing: &[String]) -> bool {
     existing.iter().any(|e| {
         normalize_title(e) == norm
             || (meta && is_backlog_meta(e))
-            || jaccard(&toks, &title_tokens(e)) >= 0.6
+            || jaccard(&toks, &title_tokens(e)) >= DUPLICATE_JACCARD_THRESHOLD
     })
 }
 
