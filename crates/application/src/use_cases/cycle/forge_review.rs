@@ -848,7 +848,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
              fits — right module, current structure, current conventions. When it no longer fits \
              (moved code, dead paths, superseded patterns — any reason), REQUEST_CHANGES and say \
              concretely what to change and where that code lives now, so the DEV can fix and you \
-             re-review the corrected PR on the next pass.\n\nPR: {title}\nBranch: {head}\n\nUnified diff:\n```\n\
+             re-review the corrected PR on the next pass. For any PR that adds or changes UI, also \
+             hold it to the DEPTH BAR (operator mandate — no shallow features, however small): a \
+             list view without filter/counts/pagination/empty-state, a number without its window \
+             and trend, a state change without who/when/why attribution, or a destructive action \
+             without a blast-radius confirm is grounds for REQUEST_CHANGES even when the code is \
+             correct — name the missing depth items concretely.\n\nPR: {title}\nBranch: {head}\n\nUnified diff:\n```\n\
              {clipped}\n```\n{impact}\nRespond with ONLY JSON: {{\"decision\": \"approve\" | \
              \"request_changes\", \"summary\": \"one short paragraph; if request_changes, list the \
              concrete fixes\"}}.{terse}"
