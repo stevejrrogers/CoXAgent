@@ -100,6 +100,14 @@ pub(super) struct CommentQuery {
     pub(super) ticket: Option<String>,
 }
 
+/// Paging parameters of `GET /api/projects/:pid/tickets/archive` (CXA-F274).
+/// Raw options — clamping and defaults are the read model's pure decision.
+#[derive(serde::Deserialize)]
+pub(super) struct ArchiveQuery {
+    pub(super) offset: Option<i64>,
+    pub(super) limit: Option<i64>,
+}
+
 #[derive(serde::Deserialize)]
 pub(super) struct PostCommentReq {
     pub(super) body: String,
