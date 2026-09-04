@@ -17,6 +17,7 @@ use deadpool_postgres::Pool;
 use std::sync::Arc;
 
 use super::quarantine::{gate_save, QuarantineLedger};
+use super::tombstone;
 
 /// Schema for the shared project + coordination tables. Idempotent; run on
 /// connect. `project_coord` is the cross-machine coordination row set: one
@@ -78,8 +79,9 @@ pub struct SqlStateStore {
     /// (the seed logic in `app::make_store` picks it up automatically).
     local_mirror: Option<super::JsonStateStore>,
     /// Audit trail of write-backs the structural-integrity gate refused
-    /// (CXA-F229). Memory-only: Postgres gains no table for it, so a hub
-    /// restart drops the trail and every refusal is also logged.
+    /// (CXA-F229). The in-memory buffer mirrors the durable `project_quarantine`
+    /// table (CXA-C023) and is only the fallback when the table read fails, so
+    /// the trail survives a hub restart; every refusal is also logged.
     quarantine: Arc<QuarantineLedger>,
     /// Set by [`StateStorePort::delete`]: the project was deregistered and its
     /// rows purged. A runner cycle in flight at delete time checks `STOPPED`
@@ -87,8 +89,9 @@ pub struct SqlStateStore {
     /// can land minutes after the purge — without this flag it would silently
     /// re-INSERT the deleted row and resurrect the old team under a recreated
     /// id. A recreated project builds a FRESH store (new connect), so the flag
-    /// never blocks legitimate new work. Narrows the late-write window to a
-    /// simultaneous-writer race; fully closing it needs a DB-level tombstone.
+    /// never blocks legitimate new work. This flag is the fast in-process
+    /// path; the durable `project_tombstone` row (CXA-C023) closes the
+    /// cross-process and post-restart window the flag alone cannot.
     deleted: std::sync::atomic::AtomicBool,
 }
 
@@ -163,7 +166,23 @@ impl SqlStateStore {
         client
             .batch_execute(INIT_SQL)
             .await
-            .map_err(|e| PortError::Backend(format!("migrate: {e}")))
+            .map_err(|e| PortError::Backend(format!("migrate: {e}")))?;
+        // Each unit owns its table DDL (CXA-C023); both are idempotent.
+        client
+            .batch_execute(tombstone::DDL)
+            .await
+            .map_err(|e| PortError::Backend(format!("migrate tombstone: {e}")))?;
+        client
+            .batch_execute(super::quarantine::DDL)
+            .await
+            .map_err(|e| PortError::Backend(format!("migrate quarantine: {e}")))?;
+        // Connecting is the one moment an id legitimately comes back to life
+        // (hub boot of a registered project, or re-registration after delete):
+        // clear this id's tombstone so the recreated project can save. A
+        // zombie writer never reconnects, so the per-write guard still catches
+        // it (see `super::tombstone`).
+        tombstone::clear(&client, &self.project_id).await?;
+        Ok(())
     }
 
     /// Read the stored `(revision, state)` for this project, or `(0, default)`
@@ -458,6 +477,23 @@ impl StateStorePort for SqlStateStore {
     }
 
     async fn quarantined(&self) -> Vec<QuarantineEntry> {
+        // The durable `project_quarantine` table is the ledger: a fresh store
+        // instance (or a hub restarted after the refusal) reads the same trail.
+        match self.client().await {
+            Ok(client) => match super::quarantine::load_recent(&client, &self.project_id).await {
+                Ok(entries) => return entries,
+                Err(e) => tracing::warn!(
+                    "[{}] durable quarantine read failed, falling back to the \
+                     in-memory buffer: {e}",
+                    self.project_id
+                ),
+            },
+            Err(e) => tracing::warn!(
+                "[{}] no database connection for the quarantine read, falling \
+                 back to the in-memory buffer: {e}",
+                self.project_id
+            ),
+        }
         self.quarantine.recent()
     }
 
@@ -469,6 +505,15 @@ impl StateStorePort for SqlStateStore {
     /// tickets" 500). Coordination rows go too: the operator's desired-run
     /// state is persistent and would auto-resume the deleted project's
     /// runner under the reused id.
+    ///
+    /// The SAME transaction arms the durable delete tombstone (CXA-C023) and
+    /// purges this project's quarantine rows: the tombstone is what makes the
+    /// purge hold against writers in other processes (or after a restart) that
+    /// the in-process `deleted` flag cannot see — every guarded write filters
+    /// on its absence, so a late phase-end save is refused at the database
+    /// instead of re-INSERTing the purged row. The ledger rows go too: a
+    /// deleted project's refusal trail must not leak onto a recreated id's
+    /// audit view.
     async fn delete(&self) -> Result<(), PortError> {
         // Arm the write refusal BEFORE purging, so a save already in flight
         // when the rows go finds the flag (see `deleted` for the race this
@@ -480,6 +525,7 @@ impl StateStorePort for SqlStateStore {
             .transaction()
             .await
             .map_err(|e| PortError::Backend(format!("begin: {e}")))?;
+        tombstone::arm(&tx, &self.project_id, "delete()").await?;
         let state_rows = tx
             .execute(
                 "DELETE FROM project_state WHERE project_id = $1",
@@ -493,6 +539,7 @@ impl StateStorePort for SqlStateStore {
         )
         .await
         .map_err(|e| PortError::Backend(format!("delete coord: {e}")))?;
+        super::quarantine::purge_project(&tx, &self.project_id).await?;
         tx.commit()
             .await
             .map_err(|e| PortError::Backend(format!("commit: {e}")))?;
@@ -519,7 +566,7 @@ impl StateStorePort for SqlStateStore {
             }
         }
         tracing::info!(
-            "[{}] deleted persisted state ({state_rows} state row(s) purged)",
+            "[{}] deleted persisted state and armed the tombstone ({state_rows} state row(s) purged)",
             self.project_id
         );
         Ok(())
@@ -564,6 +611,14 @@ impl SqlStateStore {
     /// loaded, so a stale writer affects zero rows and gets a [`PortError::Conflict`].
     /// When `None`, fall back to re-reading at write time (the historical default,
     /// sound for intra-process writers sharing one store instance).
+    ///
+    /// The whole write is ONE guarded statement ([`tombstone::GUARDED_SAVE_SQL`]):
+    /// both the insert and the conflict-update branch filter on the delete
+    /// tombstone's absence (CXA-C023), so "was this project deleted?" and "is my
+    /// revision current?" are decided atomically and a zombie writer in any
+    /// process is refused the moment a concurrent delete commits. Zero rows
+    /// affected is disambiguated by a fresh tombstone re-check: refusal if armed,
+    /// the ordinary conflict otherwise.
     async fn persist_at_revision(
         &self,
         mut state: ProjectState,
@@ -571,22 +626,63 @@ impl SqlStateStore {
     ) -> Result<(), PortError> {
         // A deleted project's store refuses all state writes (see `deleted`) —
         // an explicit error, never a silent "saved", so the stopping runner's
-        // cycle reports the refusal instead of believing it persisted.
+        // cycle reports the refusal instead of believing it persisted. The
+        // durable tombstone re-check below covers every other process.
         if self.deleted.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(PortError::Backend(format!(
-                "[{}] write refused: project was deleted",
-                self.project_id
-            )));
+            return Err(tombstone::refusal(&self.project_id));
         }
         // The pre-existing schema-level validation is untouched; the
         // structural-integrity audit (CXA-F229) is the additional gate. The
-        // ledger is memory-only here, so every refusal is also logged.
-        if let Err(e) = gate_save(&mut state, &self.quarantine) {
+        // recorded refusal is persisted into `project_quarantine`
+        // (best-effort — it must not mask the refusal error itself), so the
+        // trail outlives this process.
+        if let Err(refused) = gate_save(&mut state, &self.quarantine) {
             tracing::error!(
-                "[{}] write-back refused by structural integrity audit: {e}",
-                self.project_id
+                "[{}] write-back refused by structural integrity audit: {}",
+                self.project_id,
+                refused.error
             );
-            return Err(e);
+            if let Some(entry) = refused.quarantined {
+                // A zombie writer refused on a corrupt payload AFTER a
+                // cross-process delete must not leak its refusal into the
+                // purged id's ledger: the delete transaction already purged
+                // those rows, and a recreated id would inherit the stale
+                // entry in its audit view. When in doubt (tombstone armed or
+                // unreadable, no connection) skip the durable write — the
+                // refusal error and the in-memory buffer still carry the
+                // trail for this instance.
+                match self.client().await {
+                    Ok(client) => match tombstone::exists(&client, &self.project_id).await {
+                        Ok(false) => {
+                            if let Err(e) = super::quarantine::persist_entry(
+                                &client,
+                                &self.project_id,
+                                &entry,
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    "[{}] durable quarantine write failed (the refusal still stands): {e}",
+                                    self.project_id
+                                );
+                            }
+                        }
+                        Ok(true) => tracing::debug!(
+                            "[{}] quarantine entry not durably recorded: project was deleted",
+                            self.project_id
+                        ),
+                        Err(e) => tracing::warn!(
+                            "[{}] durable quarantine write skipped, tombstone state unreadable: {e}",
+                            self.project_id
+                        ),
+                    },
+                    Err(e) => tracing::warn!(
+                        "[{}] durable quarantine write skipped, no database connection: {e}",
+                        self.project_id
+                    ),
+                }
+            }
+            return Err(refused.error);
         }
         let value =
             serde_json::to_value(&state).map_err(|e| PortError::Backend(format!("encode: {e}")))?;
@@ -598,14 +694,7 @@ impl SqlStateStore {
         };
         let rows = client
             .execute(
-                "INSERT INTO project_state (project_id, schema_version, revision, data)
-                 VALUES ($1, $2, 1, $3)
-                 ON CONFLICT (project_id) DO UPDATE
-                    SET data = EXCLUDED.data,
-                        schema_version = EXCLUDED.schema_version,
-                        revision = project_state.revision + 1,
-                        updated_at = now()
-                    WHERE project_state.revision = $4",
+                tombstone::GUARDED_SAVE_SQL,
                 &[
                     &self.project_id,
                     &i32::try_from(state.schema_version).unwrap_or(i32::MAX),
@@ -616,6 +705,12 @@ impl SqlStateStore {
             .await
             .map_err(|e| PortError::Backend(format!("upsert: {e}")))?;
         if rows == 0 {
+            // Either a concurrent writer moved the revision, or a delete
+            // tombstoned this project in another process. A fresh read (new
+            // statement snapshot) tells the two apart.
+            if tombstone::exists(&client, &self.project_id).await? {
+                return Err(tombstone::refusal(&self.project_id));
+            }
             return Err(PortError::Conflict(
                 "state changed since last read (concurrent writer)".to_owned(),
             ));
