@@ -730,8 +730,8 @@ pub async fn brownfield<S: StateStorePort + 'static>(
 }
 
 /// CXA-F258 — brownfield backlog import: when the adopted repo is connected
-/// on GitHub, fetch its OPEN issues (cap [`coxagent_application::
-/// backlog_import::IMPORT_CAP`]) and merge them in as Pending tickets through
+/// on GitHub, fetch its OPEN issues (capped at `backlog_import::IMPORT_CAP`)
+/// and merge them in as Pending tickets through
 /// [`coxagent_application::backlog_import::merge_pending`]; ONE load → merge
 /// → save. Closed issues are never fetched here (AC4: excluded by default;
 /// an opt-in surface is pending the SA's answer on where the preview lives).

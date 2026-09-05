@@ -93,7 +93,8 @@ impl GhApiForge {
     /// Issues in `state` (`open`/`closed`) as import drafts (CXA-F258).
     /// The REST issues endpoint also lists pull requests — every PR is an
     /// issue upstream — so those are filtered out: the backlog import takes
-    /// issues only.
+    /// issues only. REST caps `per_page` at 100 — a larger `limit` silently
+    /// returns 100.
     async fn issues(&self, state: &str, limit: usize) -> Result<Vec<IssueDraft>, PortError> {
         let v = self
             .get_json(&format!("issues?state={state}&per_page={limit}"))

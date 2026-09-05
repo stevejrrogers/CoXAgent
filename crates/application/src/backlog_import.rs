@@ -109,12 +109,15 @@ pub fn merge_pending(state: &mut ProjectState, drafts: &[IssueDraft], cap: usize
             continue;
         }
         // AC3's teeth: dedupe on the SOURCE issue's identity (its URL in the
-        // persisted backlog), not just on wording.
+        // persisted backlog), not just on wording. The needle is the URL with
+        // its trailing newline — `imported_body` always newline-terminates the
+        // link line — because a bare substring match would read issue #71's
+        // `.../issues/71` as already tracking #7 (`.../issues/7`).
         if !draft.url.is_empty()
             && (state
                 .tickets
                 .iter()
-                .any(|t| t.description().contains(&draft.url))
+                .any(|t| t.description().contains(&format!("{}\n", draft.url)))
                 || !batch_urls.insert(draft.url.clone()))
         {
             report.skipped += 1;
@@ -351,6 +354,31 @@ mod tests {
             t.description().contains("Labels: bug"),
             "the bug signal survives in the body for triage"
         );
+    }
+
+    #[test]
+    fn a_shorter_issue_number_is_not_shadowed_by_a_longer_one() {
+        // Regression: `.../issues/7` is a substring of `.../issues/71`, so a
+        // bare substring dedupe skips #7 the moment #71 is tracked — and the
+        // skip is silent. Both must import; order must not matter.
+        let mut state = ProjectState::default();
+        let first = merge_pending(
+            &mut state,
+            &[draft(71, "Migrate the audit log to Postgres", "b", &[])],
+            IMPORT_CAP,
+        );
+        assert_eq!(first.imported, 1);
+        let second = merge_pending(
+            &mut state,
+            &[draft(7, "Add dark mode to the dashboard", "b", &[])],
+            IMPORT_CAP,
+        );
+        assert_eq!(
+            (second.imported, second.skipped),
+            (1, 0),
+            "issue #7 must not be swallowed by #71's URL substring"
+        );
+        assert_eq!(state.tickets.len(), 2);
     }
 
     #[test]
