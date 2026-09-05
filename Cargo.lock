@@ -476,7 +476,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cox-gateway"
-version = "2.34.0"
+version = "2.35.0"
 dependencies = [
  "coxagent-app",
  "tokio",
@@ -484,7 +484,7 @@ dependencies = [
 
 [[package]]
 name = "cox-knowledge"
-version = "2.34.0"
+version = "2.35.0"
 dependencies = [
  "coxagent-app",
  "tokio",
@@ -492,7 +492,7 @@ dependencies = [
 
 [[package]]
 name = "cox-realtime"
-version = "2.34.0"
+version = "2.35.0"
 dependencies = [
  "coxagent-app",
  "tokio",
@@ -500,7 +500,7 @@ dependencies = [
 
 [[package]]
 name = "cox-runner"
-version = "2.34.0"
+version = "2.35.0"
 dependencies = [
  "coxagent-app",
  "tokio",
