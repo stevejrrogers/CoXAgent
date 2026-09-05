@@ -25,7 +25,7 @@ test('the board renders without any archive surface', async ({ page }) => {
   await openApp(page);
 
   await page.locator('a[data-v="board"]').click();
-  await expect(page.locator('#board-cols .col h3')).toContainText('Backlog');
+  await expect(page.locator('#board-cols .col h3').first()).toContainText('Backlog');
   await expect(page.locator('#board-filters')).not.toContainText('Archived');
   await expect(page.locator('#board-filters')).not.toContainText('closed:');
   await expect(page.locator('#board-cols')).not.toContainText('Archive');

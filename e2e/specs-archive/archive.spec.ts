@@ -10,8 +10,8 @@ test('the archive api serves the seeded tickets with the board shape', async ({ 
   const doc = await list.json();
   expect(doc.total).toBe(3);
   expect(doc.tickets).toHaveLength(3);
-  // Id-descending: newest ids first.
-  expect(doc.tickets.map((t) => t.id)).toEqual(['CXC-F090', 'CXC-B044', 'CXC-F013']);
+  // Id-descending: newest ids first (lexicographic over the id string).
+  expect(doc.tickets.map((t) => t.id)).toEqual(['CXC-F090', 'CXC-F013', 'CXC-B044']);
   for (const t of doc.tickets) {
     expect(t.archived).toBe(true);
     expect(t.design).toBeUndefined();
@@ -33,7 +33,7 @@ test('the board shows the Archived chip, the Archive column and the closed summa
 
   await page.locator('a[data-v="board"]').click();
   await expect(page.locator('#board-filters')).toContainText('Archived · 3');
-  await expect(page.locator('#board-cols .col h3')).toContainText('Archive');
+  await expect(page.locator('#board-cols .col h3', { hasText: 'Archive' })).toBeVisible();
   const summary = page.locator('#board-filters span', { hasText: 'hot +' });
   await expect(summary).toContainText('closed:');
   await expect(summary).toContainText('3 archived');
@@ -57,7 +57,8 @@ test('an archived ticket opens as a read-only dialog', async ({ page }) => {
   await expect(dialog).toContainText('served from the cold store');
   // The saved fields render: checklist + test-case verdicts.
   await expect(dialog).toContainText('compose publishes the assigned host port');
-  await expect(dialog).toContainText('PASSED');
+  // The verdict badge renders "Passed" in the DOM; CSS uppercases it visually.
+  await expect(dialog).toContainText('Passed');
   // Every mutation affordance is suppressed.
   await expect(dialog.locator('button', { hasText: 'Edit' })).toHaveCount(0);
   await expect(dialog.locator('button', { hasText: 'Reject' })).toHaveCount(0);
