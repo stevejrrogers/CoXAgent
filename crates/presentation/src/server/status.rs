@@ -145,6 +145,23 @@ pub(super) fn lite_state_value(state: &coxagent_application::ProjectState) -> se
             obj.insert("collisions".into(), collisions);
         }
     }
+    // Milestone strip (CXA-F361): the roadmap's per-milestone progress bars and
+    // drill-in render from the SAME pure read model the projection endpoint
+    // serves, riding the snapshot the way the radars do — zero new requests on
+    // the 1 Hz stream. Present only when a roadmap exists; absence stays an
+    // empty read model for every existing client.
+    let milestones = serde_json::to_value(
+        coxagent_application::milestone_projection::project_milestones(state),
+    )
+    .unwrap_or_default();
+    if milestones.as_array().is_some_and(|a| !a.is_empty()) {
+        if !derived.is_object() {
+            derived = serde_json::json!({});
+        }
+        if let Some(obj) = derived.as_object_mut() {
+            obj.insert("milestones".into(), milestones);
+        }
+    }
     if derived.as_object().is_some_and(|o| !o.is_empty()) {
         if let Some(obj) = v.as_object_mut() {
             obj.insert("derived".into(), derived);
@@ -629,6 +646,49 @@ mod radar_state_tests {
             running_feature("FEAT-B", &["web/app.css"]),
         ]));
         assert!(v.get("derived").is_none(), "disjoint slots stay silent");
+    }
+
+    /// The wire contract the roadmap's milestone strip depends on (CXA-F361):
+    /// the projection's rows ride the snapshot as `derived.milestones` with
+    /// the progress figure the bars render, and a roadmap-less project still
+    /// emits no `derived` key at all.
+    #[test]
+    fn the_milestone_projection_rides_the_snapshot_for_the_roadmap_strip() {
+        use coxagent_application::state::Milestone;
+
+        let mut state = state_with(vec![ready_feature("FEAT-A", &[])]);
+        state.current_version = coxagent_domain::SemVer::parse("0.5.2").expect("version");
+        state.milestones = vec![Milestone {
+            name: "Beta".into(),
+            goal: "the Beta goal".into(),
+            target_version: "0.9.0".into(),
+            goal_complete: false,
+            fulfilled: false,
+        }];
+        let v = lite_state_value(&state);
+        let rows = v
+            .get("derived")
+            .and_then(|d| d.get("milestones"))
+            .and_then(serde_json::Value::as_array)
+            .expect("the milestone projection must ride the snapshot");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("name").and_then(|n| n.as_str()), Some("Beta"));
+        assert_eq!(
+            rows[0].get("progress").and_then(serde_json::Value::as_u64),
+            Some(0),
+            "no attributed scope reads 0, never NaN"
+        );
+
+        // No roadmap → no projection rows → the omission rule still holds.
+        let v = lite_state_value(&state_with(vec![ready_feature("FEAT-A", &[])]));
+        let no_rows = v
+            .get("derived")
+            .and_then(|d| d.get("milestones"))
+            .is_none();
+        assert!(
+            no_rows,
+            "a roadmap-less project must not emit derived.milestones"
+        );
     }
 
     /// The wire contract the board badge depends on (CXA-F329): two running

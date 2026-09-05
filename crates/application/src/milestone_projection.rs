@@ -50,6 +50,15 @@ pub struct MilestoneProjection {
     /// work is closed; `Fixed` is deliberately open (built but awaiting the
     /// human verify gate), and so is `OnHold` (paused is not delivered).
     pub open: Vec<TicketId>,
+    /// Completion percent for the roadmap's progress bars (CXA-F361), derived
+    /// purely from the tickets attributed to this row: a released row is
+    /// complete by the release pipeline's own record (100, even with zero
+    /// attributed scope); the active target's bar is its committed scope's
+    /// closed share — the same `closes_scope` set the `open` list is the
+    /// complement of — rounded to an integer percent; a row with no
+    /// attributed scope reads 0, which is never NaN and never masquerades as
+    /// either done or unstarted-by-choice.
+    pub progress: u8,
 }
 
 /// The whole `GET /api/projects/:pid/milestones/projection` payload.
@@ -146,6 +155,27 @@ pub fn project_milestones(state: &ProjectState) -> Vec<MilestoneProjection> {
             let target = SemVer::parse(&m.target_version).ok();
             let reached = released || target.is_some_and(|t| state.current_version >= t);
             let on_active_target = active.is_some_and(|a| a == i);
+            let row_scope = if on_active_target {
+                scope.clone()
+            } else {
+                Vec::new()
+            };
+            let progress = if released {
+                100
+            } else if !row_scope.is_empty() {
+                let closed = row_scope
+                    .iter()
+                    .filter(|id| state.ticket(id).is_some_and(|t| closes_scope(t.status())))
+                    .count();
+                // Round-half-up integer percent, no float drift. `closed` can
+                // never exceed the divisor (both count the same list), so the
+                // quotient is ≤ 100 — the conversion keeps that invariant
+                // total, clamping an impossible overflow to the honest
+                // ceiling rather than truncating.
+                u8::try_from((closed * 100 + row_scope.len() / 2) / row_scope.len()).unwrap_or(100)
+            } else {
+                0
+            };
             MilestoneProjection {
                 id: m.name.clone(),
                 name: m.name.clone(),
@@ -153,16 +183,13 @@ pub fn project_milestones(state: &ProjectState) -> Vec<MilestoneProjection> {
                 goal_complete: m.goal_complete,
                 released,
                 reached,
-                committed: if on_active_target {
-                    scope.clone()
-                } else {
-                    Vec::new()
-                },
+                committed: row_scope.clone(),
                 open: if on_active_target {
                     open_scope.clone()
                 } else {
                     Vec::new()
                 },
+                progress,
             }
         })
         .collect()
@@ -696,11 +723,13 @@ mod tests {
                 "id".to_owned(),
                 "name".to_owned(),
                 "open".to_owned(),
+                "progress".to_owned(),
                 "reached".to_owned(),
                 "released".to_owned(),
                 "target_version".to_owned(),
             ]),
-            "F249's exact keys kept, plus the CXA-F252 trio (id + committed/open scope)"
+            "F249's exact keys kept, plus the CXA-F252 trio (id + committed/open scope) \
+             and CXA-F361's progress figure"
         );
         assert_eq!(row["id"], row["name"], "the wire id IS the name (CXA-F252)");
         assert_eq!(
@@ -709,6 +738,10 @@ mod tests {
             "the sprint committed nothing, so the active row carries no scope"
         );
         assert_eq!(row["open"], serde_json::json!([]));
+        assert_eq!(
+            row["progress"], 0,
+            "no attributed scope reads 0 — never NaN, never invented (CXA-F361)"
+        );
 
         let blocked = &v["blocked_tickets"][0];
         assert_eq!(blocked["id"], "FEAT-A");
