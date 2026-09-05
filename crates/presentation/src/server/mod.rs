@@ -980,6 +980,11 @@ pub async fn serve_full(
             axum::routing::put(doc_upsert_ep).delete(doc_delete_ep),
         )
         .route("/api/projects/:pid/docs/:id/ai-edit", post(doc_ai_edit_ep))
+        .route(
+            "/api/projects/:pid/docs/:id/backlinks",
+            get(doc_backlinks_ep),
+        )
+        .route("/api/projects/:pid/wiki/search", get(wiki_search_ep))
         .route("/api/projects/:pid/docs/:id/ws", get(docs_ws_ep))
         .route("/api/projects/:pid/terminal", get(terminal_ws_ep))
         .route("/api/projects/:pid/codegraph", get(codegraph_ep))

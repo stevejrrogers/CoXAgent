@@ -17,6 +17,56 @@ pub(super) async fn docs_list_ep(
     Json(docs).into_response()
 }
 
+/// Query parameters for the wiki sidebar search.
+#[derive(serde::Deserialize)]
+pub(super) struct WikiSearchParams {
+    q: Option<String>,
+}
+
+/// In-wiki search (CXA-F364): titles + bodies, ranked with snippets — the
+/// backend of the docs rail's filter box. Matching is pure
+/// (`application::wiki_views::wiki_search`); a blank query returns an empty
+/// list, which the rail reads as "unfiltered".
+pub(super) async fn wiki_search_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    Query(params): Query<WikiSearchParams>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let pages = app.doc_list(&pid, &p).await;
+    Json(coxagent_application::wiki_views::wiki_search(
+        &pages,
+        params.q.as_deref().unwrap_or_default(),
+    ))
+    .into_response()
+}
+
+/// Backlinks for one page (CXA-F364): every sibling page body and ticket
+/// description that references it, so the reader view can list "referenced
+/// by" beneath the body. Unknown page → 404 like every doc route.
+pub(super) async fn doc_backlinks_ep(
+    State(app): State<AppState>,
+    Path((pid, id)): Path<(String, String)>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Some(page) = app.doc_get(&pid, &p, &id).await else {
+        return not_found();
+    };
+    let pages = app.doc_list(&pid, &p).await;
+    let tickets = p.store.load().await.map(|s| s.tickets).unwrap_or_default();
+    let mut links = coxagent_application::wiki_views::page_backlinks(&pages, &page.id, &page.title);
+    links.extend(coxagent_application::wiki_views::ticket_backlinks(
+        &tickets,
+        &page.id,
+        &page.title,
+    ));
+    Json(links).into_response()
+}
+
 /// Mint an id for a brand-new page (used only when the client sends none).
 pub(super) fn mint_doc_id() -> String {
     let nanos = std::time::SystemTime::now()

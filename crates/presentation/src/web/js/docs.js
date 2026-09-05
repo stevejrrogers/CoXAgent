@@ -227,6 +227,7 @@ function mdRender(md){
     .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>')
     .replace(/(^|[^"'>])(https?:\/\/[^\s<]+)/g,'$1<a href="$2" target="_blank" rel="noopener">$2</a>');
   const lines=s.split(/\r?\n/);let out="",inUl=false,inOl=false,inTask=false;
+  const anchors=new Map(); // heading slug → occurrence count (dedup ids per render)
   const closeLists=()=>{if(inUl){out+="</ul>";inUl=false;}if(inOl){out+="</ol>";inOl=false;}if(inTask){out+="</ul>";inTask=false;}};
   const cells=r=>r.trim().replace(/^\|/,"").replace(/\|$/,"").split("|").map(c=>c.trim());
   for(let i=0;i<lines.length;i++){
@@ -241,7 +242,10 @@ function mdRender(md){
       out+="</tbody></table>";i=j-1;continue;
     }
     let m;
-    if(m=ln.match(/^(#{1,4})\s+(.*)$/)){closeLists();const n=m[1].length;out+="<h"+n+">"+inline(m[2])+"</h"+n+">";continue;}
+    if(m=ln.match(/^(#{1,4})\s+(.*)$/)){closeLists();const n=m[1].length;
+      // Stable anchor id per heading — what the auto TOC links to (CXA-F364).
+      const label=m[2].replace(/\*\*/g,"").replace(/`/g,"").replace(/\*/g,"").trim();
+      out+="<h"+n+' id="'+headingAnchor(label,anchors)+'">'+inline(m[2])+"</h"+n+">";continue;}
     if(m=ln.match(/^\s*[-*]\s+\[([ xX])\]\s+(.*)$/)){if(!inTask){closeLists();out+='<ul class="tasklist">';inTask=true;}out+='<li data-checked="'+(m[1].toLowerCase()==="x"?"true":"false")+'">'+inline(m[2])+"</li>";continue;}
     if(/^\s*[-*]\s+/.test(ln)){if(!inUl){closeLists();out+="<ul>";inUl=true;}out+="<li>"+inline(ln.replace(/^\s*[-*]\s+/,""))+"</li>";continue;}
     if(/^\s*\d+\.\s+/.test(ln)){if(!inOl){closeLists();out+="<ol>";inOl=true;}out+="<li>"+inline(ln.replace(/^\s*\d+\.\s+/,""))+"</li>";continue;}
@@ -251,6 +255,21 @@ function mdRender(md){
     closeLists();out+="<p>"+inline(ln)+"</p>";
   }
   closeLists();return out;
+}
+// Anchor id for a rendered heading — mirrors
+// coxagent_application::wiki_views::heading_anchor (CXA-F364): lowercase,
+// non-alphanumeric runs → one '-', trimmed, prefixed "h-"; the Nth duplicate
+// appends "-N". The TOC (buildToc in mcp.js) links to these ids, so the two
+// sides must stay in sync. `seen` accumulates duplicates across one render.
+function headingAnchor(text,seen){
+  let slug="h-";let prev=false;
+  for(const ch of text.toLowerCase()){
+    if(/[a-z0-9]/.test(ch)){slug+=ch;prev=false;}
+    else if(!prev&&slug.length>2){slug+="-";prev=true;}
+  }
+  while(slug.endsWith("-"))slug=slug.slice(0,-1);
+  const n=(seen.get(slug)||0)+1;seen.set(slug,n);
+  return n>1?slug+"-"+n:slug;
 }
 function startPoll(){if(poll)return;poll=setInterval(async()=>{try{const s=await(await fetch(api("/state"))).json();const rn=await(await fetch(api("/runner"))).json();render(s);renderRunner(rn);setConn(false);}catch(e){}},3000);}
 function connect(){if(ES)ES.close();if(poll){clearInterval(poll);poll=null;}

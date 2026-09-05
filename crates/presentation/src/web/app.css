@@ -543,6 +543,16 @@
   .docslayout{display:flex;gap:16px;height:calc(100vh - 118px);min-height:520px}
   .docsrail{width:250px;flex:none;display:flex;flex-direction:column;background:var(--card);border:1px solid var(--border);border-radius:var(--r);overflow:hidden}
   .docsrail-hd{display:flex;align-items:center;justify-content:space-between;padding:13px 14px 10px;font-size:11px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--dim)}
+  /* Wiki sidebar search (CXA-F364) — filters titles+bodies as you type. */
+  .docsearch{display:flex;align-items:center;gap:7px;margin:0 10px 8px;padding:6px 10px;border-radius:8px;background:var(--card2);border:1px solid var(--border2);transition:border-color .15s,background .15s}
+  .docsearch:focus-within{border-color:var(--accent)}
+  .docsearch i{font-size:13px;color:var(--dim);flex-shrink:0}
+  .docsearch input{flex:1;min-width:0;background:none;border:0;outline:0;color:var(--text);font-size:12.5px}
+  .docsearch input::placeholder{color:var(--dim)}
+  .docsearch-hit{display:flex;flex-direction:column;gap:2px;white-space:normal;padding:7px 11px}
+  .docsearch-hit .dsh-t{font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .docsearch-hit .dsh-s{font-size:11px;color:var(--dim);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .docitem mark{background:color-mix(in srgb,var(--accent2) 30%,transparent);color:var(--accent2);border-radius:3px;padding:0 1px}
   .docslist{flex:1;overflow-y:auto;padding:2px 8px 10px}
   .docfolder{display:flex;align-items:center;gap:5px;padding:5px 6px;border-radius:6px;cursor:pointer;font-size:12.5px;font-weight:600;color:var(--muted);user-select:none}
   .docfolder:hover{background:var(--card2);color:var(--text)}
@@ -559,7 +569,25 @@
   .docitem{padding:7px 11px;border-radius:8px;cursor:pointer;color:var(--muted);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .docitem:hover{background:var(--card2);color:var(--text)}
   .docitem.on{background:var(--accentbg);color:var(--accent2);font-weight:600}
-  .docsmain{flex:1;min-width:0;background:var(--card);border:1px solid var(--border);border-radius:var(--r);overflow-y:auto;padding:26px 32px}
+  .docsmain{flex:1;min-width:0;background:var(--card);border:1px solid var(--border);border-radius:var(--r);overflow-y:auto;padding:26px 32px;scroll-behavior:smooth}
+  /* Reader layout: body + (3+ headings only) sticky TOC in the right margin. */
+  .doc-cols{display:flex;gap:24px;align-items:flex-start}
+  .doc-cols .doc-body{flex:1;min-width:0}
+  .doc-toc{width:190px;flex:none;position:sticky;top:8px;padding:10px 0 10px 16px;border-left:1px solid var(--border)}
+  .doc-toc-t{font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--dim);margin-bottom:8px}
+  .doc-toc-l{display:block;font-size:11.5px;color:var(--dim);text-decoration:none;padding:3px 8px;border-radius:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;transition:color .15s,background .15s}
+  .doc-toc-l.lv3{padding-left:18px}
+  .doc-toc-l.lv4{padding-left:28px}
+  .doc-toc-l:hover{color:var(--text);background:var(--card2)}
+  .doc-toc-l.on{color:var(--accent2);background:var(--accentbg);font-weight:600}
+  /* Backlinks footer — hidden entirely when nothing references the page. */
+  .doc-backlinks{margin-top:26px;padding-top:14px;border-top:1px solid var(--border)}
+  .doc-bl-t{font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--dim);margin-bottom:8px;display:flex;align-items:center;gap:6px}
+  .doc-bl-t i{font-size:13px}
+  .doc-bl-i{display:inline-flex;align-items:center;gap:6px;margin:0 8px 6px 0;padding:5px 12px;border-radius:8px;background:var(--card2);border:1px solid var(--border2);color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;text-decoration:none;transition:border-color .15s,color .15s}
+  .doc-bl-i:hover{border-color:var(--accent);color:var(--text)}
+  .doc-bl-i i{font-size:13px;color:var(--accent2)}
+  .doc-bl-sub{font-size:10.5px;color:var(--dim);font-weight:400}
   .docs-empty{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--dim);gap:6px;text-align:center}
   .docs-empty i{font-size:34px;color:var(--accent2);opacity:.7}
   .docs-empty div{font-size:15px;font-weight:600;color:var(--muted)}
