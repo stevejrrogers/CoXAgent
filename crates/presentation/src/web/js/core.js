@@ -597,6 +597,68 @@ function ucolumn([k,l,c,statuses],ts){const items=ts.filter(t=>statuses.includes
     .sort((a,b)=>(a.type==="bug")-(b.type==="bug")); // bugs after features in the same column
   return `<div class="col"><h3><span class="dot" style="background:var(${c})"></span>${l}<span class="n">${items.length}</span></h3>${items.length?items.map(card).join(""):'<div class="empty">—</div>'}</div>`;}
 
+// ── Ticket archive read-back (CXA-F274) ────────────────────────────────────
+// Evicted tickets live behind GET /tickets/archive (paged, id-descending).
+// The board touches them only when the cold store actually holds work: one
+// probe (limit=1) sizes the archive, and while it is in flight — or when it
+// comes back empty/disabled — every render below is byte-identical to the
+// pre-archive board. Hot columns are never touched; the Archive column is a
+// separate lazy feed with its own paging, so the 1 Hz snapshot stays small.
+const ARCH_PAGE=50;
+// Closed statuses = the board's terminal columns (UCOLS done+shipped): the
+// same set the eviction path archives, so "hot closed + archived" counts every
+// finished ticket exactly once.
+const ARCH_CLOSED=["done","fixed","documented","verified"];
+let ARCHIVE={pid:null,total:0,probed:false,on:false,tickets:[],loaded:0,err:null,loading:false};
+function probeArchive(){
+  if(ARCHIVE.probed&&ARCHIVE.pid===PID)return;
+  ARCHIVE={pid:PID,total:0,probed:true,on:false,tickets:[],loaded:0,err:null,loading:false};
+  // A failed probe degrades to "no archive" — the same surface a disabled or
+  // empty cold store presents — and never errors the console.
+  fetch(api("/tickets/archive?limit=1")).then(r=>r.ok?r.json():{total:0}).then(d=>{
+    ARCHIVE.total=Number(d.total)||0;
+    if(ARCHIVE.total>0){ARCHIVE.on=true;loadArchivePage();}
+  }).catch(()=>{}).finally(()=>{if(CUR==="board")renderActive();});
+}
+function archiveFilterHtml(){
+  if(ARCHIVE.total<1)return"";
+  const chip=`<span class="fchip ${ARCHIVE.on?'on':''}" onclick="ARCHIVE.on=!ARCHIVE.on;renderActive()" title="Tickets evicted to the archive cold store — open any card to read it"><i class="ti ti-archive" style="font-size:12px"></i> Archived · ${ARCHIVE.total}</span>`;
+  if(!ARCHIVE.on)return chip;
+  const hot=(STATE.tickets||[]).filter(t=>ARCH_CLOSED.includes(t.status)).length;
+  return chip+`<span style="margin-left:auto;align-self:center;font-size:11.5px;color:var(--dim)" title="closed tickets: hot board columns + the archive">closed: <b style="color:var(--text)">${hot}</b> hot + <b style="color:var(--text)">${ARCHIVE.total}</b> archived</span>`;
+}
+// The archive column renders card() unchanged (it reads only the ticket plus
+// hot STATE, which archived ids never collide with) and adds the one chip the
+// hot columns don't need: the saved status, since the column itself isn't one.
+function archCard(t){
+  const col={done:"var(--green)",fixed:"var(--amber)",documented:"var(--teal)",verified:"var(--green)",rejected:"var(--dim)"}[t.status]||"var(--dim)";
+  return card(t).replace('<div class="badges">',
+    `<div class="badges"><span class="b" style="background:color-mix(in srgb,${col} 15%,transparent);color:${col}">${esc(t.status)}</span>`);
+}
+function archiveColumnHtml(){
+  if(!ARCHIVE.on||ARCHIVE.total<1)return"";
+  const head=`<div class="col"><h3><span class="dot" style="background:var(--purple)"></span>Archive<span class="n" style="background:color-mix(in srgb,var(--purple) 16%,transparent);color:var(--purple)">${ARCHIVE.total}</span></h3>`;
+  if(ARCHIVE.err)return head+`<div class="empty">Couldn’t load the archive <span class="fchip" style="margin-left:8px" onclick="loadArchivePage()">Retry</span></div></div>`;
+  if(ARCHIVE.loading&&!ARCHIVE.tickets.length)return head+[0,1,2].map(()=>`<div class="card-t" style="height:58px;opacity:.45;cursor:default"><div class="cid">···</div><div class="ct" style="color:var(--dim)">loading…</div></div>`).join("")+'</div>';
+  let tail=ARCHIVE.loaded<ARCHIVE.total
+    ?`<div class="empty" style="cursor:pointer" onclick="loadArchivePage()">Load ${Math.min(ARCH_PAGE,ARCHIVE.total-ARCHIVE.loaded)} more · ${ARCHIVE.total-ARCHIVE.loaded} left</div>`
+    :`<div class="empty" style="color:var(--dim)">Showing all ${ARCHIVE.total} archived</div>`;
+  return head+ARCHIVE.tickets.map(archCard).join("")+tail+'</div>';
+}
+async function loadArchivePage(){
+  if(ARCHIVE.loading)return;
+  ARCHIVE.loading=true;ARCHIVE.err=null;if(CUR==="board")renderActive();
+  try{
+    const r=await fetch(api("/tickets/archive?limit="+ARCH_PAGE+"&offset="+ARCHIVE.loaded));
+    if(!r.ok)throw new Error("archive fetch "+r.status);
+    const d=await r.json();
+    ARCHIVE.tickets=ARCHIVE.tickets.concat(d.tickets||[]);
+    ARCHIVE.loaded=ARCHIVE.tickets.length;
+    ARCHIVE.total=Number(d.total)||ARCHIVE.total;
+  }catch(e){ARCHIVE.err=true;}
+  ARCHIVE.loading=false;if(CUR==="board")renderActive();
+}
+
 // Merged-then-reverted work (CXA-F047) on the Work board: the most recent
 // events, with the approve/dismiss decision pending ones still wait on.
 // Renders nothing when the ledger is empty — the board reads as before.
@@ -806,14 +868,16 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
     document.getElementById("board-filters").innerHTML=
       fc.map(f=>`<span class="fchip ${BF===f?'on':''}" onclick="BF='${f}';renderActive()">${f==='all'?'all priorities':f}</span>`).join("")
       +'<span style="width:1px;background:var(--border2);margin:0 4px;align-self:stretch"></span>'
-      +sc.map(f=>`<span class="fchip ${SF===f?'on':''}" onclick="SF='${f}';renderActive()">${f==='all'?'all statuses':f.replace('_',' ')}</span>`).join("");
+      +sc.map(f=>`<span class="fchip ${SF===f?'on':''}" onclick="SF='${f}';renderActive()">${f==='all'?'all statuses':f.replace('_',' ')}</span>`).join("")
+      +archiveFilterHtml();
     // One unified board: features + bugs share columns mapped by lifecycle stage.
     let all=(s.tickets||[]);if(BF!=="all")all=all.filter(t=>t.priority===BF);
     if(SF!=="all")all=all.filter(t=>t.status===SF);
-    document.getElementById("board-cols").innerHTML=UCOLS.map(c=>ucolumn(c,all)).join("");
+    document.getElementById("board-cols").innerHTML=UCOLS.map(c=>ucolumn(c,all)).join("")+archiveColumnHtml();
     renderRevertedWork(s);
     renderSprintPanel(s);
     renderBacklogPanel(s);
+    probeArchive();
   }else if(CUR==="activity"){
     const sel=document.getElementById("act-filter");
     if(!INIT_ACT){const agents=[...new Set((s.activity||[]).map(a=>a.agent))];

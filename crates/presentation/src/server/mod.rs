@@ -35,6 +35,7 @@ use crate::middleware::{
 };
 
 mod alerts;
+mod archive;
 mod approval_policy;
 mod assets;
 mod auth;
@@ -305,6 +306,9 @@ struct AppState {
     /// Server-side documentation store (MongoDB) when configured; `None` falls
     /// back to per-project `state.json`.
     doc_store: Option<Arc<dyn coxagent_application::ports::outbound::DocStorePort>>,
+    /// Cold store holding tickets evicted from the hot state (CXA-F272/F273);
+    /// `None` means no archive is wired and every read-back answers empty.
+    archive_store: Option<Arc<dyn coxagent_application::ports::outbound::ArchiveStorePort>>,
     /// A hub-level engine for cross-project drafting (e.g. project goals), with a
     /// working directory to run it in.
     analyzer: Option<(
@@ -558,6 +562,10 @@ pub struct HubExtras {
     pub storage: Option<Arc<dyn coxagent_application::ports::outbound::StoragePort>>,
     /// Server-side documentation store (e.g. MongoDB). `None` = per-project state.
     pub doc_store: Option<Arc<dyn coxagent_application::ports::outbound::DocStorePort>>,
+    /// Cold store for archived (evicted) tickets, e.g. MongoDB (CXA-F272);
+    /// the in-memory dev/e2e adapter stands in when configured. `None` = no
+    /// archive: the read-back endpoints answer empty, the UI shows nothing.
+    pub archive_store: Option<Arc<dyn coxagent_application::ports::outbound::ArchiveStorePort>>,
     /// Shared KV store for hub-wide singletons (system chat). `None` = local file.
     pub syschat_store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
     /// Registered projects that failed to load (e.g. an unparseable
@@ -989,6 +997,10 @@ pub async fn serve_full(
         .route("/api/projects/:pid/docs-review", post(docs_review_ep))
         .route("/api/projects/:pid/chat-reply", post(chat_reply_ep))
         .route("/api/projects/:pid/tickets", post(create_ticket))
+        .route(
+            "/api/projects/:pid/tickets/archive",
+            get(archive::ticket_archive_ep),
+        )
         .route("/api/projects/:pid/ticket/:id", get(ticket_detail_ep))
         .route("/api/projects/:pid/ticket/:id/priority", post(set_priority))
         .route("/api/projects/:pid/ticket/:id/reject", post(reject_ticket))
@@ -1400,6 +1412,8 @@ fn bad_request_error(msg: &str) -> axum::response::Response {
 
 #[cfg(test)]
 mod alerts_tests;
+#[cfg(test)]
+mod archive_tests;
 #[cfg(test)]
 mod approval_policy_tests;
 #[cfg(test)]

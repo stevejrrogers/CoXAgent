@@ -1039,6 +1039,7 @@ async fn serve_with_runner(
         hub_dir: Some(state_dir.parent().unwrap_or(state_dir).to_path_buf()),
         storage: build_storage().await,
         doc_store: build_doc_store().await,
+        archive_store: build_archive_store(),
         syschat_store: build_syschat_store(state_dir.parent().unwrap_or(state_dir)).await,
         ..Default::default()
     };
@@ -1227,6 +1228,7 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
         hub_dir: Some(base.clone()),
         storage: build_storage().await,
         doc_store: build_doc_store().await,
+        archive_store: build_archive_store(),
         syschat_store: build_syschat_store(&base).await,
         broken,
         // CXA-B114: recovered projects arrive here and join the live registry

@@ -806,6 +806,27 @@ pub(crate) async fn build_doc_store(
     }
 }
 
+/// Cold store for archived (evicted) tickets (CXA-F272/F274). The Mongo
+/// adapter takes this slot in production once F272 lands; until then the
+/// env-gated in-memory adapter stands in for dev/e2e runs
+/// (`COXAGENT_ARCHIVE_MEMORY=1`, optionally seeded via
+/// `COXAGENT_ARCHIVE_MEMORY_SEED`). Off by default: with nothing wired every
+/// archive read-back answers empty, exactly the pre-archive behavior.
+pub(crate) fn build_archive_store(
+) -> Option<std::sync::Arc<dyn coxagent_application::ports::outbound::ArchiveStorePort>> {
+    match coxagent_infrastructure::MemoryArchiveStore::from_env() {
+        Ok(Some(store)) => {
+            tracing::info!("ticket archive: in-memory (dev/e2e; no Mongo cold store wired)");
+            Some(std::sync::Arc::new(store))
+        }
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!("in-memory archive requested but unusable ({e}); archive stays empty");
+            None
+        }
+    }
+}
+
 /// Blob storage backend: S3/MinIO when `COXAGENT_S3_*` is configured, else the
 /// presentation layer's local-disk default.
 pub(crate) async fn build_storage(

@@ -237,6 +237,7 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/ticket/:id/unpark", &["post"]),
     route("/api/projects/:pid/ticket/:id/verify", &["post"]),
     route("/api/projects/:pid/tickets", &["post"]),
+    route("/api/projects/:pid/tickets/archive", &["get"]),
     route("/api/projects/:pid/transcripts", &["get"]),
     route("/api/projects/:pid/transcripts/:name", &["get"]),
     route("/api/projects/:pid/upload", &["post"]),

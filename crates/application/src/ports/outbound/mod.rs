@@ -1,5 +1,6 @@
 //! Outbound ports — interfaces the application needs the outside world to fulfil.
 
+pub mod archive;
 pub mod audit;
 pub mod backup;
 pub mod deploy;
@@ -19,6 +20,7 @@ pub mod state_store;
 pub mod storage;
 pub mod workspace;
 
+pub use archive::ArchiveStorePort;
 pub use audit::{AuditPort, AuditRecord};
 pub use backup::{
     archive_sha256, hex_decode, hex_encode, is_safe_archive_path, sha256_hex, validate_archive,

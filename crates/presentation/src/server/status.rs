@@ -50,6 +50,7 @@ pub(super) async fn build_state(
             })
         }),
         doc_store: extras.doc_store,
+        archive_store: extras.archive_store,
     }
 }
 
