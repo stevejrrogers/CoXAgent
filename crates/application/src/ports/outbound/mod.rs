@@ -32,7 +32,7 @@ pub use deploy::{
 pub use deps::{DependencyDiscoveryPort, Lockfile};
 pub use doc_store::DocStorePort;
 pub use engine::{AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus, Usage};
-pub use forge::{ForgePort, PrFeedback, PullRequest};
+pub use forge::{ForgePort, IssueDraft, PrFeedback, PullRequest};
 pub use git::{GitAuthor, GitPort, SyncBase, WorkingTreeDiff};
 pub use janitor::ProcessJanitorPort;
 pub use kv_doc::KvDocPort;
