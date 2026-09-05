@@ -69,7 +69,9 @@ pub use state::{
     HealthCheckResult, Milestone, OutboxEntry, OutboxStatus, OutcomeLedgerEntry, PrReview,
     ProjectState, Reaction, Spend, Sprint, UnattributedOutcome, GENERAL_CHANNEL, SCHEMA_VERSION,
 };
-pub use system_chat::{ChatContext, ProjectRef, SystemChat, UserRef, Webhook};
+pub use system_chat::{
+    ChatContext, ProjectRef, SystemChat, UserRef, Webhook, MAX_PINS_PER_CHANNEL, REACTION_EMOJIS,
+};
 
 /// Test-only filesystem adapter: the real disk behind the files port, for
 /// tests that build fixtures in a temp dir. `#[cfg(test)]` code may use

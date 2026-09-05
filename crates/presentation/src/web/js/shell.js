@@ -417,6 +417,10 @@ async function boot(){
   let r;try{r=await fetch("/api/auth/me");}catch(e){rememberDestination();showLogin();return;}
   if(r.status===401){rememberDestination();showLogin();return;}
   try{ME=await r.json();}catch(e){ME={auth:false};}
+  // Open mode (no accounts configured): the server resolves every caller as
+  // "user" — the client must carry the same identity, or own-message actions
+  // (edit/delete) and reaction "mine" states are unreachable (CXA-F367).
+  if(ME&&!ME.username)ME.username="user";
   try{updateSegments();}catch(e){}
   startApp();
 }
@@ -2130,7 +2134,11 @@ async function deleteMsg(id){
   try{const r=await fetch("/api/chat/messages/"+id,{method:"DELETE"});if(!r.ok)toasty("Cannot delete","err");}
   catch(e){toasty("Network error","err");}}
 async function togglePin(id){
-  try{const r=await fetch("/api/chat/messages/"+id+"/pin",{method:"POST"});const d=await r.json();
+  try{const r=await fetch("/api/chat/messages/"+id+"/pin",{method:"POST"});
+    // A refused pin (not owner/admin, or the 5-pin cap) carries the reason —
+    // show it instead of a generic network failure.
+    if(!r.ok){toasty((await r.text())||"Cannot pin","err");return;}
+    const d=await r.json();
     toasty(d.pinned?"Pinned":"Unpinned","ok");loadPins();
   }catch(e){toasty("Network error","err");}}
 function copyMsgLink(id){
