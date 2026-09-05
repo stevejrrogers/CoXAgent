@@ -5,6 +5,7 @@
 
 pub mod artifacts;
 pub mod auth;
+pub mod backlog_import;
 pub mod backlog_scoping;
 pub mod brief_screening;
 pub mod codegraph;
