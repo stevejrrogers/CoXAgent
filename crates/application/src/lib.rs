@@ -3,6 +3,7 @@
 //! ports, presentation drives the inbound ones.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod archive_read;
 pub mod artifacts;
 pub mod auth;
 pub mod backlog_import;

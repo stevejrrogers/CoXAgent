@@ -64,6 +64,16 @@ fn provenance_field(
     (!prov.is_empty()).then(|| serde_json::to_value(prov).unwrap_or_default())
 }
 
+/// The project's deploy config, read leniently: a corrupt file degrades to
+/// the default and any link derived from it degrades to null, never fails the
+/// payload that wanted it (the rule `inbox_ep` and this reader share).
+fn config_lenient(path: &std::path::Path) -> Config {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
+        .unwrap_or_default()
+}
+
 /// Full detail for one ticket — including the `design` specs stripped from list
 /// payloads — loaded only when the user opens it.
 pub(super) async fn ticket_detail_ep(
@@ -73,13 +83,8 @@ pub(super) async fn ticket_detail_ep(
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
-    // The live reproduction link (CXA-F244) needs the project's deploy config;
-    // read it the same way inbox_ep does — a corrupt config degrades to the
-    // default and the link degrades to null, never fails the detail payload.
-    let cfg = std::fs::read_to_string(&p.config_path)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
-        .unwrap_or_default();
+    // The live reproduction link (CXA-F244) needs the project's deploy config.
+    let cfg = config_lenient(&p.config_path);
     match p.store.load().await {
         Ok(state) => {
             // Artifact existence is storage IO, resolved up front so the
@@ -89,12 +94,15 @@ pub(super) async fn ticket_detail_ep(
                 state.ticket_evidence.get(&id).map(Vec::as_slice),
             )
             .await;
-            state
-                .tickets
-                .iter()
-                .find(|t| t.id().as_str() == id)
-                .map_or_else(not_found, |t| {
-                    let mut v = serde_json::to_value(t).unwrap_or_default();
+            // Hot state first, then the archive cold store on a miss
+            // (CXA-F274) — see archive::resolve_detail for the contract.
+            let resolved =
+                match super::archive::resolve_detail(&state.tickets, &app, &pid, &id).await {
+                    Ok(r) => r,
+                    Err(e) => return internal_error(&e.to_string()),
+                };
+            resolved.map_or_else(not_found, |(t, archived)| {
+                    let mut v = serde_json::to_value(&t).unwrap_or_default();
                     // Cost-gate surface: the hold estimate (if any) and whether a
                     // human already approved this ticket to run.
                     if let Some(obj) = v.as_object_mut() {
@@ -199,6 +207,13 @@ pub(super) async fn ticket_detail_ep(
                                 "unknown_dependencies".into(),
                                 serde_json::to_value(unknown).unwrap_or_default(),
                             );
+                        }
+                        // Served from the cold store (CXA-F274): the stamp is
+                        // the whole show/hide axis for the read-only dialog —
+                        // absent on hot tickets, so their payloads are
+                        // byte-identical to before.
+                        if archived {
+                            obj.insert("archived".into(), serde_json::json!(true));
                         }
                     }
                     Json(v).into_response()

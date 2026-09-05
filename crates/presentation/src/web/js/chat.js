@@ -1912,6 +1912,9 @@ async function showTicket(id){
     }catch(e){}
     body.innerHTML='<span class="x" onclick="close_(\'ov-ticket\')"><i class="ti ti-x"></i></span><div class="empty">ticket not found in any project</div>';return;}
   const d=t.design||{},tech=d.technical,ux=d.ux,ac=t.acceptance_criteria||[];
+  // Served from the archive cold store (CXA-F274): the record is complete but
+  // immutable — every mutation affordance below is suppressed behind this flag.
+  const ARCH=t.archived===true;
   // Dependency graph (CXA-F237): the ticket's transitive closure rendered from
   // the project's derived graph. Only fetched when the ticket DECLARES deps,
   // and only rendered when the ticket belongs to THIS project's graph — the
@@ -1926,25 +1929,25 @@ async function showTicket(id){
     }catch(e){}
   }
   let h=`<span class="x" onclick="close_('ov-ticket')"><i class="ti ti-x"></i></span><h3>${esc(t.title)}</h3>
-    <div class="msub">${esc(t.id)} · ${esc(t.type)}</div>
+    <div class="msub">${esc(t.id)} · ${esc(t.type)}${ARCH?` <span class="b" style="background:color-mix(in srgb,var(--purple) 16%,transparent);color:var(--purple)" title="Evicted to the archive cold store — read-only"><i class="ti ti-archive" style="font-size:10px"></i> ARCHIVED</span> <span style="color:var(--dim)">· served from the cold store</span>`:""}</div>
     <div class="tk-tabs" role="tablist">
       <button class="tk-tab on" data-tk-tab="details" onclick="tkTab('details')"><i class="ti ti-list-details"></i> Details</button>
       <button class="tk-tab" data-tk-tab="coverage" onclick="tkTab('coverage')"><i class="ti ti-shield-check"></i> Test Coverage</button>
       <button class="tk-tab" data-tk-tab="forensics" onclick="tkTab('forensics')"><i class="ti ti-history"></i> Forensics</button>
     </div>
     <div class="tk-pane" id="tk-pane-details">
-    <div class="mrow"><span class="lbl">Status</span><b>${t.status==="on_hold"?'<span style="color:var(--amber)">on hold</span>':esc(t.status)}</b>${t.status==="on_hold"&&(STATE.hold_reasons||{})[t.id]?`<span style="font-size:11.5px;color:var(--dim);margin-left:8px">· ${esc(STATE.hold_reasons[t.id])}</span>`:""}${(typeof canManage==="function"&&canManage())?(["pending","ready","open"].includes(t.status)?` <button class="tk-btn" style="margin-left:10px" onclick="holdTicket('${t.id}',true)" title="Park it — sprints and agents skip it until resumed"><i class="ti ti-player-pause"></i> Hold</button>`:(t.status==="on_hold"?` <button class="tk-btn go" style="margin-left:10px" onclick="holdTicket('${t.id}',false)"><i class="ti ti-player-play"></i> Resume</button>`:"")):""}</div>
+    <div class="mrow"><span class="lbl">Status</span><b>${t.status==="on_hold"?'<span style="color:var(--amber)">on hold</span>':esc(t.status)}</b>${t.status==="on_hold"&&(STATE.hold_reasons||{})[t.id]?`<span style="font-size:11.5px;color:var(--dim);margin-left:8px">· ${esc(STATE.hold_reasons[t.id])}</span>`:""}${(!ARCH&&typeof canManage==="function"&&canManage())?(["pending","ready","open"].includes(t.status)?` <button class="tk-btn" style="margin-left:10px" onclick="holdTicket('${t.id}',true)" title="Park it — sprints and agents skip it until resumed"><i class="ti ti-player-pause"></i> Hold</button>`:(t.status==="on_hold"?` <button class="tk-btn go" style="margin-left:10px" onclick="holdTicket('${t.id}',false)"><i class="ti ti-player-play"></i> Resume</button>`:"")):""}${ARCH?' <span style="font-size:11px;color:var(--dim);margin-left:8px">terminal — no further transitions</span>':""}</div>
     <div class="mrow"><span class="lbl">Priority</span>
       <div style="display:flex;gap:6px;align-items:center">
-        ${["high","medium","low"].map(p=>`<span onclick="setPriority('${t.id}','${p}')" style="cursor:pointer;font-size:11px;padding:3px 10px;border-radius:7px;font-weight:600;${t.priority===p?`background:var(--accentbg);color:var(--accent2)`:'background:var(--card2);color:var(--muted)'}">${p}</span>`).join("")}
+        ${ARCH?`<span style="font-size:11px;padding:3px 10px;border-radius:7px;font-weight:600;background:var(--accentbg);color:var(--accent2)">${esc(t.priority)}</span>`:["high","medium","low"].map(p=>`<span onclick="setPriority('${t.id}','${p}')" style="cursor:pointer;font-size:11px;padding:3px 10px;border-radius:7px;font-weight:600;${t.priority===p?`background:var(--accentbg);color:var(--accent2)`:'background:var(--card2);color:var(--muted)'}">${p}</span>`).join("")}
         <span style="color:var(--dim);font-size:12px;margin-left:6px">· ${esc(t.complexity)}${t.has_ui?' · UI':''}</span></div></div>
     <div class="mrow"><span class="lbl">Assignee</span>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        ${t.assignee?`<span class="tk" style="background:var(--accentbg);color:var(--accent2)"><i class="ti ti-user"></i> @${esc(t.assignee)}</span>
-          <button class="tk-btn" style="padding:4px 10px;font-size:11px" onclick="assignTicket('${t.id}','')"><i class="ti ti-robot"></i> Return to agents</button>`
-        :`<span style="color:var(--dim);font-size:12px">agents (pool)</span>
+        ${t.assignee?`<span class="tk" style="background:var(--accentbg);color:var(--accent2)"><i class="ti ti-user"></i> @${esc(t.assignee)}</span>${ARCH?"":`
+          <button class="tk-btn" style="padding:4px 10px;font-size:11px" onclick="assignTicket('${t.id}','')"><i class="ti ti-robot"></i> Return to agents</button>`}`
+        :`<span style="color:var(--dim);font-size:12px">agents (pool)</span>${ARCH?"":`
           <select id="tk-assign-sel" style="background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:7px;padding:4px 8px;font-size:12px"><option value="">choose person…</option></select>
-          <button class="tk-btn" style="padding:4px 10px;font-size:11px" onclick="assignTicket('${t.id}',document.getElementById('tk-assign-sel').value)"><i class="ti ti-user-plus"></i> Assign</button>`}
+          <button class="tk-btn" style="padding:4px 10px;font-size:11px" onclick="assignTicket('${t.id}',document.getElementById('tk-assign-sel').value)"><i class="ti ti-user-plus"></i> Assign</button>`}`}
       </div></div>
     <div class="mrow"><span class="lbl">Blocked by</span>${depChips(t.depends_on,blockedStatuses(t))}</div>
     <div class="mrow"><span class="lbl">Blocks</span>${depChips((STATE.tickets||[]).filter(x=>(x.depends_on||[]).includes(t.id)).map(x=>x.id))}</div>
@@ -1978,22 +1981,23 @@ async function showTicket(id){
    ATT_GALLERY=atts.map(a=>({url:api("/attachment?key="+encodeURIComponent(a.key)),
      name:a.name,img:(a.content_type||"").startsWith("image/")}));
    const grid=ATT_GALLERY.map((g,i)=>{
-     const del=`<button class="att-del" title="Remove attachment" onclick="event.stopPropagation();deleteAttachment('${t.id}','${esc(atts[i].key)}')">&times;</button>`;
+     const del=ARCH?"":`<button class="att-del" title="Remove attachment" onclick="event.stopPropagation();deleteAttachment('${t.id}','${esc(atts[i].key)}')">&times;</button>`;
      return g.img
        ?`<div class="att-card" onclick="event.stopPropagation();showAttachment(${i})" title="${esc(g.name)} · ${esc(atts[i].by)}">${del}<img src="${esc(g.url)}" alt="${esc(g.name)}" loading="lazy"><span>${esc(g.name)}</span></div>`
        :`<div class="att-card att-file" onclick="event.stopPropagation();showAttachment(${i})" title="${esc(g.name)} · ${esc(atts[i].by)}">${del}<i class="ti ti-file"></i><span>${esc(g.name)}</span></div>`;
    }).join("");
    h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">Design & attachments</span>
      <div class="att-grid" id="att-grid">${grid||'<div style="color:var(--dim);font-size:12px;margin-top:6px">— none yet (PD attaches mockups here)</div>'}</div>
-     <input type="file" id="att-file" style="display:none" onchange="uploadAttachment('${t.id}',this)">
-     <button class="tk-btn" style="margin-top:8px" onclick="document.getElementById('att-file').click()"><i class="ti ti-paperclip"></i> Attach file</button></div>`;}
+     ${ARCH?"":`<input type="file" id="att-file" style="display:none" onchange="uploadAttachment('${t.id}',this)">
+     <button class="tk-btn" style="margin-top:8px" onclick="document.getElementById('att-file').click()"><i class="ti ti-paperclip"></i> Attach file</button>`}</div>`;}
   h+=`</div>`+covPane(t)+fgPane(t);
   const canWork=["pending","ready","open"].includes(t.status);
-  if(t.cost_hold!=null&&!t.cost_approved)h+=`<div class="mrow" style="display:block;border:1px solid var(--amber);border-radius:9px;padding:10px 12px;background:color-mix(in srgb,var(--amber) 9%,transparent)"><span style="color:var(--amber);font-weight:700"><i class="ti ti-currency-dollar"></i> Held for cost approval</span><div style="font-size:12.5px;color:var(--muted);margin-top:4px">Estimated ~$${(+t.cost_hold).toFixed(2)}/run exceeds the approval gate. Agents will skip this ticket until you approve it.</div><button class="pri" style="margin-top:8px" onclick="approveCost('${t.id}')"><i class="ti ti-check"></i> Approve run</button></div>`;
+  if(t.cost_hold!=null&&!t.cost_approved&&!ARCH)h+=`<div class="mrow" style="display:block;border:1px solid var(--amber);border-radius:9px;padding:10px 12px;background:color-mix(in srgb,var(--amber) 9%,transparent)"><span style="color:var(--amber);font-weight:700"><i class="ti ti-currency-dollar"></i> Held for cost approval</span><div style="font-size:12.5px;color:var(--muted);margin-top:4px">Estimated ~$${(+t.cost_hold).toFixed(2)}/run exceeds the approval gate. Agents will skip this ticket until you approve it.</div><button class="pri" style="margin-top:8px" onclick="approveCost('${t.id}')"><i class="ti ti-check"></i> Approve run</button></div>`;
   // Same live link as the inbox verify card (CXA-F242-C): the server injects
   // the field only while the ticket awaits a human verdict, so its presence
   // is the whole show/hide axis — no resolved deploy, no dead button.
-  h+=`<div class="tk-actions">
+  // Archived records are immutable: the whole action bar is suppressed.
+  if(!ARCH)h+=`<div class="tk-actions">
     <button class="tk-btn" onclick="editTicket('${t.id}')"><i class="ti ti-edit"></i> Edit</button>
     ${canWork?`<button class="tk-btn go" onclick="workNext('${t.id}')"><i class="ti ti-player-play-filled"></i> Work on this next</button>`:''}
     ${(t.status==="pending"&&tech)?`<button class="tk-btn go" onclick="humanGate('${t.id}','ready')"><i class="ti ti-checks"></i> Approve → Ready</button>`:''}
@@ -2003,10 +2007,10 @@ async function showTicket(id){
     ${(t.status==="pending"||t.status==="open")?`<button class="tk-btn danger" onclick="rejectTicket('${t.id}')"><i class="ti ti-ban"></i> Reject</button>`:''}
   </div>`;
   h+=`<div class="mrow" style="display:block;border:none;margin-top:6px"><span class="lbl">Comments</span><div id="tk-comments" style="margin-top:8px">${'<div class="empty" style="padding:8px">loading…</div>'}</div>
-    <div class="tkc-wrap">${mdToolbar('tkc-input')}<div class="tkc-compose"><input id="tkc-input" placeholder="Add a comment…  (**markdown** · Enter to post · @ to mention)" onkeydown="if(!imeEnter(event)&&event.key==='Enter')postTicketComment('${t.id}')"><button class="pri" onclick="postTicketComment('${t.id}')"><i class="ti ti-send"></i></button></div></div></div>`;
+    ${ARCH?'<div class="tkc-wrap" style="border:1px dashed var(--border2);border-radius:8px;padding:8px 12px;text-align:center;color:var(--dim);font-size:12.5px">This ticket is archived — history is read-only.</div>':`<div class="tkc-wrap">${mdToolbar('tkc-input')}<div class="tkc-compose"><input id="tkc-input" placeholder="Add a comment…  (**markdown** · Enter to post · @ to mention)" onkeydown="if(!imeEnter(event)&&event.key==='Enter')postTicketComment('${t.id}')"><button class="pri" onclick="postTicketComment('${t.id}')"><i class="ti ti-send"></i></button></div></div>`}</div>`;
   body.innerHTML=h;
-  fillAssignSelect();
-  renderTicketComments(t.id);
+  if(!ARCH)fillAssignSelect();
+  renderTicketComments(t.id,ARCH);
   // Ticket descriptions can carry ```mermaid fences too (SA designs often do).
   if(typeof renderMermaidIn==="function")renderMermaidIn(body);}
 // Ticket-detail tabs (CXA-F024): Details vs Test Coverage. Pure visibility
@@ -2237,7 +2241,9 @@ async function workNext(id){
   try{await ctl('resume');}catch(e){}
   showTicket(id);}
 const TKC_QUICK=["👍","❤️","🎉","🚀","👀","✅"];
-async function renderTicketComments(tid){
+// `arch` renders the thread read-only: no reaction affordances (an archived
+// ticket's history is immutable — the composer is already suppressed).
+async function renderTicketComments(tid,arch){
   const box=document.getElementById("tk-comments");if(!box)return;
   let list=[];try{list=await(await fetch(api("/comments?ticket="+encodeURIComponent(tid)))).json();}catch(e){}
   if(!Array.isArray(list)||!list.length){box.innerHTML='<div class="empty" style="padding:8px;font-size:12px">No comments yet — start the thread.</div>';return;}
@@ -2245,14 +2251,14 @@ async function renderTicketComments(tid){
   box.innerHTML=list.map(c=>{
     const mine=c.author==="USER"||c.author===me;
     const av=(c.author||"?").slice(0,2).toUpperCase();
-    const chips=(c.reactions||[]).map(r=>{const on=(r.users||[]).includes(me);
+    const chips=arch?"":(c.reactions||[]).map(r=>{const on=(r.users||[]).includes(me);
       return `<button class="react${on?' on':''}" title="${esc((r.users||[]).join(', '))}" onclick="reactComment('${tid}','${esc(c.id)}','${esc(r.emoji)}')">${r.emoji} <span>${(r.users||[]).length}</span></button>`;}).join("");
     return `<div class="tkc">
       <div class="tkc-av${mine?' me':''}">${esc(av)}</div>
       <div class="tkc-main"><div class="tkc-h"><b>${esc(c.author==='USER'?'You':c.author)}</b> <span class="tkc-t">${esc((c.at||'').slice(0,16).replace('T',' '))}</span></div>
         <div class="tkc-b">${formatMsg(c.body)}</div>
         ${attHtml(c.attachments)}
-        <div class="tkc-react">${chips}<button class="tkc-addr" onclick="tkcReactMenu(event,'${tid}','${esc(c.id)}')" title="React"><i class="ti ti-mood-plus"></i></button></div></div>
+        <div class="tkc-react">${chips}${arch?"":`<button class="tkc-addr" onclick="tkcReactMenu(event,'${tid}','${esc(c.id)}')" title="React"><i class="ti ti-mood-plus"></i></button>`}</div></div>
     </div>`;}).join("");
 }
 function tkcReactMenu(ev,tid,cid){ev.stopPropagation();

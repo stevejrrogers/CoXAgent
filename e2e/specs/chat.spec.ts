@@ -188,5 +188,15 @@ test('reaction set and pin cap are enforced server-side, not just in the UI', as
     'a tombstone is not pinnable',
   ).toBe(400);
 
-  await assertNoConsoleErrors(errors);
+  // The three deliberate refusals above (🦄 react, 6th pin, tombstone pin)
+  // each log a browser network-layer "Failed to load resource" message; that
+  // is the test provoking the server, not app breakage. Exactly those three
+  // must have fired — any other resource error, page error or app JS error
+  // still fails the gate below.
+  const resourceNoise = errors.filter((e) => e.startsWith('Failed to load resource'));
+  expect(
+    resourceNoise.map((e) => (/status of (\d{3})/.exec(e)?.[1] ?? '?')).sort(),
+    'the deliberate 4xx probes, and only those',
+  ).toEqual(['400', '400', '409']);
+  await assertNoConsoleErrors(errors.filter((e) => !e.startsWith('Failed to load resource')));
 });
