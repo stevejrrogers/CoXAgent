@@ -23,12 +23,33 @@ use coxagent_application::use_cases::duplicate_radar::{
 /// the caller's visible projects. Auth is `auth_mw`'s session/bearer gate
 /// (like `/api/fleet/river`); pair visibility is scoped per principal, so a
 /// member never learns another team's ticket titles.
+///
+/// Opening the view IS a radar run (CXA-F362): the pairs are computed live
+/// through the pure core, so the run is stamped onto the persisted workspace
+/// doc first — the served `scannedAt` is the vintage of the pairs served
+/// beside it, and the stamp survives a hub restart with the doc.
 pub(super) async fn duplicates_ep(
     State(app): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
+    {
+        let mut doc = app.workspace.inner.lock().await;
+        doc.scanned_at = now_rfc3339();
+    }
+    app.workspace.save().await;
+    let payload = radar_payload(&app, &headers).await;
+    Json(payload).into_response()
+}
+
+/// The radar's full payload for one caller: the cross-project pairs computed
+/// live through the pure core over the caller's visible projects (the same
+/// visibility rule `river_scope` enforces for the fleet river), plus the
+/// last-run stamp read off the persisted workspace doc — the state `Ws::load`
+/// restores at boot, so the header's "last scanned" comes back from disk/KV
+/// after a restart rather than being minted at request time.
+async fn radar_payload(app: &AppState, headers: &axum::http::HeaderMap) -> serde_json::Value {
     let principal = match &app.auth {
-        Some(auth) => resolve_principal(auth, &headers).await,
+        Some(auth) => resolve_principal(auth, headers).await,
         // Open mode (no accounts configured): the operator sees everything.
         None => None,
     };
@@ -78,10 +99,44 @@ pub(super) async fn duplicates_ep(
         }
     }
     let pairs = find_cross_project_duplicates(&snapshots, &allowed_keys);
-    Json(json!({
+    let scanned_at = app.workspace.inner.lock().await.scanned_at.clone();
+    json!({
         "crossProjectDuplicates": pairs.iter().map(pair_json).collect::<Vec<_>>(),
-    }))
-    .into_response()
+        "scannedAt": scanned_at,
+    })
+}
+
+/// POST /api/workspace/duplicates/scan — the operator's explicit "Scan now"
+/// (CXA-F362 AC1): re-runs the cross-project comparison on demand, stamps the
+/// persisted `scanned_at` with this run, and serves the fresh payload. Gated
+/// to hub admins and leads (`can_manage`) through the house authorization
+/// gate — hiding the button client-side alone would leave the re-run
+/// drivable by anyone — and audited, so the trail names who ran a scan.
+pub(super) async fn duplicates_scan_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let Some(me) = gate_principal(
+        &app,
+        &headers,
+        coxagent_application::auth::AuthRole::can_manage,
+    )
+    .await
+    else {
+        return (
+            StatusCode::FORBIDDEN,
+            "hub admins and leads may run a scan",
+        )
+            .into_response();
+    };
+    {
+        let mut doc = app.workspace.inner.lock().await;
+        doc.scanned_at = now_rfc3339();
+    }
+    app.workspace.save().await;
+    let payload = radar_payload(&app, &headers).await;
+    audit_push(&app.audit, &me, "dupe-radar scan now".to_owned(), 200).await;
+    Json(payload).into_response()
 }
 
 /// One radar entry for the view: home side flattened (the SA contract's named
@@ -336,6 +391,22 @@ mod tests {
         .expect("doc with verdict");
         assert_eq!(doc.dupe_allowlist.len(), 1);
         assert_eq!(doc.dupe_allowlist[0].key, "p1/T-1|p2/T-2");
+    }
+
+    /// CXA-F362 AC3 regression: the last-scan stamp persists with the
+    /// workspace doc — a doc written before the field loads clean after a
+    /// hub restart (serde default, empty = never scanned), and a stamped doc
+    /// round-trips the instant through `Ws::save`/`Ws::load` unchanged.
+    #[test]
+    fn the_scanned_at_stamp_defaults_empty_and_round_trips() {
+        let doc: super::hub_docs::WorkspaceDoc =
+            serde_json::from_str(r#"{"name":"Acme"}"#).expect("pre-F362 doc");
+        assert_eq!(doc.scanned_at, "", "serde default, no migration");
+        let doc: super::hub_docs::WorkspaceDoc = serde_json::from_str(
+            r#"{"name":"Acme","scanned_at":"2026-09-05T12:00:00Z"}"#,
+        )
+        .expect("doc with stamp");
+        assert_eq!(doc.scanned_at, "2026-09-05T12:00:00Z");
     }
 
     #[test]
