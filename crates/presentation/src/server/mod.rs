@@ -806,6 +806,12 @@ pub async fn serve_full(
             "/api/workspace/duplicates/action",
             post(duplicates_action_ep),
         )
+        // "Scan now" (CXA-F362): the operator's explicit radar re-run —
+        // admin-gated server-side, stamps the persisted last-scan instant.
+        .route(
+            "/api/workspace/duplicates/scan",
+            post(duplicates_scan_ep),
+        )
         // Fleet spend cockpit (CXA-F278): hub-level cross-project cost
         // aggregation with cap headroom + the soft-ceiling setting (see
         // fleet_spend.rs). Super admin; visibility-only by design.
