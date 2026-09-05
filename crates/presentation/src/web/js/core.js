@@ -609,23 +609,23 @@ const ARCH_PAGE=50;
 // same set the eviction path archives, so "hot closed + archived" counts every
 // finished ticket exactly once.
 const ARCH_CLOSED=["done","fixed","documented","verified"];
-let ARCH={pid:null,total:0,probed:false,on:false,tickets:[],loaded:0,err:null,loading:false};
+let ARCHIVE={pid:null,total:0,probed:false,on:false,tickets:[],loaded:0,err:null,loading:false};
 function probeArchive(){
-  if(ARCH.probed&&ARCH.pid===PID)return;
-  ARCH={pid:PID,total:0,probed:true,on:false,tickets:[],loaded:0,err:null,loading:false};
+  if(ARCHIVE.probed&&ARCHIVE.pid===PID)return;
+  ARCHIVE={pid:PID,total:0,probed:true,on:false,tickets:[],loaded:0,err:null,loading:false};
   // A failed probe degrades to "no archive" — the same surface a disabled or
   // empty cold store presents — and never errors the console.
   fetch(api("/tickets/archive?limit=1")).then(r=>r.ok?r.json():{total:0}).then(d=>{
-    ARCH.total=Number(d.total)||0;
-    if(ARCH.total>0){ARCH.on=true;loadArchivePage();}
+    ARCHIVE.total=Number(d.total)||0;
+    if(ARCHIVE.total>0){ARCHIVE.on=true;loadArchivePage();}
   }).catch(()=>{}).finally(()=>{if(CUR==="board")renderActive();});
 }
 function archiveFilterHtml(){
-  if(ARCH.total<1)return"";
-  const chip=`<span class="fchip ${ARCH.on?'on':''}" onclick="ARCH.on=!ARCH.on;renderActive()" title="Tickets evicted to the archive cold store — open any card to read it"><i class="ti ti-archive" style="font-size:12px"></i> Archived · ${ARCH.total}</span>`;
-  if(!ARCH.on)return chip;
+  if(ARCHIVE.total<1)return"";
+  const chip=`<span class="fchip ${ARCHIVE.on?'on':''}" onclick="ARCHIVE.on=!ARCHIVE.on;renderActive()" title="Tickets evicted to the archive cold store — open any card to read it"><i class="ti ti-archive" style="font-size:12px"></i> Archived · ${ARCHIVE.total}</span>`;
+  if(!ARCHIVE.on)return chip;
   const hot=(STATE.tickets||[]).filter(t=>ARCH_CLOSED.includes(t.status)).length;
-  return chip+`<span style="margin-left:auto;align-self:center;font-size:11.5px;color:var(--dim)" title="closed tickets: hot board columns + the archive">closed: <b style="color:var(--text)">${hot}</b> hot + <b style="color:var(--text)">${ARCH.total}</b> archived</span>`;
+  return chip+`<span style="margin-left:auto;align-self:center;font-size:11.5px;color:var(--dim)" title="closed tickets: hot board columns + the archive">closed: <b style="color:var(--text)">${hot}</b> hot + <b style="color:var(--text)">${ARCHIVE.total}</b> archived</span>`;
 }
 // The archive column renders card() unchanged (it reads only the ticket plus
 // hot STATE, which archived ids never collide with) and adds the one chip the
@@ -636,27 +636,27 @@ function archCard(t){
     `<div class="badges"><span class="b" style="background:color-mix(in srgb,${col} 15%,transparent);color:${col}">${esc(t.status)}</span>`);
 }
 function archiveColumnHtml(){
-  if(!ARCH.on||ARCH.total<1)return"";
-  const head=`<div class="col"><h3><span class="dot" style="background:var(--purple)"></span>Archive<span class="n" style="background:color-mix(in srgb,var(--purple) 16%,transparent);color:var(--purple)">${ARCH.total}</span></h3>`;
-  if(ARCH.err)return head+`<div class="empty">Couldn’t load the archive <span class="fchip" style="margin-left:8px" onclick="loadArchivePage()">Retry</span></div></div>`;
-  if(ARCH.loading&&!ARCH.tickets.length)return head+[0,1,2].map(()=>`<div class="card-t" style="height:58px;opacity:.45;cursor:default"><div class="cid">···</div><div class="ct" style="color:var(--dim)">loading…</div></div>`).join("")+'</div>';
-  let tail=ARCH.loaded<ARCH.total
-    ?`<div class="empty" style="cursor:pointer" onclick="loadArchivePage()">Load ${Math.min(ARCH_PAGE,ARCH.total-ARCH.loaded)} more · ${ARCH.total-ARCH.loaded} left</div>`
-    :`<div class="empty" style="color:var(--dim)">Showing all ${ARCH.total} archived</div>`;
-  return head+ARCH.tickets.map(archCard).join("")+tail+'</div>';
+  if(!ARCHIVE.on||ARCHIVE.total<1)return"";
+  const head=`<div class="col"><h3><span class="dot" style="background:var(--purple)"></span>Archive<span class="n" style="background:color-mix(in srgb,var(--purple) 16%,transparent);color:var(--purple)">${ARCHIVE.total}</span></h3>`;
+  if(ARCHIVE.err)return head+`<div class="empty">Couldn’t load the archive <span class="fchip" style="margin-left:8px" onclick="loadArchivePage()">Retry</span></div></div>`;
+  if(ARCHIVE.loading&&!ARCHIVE.tickets.length)return head+[0,1,2].map(()=>`<div class="card-t" style="height:58px;opacity:.45;cursor:default"><div class="cid">···</div><div class="ct" style="color:var(--dim)">loading…</div></div>`).join("")+'</div>';
+  let tail=ARCHIVE.loaded<ARCHIVE.total
+    ?`<div class="empty" style="cursor:pointer" onclick="loadArchivePage()">Load ${Math.min(ARCH_PAGE,ARCHIVE.total-ARCHIVE.loaded)} more · ${ARCHIVE.total-ARCHIVE.loaded} left</div>`
+    :`<div class="empty" style="color:var(--dim)">Showing all ${ARCHIVE.total} archived</div>`;
+  return head+ARCHIVE.tickets.map(archCard).join("")+tail+'</div>';
 }
 async function loadArchivePage(){
-  if(ARCH.loading)return;
-  ARCH.loading=true;ARCH.err=null;if(CUR==="board")renderActive();
+  if(ARCHIVE.loading)return;
+  ARCHIVE.loading=true;ARCHIVE.err=null;if(CUR==="board")renderActive();
   try{
-    const r=await fetch(api("/tickets/archive?limit="+ARCH_PAGE+"&offset="+ARCH.loaded));
+    const r=await fetch(api("/tickets/archive?limit="+ARCH_PAGE+"&offset="+ARCHIVE.loaded));
     if(!r.ok)throw new Error("archive fetch "+r.status);
     const d=await r.json();
-    ARCH.tickets=ARCH.tickets.concat(d.tickets||[]);
-    ARCH.loaded=ARCH.tickets.length;
-    ARCH.total=Number(d.total)||ARCH.total;
-  }catch(e){ARCH.err=true;}
-  ARCH.loading=false;if(CUR==="board")renderActive();
+    ARCHIVE.tickets=ARCHIVE.tickets.concat(d.tickets||[]);
+    ARCHIVE.loaded=ARCHIVE.tickets.length;
+    ARCHIVE.total=Number(d.total)||ARCHIVE.total;
+  }catch(e){ARCHIVE.err=true;}
+  ARCHIVE.loading=false;if(CUR==="board")renderActive();
 }
 
 // Merged-then-reverted work (CXA-F047) on the Work board: the most recent

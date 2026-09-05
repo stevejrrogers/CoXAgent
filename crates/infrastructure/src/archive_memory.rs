@@ -47,20 +47,22 @@ impl MemoryArchiveStore {
     }
 
     /// Build the store from the environment, or `None` when the gate is off:
-    /// `COXAGENT_ARCHIVE_MEMORY=1` enables it, and a set
-    /// `COXAGENT_ARCHIVE_MEMORY_SEED` additionally preloads the fixture
-    /// (missing/unparsable seed files are refused — a silently empty archive
-    /// would lie to the very e2e spec that set the variable).
+    /// `COXAGENT_ARCHIVE_MEMORY=1` enables it — the repo's strict flag
+    /// convention (`COXAGENT_WAIT_FOR_START`), so `=0` and any other value
+    /// leave it OFF — and a set `COXAGENT_ARCHIVE_MEMORY_SEED` additionally
+    /// preloads the fixture (missing/unparsable seed files are refused — a
+    /// silently empty archive would lie to the very e2e spec that set the
+    /// variable).
     ///
     /// # Errors
     /// [`PortError::Backend`] when the seed file cannot be read or parsed.
     pub fn from_env() -> Result<Option<Self>, PortError> {
         let gate = std::env::var("COXAGENT_ARCHIVE_MEMORY").unwrap_or_default();
-        let seed_path = std::env::var("COXAGENT_ARCHIVE_MEMORY_SEED").unwrap_or_default();
-        if gate.trim().is_empty() && seed_path.trim().is_empty() {
+        if gate.trim() != "1" {
             return Ok(None);
         }
         let mut store = Self::new();
+        let seed_path = std::env::var("COXAGENT_ARCHIVE_MEMORY_SEED").unwrap_or_default();
         if !seed_path.trim().is_empty() {
             store.load_seed_file(&seed_path)?;
         }
@@ -167,8 +169,26 @@ mod tests {
         assert_eq!(listed.len(), 1, "re-put replaces, never duplicates");
     }
 
+    /// Env vars are process-global: every test that reads or writes them
+    /// holds this lock, or cargo's parallel threads race each other's env.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Sets `COXAGENT_ARCHIVE_MEMORY` for the closure's duration, then
+    /// restores the previous value (absent stays absent).
+    fn with_gate(value: &str, run: impl FnOnce()) {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prior = std::env::var("COXAGENT_ARCHIVE_MEMORY").ok();
+        std::env::set_var("COXAGENT_ARCHIVE_MEMORY", value);
+        run();
+        match prior {
+            Some(v) => std::env::set_var("COXAGENT_ARCHIVE_MEMORY", v),
+            None => std::env::remove_var("COXAGENT_ARCHIVE_MEMORY"),
+        }
+    }
+
     #[test]
     fn the_env_gate_keeps_the_adapter_off_by_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
         // No env set in the test process: the adapter must not silently turn
         // itself on — production boots stay archive-less until configured.
         let built = MemoryArchiveStore::from_env().unwrap();
@@ -176,6 +196,40 @@ mod tests {
             built.is_none(),
             "the memory archive must be env-gated, never implicit"
         );
+    }
+
+    #[test]
+    fn the_gate_follows_the_strict_flag_convention_zero_means_off() {
+        // House convention (`COXAGENT_WAIT_FOR_START`): the flag is ON only
+        // for the exact value "1" — a disabling-looking `=0` must never turn
+        // the adapter on.
+        with_gate("0", || {
+            assert!(MemoryArchiveStore::from_env().unwrap().is_none());
+        });
+        with_gate("yes", || {
+            assert!(MemoryArchiveStore::from_env().unwrap().is_none());
+        });
+        with_gate("1", || {
+            assert!(MemoryArchiveStore::from_env().unwrap().is_some());
+        });
+    }
+
+    #[test]
+    fn a_seed_alone_never_enables_the_gate() {
+        // The seed is a PRELOAD for an enabled adapter, never an activation
+        // switch of its own — documented contract, pinned here.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("seed.json");
+        let seed = serde_json::json!({ "demo": [ticket("CXC-F001")] });
+        std::fs::write(&path, serde_json::to_string(&seed).unwrap()).unwrap();
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prior = std::env::var("COXAGENT_ARCHIVE_MEMORY_SEED").ok();
+        std::env::set_var("COXAGENT_ARCHIVE_MEMORY_SEED", path.to_str().unwrap());
+        assert!(MemoryArchiveStore::from_env().unwrap().is_none());
+        match prior {
+            Some(v) => std::env::set_var("COXAGENT_ARCHIVE_MEMORY_SEED", v),
+            None => std::env::remove_var("COXAGENT_ARCHIVE_MEMORY_SEED"),
+        }
     }
 
     #[tokio::test]
