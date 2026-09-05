@@ -503,14 +503,23 @@ pub(super) async fn syschat_dm_ep(
 }
 
 /// Toggle the caller's emoji reaction on a message; broadcast the update.
+/// Only the declared [`REACTION_EMOJIS`] set is accepted — the picker limits
+/// the UI, this check enforces the rule (CXA-F367).
 pub(super) async fn syschat_react_ep(
     State(app): State<AppState>,
     headers: axum::http::HeaderMap,
     Json(req): Json<ReactReq>,
 ) -> axum::response::Response {
     let user = resolve_username(&app, &headers).await;
-    let emoji = req.emoji.chars().take(8).collect::<String>();
-    let updated = { app.syschat.inner.lock().await.react(&req.id, &user, &emoji) };
+    let emoji = req.emoji.trim();
+    if !coxagent_application::REACTION_EMOJIS.contains(&emoji) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "unsupported reaction — pick one of the five offered",
+        )
+            .into_response();
+    }
+    let updated = { app.syschat.inner.lock().await.react(&req.id, &user, emoji) };
     let Some(msg) = updated else {
         return not_found();
     };
@@ -678,15 +687,26 @@ pub(super) async fn syschat_delete_ep(
     if user.is_empty() {
         return (StatusCode::UNAUTHORIZED, "sign in").into_response();
     }
+    // The one carve-out to author-only delete (CXA-F367): an admin may
+    // tombstone any message. Edit stays author-only — no admin override.
+    let admin = user_can_manage(&app, &headers).await;
     let mut sc = app.syschat.inner.lock().await;
-    let Some(msg) = sc.chat.iter_mut().find(|m| m.id == mid) else {
+    let Some(idx) = sc.chat.iter().position(|m| m.id == mid) else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
-    if msg.user != user {
+    if sc.chat[idx].user != user && !admin {
         return (StatusCode::FORBIDDEN, "not yours").into_response();
     }
-    msg.deleted = true;
-    msg.body = String::new();
+    let channel = sc.chat[idx].channel.clone();
+    sc.chat[idx].deleted = true;
+    sc.chat[idx].body = String::new();
+    // Tombstoning unpins: the pins list serves live messages only, so a kept
+    // id would be an invisible slot the MAX_PINS_PER_CHANNEL cap still counts
+    // — five such deletes would wedge the channel's pin bar with nothing left
+    // to unpin.
+    if let Some(pins) = sc.pins.get_mut(&channel) {
+        pins.retain(|p| p != &mid);
+    }
     drop(sc);
     app.syschat.save().await;
     let frame = json!({ "op": "delete", "msg": { "id": mid } });
@@ -723,6 +743,11 @@ pub(super) async fn syschat_search_ep(
 }
 
 // ── Pin ──────────────────────────────────────────────────────────────────
+/// Pin/unpin a message (toggle). The rule (CXA-F367): the channel owner or an
+/// admin — enforced here, not by hiding buttons. Owner-less computed channels
+/// (#general, project rooms) therefore pin by admin authority, and DMs — whose
+/// owner field is empty and whose content even admins cannot view — take no
+/// pins at all. A channel holds at most [`MAX_PINS_PER_CHANNEL`] pins.
 pub(super) async fn syschat_pin_ep(
     State(app): State<AppState>,
     Path(mid): Path<String>,
@@ -732,23 +757,52 @@ pub(super) async fn syschat_pin_ep(
     if user.is_empty() {
         return (StatusCode::UNAUTHORIZED, "sign in").into_response();
     }
-    let mid_clone = mid.clone();
+    let admin = user_can_manage(&app, &headers).await;
+    let ctx = app.chat_context().await;
     let mut sc = app.syschat.inner.lock().await;
-    let Some(channel) = sc
-        .chat
-        .iter()
-        .find(|m| m.id == mid_clone)
-        .map(|m| m.channel.clone())
-    else {
+    let Some(msg) = sc.chat.iter().find(|m| m.id == mid) else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
-    let pins = sc.pins.entry(channel.clone()).or_default();
-    if pins.contains(&mid_clone) {
-        pins.retain(|p| p != &mid_clone);
-    } else {
-        pins.push(mid_clone.clone());
+    if msg.deleted {
+        // A tombstone is not pinnable — the pins list serves live messages
+        // only, so accepting the write would mint an invisible slot.
+        return (StatusCode::BAD_REQUEST, "cannot pin a deleted message").into_response();
     }
-    let pinned = pins.contains(&mid_clone);
+    let channel = msg.channel.clone();
+    let is_owner = sc
+        .channels
+        .iter()
+        .find(|c| c.id == channel)
+        .is_some_and(|c| c.owner == user);
+    if !admin && !is_owner {
+        return (
+            StatusCode::FORBIDDEN,
+            "only the channel owner or an admin can pin",
+        )
+            .into_response();
+    }
+    if !sc.can_view(&channel, &user, &ctx) {
+        return (StatusCode::FORBIDDEN, "not a member of this channel").into_response();
+    }
+    let pins = sc.pins.entry(channel.clone()).or_default();
+    let pinned = if pins.contains(&mid) {
+        // The toggle IS the unpin affordance.
+        pins.retain(|p| p != &mid);
+        false
+    } else {
+        if pins.len() >= coxagent_application::MAX_PINS_PER_CHANNEL {
+            return (
+                StatusCode::CONFLICT,
+                format!(
+                    "a channel pins at most {} messages — unpin one first",
+                    coxagent_application::MAX_PINS_PER_CHANNEL
+                ),
+            )
+                .into_response();
+        }
+        pins.push(mid.clone());
+        true
+    };
     let pins_clone = pins.clone();
     drop(sc);
     app.syschat.save().await;
@@ -761,10 +815,18 @@ pub(super) async fn syschat_pin_ep(
 
 pub(super) async fn syschat_pins_ep(
     State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> axum::response::Response {
     let ch = q.get("channel").cloned().unwrap_or_default();
+    let user = resolve_username(&app, &headers).await;
+    let ctx = app.chat_context().await;
     let sc = app.syschat.inner.lock().await;
+    // Pins name messages; the same membership rule as `syschat_messages_ep`
+    // governs who may read them (a DM's pins are participants-only).
+    if !sc.can_view(&ch, &user, &ctx) {
+        return Json(Vec::<ChatMsg>::new()).into_response();
+    }
     let pins = sc.pins.get(&ch).cloned().unwrap_or_default();
     let msgs: Vec<ChatMsg> = pins
         .iter()

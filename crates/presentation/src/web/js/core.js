@@ -79,6 +79,10 @@ const provLabel=a=>`${a.engine} · ${a.model&&a.model.trim()?a.model:"model unkn
 const provChip=p=>`<span style="font-family:ui-monospace,Menlo,monospace;font-size:11.5px;font-weight:600;background:var(--card);border:1px solid var(--border2);border-radius:20px;padding:2px 8px;color:${p.model&&p.model.trim()?"var(--muted)":"var(--amber)"};white-space:nowrap">${esc(provLabel(p))}</span>`;
 const cvar=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||"#888";
 let STATE={}, CUR="overview", BF="all", SF="all", INIT_ACT=false, WORKTAB="board";
+// The roadmap's milestone drill-in (CXA-F361): the strip row's committed-scope
+// filter. "" shows every ticket; a milestone name narrows the buckets to that
+// milestone's attributed tickets; clicking the same row again clears it.
+let MSFILTER="";
 function setWorkTab(w){WORKTAB=w;
   document.querySelectorAll("#work-seg button").forEach(b=>b.classList.toggle("on",b.dataset.w===w));
   document.getElementById("work-board").style.display=w==="board"?"":"none";
@@ -247,6 +251,13 @@ function chartsHtml(s){
 function vnum(v){const p=String(v||"0.0.0").split(".").map(Number);return (p[0]||0)*10000+(p[1]||0)*100+(p[2]||0);}
 function roadmapGantt(s){
   const ms=s.milestones||[];if(!ms.length)return "";
+  // CXA-F361: per-milestone progress, the done state and the drill-in render
+  // from the projection read model the snapshot carries as derived.milestones
+  // — the same figures the projection endpoint serves. Absent rows (an older
+  // hub behind the view) fall back to the version arithmetic below rather
+  // than rendering a fabricated figure.
+  const dm=(s.derived||{}).milestones||[];
+  const ts=s.tickets||[];
   const proj=(PROJECTS.find(p=>p.id===PID)||{}).name||PID;
   const hist=(s.history||[]).map(r=>({v:r.version,title:r.title,t:Date.parse(r.at)})).filter(r=>!isNaN(r.t)).sort((a,b)=>a.t-b.t);
   const now=Date.now(),cur=vnum(s.current_version);
@@ -258,11 +269,21 @@ function roadmapGantt(s){
   const relDate=tv=>{const n=vnum(tv);const past=hist.filter(r=>vnum(r.v)<=n);return past.length?past[past.length-1].t:null;};
   const t0=hist.length?hist[0].t:now;
   let prev=t0,firstActive=true;
+  // Days-since-created (CXA-F361): the persisted model carries no milestone
+  // date — never fabricate one. Derive the age from real tickets: linked =
+  // the sprint.rs pushes_goal rule mirrored (a 5+ char title word inside the
+  // milestone's name+goal text), age = the OLDEST linked ticket's created_at;
+  // nothing linked carries a date → omit the figure entirely.
+  const msAge=m=>{
+    const text=(m.name+" "+(m.goal||"")).toLowerCase();
+    const oldest=ts.flatMap(t=>(t.created_at&&String(t.title||"").toLowerCase().split(/[^a-z0-9]+/).some(w=>w.length>=5&&text.includes(w))?[Date.parse(t.created_at)]:[])).filter(t=>!isNaN(t)).sort((a,b)=>a-b)[0];
+    return oldest==null?null:Math.max(0,Math.floor((now-oldest)/DAY));
+  };
   const rows=ms.map(m=>{const reached=cur>=vnum(m.target_version);
     const end=reached?(relDate(m.target_version)||now):now+(vnum(m.target_version)-cur)*perUnit;
     const start=Math.min(prev,end);prev=end;
     let st="planned";if(reached)st="reached";else if(firstActive){st="active";firstActive=false;}
-    return {name:m.name,goal:m.goal,ver:m.target_version,start,end,st};});
+    return {name:m.name,goal:m.goal,ver:m.target_version,start,end,st,gc:m.goal_complete,d:dm.find(x=>x.name===m.name),age:msAge(m)};});
   // NOTE: this is an ordered stepper, not a time-positioned chart. Milestones
   // routinely land days apart (all five of cox's did), and placing them on a
   // real date axis stacks them into one illegible clump — so each card carries
@@ -273,49 +294,41 @@ function roadmapGantt(s){
   const n=rows.length;
   const cols=rows.map((r,i)=>{
     const prevNum=i?vnum(rows[i-1].ver):0,thisNum=vnum(r.ver);
-    let prog=r.st==="reached"?100:(r.st==="planned"?0:Math.max(4,Math.min(96,Math.round((cur-prevNum)/Math.max(1,thisNum-prevNum)*100))));
+    const d=r.d||{};
+    // Done is the completion signal, two honest sources: the release
+    // pipeline's own record (fulfilled→released) or the human/PO call the
+    // pipeline waits on (goal_complete). A done card renders compact — the
+    // work shipped, so its forecast date and goal prose stop earning space.
+    const done=!!d.released||r.gc;
+    let prog=d.progress!=null?d.progress:(r.st==="reached"?100:(r.st==="planned"?0:Math.max(4,Math.min(96,Math.round((cur-prevNum)/Math.max(1,thisNum-prevNum)*100)))));
     const col=r.st==="reached"?"var(--green)":(r.st==="active"?"var(--accent2)":"var(--muted)");
-    const icon=r.st==="reached"?"circle-check-filled":(r.st==="active"?"progress":"flag");
-    const tag=r.st==="reached"?'<span class="msk-tag reached">reached</span>':(r.st==="active"?'<span class="msk-tag active">in progress</span>':'<span class="msk-tag">planned</span>');
+    const icon=done?"circle-check-filled":(r.st==="active"?"progress":"flag");
+    const tag=done?'<span class="msk-tag reached">✓ complete</span>':(r.st==="reached"?'<span class="msk-tag reached">reached</span>':(r.st==="active"?'<span class="msk-tag active">in progress</span>':'<span class="msk-tag">planned</span>'));
+    const age=r.age!=null?`<span class="msage" title="days since the oldest goal-linked ticket was filed — milestones carry no persisted date"><i class="ti ti-hourglass" style="font-size:11px"></i> ${r.age}d</span>`:"";
+    // The bar's context (depth rule: a number never stands alone). With the
+    // read model present, rows with attributed scope carry their percent and
+    // rows with none say why instead of reading as a bare 0; without it (an
+    // older hub), only the legacy version arithmetic exists, so the percent
+    // is shown as-is rather than claiming anything about scope.
+    const hasScope=Array.isArray(d.committed)&&d.committed.length>0;
+    const pct=d.progress!=null
+      ?((d.released||hasScope)?`${prog}%`:'<span class="mspct">scope not committed</span>')
+      :`<span class="mspct">${prog}%</span>`;
     const lineDone=r.st==="reached";const prevDone=i>0&&rows[i-1].st==="reached";
+    const click=escAttr(JSON.stringify(r.name));
     return `<div class="mscol">
       <div class="msrail"><div class="msline ${i===0?'hide':''} ${prevDone?'done':''}"></div>
         <div class="msknob ${r.st}" style="--kc:${col}"><i class="ti ti-${icon}"></i></div>
         <div class="msline ${i===n-1?'hide':''} ${lineDone?'done':''}"></div></div>
-      <div class="mscard ${r.st}">
+      <div class="mscard ${r.st}${MSFILTER===r.name?' ms-sel':''}${(d.released||r.gc)?' collapsed':''}" onclick="MSFILTER=MSFILTER===${click}?'':${click};renderRoadmap()">
         <div class="mstitle" title="${esc(r.name)}">${esc(r.name)}</div>
-        <div class="msmetaline"><span class="msver">v${esc(r.ver)}</span> ${tag}</div>
-        <div class="msq"><i class="ti ti-calendar-event" style="font-size:12px"></i> ${quarter(r.end)} · ${fmt(r.end)}</div>
-        <div class="msprog"><div style="width:${prog}%;background:${col}"></div></div>
-        <div class="msgoaltxt" title="${esc(r.goal)}">${esc(r.goal)}</div></div></div>`;}).join("");
-  return `<div class="sec" style="margin-top:22px">Milestone roadmap <span style="font-size:11px;color:var(--dim);font-weight:400">· ${esc(proj)} — shippable targets in delivery order, each with the date it lands</span></div>
+        <div class="msmetaline"><span class="msver">v${esc(r.ver)}</span> ${tag}${age}</div>
+        ${done?'':`<div class="msq"><i class="ti ti-calendar-event" style="font-size:12px"></i> ${quarter(r.end)} · ${fmt(r.end)}</div>`}
+        <div style="display:flex;align-items:center;gap:8px;margin-top:8px"><div class="msprog" style="flex:1;margin-top:0"><div style="width:${prog}%;background:${col}"></div></div>${pct}</div>
+        ${done?'':`<div class="msgoaltxt" title="${esc(r.goal)}">${esc(r.goal)}</div>`}</div></div>`;}).join("");
+  return `<div class="sec" style="margin-top:22px">Milestone roadmap <span style="font-size:11px;color:var(--dim);font-weight:400">· ${esc(proj)} — shippable targets in delivery order, each with the date it lands · click one to drill into its tickets</span></div>
     <div class="panel" style="overflow-x:auto;margin-bottom:26px" data-keepscroll="rm-milestones"><div class="mstepper">${cols}</div></div>`;
 }
-// Milestone roadmap — each is a shippable target (a version), spanning several
-// sprints. Status derived from the shipped version.
-function milestonesHtml(s){
-  const ms=s.milestones||[];if(!ms.length)return "";
-  const cur=String(s.current_version||"0.0.0");const sprintsRun=(s.sprints||[]).length+(s.sprint?1:0);
-  let activeShown=false;
-  const rows=ms.map((m,i)=>{
-    const reached=cmpVer(cur,m.target_version)>=0;
-    const active=!reached&&!activeShown;if(active)activeShown=true;
-    const col=reached?"var(--green)":(active?"var(--accent2)":"var(--muted)");
-    const icon=reached?"circle-check-filled":(active?"target":"flag");
-    const tag=reached?'<span class="pbadge" style="background:color-mix(in srgb,var(--green) 18%,transparent);color:var(--green)">reached</span>':(active?'<span class="pbadge on">in progress</span>':'<span class="pbadge off">planned</span>');
-    // "reached" is derived from the version; goal_complete is the human/PO
-    // call the release pipeline actually waits on. Offer the one click here
-    // instead of leaving the PO daily to flag the same drift forever.
-    const doneBtn=(reached&&!m.goal_complete)?` <button class="gc-btn" style="font-size:11px;padding:2px 8px" data-m="${escAttr(m.name)}" onclick="milestoneComplete(this.dataset.m)"><i class="ti ti-check"></i> Mark complete</button>`:(m.goal_complete?' <span class="pbadge" style="color:var(--green)">✓ complete</span>':'');
-    return `<div class="msrow">
-      ${i<ms.length-1?'<div class="msline-c"></div>':''}
-      <div class="msdot" style="color:${col};border-color:${col}"><i class="ti ti-${icon}"></i></div>
-      <div class="msmeta"><div class="msname">${esc(m.name)} <span class="msver">v${esc(m.target_version)}</span> ${tag}${doneBtn}</div>
-        <div class="msgoal">${esc(m.goal)}</div></div></div>`;}).join("");
-  return `<div class="sec" style="margin-top:4px">Milestones <span style="font-size:11px;color:var(--dim);font-weight:400">· shippable targets — each spans several sprints (${sprintsRun} run so far)</span></div>
-    <div class="panel msline">${rows}</div>`;
-}
-
 // One click on a reached-but-unconfirmed milestone: the explicit completion
 // the release pipeline waits for.
 async function milestoneComplete(name){
@@ -356,11 +369,21 @@ function renderRoadmap(){
   // match NOTHING, so those tickets vanished from the roadmap entirely and
   // the header math contradicted the columns ("0 of 5" over 3 visible cards).
   const isDone=t=>t.status==="done"||t.status==="documented"||t.status==="verified";
-  const shipped=ts.filter(isDone);
-  const inflight=ts.filter(t=>t.status==="in_progress"||t.status==="ready"||t.status==="fixed"||(t.type==="bug"&&t.status==="open"));
-  const next=ts.filter(t=>t.status==="pending"&&(t.design&&t.design.technical));
-  const later=ts.filter(t=>(t.status==="pending"&&!(t.design&&t.design.technical))||t.status==="on_hold");
-  const total=ts.length,donePct=Math.round(shipped.length/total*100);
+  // Milestone drill-in (CXA-F361): a strip row click narrows the buckets to
+  // that milestone's attributed tickets — the read model's committed list,
+  // the F252 derivation — and clicking the row again clears. The headline
+  // percent stays whole-project: delivery progress is a fact about every
+  // ticket, the filter is a lens over the board, and the banner says so.
+  const dm=(s.derived||{}).milestones||[];
+  const sel=MSFILTER?dm.find(x=>x.name===MSFILTER):null;
+  const scope=sel&&Array.isArray(sel.committed)?new Set(sel.committed):null;
+  const inScope=t=>!scope||scope.has(t.id);
+  const doneAll=ts.filter(isDone);
+  const shipped=doneAll.filter(inScope);
+  const inflight=ts.filter(t=>t.status==="in_progress"||t.status==="ready"||t.status==="fixed"||(t.type==="bug"&&t.status==="open")).filter(inScope);
+  const next=ts.filter(t=>t.status==="pending"&&(t.design&&t.design.technical)).filter(inScope);
+  const later=ts.filter(t=>(t.status==="pending"&&!(t.design&&t.design.technical))||t.status==="on_hold").filter(inScope);
+  const total=ts.length,donePct=Math.round(doneAll.length/total*100);
   const rank={high:0,medium:1,low:2};
   const sort=a=>a.slice().sort((x,y)=>(rank[x.priority]??3)-(rank[y.priority]??3));
   const prio=arr=>({high:arr.filter(t=>t.priority==="high").length,medium:arr.filter(t=>t.priority==="medium").length,low:arr.filter(t=>t.priority==="low").length});
@@ -420,8 +443,16 @@ function renderRoadmap(){
           <div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.title)}">${esc(r.title)}</div>
           <div style="font-size:10px;color:var(--dim)">${esc((r.at||'').slice(0,10))}</div></div>`).join("")}</div></div>`;
   }
+  // Drill-in lens banner: the board below shows one milestone's committed
+  // scope — say so (the denominator is THAT scope, not the project), note
+  // what the lens hides, and give the filter an inverse right where it acts.
+  const shown=shipped.length+inflight.length+next.length+later.length;
+  const banner=scope?`<div class="panel" style="margin-bottom:16px;display:flex;align-items:center;gap:10px;border-left:3px solid var(--accent2)">
+    <i class="ti ti-filter" style="color:var(--accent2)"></i>
+    <span style="font-size:12.5px;color:var(--muted)">Milestone <b style="color:var(--text)">${esc(MSFILTER)}</b> — ${shown} of ${sel.committed.length} committed tickets shown · ${total-shown} other project tickets hidden</span>
+    <button class="gc-btn" style="margin-left:auto" onclick="MSFILTER='';renderRoadmap()"><i class="ti ti-x"></i> Clear filter</button></div>`:"";
   const keep=grabScroll(el);
-  el.innerHTML=header+timeline+roadmapGantt(s)+board;
+  el.innerHTML=header+timeline+roadmapGantt(s)+banner+board;
   applyScroll(el,keep);
 }
 // A view re-renders on every state poll, and replacing innerHTML resets each
