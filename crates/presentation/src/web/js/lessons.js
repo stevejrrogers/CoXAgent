@@ -10,7 +10,9 @@
 //   * lessons with 2+ recurrences in a "Repeating" section with the one-click
 //     escalation paths that already exist — file a prevention ticket, or
 //     dismiss a suggested incident-to-lesson match (a dismissed match never
-//     increments again).
+//     increments again);
+//   * shipped lessons (CXA-F371, source "shipped" — seeded with the binary on
+//     first boot) are badged apart from locally learned ones.
 
 function loadLessonEfficacy(){
   // Cache keyed by project: switching projects must never show the previous
@@ -46,9 +48,14 @@ function renderLessonEfficacy(){
     ?`<span style="flex:none;display:inline-flex;align-items:center;gap:5px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:2px 8px;border-radius:10px;background:var(--card2);color:var(--muted)" title="structural work escalated">
        <i class="ti ti-${l.stage==="bug"?"bug":"tool"}" style="color:${l.stage==="bug"?"var(--red)":"var(--accent2)"}"></i>${esc(l.stage||"chore")} ${esc(l.structural_ticket||"")}</span>`
     :`<button class="gc-btn pri" style="flex:none;padding:6px 12px;font-size:12px" onclick="escalateLesson(this)" data-lesson="${escAttr(l.text)}">File prevention ticket</button>`;
+  // Shipped bootstrap lessons (CXA-F371) carry source:"shipped" on the row;
+  // locally learned lessons have no source and render without the badge.
+  const shippedBadge=l=>l.source==="shipped"
+    ?`<span style="display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:1px 8px;border-radius:10px;background:var(--card2);color:var(--accent2);margin-right:7px;vertical-align:1px" title="Shipped with the binary — the accumulated lesson base every fresh install starts with (CXA-F371)"><i class="ti ti-package" style="font-size:11px"></i>shipped</span>`
+    :"";
   const row=l=>`<div style="display:flex;align-items:flex-start;gap:12px;padding:10px 2px;border-bottom:1px solid var(--border)">
     <div style="flex:1;min-width:0">
-      <div style="font-size:13px;line-height:1.55;color:var(--text)">${esc(l.text)}</div>
+      <div style="font-size:13px;line-height:1.55;color:var(--text)">${shippedBadge(l)}${esc(l.text)}</div>
       <div style="font-size:11px;color:var(--dim);margin-top:4px;font-family:ui-monospace,Menlo,monospace">
         recorded ${day(l.recorded_at)} · ${l.recurrence_count} recurrence${l.recurrence_count===1?"":"s"} · last ${day(l.last_recurrence_at)}${l.re_recordings?` · re-learned ${l.re_recordings}×`:""}
       </div>

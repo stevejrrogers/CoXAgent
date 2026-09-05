@@ -320,7 +320,25 @@ pub(crate) async fn build_project(
         tracing::info!("[{id}] recovered {} orphaned claim(s)", recovered.len());
     }
 
-    let loaded = store.load().await.ok();
+    let mut loaded = store.load().await.ok();
+    // CXA-F371: a fresh install starts with the accumulated lesson base —
+    // seed the shipped lessons into state.lessons on boot. The seed is pure
+    // and idempotent (`bootstrap_lessons`): a second boot seeds nothing, and
+    // runtime-learned or operator-edited lessons are never overwritten — an
+    // upgrade adds only the new shipped ids. The save fires only when
+    // something was actually added, so later boots stay read-only here.
+    if let Some(state) = loaded.as_mut() {
+        let seeded = coxagent_application::bootstrap_lessons::seed_lessons(state);
+        if !seeded.is_empty() {
+            match store.save(state).await {
+                Ok(()) => tracing::info!(
+                    "[{id}] seeded {} shipped lesson(s) into the lesson base",
+                    seeded.len()
+                ),
+                Err(e) => tracing::warn!("[{id}] could not persist the seeded lesson base: {e}"),
+            }
+        }
+    }
     let alias = loaded.as_ref().map(|s| s.alias.clone()).unwrap_or_default();
     let custom_name = loaded.as_ref().and_then(|s| s.display_name.clone());
     let mut context =

@@ -25,6 +25,11 @@ use super::ProjectState;
 /// carry its recurrence history when it is re-learned.
 pub const MAX_LESSON_RECORDS: usize = 24;
 
+/// The prompt-facing lesson list stays at 12 (briefs render the most recent
+/// handful). Shared by [`ProjectState::record_lesson`] and the CXA-F371
+/// bootstrap seed so the two writers can never drift their caps apart.
+pub const MAX_PROMPT_LESSONS: usize = 12;
+
 /// Bounded dismissal log — a reviewer verdict per suggested match, kept so
 /// the same incident can never re-increment a lesson it was dismissed for.
 pub const MAX_DISMISSED_MATCHES: usize = 100;
@@ -78,6 +83,19 @@ pub struct LessonRecord {
     /// The structural-fix escalation, once filed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub escalated: Option<LessonEscalation>,
+    /// Stable id of a SHIPPED bootstrap lesson (CXA-F371) — the seed's dedupe
+    /// identity, so an upgraded binary adds only its new ids and an operator's
+    /// edit of the text still counts as already-seeded. `None` for lessons the
+    /// team learned at runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Where this lesson came from: `None` = learned locally at runtime (the
+    /// pre-F371 shape, still the default); `Some("shipped")` = a bootstrap
+    /// lesson shipped with the binary (`bootstrap_lessons::SHIPPED_SOURCE`),
+    /// which the Hub lessons page badges so shipped wisdom is distinguishable
+    /// from the project's own scar tissue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 impl LessonRecord {
@@ -135,6 +153,8 @@ impl ProjectState {
                 re_recordings: 0,
                 recurrences: Vec::new(),
                 escalated: None,
+                id: None,
+                source: None,
             });
             let overflow = self.lesson_records.len().saturating_sub(MAX_LESSON_RECORDS);
             if overflow > 0 {
@@ -142,12 +162,12 @@ impl ProjectState {
             }
             is_new = true;
         }
-        // The prompt-facing list keeps its own 12-entry dedupe+cap. A lesson
-        // evicted from it that gets re-recorded (or re-learned) climbs back
-        // in — the team clearly still needs it in every brief.
+        // The prompt-facing list keeps its own dedupe+cap. A lesson evicted
+        // from it that gets re-recorded (or re-learned) climbs back in — the
+        // team clearly still needs it in every brief.
         if !self.lessons.iter().any(|l| l == lesson) {
             self.lessons.push(lesson.to_owned());
-            let overflow = self.lessons.len().saturating_sub(12);
+            let overflow = self.lessons.len().saturating_sub(MAX_PROMPT_LESSONS);
             if overflow > 0 {
                 self.lessons.drain(0..overflow);
             }
@@ -190,6 +210,8 @@ impl ProjectState {
                 re_recordings: 0,
                 recurrences: Vec::new(),
                 escalated: None,
+                id: None,
+                source: None,
             });
             let overflow = self.lesson_records.len().saturating_sub(MAX_LESSON_RECORDS);
             if overflow > 0 {
@@ -317,6 +339,8 @@ mod lessons_tests {
             re_recordings: 0,
             recurrences: Vec::new(),
             escalated: None,
+            id: None,
+            source: None,
         }
     }
 
@@ -466,6 +490,8 @@ mod lessons_tests {
                 at: "2026-09-02T11:00:00Z".to_owned(),
                 stage: "chore".to_owned(),
             }),
+            id: None,
+            source: None,
         };
         let doc = serde_json::to_string(&record).expect("record serializes");
         let back: LessonRecord = serde_json::from_str(&doc).expect("record deserializes");
