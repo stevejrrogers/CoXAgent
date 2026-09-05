@@ -1898,10 +1898,16 @@ function renderPeople(){
   }).catch(()=>{body.innerHTML='<div class="empty">unable to load analytics</div>';});
 }
 /* ---- Toasts ---- */
-function toast(msg,type){const c=document.getElementById("toasts");if(!c)return;
+// opts (all optional): { ms: <lifetime>, action: { label, fn } } — an action
+// renders an inline button (the dupes radar's 10s undo, CXA-F362) and its
+// lifetime overrides the 3s default.
+function toast(msg,type,opts){const c=document.getElementById("toasts");if(!c)return;
+  const o=opts||{};
   const ic=type==="ok"?"circle-check":(type==="err"?"alert-triangle":"info-circle");
   const el=document.createElement("div");el.className="toast "+(type||"");el.innerHTML=`<i class="ti ti-${ic}"></i><span>${esc(msg)}</span>`;
-  c.appendChild(el);setTimeout(()=>{el.classList.add("hide");setTimeout(()=>el.remove(),220);},3000);}
+  const done=()=>{el.classList.add("hide");setTimeout(()=>el.remove(),220);};
+  if(o.action){const b=document.createElement("button");b.className="toast-act";b.textContent=o.action.label;b.onclick=()=>{done();o.action.fn();};el.appendChild(b);}
+  c.appendChild(el);setTimeout(done,o.ms||3000);}
 /* ---- Command palette (⌘K) ---- */
 const NAV_IC={overview:"layout-dashboard",team:"robot",board:"columns",roadmap:"timeline",activity:"activity",discuss:"messages",insights:"coin",people:"user-star",audit:"shield-lock",access:"user-cog",settings:"settings"};
 let CMDK_ITEMS=[],CMDK_SEL=0;
@@ -2396,26 +2402,56 @@ boot();
 // is within the stricter same-tag bound.
 async function renderDupes(){
   const el=document.getElementById("dupes-body");if(!el)return;
-  el.innerHTML='<div class="empty">scanning the fleet…</div>';
+  el.innerHTML='<div class="empty"><i class="ti ti-loader-2 att-spin"></i> scanning the fleet…</div>';
   let data=null;
   try{
     const r=await fetch("/api/workspace/duplicates");
     if(!r.ok){el.innerHTML='<div class="empty">unable to load the duplicate radar ('+r.status+')</div>';return;}
     data=await r.json();
   }catch(_){el.innerHTML='<div class="empty">unable to load the duplicate radar</div>';return;}
-  const pairs=(data&&data.crossProjectDuplicates)||[];
+  const all=(data&&data.crossProjectDuplicates)||[];
+  const pairs=all.filter(e=>!DUPES_DISMISSED.includes(dupeKey(e)));
+  const hidden=all.length-pairs.length;
+  const head=dupesHeader(data,pairs.length,hidden);
   if(!pairs.length){
-    el.innerHTML=`<div class="panel"><div class="dupe-empty"><i class="ti ti-copy"></i>
+    el.innerHTML=head+`<div class="panel"><div class="dupe-empty"><i class="ti ti-copy"></i>
       <div class="dupe-empty-t">No cross-project duplicates</div>
-      <div class="dupe-empty-s">Every project is building its own thing. Pairs of tickets across projects with matching titles show up here for a human decision.</div></div></div>`;
+      <div class="dupe-empty-s">${hidden?hidden+" dismissed this session · <a href='#' onclick='dupeUndoAll();return false'>undo</a>":"Every project is building its own thing. Pairs of tickets across projects with matching titles show up here for a human decision."}</div></div></div>`;
     return;
   }
-  el.innerHTML=`<div class="panel" style="display:flex;gap:10px;align-items:center;margin-bottom:12px">
+  el.innerHTML=head+pairs.map(dupesCard).join("");
+}
+// CXA-F362 depth: the header carries the radar's own provenance — when the
+// comparison last ran (the persisted `scannedAt` the server stamps on every
+// run, so it survives a restart) and the refresh cadence — plus the admin's
+// explicit re-run. Session-level dismissals hide reported pairs without
+// touching the boards; each shows a 10s undo toast (the rejection verdicts
+// are the destructive path and stay behind their confirm modal).
+let DUPES_DISMISSED=[];
+// One rendered card IS one reported pair (or collapsed group): the key covers
+// the home AND every dup side, because the paraphrase pass emits one entry per
+// pair — two cards can share a home ticket, and a home-only key would dismiss
+// (and undo) its siblings with it.
+function dupeKey(e){return e.homeProjectId+"/"+e.homeTicketId+"/"+(e.duplicates||[]).map(d=>d.projectId+"/"+d.ticketId).sort().join("|");}
+function dupesHeader(data,count,hidden){
+  return `<div class="panel" style="display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
       <i class="ti ti-copy" style="color:var(--amber)"></i>
-      <b style="font-size:13px">${pairs.length} duplicated ask${pairs.length===1?"":"s"} across projects</b>
+      <b style="font-size:13px">${count} duplicated ask${count===1?"":"s"} across projects</b>
+      <span style="font-size:11px;color:var(--dim)">last scanned ${relTime((data&&data.scannedAt)||"")} · <span title="scan cadence — the radar recomputes on every view open; Scan now forces a re-run">scans every view open</span></span>
+      ${hidden?`<span style="font-size:11px;color:var(--dim)">${hidden} dismissed</span>`:""}
       <span style="flex:1"></span>
+      ${isHubAdmin()?`<button id="dupes-scan" class="tk-btn go" onclick="dupesScanNow(this)"><i class="ti ti-refresh"></i> Scan now</button>`:""}
       <span style="font-size:11px;color:var(--dim)">redirect or reject the copy · allow a legitimately-shared ticket</span>
-    </div>`+pairs.map(dupesCard).join("");
+    </div>`;
+}
+async function dupesScanNow(btn){
+  const old=btn.innerHTML;
+  btn.disabled=true;btn.innerHTML='<i class="ti ti-loader-2 att-spin"></i> Scanning…';
+  try{
+    const r=await fetch("/api/workspace/duplicates/scan",{method:"POST"});
+    if(!r.ok){const t=await r.text().catch(()=>(""));toast(t||("scan failed ("+r.status+")"),"err");btn.disabled=false;btn.innerHTML=old;return;}
+    renderDupes();
+  }catch(_){toast("scan failed","err");btn.disabled=false;btn.innerHTML=old;}
 }
 function dupesCard(e){
   const rows=(e.duplicates||[]).map(d=>`
@@ -2439,6 +2475,7 @@ function dupesCard(e){
         <div class="dupe-scope">${esc(e.homeTicketScope||"—")}</div>
         <div class="dupe-meta"><span class="dupe-tid">${esc(e.homeTicketId)}</span><span class="dupe-proj">${esc(e.homeProjectId)}</span><span style="color:var(--dim);font-size:11px">home — the keeper</span></div>
       </div>
+      <div class="dupe-actions"><button class="tk-btn" title="Hide this reported pair for this session" onclick="dupeDismiss('${esc(dupeKey(e))}')"><i class="ti ti-eye-off"></i> Dismiss</button></div>
     </div>
     ${rows}
   </div>`;
@@ -2459,6 +2496,17 @@ async function dupeAction(action,homeProjectId,homeTicketId,dupProjectId,dupTick
     renderDupes();
   }catch(_){toast("action failed","err");}
 }
+// Session-level dismissal: the pair hides from THIS browser until the tab is
+// reloaded — no board mutation, no persisted suppression (that is what
+// "Allow both" is for). The 10s undo toast is the inverse; after it lapses
+// the dismissal stands for the session.
+function dupeDismiss(key){
+  if(!DUPES_DISMISSED.includes(key))DUPES_DISMISSED.push(key);
+  toast("Duplicate pair dismissed — hidden for this session","ok",
+    {ms:10000,action:{label:"Undo",fn:()=>{DUPES_DISMISSED=DUPES_DISMISSED.filter(k=>k!==key);renderDupes();}}});
+  renderDupes();
+}
+function dupeUndoAll(){DUPES_DISMISSED=[];renderDupes();}
 
 // ── Engine health card (depth pass round 3) ─────────────────────────────────
 // The wedge/failure picture the operator was reconstructing by hand from

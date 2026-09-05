@@ -495,6 +495,10 @@
   .toast.err{border-left-color:var(--red)} .toast.err i{color:var(--red)}
   .toast i{font-size:17px;color:var(--accent2);flex:none}
   .toast.hide{animation:toastout .2s ease forwards}
+  /* Inline undo control (CXA-F362): a ghost button riding the toast, so an
+     undone action never needs a second hunt through the UI. */
+  .toast .toast-act{flex:none;background:transparent;border:1px solid var(--border2);color:var(--text);border-radius:8px;padding:3px 12px;font-size:12px;font-weight:600;cursor:pointer;transition:border-color .15s,color .15s}
+  .toast .toast-act:hover{border-color:var(--accent2);color:var(--accent2)}
   @keyframes toastin{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:none}}
   @keyframes toastout{to{opacity:0;transform:translateX(20px)}}
   .projitem{display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:8px;cursor:pointer}
