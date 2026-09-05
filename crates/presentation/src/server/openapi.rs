@@ -253,6 +253,9 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/workspace", &["get", "put"]),
     route("/api/workspace/duplicates", &["get"]),
     route("/api/workspace/duplicates/action", &["post"]),
+    // "Scan now" (CXA-F362): the operator's explicit radar re-run, gated to
+    // hub admins and leads.
+    route("/api/workspace/duplicates/scan", &["post"]),
     route("/api/workspace/invites", &["get", "post"]),
     route("/api/workspace/invites/:token", &["delete"]),
     route("/api/workspace/join", &["post"]),

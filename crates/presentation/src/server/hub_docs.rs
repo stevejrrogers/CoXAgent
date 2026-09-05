@@ -115,6 +115,15 @@ pub(super) struct WorkspaceDoc {
     /// `Deserialize`, no `deny_unknown_fields`) tolerates the extra key.
     #[serde(default)]
     pub(super) fleet_ceiling_usd: f64,
+    /// Cross-project duplicate radar (CXA-F362): RFC3339 instant the
+    /// cross-project comparison last ran — the vintage of the pairs the
+    /// radar serves. Stamped on every radar run (view open or an explicit
+    /// Scan now) and persisted with the doc, so the header's "last scanned"
+    /// survives a hub restart. serde-defaulted like every additive field
+    /// here: a workspace doc that predates the stamp loads clean — no
+    /// migration (empty string = never scanned).
+    #[serde(default)]
+    pub(super) scanned_at: String,
 }
 
 /// One human "keep both" verdict on a cross-project duplicate pair.
