@@ -454,6 +454,9 @@
                 <button class="chanadd" onclick="newDoc()" title="New page"><i class="ti ti-plus"></i></button>
               </div>
             </div>
+            <div class="docsearch"><i class="ti ti-search"></i>
+              <input id="doc-search" type="text" placeholder="Search titles &amp; bodies" aria-label="Search wiki pages" oninput="docSearchFilter(this.value)" autocomplete="off">
+            </div>
             <div id="docs-list"></div>
           </div>
           <div class="docsmain" id="docs-main"></div>

@@ -275,8 +275,44 @@ function buildDocTree(){
 }
 // Every folder path (for the "move page" picker).
 function allFolderPaths(){const s=new Set(DOC_FOLDERS||[]);for(const d of DOCS){const f=(d.folder||"").trim();if(f){let acc="";for(const p of f.split("/")){acc=acc?acc+"/"+p:p;s.add(acc);}}}return [...s].sort();}
+// The rail's search filter (CXA-F364): while a query is set the tree is
+// replaced by the matched pages (server search over titles+bodies, matches
+// highlighted); clearing the box redraws the FULL tree again.
+let DOC_Q="";
+// Case-insensitive <mark> highlight of `term` inside `text`, escaping every
+// piece (mark on the RAW text, then escape — never inside an entity).
+function hl(text,term){
+  if(!term)return esc(text);
+  const re=new RegExp("("+term.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+")","ig");
+  return text.split(re).map((part,i)=>i%2?"<mark>"+esc(part)+"</mark>":esc(part)).join("");
+}
+async function docSearchFilter(q){
+  DOC_Q=q||"";
+  const box=document.getElementById("docs-list");if(!box)return;
+  const term=DOC_Q.trim();
+  if(!term){renderDocsList();return;} // clearing restores the tree
+  try{
+    const hits=await(await fetch(api("/wiki/search?q="+encodeURIComponent(term)))).json();
+    if(term!==DOC_Q.trim())return; // a newer keystroke already owns the box
+    if(!Array.isArray(hits)||!hits.length){
+      box.innerHTML='<div class="empty" style="padding:14px 8px;font-size:12px">No pages match “'+esc(term)+'”.</div>';
+      return;
+    }
+    box.innerHTML=hits.map(h=>`<div class="docitem docsearch-hit${h.id===DOC_CUR?' on':''}" onclick="openDoc('${esc(h.id)}')" title="${esc(h.folder)}">
+      <i class="ti ti-file-text dfi" style="opacity:.55"></i><span class="dsh-t">${hl(h.title,term)}</span>
+      <span class="dsh-s">${hl(h.snippet,term)}</span></div>`).join("");
+  }catch(e){
+    // Same staleness rule as the success path: a newer keystroke (or a clear,
+    // which already restored the tree) owns the box — never overwrite it.
+    if(term!==DOC_Q.trim())return;
+    // A failed search must NOT fall back to renderDocsList: with a filter set
+    // that re-enters this handler and loops. Show the honest error state.
+    box.innerHTML='<div class="empty" style="padding:14px 8px;font-size:12px">Search failed — try again.</div>';
+  }
+}
 function renderDocsList(){
   const box=document.getElementById("docs-list");if(!box)return;
+  if(DOC_Q&&DOC_Q.trim()){docSearchFilter(DOC_Q);return;}
   const root=buildDocTree(),exp=docExp();
   const node=(n,depth)=>{let h="";
     for(const fn of Object.keys(n.folders).sort((a,b)=>a.localeCompare(b))){const f=n.folders[fn];const open=exp.has(f.path);const pad=8+depth*13;
@@ -352,8 +388,60 @@ function renderDocMain(){
   const meta=d.updated_by?`<span class="doc-meta">Updated by ${esc(d.updated_by)}${d.updated_at?" · "+esc(d.updated_at.slice(0,10)):""}</span>`:"";
   const crumb=docFolder(d).split("/").map(esc).join(' <i class="ti ti-chevron-right" style="font-size:11px;opacity:.5"></i> ');
   const actions=canEdit?`<div style="display:flex;gap:6px"><button class="gc-btn" onclick="askAiEdit()" title="Ask the DOCS agent to revise this page"><i class="ti ti-sparkles"></i> Ask AI</button><button class="gc-btn" onclick="moveDoc('${esc(d.id)}')" title="Move to another folder"><i class="ti ti-folder-symlink"></i> Move</button><button class="gc-btn" onclick="DOC_EDIT=true;renderDocMain()"><i class="ti ti-pencil"></i> Edit</button></div>`:"";
-  el.innerHTML=`<div class="doc-head"><div><span class="doc-cat-tag ${esc(d.category)}">${crumb}</span><h2>${esc(d.title)}</h2>${meta}</div>${actions}</div><div class="doc-body md">${mdRender(d.body)}</div>`;
+  el.innerHTML=`<div class="doc-head"><div><span class="doc-cat-tag ${esc(d.category)}">${crumb}</span><h2>${esc(d.title)}</h2>${meta}</div>${actions}</div>
+    <div class="doc-cols" id="doc-cols"><div class="doc-body md">${mdRender(d.body)}</div></div>
+    <div class="doc-backlinks" id="doc-backlinks" style="display:none"></div>`;
+  const body=el.querySelector(".doc-body");
+  const toc=buildToc(body);
+  if(toc)el.querySelector("#doc-cols").appendChild(toc);
+  wireTocScroll(el);
   renderMermaidIn(el);
+  renderDocBacklinks(d.id);
+}
+// ── Auto table of contents (CXA-F364) ───────────────────────────────────────
+// Pages with 3+ anchored headings get a sticky TOC in the right margin that
+// highlights the section being read; shorter pages render none.
+const TOC_MIN_HEADINGS=3;
+let DOC_TOC_IO=null;
+function buildToc(bodyEl){
+  const heads=[...bodyEl.querySelectorAll("h1[id],h2[id],h3[id],h4[id]")];
+  if(heads.length<TOC_MIN_HEADINGS)return null;
+  const toc=document.createElement("aside");
+  toc.className="doc-toc";toc.id="doc-toc";
+  toc.innerHTML='<div class="doc-toc-t">On this page</div>'+heads.map(h=>
+    `<a class="doc-toc-l lv${h.tagName[1]}" href="#${esc(h.id)}" data-anchor="${esc(h.id)}">${esc(h.textContent)}</a>`).join("");
+  return toc;
+}
+// Scroll-track the reading position: the topmost heading inside the viewport
+// band marks its TOC link active. Re-wired on every reader render.
+function wireTocScroll(scope){
+  if(DOC_TOC_IO){DOC_TOC_IO.disconnect();DOC_TOC_IO=null;}
+  const links=[...scope.querySelectorAll(".doc-toc-l")];if(!links.length)return;
+  const setActive=id=>links.forEach(l=>l.classList.toggle("on",l.dataset.anchor===id));
+  setActive(links[0].dataset.anchor);
+  // Clicking a TOC link marks it read immediately — the observer below only
+  // reports intersections, and a jump-scroll can leave every heading outside
+  // its band for a frame.
+  links.forEach(l=>l.addEventListener("click",()=>setActive(l.dataset.anchor)));
+  DOC_TOC_IO=new IntersectionObserver(es=>{
+    for(const e of es){if(e.isIntersecting)setActive(e.target.id);}
+  },{root:document.getElementById("docs-main"),rootMargin:"-10% 0px -78% 0px",threshold:0});
+  links.forEach(l=>{const h=document.getElementById(l.dataset.anchor);if(h)DOC_TOC_IO.observe(h);});
+}
+// ── Backlinks footer (CXA-F364) ─────────────────────────────────────────────
+// "Referenced by": every wiki page and ticket whose text mentions this page.
+// When nothing references it the footer stays hidden — no empty-state box.
+function renderDocBacklinks(id){
+  const foot=document.getElementById("doc-backlinks");if(!foot)return;
+  foot.innerHTML="";foot.style.display="none";
+  fetch(api("/docs/"+encodeURIComponent(id)+"/backlinks")).then(r=>r.json()).then(links=>{
+    if(!Array.isArray(links)||!links.length)return;
+    foot.innerHTML=`<div class="doc-bl-t"><i class="ti ti-link"></i> Referenced by (${links.length})</div>`+
+      links.map(l=>l.kind==="ticket"
+        ?`<a class="doc-bl-i" onclick="showTicket('${esc(l.id)}')" title="Open ticket"><i class="ti ti-ticket"></i> ${esc(l.title)}<span class="doc-bl-sub">${esc(l.id)}</span></a>`
+        :`<a class="doc-bl-i" onclick="openDoc('${esc(l.id)}')" title="Open page"><i class="ti ti-file-text"></i> ${esc(l.title)}${l.sub?`<span class="doc-bl-sub">${esc(l.sub)}</span>`:""}</a>`).join("");
+    foot.style.display="block";
+  }).catch(()=>{});
 }
 async function newDoc(folder){
   const title=await coxModal({title:"New page",message:"Title for the new page.",input:{placeholder:"Page title"},confirmText:"Next"});if(!title||!title.trim())return;
