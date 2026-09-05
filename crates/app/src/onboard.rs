@@ -679,6 +679,11 @@ pub async fn brownfield<S: StateStorePort + 'static>(
     // Seed tickets based on docker analysis (replaces simple has_compose check)
     let seeded = seed_smart_tickets(store, &docker).await?;
 
+    // CXA-F258: pull the connected repo's issue backlog in as Pending tickets
+    // so the team starts on the real backlog, not a hand-typed stand-in.
+    // Best-effort: a forge failure surfaces as a note, never fails adoption.
+    let backlog_note = import_backlog(store, &config_path, codebase).await?;
+
     let seeded_line = if seeded.is_empty() {
         "Seeded: none (compose present, no clashes)".to_owned()
     } else {
@@ -712,7 +717,8 @@ pub async fn brownfield<S: StateStorePort + 'static>(
          {arch_line}\n\
          {docker_note}\n\
          Wrote: {}\n       {}\n\
-         {seeded_line}\n\n\
+         {seeded_line}\n\
+         {backlog_note}\n\n\
          REVIEW: skim {} (auto-drafted from the code) and the seeded backlog, then \
          run the team on `{}`.\n",
         codebase.display(),
@@ -720,6 +726,75 @@ pub async fn brownfield<S: StateStorePort + 'static>(
         context_path.display(),
         context_path.display(),
         codebase.display(),
+    ))
+}
+
+/// CXA-F258 — brownfield backlog import: when the adopted repo is connected
+/// on GitHub, fetch its OPEN issues (cap [`coxagent_application::
+/// backlog_import::IMPORT_CAP`]) and merge them in as Pending tickets through
+/// [`coxagent_application::backlog_import::merge_pending`]; ONE load → merge
+/// → save. Closed issues are never fetched here (AC4: excluded by default;
+/// an opt-in surface is pending the SA's answer on where the preview lives).
+/// The returned note reports imported vs skipped (AC3). Forge failures are
+/// surfaced in the note, never fail the adoption — the import is repeatable
+/// once the forge is reachable.
+async fn import_backlog<S: StateStorePort + 'static>(
+    store: &Arc<S>,
+    config_path: &Path,
+    codebase: &Path,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let cfg: Config = match std::fs::read_to_string(config_path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+    {
+        Some(cfg) => cfg,
+        None => return Ok("Backlog import: skipped (no readable project config)".to_owned()),
+    };
+    if !cfg.git.enabled || cfg.git.provider != "github" || cfg.git.repo.trim().is_empty() {
+        return Ok("Backlog import: skipped (no connected GitHub repo)".to_owned());
+    }
+    let forge = coxagent_infrastructure::github_forge(
+        cfg.git.repo.clone(),
+        cfg.git.base_url.clone(),
+        codebase.to_path_buf(),
+        String::new(),
+    );
+    let drafts = match forge
+        .list_open_issues(coxagent_application::backlog_import::IMPORT_CAP)
+        .await
+    {
+        Ok(drafts) => drafts,
+        Err(e) => {
+            return Ok(format!(
+                "Backlog import: FAILED — {e} (re-run once the forge is reachable)"
+            ))
+        }
+    };
+    if drafts.is_empty() {
+        return Ok(format!(
+            "Backlog import: no open issues on {}",
+            cfg.git.repo
+        ));
+    }
+    let mut state = store.load().await?;
+    let report = coxagent_application::backlog_import::merge_pending(
+        &mut state,
+        &drafts,
+        coxagent_application::backlog_import::IMPORT_CAP,
+    );
+    if report.imported == 0 {
+        return Ok(format!(
+            "Backlog import: 0 new from {} ({} already tracked)",
+            cfg.git.repo, report.skipped
+        ));
+    }
+    state
+        .validate()
+        .map_err(|e| format!("backlog import refused: {e}"))?;
+    store.save(&state).await?;
+    Ok(format!(
+        "Backlog import: {} ticket(s) from {} ({} skipped)",
+        report.imported, cfg.git.repo, report.skipped
     ))
 }
 
