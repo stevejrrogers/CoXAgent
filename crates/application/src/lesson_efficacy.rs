@@ -81,6 +81,10 @@ pub struct LessonEfficacyRow {
     pub structural_ticket: Option<String>,
     /// 2+ recurrences (or 2+ re-learnings) — listed in the repeating section.
     pub repeating: bool,
+    /// `Some("shipped")` when the lesson is shipped with the binary
+    /// (CXA-F371) — the lessons UI badges it so shipped wisdom is
+    /// distinguishable from locally learned lessons; `None` = learned locally.
+    pub source: Option<String>,
 }
 
 /// The lesson-efficacy overlay served additively on
@@ -121,6 +125,7 @@ pub fn lesson_efficacy(state: &ProjectState) -> LessonEfficacy {
             stage: record.escalated.as_ref().map(|e| e.stage.clone()),
             structural_ticket: record.escalated.as_ref().map(|e| e.ticket.clone()),
             repeating: record.is_repeating(),
+            source: record.source.clone(),
         })
         .collect();
     rows.sort_by(|a, b| {
@@ -188,6 +193,8 @@ mod efficacy_tests {
             re_recordings: 0,
             recurrences: Vec::new(),
             escalated: None,
+            id: None,
+            source: None,
         };
         for i in 0..count {
             r.recurrences.push(crate::state::LessonRecurrence {
@@ -252,6 +259,35 @@ mod efficacy_tests {
         assert!(row.escalated);
         assert_eq!(row.stage.as_deref(), Some("chore"));
         assert_eq!(row.structural_ticket.as_deref(), Some("CXC-C001"));
+    }
+
+    /// AC3's middle link (CXA-F371): the source tag rides the read model — a
+    /// shipped record reaches the UI row marked, a locally learned record
+    /// reaches it unmarked.
+    #[test]
+    fn the_source_tag_rides_the_read_model_row() {
+        use crate::bootstrap_lessons::SHIPPED_SOURCE;
+        let mut shipped = recurring("a shipped rule", 0);
+        shipped.id = Some("CXA-F371-shipped-rule".to_owned());
+        shipped.source = Some(SHIPPED_SOURCE.to_owned());
+        let local = recurring("a locally learned rule", 0);
+        let eff = lesson_efficacy(&state_with(vec![shipped, local]));
+        let row = eff
+            .lessons
+            .iter()
+            .find(|r| r.text == "a shipped rule")
+            .expect("row");
+        assert_eq!(
+            row.source.as_deref(),
+            Some(SHIPPED_SOURCE),
+            "the shipped tag reaches the UI row"
+        );
+        let row = eff
+            .lessons
+            .iter()
+            .find(|r| r.text == "a locally learned rule")
+            .expect("row");
+        assert!(row.source.is_none(), "a locally learned row stays unmarked");
     }
 
     #[test]

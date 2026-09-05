@@ -257,6 +257,8 @@ mod sweep_tests {
             re_recordings: 0,
             recurrences: Vec::new(),
             escalated: None,
+            id: None,
+            source: None,
         };
         for i in 0..count {
             r.recurrences.push(LessonRecurrence {

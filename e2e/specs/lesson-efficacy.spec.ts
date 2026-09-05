@@ -29,6 +29,8 @@ const LESSON_REPEATING =
   'docker build fails when the base image tag moves — pin the base image version';
 const LESSON_WATCHED = 'route PRs that touch gating files to their human approver at open';
 const LESSON_PLAIN = 'clear every run error before cycle close';
+const LESSON_SHIPPED =
+  'keep tmp and build artifacts out of the repo — build outputs and scratch dirs belong in target/, /tmp or gitignored paths';
 
 const recurrence = (day, reason) => ({
   at: `2026-09-${day}T10:00:00Z`,
@@ -115,6 +117,39 @@ test('a repeating lesson renders its recurrence history with the prevention acti
 
     await assertNoConsoleErrors(errors);
     await expect(page).toHaveScreenshot('lesson-efficacy.png');
+  } finally {
+    // Restore the world for the specs that run after this one.
+    await setLessonLedger(null);
+  }
+});
+
+test('a shipped bootstrap lesson is badged apart from locally learned ones', async ({ page }) => {
+  const errors = [];
+  armConsoleGate(page, errors);
+  // The exact persisted shape the CXA-F371 seed writes: a ledger record with
+  // the stable id and the "shipped" source marker, next to locally learned
+  // rows that carry no source at all.
+  await setLessonLedger([
+    ...seededLedger,
+    {
+      text: LESSON_SHIPPED,
+      at: '2026-09-05T08:00:00Z',
+      cycle: 0,
+      re_recordings: 0,
+      recurrences: [],
+      id: 'CXA-F371-tmp-build-artifact-hygiene',
+      source: 'shipped',
+    },
+  ]);
+  try {
+    await openApp(page);
+    const panel = page.locator('#ov-lessons');
+    await expect(panel).toContainText(LESSON_SHIPPED);
+    // Exactly one badge — on the shipped lesson; the local rows stay clean.
+    const badge = panel.getByTitle(/shipped with the binary/i);
+    await expect(badge).toHaveCount(1);
+    await expect(badge).toHaveText(/shipped/i);
+    await assertNoConsoleErrors(errors);
   } finally {
     // Restore the world for the specs that run after this one.
     await setLessonLedger(null);
