@@ -1041,16 +1041,21 @@
   .msknob{flex:none;width:30px;height:30px;border-radius:50%;display:grid;place-items:center;font-size:15px;color:var(--kc);border:2px solid var(--kc);background:var(--card);margin:0 2px}
   .msknob.active{color:#fff;background:var(--accent2);box-shadow:0 0 0 4px color-mix(in srgb,var(--accent2) 22%,transparent)}
   .msknob.reached{color:#fff;background:var(--green)}
-  .mscard{flex:1;display:flex;flex-direction:column;margin:10px 8px 0;background:var(--card2);border:1px solid var(--border);border-radius:11px;padding:11px 12px}
+  .mscard{flex:1;display:flex;flex-direction:column;margin:10px 8px 0;background:var(--card2);border:1px solid var(--border);border-radius:11px;padding:11px 12px;cursor:pointer;transition:border-color .15s,box-shadow .15s}
+  .mscard:hover{border-color:var(--border2)}
   .mscard.active{border-color:var(--accent2);background:var(--accentbg)}
+  .mscard.ms-sel{border-color:var(--accent2);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent2) 18%,transparent)}
+  .mscard.collapsed{opacity:.85}
   .mstitle{font-size:13px;font-weight:700;line-height:1.3;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
   .msmetaline{display:flex;align-items:center;gap:6px;margin-top:6px}
   .msk-tag{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:2px 7px;border-radius:20px;background:var(--card);color:var(--dim)}
   .msk-tag.reached{background:color-mix(in srgb,var(--green) 18%,transparent);color:var(--green)}
   .msk-tag.active{background:var(--accent);color:#fff}
+  .msage{margin-left:auto;display:inline-flex;align-items:center;gap:3px;font-family:ui-monospace,Menlo,monospace;font-size:10.5px;color:var(--dim)}
   .msq{font-size:11px;color:var(--muted);margin-top:7px;display:flex;align-items:center;gap:5px}
   .msprog{height:6px;background:var(--card);border-radius:3px;overflow:hidden;margin-top:8px}
   .msprog>div{height:100%;border-radius:3px;transition:width .3s}
+  .mspct{font-family:ui-monospace,Menlo,monospace;font-size:10px;color:var(--muted);white-space:nowrap}
   .msgoaltxt{font-size:11px;color:var(--dim);margin-top:8px;line-height:1.45;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
   .wspath{display:flex;align-items:center;gap:8px;background:var(--bg);border:1px solid var(--border2);border-radius:8px;padding:8px 10px}
   .wspath code{flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:12px;color:var(--accent2);overflow-x:auto;white-space:nowrap}
