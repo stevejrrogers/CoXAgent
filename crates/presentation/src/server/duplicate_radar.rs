@@ -123,11 +123,7 @@ pub(super) async fn duplicates_scan_ep(
     )
     .await
     else {
-        return (
-            StatusCode::FORBIDDEN,
-            "hub admins and leads may run a scan",
-        )
-            .into_response();
+        return (StatusCode::FORBIDDEN, "hub admins and leads may run a scan").into_response();
     };
     {
         let mut doc = app.workspace.inner.lock().await;
@@ -402,10 +398,9 @@ mod tests {
         let doc: super::hub_docs::WorkspaceDoc =
             serde_json::from_str(r#"{"name":"Acme"}"#).expect("pre-F362 doc");
         assert_eq!(doc.scanned_at, "", "serde default, no migration");
-        let doc: super::hub_docs::WorkspaceDoc = serde_json::from_str(
-            r#"{"name":"Acme","scanned_at":"2026-09-05T12:00:00Z"}"#,
-        )
-        .expect("doc with stamp");
+        let doc: super::hub_docs::WorkspaceDoc =
+            serde_json::from_str(r#"{"name":"Acme","scanned_at":"2026-09-05T12:00:00Z"}"#)
+                .expect("doc with stamp");
         assert_eq!(doc.scanned_at, "2026-09-05T12:00:00Z");
     }
 

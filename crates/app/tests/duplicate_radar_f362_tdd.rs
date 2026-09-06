@@ -278,8 +278,7 @@ fn preceded_within(hay: &str, token: &str, within: usize, anchor: &str) -> bool 
 /// a relative-time call (stamp first); both satisfy "shows last-scan
 /// relative time".
 fn near(hay: &str, token: &str, within: usize, other: &str) -> bool {
-    preceded_within(hay, token, within, other)
-        || any_span_has(hay, token, within, &[other])
+    preceded_within(hay, token, within, other) || any_span_has(hay, token, within, &[other])
 }
 
 /// Every Playwright spec under `e2e/specs` with its repo-relative path,
@@ -479,9 +478,7 @@ fn ac1_the_scan_rerun_exists_server_side_and_is_admin_gated() {
          server-side re-run for the Scan now button to drive"
     );
     assert!(
-        scans
-            .iter()
-            .any(|w| w.contains("gate_principal")),
+        scans.iter().any(|w| w.contains("gate_principal")),
         "the scan re-run handler must gate through the house authorization \
          gate `gate_principal` (an `AuthRole` predicate — which one is the \
          implementer's call) so the re-run is admin-gated server-side, not \
@@ -624,9 +621,7 @@ fn ac3_a_scan_stamps_and_persists_scanned_at_server_side() {
     assert!(
         scans.iter().any(|w| {
             let w = flat(w);
-            w.contains("scanned_at")
-                && w.contains("now_rfc3339")
-                && w.contains("workspace.save")
+            w.contains("scanned_at") && w.contains("now_rfc3339") && w.contains("workspace.save")
         }),
         "the scan handler must stamp `scanned_at` with `now_rfc3339()` AND \
          persist it through the workspace doc's save (`app.workspace.save()`) \

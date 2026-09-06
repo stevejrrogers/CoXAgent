@@ -16,6 +16,7 @@ mod lessons;
 mod ops;
 mod outbox;
 mod provenance;
+mod shards;
 mod work;
 mod workspace_id;
 
@@ -29,6 +30,7 @@ pub use lessons::*;
 pub use ops::*;
 pub use outbox::*;
 pub use provenance::*;
+pub use shards::*;
 pub use work::*;
 pub use workspace_id::*;
 

@@ -426,7 +426,10 @@ mod tests {
                 "infra",
             ),
         ];
-        let jd = jaccard(&title_tokens(&drifted[0].title), &title_tokens(&drifted[1].title));
+        let jd = jaccard(
+            &title_tokens(&drifted[0].title),
+            &title_tokens(&drifted[1].title),
+        );
         assert!((jd - 0.75).abs() < 1e-12);
         assert!(
             1.0 - jd > SAME_TAG_MAX_DISSIMILARITY,
@@ -486,8 +489,11 @@ mod tests {
         ];
         let out = find_cross_project_duplicates(&snaps, &[]);
         assert_eq!(out.len(), 1);
-        let dup_projects: Vec<&str> =
-            out[0].dups.iter().map(|d| d.project_name.as_str()).collect();
+        let dup_projects: Vec<&str> = out[0]
+            .dups
+            .iter()
+            .map(|d| d.project_name.as_str())
+            .collect();
         assert_eq!(
             dup_projects,
             vec!["Gamma"],
@@ -501,7 +507,10 @@ mod tests {
         // difference must not silently void the AC4 carve-out.
         let snaps = vec![
             tagged(snap("p1", "Alpha", "T-1", "Add Redis cache layer"), "Infra"),
-            tagged(snap("p2", "Beta", "T-1", "Add Redis cache layer"), " infra "),
+            tagged(
+                snap("p2", "Beta", "T-1", "Add Redis cache layer"),
+                " infra ",
+            ),
         ];
         assert!(
             find_cross_project_duplicates(&snaps, &[]).is_empty(),

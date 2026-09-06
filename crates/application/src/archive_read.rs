@@ -119,12 +119,12 @@ mod tests {
     async fn paging_serves_windows_with_the_full_total() {
         // Seven tickets land id-descending as F006..F000; a 5-offset/2-limit
         // window is exactly the last two.
-        let all: Vec<Ticket> = (0..7).rev().map(|i| ticket(&format!("CXC-F00{i}"))).collect();
-        let (tickets, total) = page(&FixedStore(all), "p", 5, 2).await.unwrap();
-        let ids: Vec<String> = tickets
-            .iter()
-            .map(|t| t.id().as_str().to_owned())
+        let all: Vec<Ticket> = (0..7)
+            .rev()
+            .map(|i| ticket(&format!("CXC-F00{i}")))
             .collect();
+        let (tickets, total) = page(&FixedStore(all), "p", 5, 2).await.unwrap();
+        let ids: Vec<String> = tickets.iter().map(|t| t.id().as_str().to_owned()).collect();
         assert_eq!(ids, ["CXC-F001", "CXC-F000"]);
         assert_eq!(total, 7);
     }

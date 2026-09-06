@@ -35,8 +35,8 @@ use crate::middleware::{
 };
 
 mod alerts;
-mod archive;
 mod approval_policy;
+mod archive;
 mod assets;
 mod auth;
 mod background;
@@ -816,10 +816,7 @@ pub async fn serve_full(
         )
         // "Scan now" (CXA-F362): the operator's explicit radar re-run —
         // admin-gated server-side, stamps the persisted last-scan instant.
-        .route(
-            "/api/workspace/duplicates/scan",
-            post(duplicates_scan_ep),
-        )
+        .route("/api/workspace/duplicates/scan", post(duplicates_scan_ep))
         // Fleet spend cockpit (CXA-F278): hub-level cross-project cost
         // aggregation with cap headroom + the soft-ceiling setting (see
         // fleet_spend.rs). Super admin; visibility-only by design.
@@ -1418,9 +1415,9 @@ fn bad_request_error(msg: &str) -> axum::response::Response {
 #[cfg(test)]
 mod alerts_tests;
 #[cfg(test)]
-mod archive_tests;
-#[cfg(test)]
 mod approval_policy_tests;
+#[cfg(test)]
+mod archive_tests;
 #[cfg(test)]
 mod avatar_media_security_tests;
 #[cfg(test)]

@@ -72,7 +72,11 @@ fn backlog(tickets: &[Ticket]) -> ProjectState {
 /// The exact per-ticket mapping the HTTP adapter performs when it gathers
 /// radar snapshots (title + scope metadata only, never raw documents).
 /// Pending proposals sit inside the radar's active pool on both sides.
-fn snapshots_for(project_id: &str, project_name: &str, state: &ProjectState) -> Vec<TicketSnapshot> {
+fn snapshots_for(
+    project_id: &str,
+    project_name: &str,
+    state: &ProjectState,
+) -> Vec<TicketSnapshot> {
     state
         .tickets
         .iter()

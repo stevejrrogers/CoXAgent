@@ -1552,7 +1552,7 @@ mod tests {
             PathBuf::from("/tmp"),
             DevMode::Feature,
         );
-        let done = uc.execute().await.expect("run");
+        let done = Box::pin(uc.execute()).await.expect("run");
         assert_eq!(done.expect("some").as_str(), "FEAT-001");
 
         let state = store.load().await.expect("load");
@@ -1572,7 +1572,7 @@ mod tests {
             PathBuf::from("/tmp"),
             DevMode::Feature,
         );
-        assert!(uc.execute().await.expect("run").is_none());
+        assert!(Box::pin(uc.execute()).await.expect("run").is_none());
     }
 
     fn open_bug(id: &str) -> Ticket {
@@ -1661,7 +1661,9 @@ mod tests {
         )
         .with_verify(Some(deploy));
 
-        let err = uc.execute().await.expect_err("repair broke tests");
+        let err = Box::pin(uc.execute())
+            .await
+            .expect_err("repair broke tests");
         assert!(err.to_string().contains("clippy repair"), "{err}");
 
         // The ticket must be back in the queue, not silently marked done.
@@ -1774,7 +1776,7 @@ mod tests {
             DevMode::Feature,
         );
         // The ask parks the run: nothing was "done", the question waits.
-        assert!(uc.execute().await.expect("run").is_none());
+        assert!(Box::pin(uc.execute()).await.expect("run").is_none());
         let state = store.load().await.expect("load");
         let q = &state.questions[0];
         assert_eq!(q.to, "@LUFFY");
@@ -1794,7 +1796,7 @@ mod tests {
             PathBuf::from("/tmp"),
             DevMode::Feature,
         );
-        assert!(uc.execute().await.expect("run").is_none());
+        assert!(Box::pin(uc.execute()).await.expect("run").is_none());
         let state = store.load().await.expect("load");
         assert!(!state.questions[0].deferred);
     }
@@ -2077,7 +2079,7 @@ mod tests {
         });
         let uc = wip_uc(&store, git.clone(), &tmp);
 
-        let err = uc.execute().await.expect_err("engine fails");
+        let err = Box::pin(uc.execute()).await.expect_err("engine fails");
         assert!(err.to_string().contains("boom"), "{err}");
         assert!(
             git.parks
@@ -2133,7 +2135,7 @@ mod tests {
         });
         let git = Arc::new(WipGit::default()); // status "" → clean tree
 
-        let _ = wip_uc(&store, git.clone(), &tmp).execute().await;
+        let _ = Box::pin(wip_uc(&store, git.clone(), &tmp).execute()).await;
 
         let state = store.load().await.expect("load");
         let t = state
@@ -2172,8 +2174,7 @@ mod tests {
             ..Default::default()
         });
 
-        let err = wip_uc(&store, git, &tmp)
-            .execute()
+        let err = Box::pin(wip_uc(&store, git, &tmp).execute())
             .await
             .expect_err("engine fails");
         // AC3: the checkpoint failure rides the run error → the errors==0
