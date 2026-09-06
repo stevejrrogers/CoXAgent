@@ -7,6 +7,7 @@ pub mod approval_policy;
 pub mod approval_risk;
 pub mod backup;
 pub mod ceremony;
+pub mod claims;
 pub mod conformance_check;
 pub mod coverage;
 pub mod cycle;
@@ -54,6 +55,7 @@ pub use backup::{
     BackupWorkspaceUseCase,
 };
 pub use conformance_check::RunConformanceUseCase;
+pub use claims::{may_touch_claim, ClaimError, ClaimsUseCase, HandbackOutcome, TakeoverOutcome};
 pub use coverage::{match_score, matches_criterion, record_verdicts};
 pub use cycle::{CycleReport, RunCycleUseCase};
 pub use duplicate_radar::{
