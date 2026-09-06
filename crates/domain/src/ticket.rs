@@ -588,6 +588,46 @@ impl Ticket {
         Ok(())
     }
 
+    /// Atomically swap the holder of an existing `InProgress` claim (CXA-F283):
+    /// a person taking over work a crashed run left behind. Like
+    /// [`Ticket::release_claim`] this is `System`-only bookkeeping — the API
+    /// layer decides WHO may take the decision (a manager, or the account whose
+    /// own run holds the claim), and the aggregate enforces only that the swap
+    /// happens in one guarded mutation with no steal window between checking
+    /// and stamping. Status is unchanged: the ticket stays `InProgress`, now
+    /// held by the new worker.
+    ///
+    /// Returns the holder that was displaced, so the caller can attribute the
+    /// takeover ("taken over by @alice (was `dev@mac`)").
+    ///
+    /// # Errors
+    /// - [`DomainError::FieldNotPermitted`] if `actor` is not `System`.
+    /// - [`DomainError::InvalidTransition`] if the ticket is not `InProgress`.
+    pub fn take_over(
+        &mut self,
+        actor: Role,
+        worker: impl Into<String>,
+        now: impl Into<String>,
+    ) -> Result<Option<String>, DomainError> {
+        if actor != Role::System {
+            return Err(DomainError::FieldNotPermitted {
+                role: actor,
+                field: "claim",
+            });
+        }
+        if self.status != Status::InProgress {
+            return Err(DomainError::InvalidTransition {
+                ticket_type: self.kind,
+                from: self.status,
+                to: self.status,
+            });
+        }
+        let previous = self.claimed_by.take();
+        self.claimed_by = Some(worker.into());
+        self.claimed_at = Some(now.into());
+        Ok(previous)
+    }
+
     /// Definition of Ready: technical design present, and UX design present when
     /// the ticket has UI.
     fn check_ready(&self) -> Result<(), DomainError> {
@@ -746,6 +786,67 @@ mod tests {
         t.transition_to(Role::DevFeature, Status::Done)
             .expect("done");
         assert_eq!(t.claimed_by(), None);
+    }
+
+    /// A claimed `InProgress` ticket, the raw material of a takeover.
+    fn claimed(t: &mut Ticket, worker: &str, at: &str) {
+        t.set_technical_design(Role::Sa, tech_design())
+            .expect("set");
+        t.transition_to(Role::Sa, Status::Ready).expect("ready");
+        t.claim(Role::DevFeature, worker, at).expect("claim");
+    }
+
+    #[test]
+    fn take_over_stamps_the_new_holder_and_reports_the_steal() {
+        let mut t = feature(false);
+        claimed(&mut t, "alice@mac", "2026-07-15T00:00:00Z");
+        let previous = t
+            .take_over(Role::System, "bob@pc", "2026-07-15T09:30:00Z")
+            .expect("swap");
+        assert_eq!(previous.as_deref(), Some("alice@mac"));
+        assert_eq!(t.status(), Status::InProgress, "the work stays in flight");
+        assert_eq!(t.claimed_by(), Some("bob@pc"));
+        assert_eq!(t.claimed_at(), Some("2026-07-15T09:30:00Z"));
+    }
+
+    #[test]
+    fn non_system_cannot_take_over_claim() {
+        let mut t = feature(false);
+        claimed(&mut t, "alice@mac", "2026-07-15T00:00:00Z");
+        assert!(matches!(
+            t.take_over(Role::DevFeature, "bob@pc", "2026-07-15T09:30:00Z"),
+            Err(DomainError::FieldNotPermitted { .. })
+        ));
+        // A refused swap leaves the original claim untouched.
+        assert_eq!(t.claimed_by(), Some("alice@mac"));
+    }
+
+    #[test]
+    fn take_over_refused_off_in_progress() {
+        // Feature parked on Ready (claim released) — nothing in flight to take.
+        let mut f = feature(false);
+        f.set_technical_design(Role::Sa, tech_design())
+            .expect("set");
+        f.transition_to(Role::Sa, Status::Ready).expect("ready");
+        assert!(matches!(
+            f.take_over(Role::System, "bob@pc", "2026-07-15T09:30:00Z"),
+            Err(DomainError::InvalidTransition { .. })
+        ));
+        // A fresh bug sits on Open until claimed — same refusal.
+        let mut b = Ticket::new(
+            TicketId::new("BUG-T1").expect("id"),
+            TicketType::Bug,
+            "A bug",
+            "",
+            Priority::High,
+            Complexity::Small,
+            false,
+        )
+        .expect("bug");
+        assert!(matches!(
+            b.take_over(Role::System, "bob@pc", "2026-07-15T09:30:00Z"),
+            Err(DomainError::InvalidTransition { .. })
+        ));
     }
 
     #[test]

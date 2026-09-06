@@ -42,6 +42,7 @@ mod auth;
 mod background;
 mod broken_projects;
 mod channels;
+mod claims;
 mod chat;
 mod comments;
 mod deps;
@@ -90,6 +91,7 @@ pub use broken_projects::BrokenProject;
 use broken_projects::*;
 use channels::*;
 use chat::*;
+use claims::*;
 use comments::*;
 use docs::*;
 use downloads::*;
@@ -1050,6 +1052,14 @@ pub async fn serve_full(
         .route(
             "/api/projects/:pid/ticket/:id/assign",
             post(assign_ticket_ep),
+        )
+        .route(
+            "/api/projects/:pid/ticket/:id/takeover",
+            post(takeover_ticket_ep),
+        )
+        .route(
+            "/api/projects/:pid/ticket/:id/handback",
+            post(handback_ticket_ep),
         )
         .route(
             "/api/projects/:pid/ticket/:id/undo-approval",
