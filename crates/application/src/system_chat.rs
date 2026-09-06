@@ -591,7 +591,7 @@ mod tests {
     #[test]
     fn react_rejects_emoji_outside_the_declared_set() {
         let mut sc = SystemChat::default();
-    let id = sc.post("alice", "hi room", GENERAL_CHANNEL, Vec::new());
+        let id = sc.post("alice", "hi room", GENERAL_CHANNEL, Vec::new());
         // An undeclared emoji is refused: no pill, no state change. The picker
         // limits the UI; the aggregate enforces the rule (CXA-F367).
         assert!(sc.react(&id, "alice", "🦄").is_none());

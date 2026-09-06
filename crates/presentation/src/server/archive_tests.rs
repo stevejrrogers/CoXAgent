@@ -6,10 +6,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![allow(clippy::wildcard_imports)]
 
-use super::*;
 use super::store_rpc_test_support::{
     app_with, body_text, CountingStore, StubAuth, INSIDE_SESSION, PID,
 };
+use super::*;
 use axum::body::Body;
 use coxagent_application::error::PortError;
 use coxagent_application::ports::outbound::ArchiveStorePort;
@@ -98,7 +98,11 @@ fn hot_state() -> ProjectState {
 
 /// The harness app with an archive store wired beside the hot store.
 async fn app_with_archive(store: ProjectState, archive: Arc<dyn ArchiveStorePort>) -> AppState {
-    let mut state = app_with(Some(Arc::new(StubAuth)), Arc::new(CountingStore::seeded(store))).await;
+    let mut state = app_with(
+        Some(Arc::new(StubAuth)),
+        Arc::new(CountingStore::seeded(store)),
+    )
+    .await;
     state.archive_store = Some(archive);
     state
 }
@@ -171,7 +175,9 @@ async fn the_archive_lists_seeded_tickets_newest_first_with_the_archived_stamp()
 async fn the_archive_serves_paged_windows_with_the_full_total() {
     let app = app_with_archive(
         ProjectState::default(),
-        Arc::new(seeded_archive(&["CXC-F001", "CXC-F002", "CXC-F003", "CXC-F004", "CXC-F005"]).await),
+        Arc::new(
+            seeded_archive(&["CXC-F001", "CXC-F002", "CXC-F003", "CXC-F004", "CXC-F005"]).await,
+        ),
     )
     .await;
     let router = archive_router(app.clone());
@@ -217,7 +223,11 @@ async fn an_unknown_project_is_a_404_on_the_archive_too() {
 #[tokio::test]
 async fn no_store_or_an_empty_archive_answers_the_pinned_empty_shape() {
     // Store disabled (the default local boot)…
-    let app = app_with(Some(Arc::new(StubAuth)), Arc::new(CountingStore::seeded(ProjectState::default()))).await;
+    let app = app_with(
+        Some(Arc::new(StubAuth)),
+        Arc::new(CountingStore::seeded(ProjectState::default())),
+    )
+    .await;
     let resp = get_at(
         archive_router(app),
         "/api/projects/demo/tickets/archive",
@@ -257,12 +267,7 @@ async fn a_cold_store_fault_on_the_listing_is_a_500_never_a_silent_empty() {
 async fn unauthenticated_archive_requests_are_refused_like_sibling_endpoints() {
     let app = app_with_archive(ProjectState::default(), Arc::new(MemoryArchiveStore::new())).await;
     let router = archive_router(app.clone());
-    let resp = get_at(
-        router,
-        "/api/projects/demo/tickets/archive",
-        None,
-    )
-    .await;
+    let resp = get_at(router, "/api/projects/demo/tickets/archive", None).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     // A valid session for ANOTHER project is equally refused.
     let resp = get_at(
@@ -304,7 +309,10 @@ async fn a_hot_miss_falls_back_to_the_archive_with_the_full_record_and_joins() {
         serde_json::json!("archive read-back spec"),
         "hot-side joins still ride the payload when present"
     );
-    assert_eq!(doc["attachments"][0]["name"], serde_json::json!("cold-store.png"));
+    assert_eq!(
+        doc["attachments"][0]["name"],
+        serde_json::json!("cold-store.png")
+    );
 }
 
 #[tokio::test]

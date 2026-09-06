@@ -102,122 +102,123 @@ pub(super) async fn ticket_detail_ep(
                     Err(e) => return internal_error(&e.to_string()),
                 };
             resolved.map_or_else(not_found, |(t, archived)| {
-                    let mut v = serde_json::to_value(&t).unwrap_or_default();
-                    // Cost-gate surface: the hold estimate (if any) and whether a
-                    // human already approved this ticket to run.
-                    if let Some(obj) = v.as_object_mut() {
-                        // Test-to-AC traceability (CXA-F024): the Test Coverage tab
-                        // renders straight from the aggregate's computed matrix —
-                        // the status logic stays in the domain, not in the view.
-                        obj.insert(
-                            "coverage_matrix".into(),
-                            serde_json::to_value(t.coverage_matrix()).unwrap_or_default(),
-                        );
-                        if let Some(est) = state.cost_holds.get(&id) {
-                            obj.insert("cost_hold".into(), serde_json::json!(est));
-                        }
-                        if let Some(ev) = state.ticket_evidence.get(&id) {
-                            obj.insert(
-                                "evidence".into(),
-                                evidence_items_with_artifacts(ev, &artifacts).into(),
-                            );
-                        }
-                        // Engine & model provenance (CXA-F257): which engine
-                        // and model actually executed each agent step on this
-                        // ticket, chronological — the verify gate approves
-                        // what ran, not what config asked for. Absent when
-                        // empty, so payloads for tickets with no captured
-                        // runs are unchanged for older readers.
-                        if let Some(pv) = provenance_field(&state, &id) {
-                            obj.insert("provenance".into(), pv);
-                        }
-                        // Live reproduction link (CXA-F244): offered exactly when
-                        // the ticket awaits a human verdict (see
-                        // `detail_awaits_verification`), from the one
-                        // resolvability source the F242 design pins
-                        // (deploy.host_port). Null when no port is configured;
-                        // additive to the payload.
-                        if detail_awaits_verification(
-                            t.status(),
-                            state.ticket_evidence.contains_key(&id),
-                        ) {
-                            obj.insert(
-                                "reproduce_url".into(),
-                                serde_json::json!(
-                                    coxagent_application::repro_url::compute_live_repro_url(
-                                        cfg.deploy.host_port
-                                    )
-                                ),
-                            );
-                            // Per-ticket resolved link (CXA-F246): recorded by
-                            // the capture funnel at evidence-collection time,
-                            // so the panel renders the exact link the evidence
-                            // was captured against — null when none recorded.
-                            obj.insert(
-                                "repro_url".into(),
-                                serde_json::json!(state.repro_urls.get(&id)),
-                            );
-                        }
-                        // The gate spine (CXA-F241): every DoD gate decision the
-                        // governance ledger holds for this ticket, chronological —
-                        // the forensic view groups evidence under these. Absent
-                        // when empty, so payloads for ungated tickets are
-                        // unchanged for older readers.
-                        let gates = coxagent_application::forensics::gate_spine(&state, t.id());
-                        if !gates.is_empty() {
-                            obj.insert(
-                                "gates".into(),
-                                serde_json::to_value(gates).unwrap_or_default(),
-                            );
-                        }
-                        if state.cost_approved.contains(&id) {
-                            obj.insert("cost_approved".into(), serde_json::json!(true));
-                        }
-                        // Attachments ride the detail payload: the modal renders
-                        // from here, always fresh — the SSE snapshot path proved
-                        // unreliable as a source (records reached the store but
-                        // never the client's STATE).
-                        if let Some(atts) = state.ticket_attachments.get(&id) {
-                            obj.insert(
-                                "attachments".into(),
-                                serde_json::to_value(atts).unwrap_or_default(),
-                            );
-                        }
-                        // Dependency radar (CXA-F237): why this ticket is not
-                        // running — direct blockers with their LIVE statuses
-                        // (AC1), and every depends_on id absent from the project
-                        // state surfaced as unknown, never treated as satisfied
-                        // (AC3). Pure derivation over the same loaded snapshot.
-                        obj.insert(
-                            "blocked_by".into(),
-                            serde_json::to_value(
-                                coxagent_application::dependency_radar::blocked_by(&state, t.id()),
-                            )
-                            .unwrap_or_default(),
-                        );
-                        let unknown_pairs =
-                            coxagent_application::dependency_radar::unknown_dependencies(&state);
-                        let unknown: Vec<&coxagent_domain::TicketId> = unknown_pairs
-                            .iter()
-                            .filter(|(dep, _)| dep == t.id())
-                            .map(|(_, missing)| missing)
-                            .collect();
-                        if !unknown.is_empty() {
-                            obj.insert(
-                                "unknown_dependencies".into(),
-                                serde_json::to_value(unknown).unwrap_or_default(),
-                            );
-                        }
-                        // Served from the cold store (CXA-F274): the stamp is
-                        // the whole show/hide axis for the read-only dialog —
-                        // absent on hot tickets, so their payloads are
-                        // byte-identical to before.
-                        if archived {
-                            obj.insert("archived".into(), serde_json::json!(true));
-                        }
+                let mut v = serde_json::to_value(&t).unwrap_or_default();
+                // Cost-gate surface: the hold estimate (if any) and whether a
+                // human already approved this ticket to run.
+                if let Some(obj) = v.as_object_mut() {
+                    // Test-to-AC traceability (CXA-F024): the Test Coverage tab
+                    // renders straight from the aggregate's computed matrix —
+                    // the status logic stays in the domain, not in the view.
+                    obj.insert(
+                        "coverage_matrix".into(),
+                        serde_json::to_value(t.coverage_matrix()).unwrap_or_default(),
+                    );
+                    if let Some(est) = state.cost_holds.get(&id) {
+                        obj.insert("cost_hold".into(), serde_json::json!(est));
                     }
-                    Json(v).into_response()
-                })
+                    if let Some(ev) = state.ticket_evidence.get(&id) {
+                        obj.insert(
+                            "evidence".into(),
+                            evidence_items_with_artifacts(ev, &artifacts).into(),
+                        );
+                    }
+                    // Engine & model provenance (CXA-F257): which engine
+                    // and model actually executed each agent step on this
+                    // ticket, chronological — the verify gate approves
+                    // what ran, not what config asked for. Absent when
+                    // empty, so payloads for tickets with no captured
+                    // runs are unchanged for older readers.
+                    if let Some(pv) = provenance_field(&state, &id) {
+                        obj.insert("provenance".into(), pv);
+                    }
+                    // Live reproduction link (CXA-F244): offered exactly when
+                    // the ticket awaits a human verdict (see
+                    // `detail_awaits_verification`), from the one
+                    // resolvability source the F242 design pins
+                    // (deploy.host_port). Null when no port is configured;
+                    // additive to the payload.
+                    if detail_awaits_verification(
+                        t.status(),
+                        state.ticket_evidence.contains_key(&id),
+                    ) {
+                        obj.insert(
+                            "reproduce_url".into(),
+                            serde_json::json!(
+                                coxagent_application::repro_url::compute_live_repro_url(
+                                    cfg.deploy.host_port
+                                )
+                            ),
+                        );
+                        // Per-ticket resolved link (CXA-F246): recorded by
+                        // the capture funnel at evidence-collection time,
+                        // so the panel renders the exact link the evidence
+                        // was captured against — null when none recorded.
+                        obj.insert(
+                            "repro_url".into(),
+                            serde_json::json!(state.repro_urls.get(&id)),
+                        );
+                    }
+                    // The gate spine (CXA-F241): every DoD gate decision the
+                    // governance ledger holds for this ticket, chronological —
+                    // the forensic view groups evidence under these. Absent
+                    // when empty, so payloads for ungated tickets are
+                    // unchanged for older readers.
+                    let gates = coxagent_application::forensics::gate_spine(&state, t.id());
+                    if !gates.is_empty() {
+                        obj.insert(
+                            "gates".into(),
+                            serde_json::to_value(gates).unwrap_or_default(),
+                        );
+                    }
+                    if state.cost_approved.contains(&id) {
+                        obj.insert("cost_approved".into(), serde_json::json!(true));
+                    }
+                    // Attachments ride the detail payload: the modal renders
+                    // from here, always fresh — the SSE snapshot path proved
+                    // unreliable as a source (records reached the store but
+                    // never the client's STATE).
+                    if let Some(atts) = state.ticket_attachments.get(&id) {
+                        obj.insert(
+                            "attachments".into(),
+                            serde_json::to_value(atts).unwrap_or_default(),
+                        );
+                    }
+                    // Dependency radar (CXA-F237): why this ticket is not
+                    // running — direct blockers with their LIVE statuses
+                    // (AC1), and every depends_on id absent from the project
+                    // state surfaced as unknown, never treated as satisfied
+                    // (AC3). Pure derivation over the same loaded snapshot.
+                    obj.insert(
+                        "blocked_by".into(),
+                        serde_json::to_value(coxagent_application::dependency_radar::blocked_by(
+                            &state,
+                            t.id(),
+                        ))
+                        .unwrap_or_default(),
+                    );
+                    let unknown_pairs =
+                        coxagent_application::dependency_radar::unknown_dependencies(&state);
+                    let unknown: Vec<&coxagent_domain::TicketId> = unknown_pairs
+                        .iter()
+                        .filter(|(dep, _)| dep == t.id())
+                        .map(|(_, missing)| missing)
+                        .collect();
+                    if !unknown.is_empty() {
+                        obj.insert(
+                            "unknown_dependencies".into(),
+                            serde_json::to_value(unknown).unwrap_or_default(),
+                        );
+                    }
+                    // Served from the cold store (CXA-F274): the stamp is
+                    // the whole show/hide axis for the read-only dialog —
+                    // absent on hot tickets, so their payloads are
+                    // byte-identical to before.
+                    if archived {
+                        obj.insert("archived".into(), serde_json::json!(true));
+                    }
+                }
+                Json(v).into_response()
+            })
         }
         Err(e) => internal_error(&e.to_string()),
     }

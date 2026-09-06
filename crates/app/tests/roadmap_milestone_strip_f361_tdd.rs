@@ -109,11 +109,13 @@ fn gated_on_completion(hay_flat: &str, label: &str) -> bool {
         return false;
     };
     let before = &hay_flat[..label_at];
-    ["reached", "released", "fulfilled", "goal_complete"].iter().any(|sig| {
-        before
-            .rfind(sig)
-            .is_some_and(|sig_at| before[sig_at..].contains('?'))
-    })
+    ["reached", "released", "fulfilled", "goal_complete"]
+        .iter()
+        .any(|sig| {
+            before
+                .rfind(sig)
+                .is_some_and(|sig_at| before[sig_at..].contains('?'))
+        })
 }
 
 /// The strip row's onclick expression, verbatim — the click affordance AC2
@@ -135,10 +137,8 @@ fn click_handler_body(core_flat: &str, onclick: &str) -> String {
     let Some(name) = onclick.split('(').next() else {
         return onclick.to_owned();
     };
-    let is_identifier = !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_');
+    let is_identifier =
+        !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     if !is_identifier {
         return onclick.to_owned();
     }
@@ -158,7 +158,7 @@ fn click_handler_body(core_flat: &str, onclick: &str) -> String {
             b'}' => {
                 depth -= 1;
                 if opened && depth == 0 {
-                    return core_flat[at..at + i + 1].to_owned();
+                    return core_flat[at..=at + i].to_owned();
                 }
             }
             _ => {}
