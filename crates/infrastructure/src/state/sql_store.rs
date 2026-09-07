@@ -1,16 +1,24 @@
 //! `SqlStateStore` — a Postgres-backed [`StateStorePort`] for multi-tenant
-//! deployments. Each project's aggregate is one JSONB row keyed by project id,
-//! so many projects share one database while staying isolated by key.
+//! deployments. Since CXA-C019b the aggregate is stored as ONE row per
+//! bounded-context shard (the C019a [`ShardKind`] vocabulary) plus a
+//! head-revision row carrying the single optimistic `revision`, so a save
+//! rewrites only the shards whose payload changed and `claim_ticket` locks
+//! only the Tickets shard row — not the whole aggregate. Many projects share
+//! one database while staying isolated by key.
 //!
 //! This is the port swap the architecture promised: use cases are unchanged;
 //! only the adapter differs from [`super::JsonStateStore`]. Optimistic
-//! concurrency (a monotonic `revision`) rejects lost updates from two writers.
+//! concurrency (a monotonic `revision` on the head row) rejects lost updates
+//! from two writers. A pre-C019b single-blob `project_state` row is migrated
+//! to shards atomically (see [`Self::migrate_legacy_row_tx`]).
 
 use async_trait::async_trait;
 use coxagent_application::ports::outbound::{
     QuarantineEntry, StateStorePort, WorkerCaps, WorkerEntry,
 };
-use coxagent_application::state::{ProjectState, SCHEMA_VERSION};
+use coxagent_application::state::{
+    ProjectState, ShardData, ShardKind, ShardedState, SCHEMA_VERSION,
+};
 use coxagent_application::PortError;
 use coxagent_domain::{Role, TicketId};
 use deadpool_postgres::Pool;
@@ -54,7 +62,37 @@ ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS gitcheck TEXT;
 ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS tooling TEXT;
 -- Worker registry: the coxagent build that runner runs (CARGO_PKG_VERSION) —
 -- the hub self-upgrades but remote workers do not, and skew must be visible.
-ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS version TEXT;";
+ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS version TEXT;
+-- CXA-C019b: one row per bounded-context shard (the C019a ShardKind labels:
+-- work, social, docs, governance, ops). `data` is the externally-tagged
+-- ShardData JSON (a single-key object naming the kind) so the row is
+-- self-describing and one decode path serves every kind. `revision` is that
+-- shard's own write counter — per-shard observability for the
+-- write-amplification this table exists to remove. A `'_legacy'` row
+-- (data = the whole pre-migration aggregate) is written once by the migration
+-- and frozen.
+CREATE TABLE IF NOT EXISTS project_state_shard (
+    project_id TEXT NOT NULL,
+    shard      TEXT NOT NULL,
+    revision   BIGINT NOT NULL DEFAULT 0,
+    data       JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (project_id, shard)
+);
+-- CXA-C019b: the head-revision row — the single optimistic-concurrency token
+-- per project, split out of the payload so shard writes never carry the CAS.
+-- Seeded from any legacy single-blob rows on every connect. This seed is
+-- deliberately lowercase: the F300 source guard pins its idempotent shape
+-- (insert into ... on conflict ... do nothing) in the adapter source.
+create table if not exists project_state_head (
+    project_id     TEXT PRIMARY KEY,
+    schema_version INTEGER NOT NULL DEFAULT 0,
+    revision       BIGINT NOT NULL DEFAULT 0,
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+insert into project_state_head (project_id, schema_version, revision)
+    select project_id, schema_version, revision from project_state
+    on conflict (project_id) do nothing;";
 
 /// Leader lease lifetime (seconds) — a runner must renew within this or another
 /// takes over. Matches the JSON store.
@@ -154,6 +192,45 @@ impl SqlStateStore {
         }
     }
 
+    /// Best-effort durable record of one F229 refusal into `project_quarantine`
+    /// so the trail outlives this process. Never fails the caller — the refusal
+    /// error itself still stands regardless of what happens here.
+    ///
+    /// A zombie writer refused on a corrupt payload AFTER a cross-process
+    /// delete must not leak its refusal into the purged id's ledger: the delete
+    /// transaction already purged those rows, and a recreated id would inherit
+    /// the stale entry in its audit view. When in doubt (tombstone armed or
+    /// unreadable, no connection) the durable write is skipped — the refusal
+    /// error and the in-memory buffer still carry the trail for this instance.
+    async fn persist_refusal_ledger(&self, entry: &QuarantineEntry) {
+        match self.client().await {
+            Ok(client) => match tombstone::exists(&client, &self.project_id).await {
+                Ok(false) => {
+                    if let Err(e) =
+                        super::quarantine::persist_entry(&client, &self.project_id, entry).await
+                    {
+                        tracing::warn!(
+                            "[{}] durable quarantine write failed (the refusal still stands): {e}",
+                            self.project_id
+                        );
+                    }
+                }
+                Ok(true) => tracing::debug!(
+                    "[{}] quarantine entry not durably recorded: project was deleted",
+                    self.project_id
+                ),
+                Err(e) => tracing::warn!(
+                    "[{}] durable quarantine write skipped, tombstone state unreadable: {e}",
+                    self.project_id
+                ),
+            },
+            Err(e) => tracing::warn!(
+                "[{}] durable quarantine write skipped, no database connection: {e}",
+                self.project_id
+            ),
+        }
+    }
+
     async fn client(&self) -> Result<deadpool_postgres::Client, PortError> {
         self.pool
             .get()
@@ -162,7 +239,7 @@ impl SqlStateStore {
     }
 
     async fn migrate(&self) -> Result<(), PortError> {
-        let client = self.client().await?;
+        let mut client = self.client().await?;
         client
             .batch_execute(INIT_SQL)
             .await
@@ -182,13 +259,78 @@ impl SqlStateStore {
         // zombie writer never reconnects, so the per-write guard still catches
         // it (see `super::tombstone`).
         tombstone::clear(&client, &self.project_id).await?;
+        // CXA-C019b: migrate a pre-shard single-blob row to shard rows on the
+        // first post-upgrade connect — atomically (one tx) and concurrently
+        // safe (the legacy row lock serializes migrators; the second finds
+        // nothing left to do). A project that never connects is migrated
+        // lazily by its next save instead (see `persist_at_revision`).
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|e| PortError::Backend(format!("migrate begin: {e}")))?;
+        // Box::pin: the migration future is the largest piece of connect()'s
+        // future; inlined it pushed every caller of connect (app's
+        // build_project) over clippy's large-future line.
+        let migrated = Box::pin(Self::migrate_legacy_row_tx(&tx, &self.project_id)).await?;
+        tx.commit()
+            .await
+            .map_err(|e| PortError::Backend(format!("migrate commit: {e}")))?;
+        if migrated {
+            tracing::info!(
+                "[{}] migrated the legacy single-blob row to per-shard rows (CXA-C019b)",
+                self.project_id
+            );
+        }
         Ok(())
     }
 
     /// Read the stored `(revision, state)` for this project, or `(0, default)`
-    /// when the row does not exist yet.
+    /// when nothing is stored yet.
+    ///
+    /// Shard-native projects compose the aggregate from `project_state_shard`
+    /// rows joined to the head revision. A pre-C019b single-blob row (written
+    /// by an older binary, or raw-present before this store ever migrated) is
+    /// decoded whole — the exact pre-shard read — so a legacy project always
+    /// loads correctly whether or not the migration has run yet.
     async fn load_versioned(&self) -> Result<(i64, ProjectState), PortError> {
         let client = self.client().await?;
+        // One round trip over the shard-native path: every shard row joined to
+        // the head revision and the legacy row (the legacy columns repeat per
+        // row; the mixed-binary rule below compares revisions).
+        let rows = client
+            .query(
+                "SELECT s.shard, s.data, h.revision, l.revision, l.data
+                   FROM project_state_shard s
+                   LEFT JOIN project_state_head h ON h.project_id = s.project_id
+                   LEFT JOIN project_state      l ON l.project_id = s.project_id
+                  WHERE s.project_id = $1",
+                &[&self.project_id],
+            )
+            .await
+            .map_err(|e| PortError::Backend(format!("select shards: {e}")))?;
+        if let Some(first) = rows.first() {
+            let head_revision: i64 = first.try_get(2).map_err(|_| {
+                PortError::Corrupt(
+                    "shard rows exist without a head-revision row (corrupt state)".to_owned(),
+                )
+            })?;
+            let shard_rows: Vec<(String, serde_json::Value)> = rows
+                .iter()
+                .map(|r| (r.get::<_, String>(0), r.get::<_, serde_json::Value>(1)))
+                .collect();
+            // Mixed-binary rule: an old binary writing the single-blob row
+            // after this project migrated leaves a legacy row whose revision
+            // is NEWER than the head — that write is the latest state, so read
+            // it whole. Otherwise the shards are authoritative.
+            let legacy_revision: Option<i64> = first.try_get(3).ok().flatten();
+            if let Some(legacy_newer) = legacy_revision.filter(|l| *l > head_revision) {
+                let value: serde_json::Value = first.get(4);
+                return decode_whole_document(legacy_newer, value);
+            }
+            let state = compose_from_shard_rows(&shard_rows)?;
+            return Ok((head_revision, state));
+        }
+        // No shard rows: the pre-C019b layout (or an empty project).
         let row = client
             .query_opt(
                 "SELECT revision, data FROM project_state WHERE project_id = $1",
@@ -198,21 +340,203 @@ impl SqlStateStore {
             .map_err(|e| PortError::Backend(format!("select: {e}")))?;
         match row {
             None => Ok((0, ProjectState::default())),
-            Some(row) => {
-                let revision: i64 = row.get(0);
-                let value: serde_json::Value = row.get(1);
-                let state: ProjectState = serde_json::from_value(value)
-                    .map_err(|e| PortError::Corrupt(format!("row not decodable: {e}")))?;
-                if state.schema_version > SCHEMA_VERSION {
-                    return Err(PortError::Corrupt(format!(
-                        "state schema_version {} newer than supported {SCHEMA_VERSION}",
-                        state.schema_version
-                    )));
-                }
-                Ok((revision, state))
-            }
+            Some(row) => decode_whole_document(row.get(0), row.get(1)),
         }
     }
+
+    /// Split the legacy single-blob row into shard rows inside ONE transaction
+    /// (CXA-C019b). Called from `migrate()` on connect, and lazily from the
+    /// persist path when a CAS misses because an unmigrated legacy row blocks
+    /// the fresh head insert — a project saved by the OLD code path migrates
+    /// on its next save. Crash-safe (one tx: rollback leaves the legacy row
+    /// and every shard row untouched) and concurrent-safe (the legacy row is
+    /// locked; a second migrator then finds it gone and skips).
+    ///
+    /// The original full JSON is preserved frozen as `shard = '_legacy'` for
+    /// recovery/rollback tooling, the head revision moves UP to the legacy
+    /// row's (never backward), and the legacy row itself is tombstoned — the
+    /// shard rows are authoritative from here on.
+    ///
+    /// Returns whether a legacy row was actually migrated.
+    async fn migrate_legacy_row_tx(
+        tx: &tokio_postgres::Transaction<'_>,
+        project_id: &str,
+    ) -> Result<bool, PortError> {
+        let Some(row) = tx
+            .query_opt(
+                "SELECT schema_version, revision, data FROM project_state
+                  WHERE project_id = $1 FOR UPDATE",
+                &[&project_id],
+            )
+            .await
+            .map_err(|e| PortError::Backend(format!("legacy row select: {e}")))?
+        else {
+            return Ok(false);
+        };
+        let legacy_revision: i64 = row.get(1);
+        let value: serde_json::Value = row.get(2);
+        let Ok(state) = serde_json::from_value::<ProjectState>(value.clone()) else {
+            // A row this binary cannot decode is left exactly as it is:
+            // load() keeps returning today's Corrupt for it, and the migration
+            // must never destroy data it does not understand.
+            tracing::warn!("[{project_id}] legacy row not decodable; left unmigrated");
+            return Ok(false);
+        };
+        if state.schema_version > SCHEMA_VERSION {
+            // Newer than this binary understands — leave it for a newer one;
+            // load() keeps returning today's "newer than supported" Corrupt.
+            tracing::warn!(
+                "[{project_id}] legacy row schema_version {} newer than supported \
+                 {SCHEMA_VERSION}; left unmigrated",
+                state.schema_version
+            );
+            return Ok(false);
+        }
+        let legacy_schema_version = state.schema_version;
+        let sharded = state.into_shards();
+        for (label, wrapped) in shard_row_payloads(&sharded)? {
+            tx.execute(
+                "INSERT INTO project_state_shard (project_id, shard, revision, data)
+                 VALUES ($1, $2, 1, $3)
+                 ON CONFLICT (project_id, shard) DO UPDATE
+                     SET data = EXCLUDED.data, updated_at = now()",
+                &[&project_id, &label, &wrapped],
+            )
+            .await
+            .map_err(|e| PortError::Backend(format!("shard insert: {e}")))?;
+        }
+        // Freeze the original document for recovery/rollback tooling. The row
+        // is written once: ON CONFLICT keeps the FIRST frozen copy if a legacy
+        // row ever reappears (an old binary's rewrite) and migrates again.
+        tx.execute(
+            "INSERT INTO project_state_shard (project_id, shard, revision, data)
+             VALUES ($1, '_legacy', $2, $3)
+             ON CONFLICT (project_id, shard) DO NOTHING",
+            &[&project_id, &legacy_revision, &value],
+        )
+        .await
+        .map_err(|e| PortError::Backend(format!("legacy freeze: {e}")))?;
+        // The head revision moves UP to the legacy row's — an old binary may
+        // have bumped the single-blob row after the head was seeded, and the
+        // single-blob row was the truth until this very transaction.
+        tx.execute(
+            "INSERT INTO project_state_head (project_id, schema_version, revision)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (project_id) DO UPDATE
+                 SET revision = EXCLUDED.revision, updated_at = now()
+               WHERE project_state_head.revision < EXCLUDED.revision",
+            &[
+                &project_id,
+                &i32::try_from(legacy_schema_version).unwrap_or(i32::MAX),
+                &legacy_revision,
+            ],
+        )
+        .await
+        .map_err(|e| PortError::Backend(format!("head sync: {e}")))?;
+        tx.execute(
+            "DELETE FROM project_state WHERE project_id = $1",
+            &[&project_id],
+        )
+        .await
+        .map_err(|e| PortError::Backend(format!("legacy tombstone: {e}")))?;
+        Ok(true)
+    }
+}
+
+/// The stored label of a shard kind — [`ShardKind`]'s own serde vocabulary
+/// (`work`, `social`, …), the same one the C019a seam and the F300 guards use.
+fn shard_label(kind: ShardKind) -> String {
+    serde_json::to_string(&kind)
+        .unwrap_or_default()
+        .trim_matches('"')
+        .to_owned()
+}
+
+/// One shard row's `(label, externally-tagged payload)` pair — the write unit
+/// of the sharded layout. The payload wraps the kind's struct as
+/// `{"work": {...}}` so a row is self-describing and one decode path serves
+/// every kind.
+///
+/// # Errors
+/// [`PortError::Backend`] if a shard payload fails to serialize — a payload
+/// that cannot be encoded must fail the save, never fall back to a Null row.
+fn shard_row_payloads(
+    sharded: &ShardedState,
+) -> Result<Vec<(String, serde_json::Value)>, PortError> {
+    ShardKind::ALL
+        .iter()
+        .map(|kind| {
+            let data = match kind {
+                ShardKind::Work => ShardData::Work(sharded.work.clone()),
+                ShardKind::Social => ShardData::Social(sharded.social.clone()),
+                ShardKind::Docs => ShardData::Docs(sharded.docs.clone()),
+                ShardKind::Governance => ShardData::Governance(sharded.governance.clone()),
+                ShardKind::Ops => ShardData::Ops(sharded.ops.clone()),
+            };
+            let wrapped = serde_json::to_value(&data)
+                .map_err(|e| PortError::Backend(format!("encode shard: {e}")))?;
+            Ok((shard_label(*kind), wrapped))
+        })
+        .collect()
+}
+
+/// Reassemble the aggregate from `(label, payload)` shard rows. Unknown labels
+/// (the frozen `'_legacy'` row, future kinds) are ignored by the join; a
+/// missing shard contributes its serde-default payload, so a partial row set
+/// still reassembles a state the stores accept. A row whose payload disagrees
+/// with its label is corrupt — refusing beats silently trusting either.
+fn compose_from_shard_rows(
+    shard_rows: &[(String, serde_json::Value)],
+) -> Result<ProjectState, PortError> {
+    let mut sharded = ShardedState::default();
+    for (label, value) in shard_rows {
+        let Some(kind) = ShardKind::ALL
+            .iter()
+            .copied()
+            .find(|k| shard_label(*k) == *label)
+        else {
+            continue;
+        };
+        let data: ShardData = serde_json::from_value(value.clone())
+            .map_err(|e| PortError::Corrupt(format!("shard {label} not decodable: {e}")))?;
+        if data.kind() != kind {
+            return Err(PortError::Corrupt(format!(
+                "shard row labelled '{label}' carries a '{}' payload",
+                shard_label(data.kind())
+            )));
+        }
+        match data {
+            ShardData::Work(work) => sharded.work = work,
+            ShardData::Social(social) => sharded.social = social,
+            ShardData::Docs(docs) => sharded.docs = docs,
+            ShardData::Governance(governance) => sharded.governance = governance,
+            ShardData::Ops(ops) => sharded.ops = ops,
+        }
+    }
+    decode_checked(ProjectState::from_shards(sharded))
+}
+
+/// Decode a pre-C019b whole-document row — the exact pre-shard read path,
+/// including the schema-version ceiling.
+fn decode_whole_document(
+    revision: i64,
+    value: serde_json::Value,
+) -> Result<(i64, ProjectState), PortError> {
+    let state: ProjectState = serde_json::from_value(value)
+        .map_err(|e| PortError::Corrupt(format!("row not decodable: {e}")))?;
+    decode_checked(state).map(|state| (revision, state))
+}
+
+/// The schema-version ceiling every decode path applies (semantics unchanged
+/// since the first SQL adapter).
+fn decode_checked(state: ProjectState) -> Result<ProjectState, PortError> {
+    if state.schema_version > SCHEMA_VERSION {
+        return Err(PortError::Corrupt(format!(
+            "state schema_version {} newer than supported {SCHEMA_VERSION}",
+            state.schema_version
+        )));
+    }
+    Ok(state)
 }
 
 #[async_trait]
@@ -241,14 +565,27 @@ impl StateStorePort for SqlStateStore {
         let client = self.client().await?;
         let row = client
             .query_opt(
-                "SELECT revision FROM project_state WHERE project_id = $1",
+                "SELECT revision FROM project_state_head WHERE project_id = $1",
                 &[&self.project_id],
             )
             .await
             .map_err(|e| PortError::Backend(format!("select rev: {e}")))?;
+        if let Some(row) = row {
+            return Ok(Some(row.get::<_, i64>(0)));
+        }
+        // No head row yet: an unmigrated legacy single-blob row's revision is
+        // still the truth (the migration syncs it into the head when it runs),
+        // and a project never written exposes the baseline revision 0.
+        let legacy = client
+            .query_opt(
+                "SELECT revision FROM project_state WHERE project_id = $1",
+                &[&self.project_id],
+            )
+            .await
+            .map_err(|e| PortError::Backend(format!("select legacy rev: {e}")))?;
         // An absent row has not been written yet -> baseline revision 0 matches
         // [`Self::persist_at_revision`]'s first insert (`revision = 1`).
-        Ok(Some(row.map_or(0_i64, |r| r.get::<_, i64>(0))))
+        Ok(Some(legacy.map_or(0_i64, |r| r.get::<_, i64>(0))))
     }
 
     async fn claim_ticket(
@@ -262,18 +599,42 @@ impl StateStorePort for SqlStateStore {
         if self.deleted.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(false);
         }
-        // Serialize claims cluster-wide with a row lock: the whole
-        // read-check-set-write runs in one transaction, so two machines racing
-        // on the same backlog can never both win the ticket.
+        // Serialize claims cluster-wide inside one transaction. Two ordering
+        // rules make this both narrow and deadlock-free:
+        // 1. The head row is locked FIRST (the revision bump below takes its
+        //    row lock) — the same lock order every writer uses, so a claim and
+        //    a shard-diff save never wait on each other in a cycle. The bump
+        //    is transactional: a losing claim below rolls it back.
+        // 2. Only the Tickets shard row is then locked FOR UPDATE — the
+        //    whole-aggregate row lock this method used to take is exactly the
+        //    write contention CXA-C019b removes; claims no longer serialize
+        //    behind unrelated shard writes.
+        let work_label = shard_label(ShardKind::Work);
         let mut client = self.client().await?;
         let tx = client
             .transaction()
             .await
             .map_err(|e| PortError::Backend(format!("begin: {e}")))?;
+        let bumped = tx
+            .execute(
+                "UPDATE project_state_head
+                    SET revision = revision + 1, updated_at = now()
+                  WHERE project_id = $1",
+                &[&self.project_id],
+            )
+            .await
+            .map_err(|e| PortError::Backend(format!("bump head: {e}")))?;
+        if bumped == 0 {
+            // Never written (or purged by a delete) — nothing to claim, and a
+            // late claim must not recreate the row.
+            return Ok(false);
+        }
         let Some(row) = tx
             .query_opt(
-                "SELECT data FROM project_state WHERE project_id = $1 FOR UPDATE",
-                &[&self.project_id],
+                "SELECT data FROM project_state_shard
+                  WHERE project_id = $1 AND shard = $2
+                  FOR UPDATE OF project_state_shard",
+                &[&self.project_id, &work_label],
             )
             .await
             .map_err(|e| PortError::Backend(format!("select for update: {e}")))?
@@ -281,28 +642,43 @@ impl StateStorePort for SqlStateStore {
             return Ok(false);
         };
         let value: serde_json::Value = row.get(0);
-        let mut state: ProjectState = serde_json::from_value(value)
-            .map_err(|e| PortError::Corrupt(format!("row not decodable: {e}")))?;
-        let Some(ticket) = state.ticket_mut(id) else {
+        let shard: ShardData = serde_json::from_value(value)
+            .map_err(|e| PortError::Corrupt(format!("work shard not decodable: {e}")))?;
+        let ShardData::Work(mut work) = shard else {
+            return Err(PortError::Corrupt(format!(
+                "shard row '{work_label}' carries a '{}' payload",
+                shard_label(shard.kind())
+            )));
+        };
+        let Some(ticket) = work.tickets.iter_mut().find(|t| t.id() == id) else {
             return Ok(false);
         };
         if ticket.claimed_by().is_some() || ticket.claim(Role::System, worker, now).is_err() {
             return Ok(false);
         }
-        let newval =
-            serde_json::to_value(&state).map_err(|e| PortError::Backend(format!("encode: {e}")))?;
+        let updated = serde_json::to_value(ShardData::Work(work))
+            .map_err(|e| PortError::Backend(format!("encode: {e}")))?;
         tx.execute(
-            "UPDATE project_state
-                SET data = $1, revision = revision + 1, updated_at = now()
-              WHERE project_id = $2",
-            &[&newval, &self.project_id],
+            "UPDATE project_state_shard
+                SET data = $3, revision = revision + 1, updated_at = now()
+              WHERE project_id = $1 AND shard = $2",
+            &[&self.project_id, &work_label, &updated],
         )
         .await
         .map_err(|e| PortError::Backend(format!("update: {e}")))?;
         tx.commit()
             .await
             .map_err(|e| PortError::Backend(format!("commit: {e}")))?;
-        self.mirror_save(&state).await;
+        // The local JSON mirror stays a whole-state backup file (format
+        // unchanged), so the claim still mirrors — one extra read, the same
+        // whole-aggregate read this claim has always paid.
+        match self.load().await {
+            Ok(whole) => self.mirror_save(&whole).await,
+            Err(e) => tracing::warn!(
+                "[{}] post-claim mirror read failed (the claim itself committed): {e}",
+                self.project_id
+            ),
+        }
         Ok(true)
     }
 
@@ -533,6 +909,23 @@ impl StateStorePort for SqlStateStore {
             )
             .await
             .map_err(|e| PortError::Backend(format!("delete state: {e}")))?;
+        // The CXA-C019b footprint goes with it: shard rows and the head
+        // revision row. A recreated id must start truly fresh — a surviving
+        // shard row or head revision would resurrect the deleted team's data
+        // (or its revision counter) under the reused id.
+        let shard_rows = tx
+            .execute(
+                "DELETE FROM project_state_shard WHERE project_id = $1",
+                &[&self.project_id],
+            )
+            .await
+            .map_err(|e| PortError::Backend(format!("delete shards: {e}")))?;
+        tx.execute(
+            "DELETE FROM project_state_head WHERE project_id = $1",
+            &[&self.project_id],
+        )
+        .await
+        .map_err(|e| PortError::Backend(format!("delete head: {e}")))?;
         tx.execute(
             "DELETE FROM project_coord WHERE project_id = $1",
             &[&self.project_id],
@@ -566,7 +959,8 @@ impl StateStorePort for SqlStateStore {
             }
         }
         tracing::info!(
-            "[{}] deleted persisted state and armed the tombstone ({state_rows} state row(s) purged)",
+            "[{}] deleted persisted state and armed the tombstone ({state_rows} state row(s), \
+             {shard_rows} shard row(s) purged)",
             self.project_id
         );
         Ok(())
@@ -601,27 +995,87 @@ impl SqlStateStore {
         Ok(row.is_some_and(|r| r.get::<_, String>(0) == worker))
     }
 
-    /// Validate, encode and CAS-persist one snapshot against a caller-chosen
-    /// expected revision.
+    /// Win the head revision for a save: run the guarded CAS inside `tx`, and
+    /// on a miss disambiguate — a delete tombstone refuses; an unmigrated
+    /// legacy single-blob row is migrated in the same transaction (freezing
+    /// the original document and syncing the head revision up to it) and the
+    /// CAS retried once; anything else is the ordinary stale-writer conflict.
     ///
-    /// Optimistic concurrency: insert when absent, otherwise bump the revision
-    /// only if it has not moved past what this writer expected. When
-    /// `expected_revision` is supplied it is used directly as the predicate — two
-    /// writers racing across process boundaries both check against what THEY each
-    /// loaded, so a stale writer affects zero rows and gets a [`PortError::Conflict`].
-    /// When `None`, fall back to re-reading at write time (the historical default,
-    /// sound for intra-process writers sharing one store instance).
+    /// # Errors
+    /// [`tombstone::refusal`] for a tombstoned project, [`PortError::Conflict`]
+    /// for a stale expected revision, [`PortError::Backend`] on statement
+    /// failures.
+    async fn win_head_revision(
+        tx: &tokio_postgres::Transaction<'_>,
+        project_id: &str,
+        schema_version: u32,
+        expected: i64,
+    ) -> Result<(), PortError> {
+        let cas = (i32::try_from(schema_version).unwrap_or(i32::MAX), expected);
+        let rows = tx
+            .execute(
+                tombstone::GUARDED_HEAD_CAS_SQL,
+                &[&project_id, &cas.0, &cas.1],
+            )
+            .await
+            .map_err(|e| PortError::Backend(format!("head cas: {e}")))?;
+        if rows > 0 {
+            return Ok(());
+        }
+        // Either a concurrent writer moved the revision, a delete tombstoned
+        // this project in another process, or an unmigrated legacy single-blob
+        // row blocked the fresh head insert. A fresh read (the same statement
+        // snapshot the miss was decided in) tells the three apart.
+        if tombstone::exists_tx(tx, project_id).await? {
+            return Err(tombstone::refusal(project_id));
+        }
+        if Self::migrate_legacy_row_tx(tx, project_id).await? {
+            let retried = tx
+                .execute(
+                    tombstone::GUARDED_HEAD_CAS_SQL,
+                    &[&project_id, &cas.0, &cas.1],
+                )
+                .await
+                .map_err(|e| PortError::Backend(format!("head cas retry: {e}")))?;
+            if retried > 0 {
+                return Ok(());
+            }
+        }
+        Err(PortError::Conflict(
+            "state changed since last read (concurrent writer)".to_owned(),
+        ))
+    }
+
+    /// Validate, then CAS-persist one snapshot against a caller-chosen expected
+    /// revision — as a head-revision win plus a changed-shard diff write
+    /// (CXA-C019b).
     ///
-    /// The whole write is ONE guarded statement ([`tombstone::GUARDED_SAVE_SQL`]):
-    /// both the insert and the conflict-update branch filter on the delete
-    /// tombstone's absence (CXA-C023), so "was this project deleted?" and "is my
-    /// revision current?" are decided atomically and a zombie writer in any
-    /// process is refused the moment a concurrent delete commits. Zero rows
-    /// affected is disambiguated by a fresh tombstone re-check: refusal if armed,
-    /// the ordinary conflict otherwise.
+    /// Optimistic concurrency: the head revision in `project_state_head` is
+    /// won first via [`tombstone::GUARDED_HEAD_CAS_SQL`] — insert when absent,
+    /// otherwise bump only if it has not moved past what this writer expected.
+    /// When `expected_revision` is supplied it is used directly as the
+    /// predicate — two writers racing across process boundaries both check
+    /// against what THEY each loaded, so a stale writer affects zero rows and
+    /// gets a [`PortError::Conflict`]. When `None`, fall back to re-reading at
+    /// write time (the historical default, sound for intra-process writers
+    /// sharing one store instance).
+    ///
+    /// Only after the head is won are the shard rows written — and only the
+    /// shards whose serialized payload actually changed (the write
+    /// amplification this layout removes). The whole write is ONE transaction,
+    /// so a crash between the CAS and the shard writes leaves the previous
+    /// consistent snapshot; the loser of the CAS writes nothing at all.
+    ///
+    /// A CAS that misses because an UNMIGRATED legacy single-blob row blocks
+    /// the fresh head insert migrates that row in the same transaction
+    /// ([`Self::migrate_legacy_row_tx`], which also freezes the original
+    /// document as `'_legacy'` and syncs the head revision up to it) and
+    /// retries the CAS once — a project saved by the old code path migrates on
+    /// its next save. Any legacy row surviving a WINNING save is stale
+    /// residue (the shards are authoritative from here) and is tombstoned.
     async fn persist_at_revision(
         &self,
-        mut state: ProjectState,
+        state: ProjectState,
         expected_revision: Option<i64>,
     ) -> Result<(), PortError> {
         // A deleted project's store refuses all state writes (see `deleted`) —
@@ -635,7 +1089,9 @@ impl SqlStateStore {
         // structural-integrity audit (CXA-F229) is the additional gate. The
         // recorded refusal is persisted into `project_quarantine`
         // (best-effort — it must not mask the refusal error itself), so the
-        // trail outlives this process.
+        // trail outlives this process. The gate runs BEFORE any row write: a
+        // refused payload reaches no legacy row and no shard row.
+        let mut state = state;
         if let Err(refused) = gate_save(&mut state, &self.quarantine) {
             tracing::error!(
                 "[{}] write-back refused by structural integrity audit: {}",
@@ -643,79 +1099,76 @@ impl SqlStateStore {
                 refused.error
             );
             if let Some(entry) = refused.quarantined {
-                // A zombie writer refused on a corrupt payload AFTER a
-                // cross-process delete must not leak its refusal into the
-                // purged id's ledger: the delete transaction already purged
-                // those rows, and a recreated id would inherit the stale
-                // entry in its audit view. When in doubt (tombstone armed or
-                // unreadable, no connection) skip the durable write — the
-                // refusal error and the in-memory buffer still carry the
-                // trail for this instance.
-                match self.client().await {
-                    Ok(client) => match tombstone::exists(&client, &self.project_id).await {
-                        Ok(false) => {
-                            if let Err(e) = super::quarantine::persist_entry(
-                                &client,
-                                &self.project_id,
-                                &entry,
-                            )
-                            .await
-                            {
-                                tracing::warn!(
-                                    "[{}] durable quarantine write failed (the refusal still stands): {e}",
-                                    self.project_id
-                                );
-                            }
-                        }
-                        Ok(true) => tracing::debug!(
-                            "[{}] quarantine entry not durably recorded: project was deleted",
-                            self.project_id
-                        ),
-                        Err(e) => tracing::warn!(
-                            "[{}] durable quarantine write skipped, tombstone state unreadable: {e}",
-                            self.project_id
-                        ),
-                    },
-                    Err(e) => tracing::warn!(
-                        "[{}] durable quarantine write skipped, no database connection: {e}",
-                        self.project_id
-                    ),
-                }
+                self.persist_refusal_ledger(&entry).await;
             }
             return Err(refused.error);
         }
-        let value =
-            serde_json::to_value(&state).map_err(|e| PortError::Backend(format!("encode: {e}")))?;
+        // Decompose the validated snapshot into its bounded-context shards;
+        // the diff below compares serialized payloads, so an unchanged shard
+        // is never rewritten.
+        let sharded = state.into_shards();
+        let schema_version = sharded.work.schema_version;
 
-        let client = self.client().await?;
+        let mut client = self.client().await?;
         let expected = match expected_revision {
             Some(rev) => rev,
             None => self.load_versioned().await?.0,
         };
-        let rows = client
-            .execute(
-                tombstone::GUARDED_SAVE_SQL,
-                &[
-                    &self.project_id,
-                    &i32::try_from(state.schema_version).unwrap_or(i32::MAX),
-                    &value,
-                    &expected,
-                ],
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|e| PortError::Backend(format!("begin: {e}")))?;
+        Self::win_head_revision(&tx, &self.project_id, schema_version, expected).await?;
+        // Won the head at `expected + 1`: write only what changed. The stored
+        // payloads are read inside the same transaction, so the diff is
+        // consistent with the revision this writer just claimed.
+        let stored = tx
+            .query(
+                "SELECT shard, data FROM project_state_shard WHERE project_id = $1",
+                &[&self.project_id],
             )
             .await
-            .map_err(|e| PortError::Backend(format!("upsert: {e}")))?;
-        if rows == 0 {
-            // Either a concurrent writer moved the revision, or a delete
-            // tombstoned this project in another process. A fresh read (new
-            // statement snapshot) tells the two apart.
-            if tombstone::exists(&client, &self.project_id).await? {
-                return Err(tombstone::refusal(&self.project_id));
+            .map_err(|e| PortError::Backend(format!("select shards: {e}")))?;
+        let stored: std::collections::BTreeMap<String, serde_json::Value> = stored
+            .into_iter()
+            .map(|r| (r.get::<_, String>(0), r.get::<_, serde_json::Value>(1)))
+            .collect();
+        for (label, wrapped) in shard_row_payloads(&sharded)? {
+            if stored
+                .get(&label)
+                .is_some_and(|current| *current == wrapped)
+            {
+                continue;
             }
-            return Err(PortError::Conflict(
-                "state changed since last read (concurrent writer)".to_owned(),
-            ));
+            tx.execute(
+                "INSERT INTO project_state_shard (project_id, shard, revision, data)
+                 VALUES ($1, $2, 1, $3)
+                 ON CONFLICT (project_id, shard) DO UPDATE
+                     SET data = EXCLUDED.data,
+                         revision = project_state_shard.revision + 1,
+                         updated_at = now()",
+                &[&self.project_id, &label, &wrapped],
+            )
+            .await
+            .map_err(|e| PortError::Backend(format!("shard upsert: {e}")))?;
         }
-        self.mirror_save(&state).await;
+        // A surviving single-blob row is stale residue once the shards are
+        // authoritative: this save carried the caller's complete loaded state,
+        // so the legacy document is superseded by definition (also closes the
+        // old-binary-rewrote-the-legacy-row window).
+        tx.execute(
+            "DELETE FROM project_state WHERE project_id = $1",
+            &[&self.project_id],
+        )
+        .await
+        .map_err(|e| PortError::Backend(format!("legacy residue: {e}")))?;
+        tx.commit()
+            .await
+            .map_err(|e| PortError::Backend(format!("commit: {e}")))?;
+        // The local JSON mirror stays a whole-state backup file (format
+        // unchanged, so seed/restore keeps working) — reassembled from the
+        // exact shards that just committed.
+        self.mirror_save(&ProjectState::from_shards(sharded)).await;
         Ok(())
     }
 }

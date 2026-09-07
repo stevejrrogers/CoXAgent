@@ -45,6 +45,10 @@ use std::sync::OnceLock;
 
 use coxagent_infrastructure::SqlStateStore;
 
+/// CXA-F300 (CXA-C019b): discovery of the shard schema the SQL adapter must
+/// declare — shared by the F300 TDD guards and the shard contract tests.
+pub mod shard_schema_f300;
+
 /// The one compose stack every DB-backed suite provisions through. Lives
 /// inside the test tree: it is a throwaway fixture, not a deployable stack,
 /// and stays invisible to the product compose gates (compose_security_gate /

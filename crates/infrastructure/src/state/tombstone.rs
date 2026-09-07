@@ -27,22 +27,28 @@ CREATE TABLE IF NOT EXISTS project_tombstone (
     reason      TEXT NOT NULL DEFAULT ''
 );";
 
-/// The single guarded upsert behind every aggregate write. Both the INSERT
-/// branch and the ON CONFLICT branch filter on the tombstone's absence, so the
-/// "was this project deleted?" check and the revision check are decided
-/// atomically inside ONE statement — no lock regime needed for READ COMMITTED.
-/// Zero rows affected means "refused or stale"; the caller disambiguates with
-/// a fresh tombstone re-check.
-pub(crate) const GUARDED_SAVE_SQL: &str = "
-INSERT INTO project_state (project_id, schema_version, revision, data)
-SELECT $1, $2, 1, $3
+/// The single guarded CAS behind every aggregate write (CXA-C019b): it wins
+/// the head revision in `project_state_head`, and only then may the caller
+/// write shard rows. Both the INSERT branch and the ON CONFLICT branch filter
+/// on the tombstone's absence, so the "was this project deleted?" check and
+/// the revision check are decided atomically inside ONE statement — no lock
+/// regime needed for READ COMMITTED. Zero rows affected means "refused, stale,
+/// or blocked by an unmigrated legacy row"; the caller disambiguates.
+///
+/// The INSERT branch additionally refuses to fire while a legacy single-blob
+/// row exists in `project_state`: that row's revision is the truth until the
+/// migration splits it (its head row is born FROM that revision), so a fresh
+/// revision-1 insert over it would silently rewind the aggregate's history.
+pub(crate) const GUARDED_HEAD_CAS_SQL: &str = "
+INSERT INTO project_state_head (project_id, schema_version, revision)
+SELECT $1, $2, 1
  WHERE NOT EXISTS (SELECT 1 FROM project_tombstone WHERE project_id = $1)
+   AND NOT EXISTS (SELECT 1 FROM project_state WHERE project_id = $1)
 ON CONFLICT (project_id) DO UPDATE
-    SET data = EXCLUDED.data,
-        schema_version = EXCLUDED.schema_version,
-        revision = project_state.revision + 1,
+    SET schema_version = EXCLUDED.schema_version,
+        revision = project_state_head.revision + 1,
         updated_at = now()
-    WHERE project_state.revision = $4
+    WHERE project_state_head.revision = $3
       AND NOT EXISTS (SELECT 1 FROM project_tombstone WHERE project_id = $1)";
 
 /// Arm the tombstone inside the delete transaction (same commit as the row
@@ -93,14 +99,32 @@ pub(crate) async fn clear(client: &Client, project_id: &str) -> Result<(), PortE
 /// [`PortError::Backend`] when the query fails.
 pub(crate) async fn exists(client: &Client, project_id: &str) -> Result<bool, PortError> {
     let row = client
-        .query_opt(
-            "SELECT 1 FROM project_tombstone WHERE project_id = $1",
-            &[&project_id],
-        )
+        .query_opt(EXISTS_SQL, &[&project_id])
         .await
         .map_err(|e| PortError::Backend(format!("tombstone check: {e}")))?;
     Ok(row.is_some())
 }
+
+/// [`exists`] inside an open transaction — the CAS-loser disambiguation in the
+/// persist path reads the tombstone in the SAME statement snapshot that just
+/// missed, so a delete committing in parallel cannot flip the verdict between
+/// the two reads.
+///
+/// # Errors
+/// [`PortError::Backend`] when the query fails.
+pub(crate) async fn exists_tx(
+    tx: &tokio_postgres::Transaction<'_>,
+    project_id: &str,
+) -> Result<bool, PortError> {
+    let row = tx
+        .query_opt(EXISTS_SQL, &[&project_id])
+        .await
+        .map_err(|e| PortError::Backend(format!("tombstone check: {e}")))?;
+    Ok(row.is_some())
+}
+
+/// The tombstone-presence query shared by [`exists`] and [`exists_tx`].
+const EXISTS_SQL: &str = "SELECT 1 FROM project_tombstone WHERE project_id = $1";
 
 /// The refusal error for a write that hit an armed tombstone — the same
 /// envelope the in-process `deleted` flag has always returned, so callers
@@ -116,19 +140,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_guarded_save_filters_the_tombstone_in_both_upsert_branches() {
+    fn the_guarded_cas_filters_the_tombstone_in_both_upsert_branches() {
         // The insert branch must not fire over a tombstone, and the
         // conflict-update branch must re-check it too — otherwise a writer
-        // racing a delete could still bump the purged row back into existence
-        // through the ON CONFLICT path.
-        let occurrences = GUARDED_SAVE_SQL.matches("NOT EXISTS").count();
+        // racing a delete could still bump the purged head row back into
+        // existence through the ON CONFLICT path.
+        let tombstone_guards = GUARDED_HEAD_CAS_SQL
+            .matches("NOT EXISTS (SELECT 1 FROM project_tombstone")
+            .count();
         assert_eq!(
-            occurrences, 2,
-            "the tombstone guard must gate both the INSERT and the ON CONFLICT branch: {GUARDED_SAVE_SQL}"
+            tombstone_guards, 2,
+            "the tombstone guard must gate both the INSERT and the ON CONFLICT branch: {GUARDED_HEAD_CAS_SQL}"
         );
         assert!(
-            GUARDED_SAVE_SQL.contains("WHERE project_state.revision = $4"),
-            "the revision predicate is unchanged: {GUARDED_SAVE_SQL}"
+            GUARDED_HEAD_CAS_SQL.contains("WHERE project_state_head.revision = $3"),
+            "the revision predicate is unchanged in shape — a stale expected revision affects zero rows: {GUARDED_HEAD_CAS_SQL}"
+        );
+        assert!(
+            GUARDED_HEAD_CAS_SQL
+                .contains("NOT EXISTS (SELECT 1 FROM project_state WHERE project_id = $1)"),
+            "the fresh-insert branch must never fire over an unmigrated legacy \
+             single-blob row — that row's revision is the truth until the \
+             migration splits it: {GUARDED_HEAD_CAS_SQL}"
         );
     }
 

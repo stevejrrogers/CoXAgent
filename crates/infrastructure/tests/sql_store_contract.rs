@@ -3,15 +3,25 @@
 //! ephemeral database from the shared compose fixture (`common::TestDb`,
 //! CXA-F327): no exported DSN is honored, an unprovisionable database fails
 //! red naming the fixture, and a docker-less environment skips explicitly.
+//!
+//! CXA-C019b adds the sharded-rows contract: per-shard JSONB storage with a
+//! head-revision row, legacy single-blob migration, shard-diff writes and the
+//! shard-scoped `claim_ticket` lock. The schema the tests inspect is
+//! discovered from the adapter's own `INIT_SQL` via
+//! `common::shard_schema_f300` — no invented identifiers.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
 
+use common::shard_schema_f300 as schema;
 use coxagent_application::ports::outbound::StateStorePort;
-use coxagent_application::state::ProjectState;
+use coxagent_application::state::{ProjectState, ShardKind, SCHEMA_VERSION};
 use coxagent_application::PortError;
-use coxagent_domain::{Complexity, Priority, SemVer, Ticket, TicketId, TicketType};
+use coxagent_domain::{
+    Complexity, Priority, Role, SemVer, Status, TechnicalDesign, Ticket, TicketId, TicketType,
+};
 use coxagent_infrastructure::SqlStateStore;
+use tokio_postgres::NoTls;
 
 fn sample_ticket(id: &str) -> Ticket {
     Ticket::new(
@@ -262,4 +272,478 @@ async fn sql_store_delete_purges_state_and_coordination_for_the_project_only() {
 
     // Idempotent: deleting an already-purged project is a clean success.
     store.delete().await.expect("second delete");
+}
+
+// --- CXA-C019b: sharded rows --------------------------------------------------
+
+use coxagent_application::state::DeployRecord;
+
+/// A claimable ticket: the `distributed_coord` fixture shape (designed then
+/// ready), since `Ticket::claim` requires a legal transition to InProgress.
+fn ready_feature(id: &str) -> Ticket {
+    let mut t = Ticket::new(
+        TicketId::new(id).expect("valid id"),
+        TicketType::Feature,
+        "A feature",
+        "desc",
+        Priority::Medium,
+        Complexity::Small,
+        false,
+    )
+    .expect("valid ticket");
+    t.set_technical_design(Role::Sa, TechnicalDesign::default())
+        .expect("design");
+    t.transition_to(Role::Sa, Status::Ready).expect("ready");
+    t
+}
+
+/// A state with content in EVERY bounded-context shard, so the per-shard
+/// assertions below each have a payload to observe.
+fn lived_in_state() -> ProjectState {
+    let mut state = ProjectState {
+        tickets: vec![ready_feature("CXC-F300")],
+        ..ProjectState::default()
+    };
+    state.post_comment_by("SM", "sm@host", "cycle kickoff", None);
+    state.docs.push(coxagent_application::state::DocPage {
+        id: "f300-doc".to_owned(),
+        folder: String::new(),
+        category: "product".to_owned(),
+        title: "F300 doc".to_owned(),
+        body: "shard fixture".to_owned(),
+        updated_at: String::new(),
+        updated_by: String::new(),
+    });
+    state.decisions.push("keep shards disjoint".to_owned());
+    state.history.push(DeployRecord {
+        version: SemVer::new(1, 0, 0),
+        ticket: TicketId::new("CXC-F300").expect("valid id"),
+        title: "first deploy".to_owned(),
+        at: "2026-09-07T00:00:00Z".to_owned(),
+    });
+    state
+}
+
+/// Raw access for the row-level assertions the port API deliberately does not
+/// expose (the physical shard layout IS adapter-internal).
+async fn raw(dsn: &str) -> tokio_postgres::Client {
+    let (client, connection) = tokio_postgres::connect(dsn, NoTls)
+        .await
+        .expect("raw connection to the ephemeral test database");
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("raw connection error: {e}");
+        }
+    });
+    client
+}
+
+async fn count(client: &tokio_postgres::Client, sql: &str, pid: &str) -> i64 {
+    client
+        .query_one(sql, &[&pid])
+        .await
+        .expect("count query")
+        .get::<_, i64>(0)
+}
+
+/// The `shard`-kind column of the discovered shard table, e.g. `shard` — used
+/// to build the raw row queries from the adapter's own schema.
+fn kind_column() -> String {
+    schema::shard_kind_column()
+}
+
+/// (label -> (write counter, updated_at)) of every shard row of one project.
+async fn shard_row_stamps(
+    client: &tokio_postgres::Client,
+    pid: &str,
+) -> std::collections::BTreeMap<String, (i64, std::time::SystemTime)> {
+    let sql = format!(
+        "SELECT {kind}, revision, updated_at FROM {table} WHERE project_id = $1",
+        kind = kind_column(),
+        table = schema::shard_table_name()
+    );
+    let rows = client.query(&sql, &[&pid]).await.expect("shard rows");
+    rows.into_iter()
+        .map(|r| {
+            (
+                r.get::<_, String>(0),
+                (r.get::<_, i64>(1), r.get::<_, std::time::SystemTime>(2)),
+            )
+        })
+        .collect()
+}
+
+async fn head_revision(client: &tokio_postgres::Client, pid: &str) -> Option<i64> {
+    client
+        .query_opt(
+            "SELECT revision FROM project_state_head WHERE project_id = $1",
+            &[&pid],
+        )
+        .await
+        .expect("head row")
+        .map(|r| r.get::<_, i64>(0))
+}
+
+/// AC1: a project saved by the OLD code path (legacy single-blob row) loads
+/// correctly, keeps its revision visible, and migrates to shards on its next
+/// save — with the data identical across the migration and the original
+/// document frozen for recovery.
+#[tokio::test]
+async fn f300_legacy_row_loads_and_migrates_to_shards_on_next_save() {
+    let Some(db) = common::claim_or_skip().await else {
+        return;
+    };
+    let pid = format!("f300-legacy-{}", std::process::id());
+    let store = connect_store(&db, &pid).await;
+
+    // The old code path's exact artifact: one full-aggregate JSONB row in
+    // `project_state` (this is serde of a real ProjectState, revision 7).
+    let legacy_state = lived_in_state();
+    let legacy_json = serde_json::to_value(&legacy_state).expect("serialize aggregate");
+    raw(&db.dsn())
+        .await
+        .execute(
+            "INSERT INTO project_state (project_id, schema_version, revision, data)
+             VALUES ($1, $2, $3, $4)",
+            &[
+                &pid,
+                &i32::try_from(SCHEMA_VERSION).expect("schema version fits i32"),
+                &7_i64,
+                &legacy_json,
+            ],
+        )
+        .await
+        .expect("seed the legacy single-blob row");
+
+    // Pre-migration: the legacy row loads whole, with its revision.
+    assert_eq!(
+        store.load().await.expect("legacy load"),
+        legacy_state,
+        "a project saved by the old code path must load correctly before any \
+         migration runs"
+    );
+    assert_eq!(
+        store.current_version().await.expect("legacy version"),
+        Some(7),
+        "the legacy row's revision is the truth until the migration runs"
+    );
+
+    // The next save migrates: shards written, data preserved, revision kept.
+    let mut next = store.load().await.expect("load before save");
+    next.tickets.push(ready_feature("CXC-F301"));
+    store.save(&next).await.expect("the migrating save");
+
+    let client = raw(&db.dsn()).await;
+    let shard_table = schema::shard_table_name();
+    let kind = kind_column();
+    assert_eq!(
+        count(
+            &client,
+            "SELECT count(*) FROM project_state WHERE project_id = $1",
+            &pid
+        )
+        .await,
+        0,
+        "the legacy single-blob row is tombstoned once the shards are written"
+    );
+    assert_eq!(
+        count(
+            &client,
+            &format!(
+                "SELECT count(*) FROM {shard_table} WHERE project_id = $1 AND {kind} = '_legacy'"
+            ),
+            &pid
+        )
+        .await,
+        1,
+        "the original full JSON is preserved frozen as shard='_legacy'"
+    );
+    assert_eq!(
+        count(
+            &client,
+            &format!("SELECT count(*) FROM {shard_table} WHERE project_id = $1"),
+            &pid
+        )
+        .await,
+        6,
+        "one row per bounded-context shard plus the frozen legacy row"
+    );
+    let frozen: serde_json::Value = client
+        .query_one(
+            &format!("SELECT data FROM {shard_table} WHERE project_id = $1 AND {kind} = '_legacy'"),
+            &[&pid],
+        )
+        .await
+        .expect("legacy freeze row")
+        .get(0);
+    assert_eq!(
+        frozen, legacy_json,
+        "the frozen document must be byte-identical JSON to what the old code wrote"
+    );
+    assert_eq!(
+        head_revision(&client, &pid).await,
+        Some(8),
+        "the head revision carries the legacy row's revision forward (7) plus \
+         the save's own bump — never rewound to 1"
+    );
+
+    // Data identical pre/post migration, plus the mutation.
+    assert_eq!(
+        store.load().await.expect("post-migration load"),
+        next,
+        "load composes the shards back into the same aggregate"
+    );
+    assert_eq!(
+        store
+            .current_version()
+            .await
+            .expect("post-migration version"),
+        Some(8)
+    );
+}
+
+/// AC5: a save rewrites only the shards whose payload changed — the write
+/// amplification CXA-C019b removes, observed at the row level (per-shard write
+/// counter and updated_at unchanged for untouched shards).
+#[tokio::test]
+async fn f300_a_save_rewrites_only_the_shards_whose_payload_changed() {
+    let Some(db) = common::claim_or_skip().await else {
+        return;
+    };
+    let pid = format!("f300-diff-{}", std::process::id());
+    let store = connect_store(&db, &pid).await;
+    let state = lived_in_state();
+    store.save(&state).await.expect("seed");
+
+    let client = raw(&db.dsn()).await;
+    let before = shard_row_stamps(&client, &pid).await;
+    assert_eq!(before.len(), 5, "one row per bounded-context shard");
+    let rev_before = head_revision(&client, &pid).await.expect("head row");
+
+    // Change ONLY the social shard; every other field stays as loaded.
+    let mut social_only = store.load().await.expect("load");
+    social_only.post_comment_by("DEV", "dev@host", "a social-only write", None);
+    store.save(&social_only).await.expect("social-only save");
+
+    let after = shard_row_stamps(&client, &pid).await;
+    assert_eq!(
+        head_revision(&client, &pid).await,
+        Some(rev_before + 1),
+        "the head revision bumps on every successful write"
+    );
+    for (label, (revision, updated_at)) in before {
+        let Some((new_revision, new_updated_at)) = after.get(&label) else {
+            panic!("shard row {label} vanished");
+        };
+        if label == schema::shard_label(ShardKind::Social) {
+            assert_eq!(
+                *new_revision,
+                revision + 1,
+                "the social shard was rewritten: its write counter moves"
+            );
+            assert!(
+                *new_updated_at >= updated_at,
+                "the rewritten shard's updated_at moves forward"
+            );
+        } else {
+            assert_eq!(
+                *new_revision, revision,
+                "shard {label} was NOT part of this save — its write counter \
+                 must not move (no whole-aggregate rewrite)"
+            );
+            assert_eq!(
+                *new_updated_at, updated_at,
+                "shard {label} was NOT part of this save — its row must not be \
+                 touched (updated_at unchanged)"
+            );
+        }
+    }
+    assert_eq!(
+        store.load().await.expect("reload"),
+        social_only,
+        "the composed aggregate reflects the save"
+    );
+}
+
+/// AC3: two sequential claims cannot both win, and a claim does NOT take the
+/// whole-aggregate lock — while another connection holds a DIFFERENT shard's
+/// row lock, the claim still wins (under the old whole-row lock it would block
+/// until that lock released).
+#[tokio::test]
+async fn f300_claim_scopes_its_lock_to_the_tickets_shard_row() {
+    let Some(db) = common::claim_or_skip().await else {
+        return;
+    };
+    let pid = format!("f300-claim-{}", std::process::id());
+    let first = connect_store(&db, &pid).await;
+    let state = lived_in_state();
+    first.save(&state).await.expect("seed");
+    let id = TicketId::new("CXC-F300").expect("valid id");
+    let now = "2026-09-07T00:00:00Z";
+
+    // Two sequential claims on the same ticket: exactly one wins.
+    assert!(
+        first
+            .claim_ticket(&id, "dev-a@host", now)
+            .await
+            .expect("claim"),
+        "the first claim wins"
+    );
+    let second = connect_store(&db, &pid).await;
+    assert!(
+        !second
+            .claim_ticket(&id, "dev-b@host", now)
+            .await
+            .expect("second claim"),
+        "two sequential claims cannot both win the same ticket"
+    );
+
+    // A successful claim bumps the revision the REST ops observe.
+    let client = raw(&db.dsn()).await;
+    let rev_after_claims = head_revision(&client, &pid).await.expect("head row");
+    assert_eq!(
+        first.current_version().await.expect("version after claims"),
+        Some(rev_after_claims),
+        "claim_ticket bumps the head revision (REST op=version keeps observing claims)"
+    );
+
+    // A second, still-free ticket for the lock-scope claim below.
+    let mut with_second = second.load().await.expect("load");
+    with_second.tickets.push(ready_feature("CXC-F302"));
+    second
+        .save(&with_second)
+        .await
+        .expect("seed the free ticket");
+
+    // Lock scope: hold ONLY the social shard row on another connection. The
+    // claim must still win — it locks the Tickets (work) shard row, not the
+    // whole aggregate. (Bounded so a regression to the whole-row lock fails
+    // red instead of hanging the suite.)
+    let mut holder = raw(&db.dsn()).await;
+    let tx = holder.transaction().await.expect("holder tx");
+    let social_label = schema::shard_label(ShardKind::Social);
+    tx.query_opt(
+        &format!(
+            "SELECT data FROM {} WHERE project_id = $1 AND {} = $2 FOR UPDATE",
+            schema::shard_table_name(),
+            kind_column()
+        ),
+        &[&pid, &social_label],
+    )
+    .await
+    .expect("lock the social shard row");
+    let won = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        second.claim_ticket(
+            &TicketId::new("CXC-F302").expect("valid id"),
+            "dev-b@host",
+            now,
+        ),
+    )
+    .await
+    .expect("the claim must not block behind an unrelated shard row's lock")
+    .expect("claim while another shard row is locked");
+    assert!(
+        won,
+        "the claim on a free ticket wins without the whole-row lock"
+    );
+    tx.rollback().await.expect("release the social lock");
+}
+
+/// AC5: a Conflict on a stale revision changes NOTHING — the winning state's
+/// shard rows and the head revision are exactly as the winner left them.
+#[tokio::test]
+async fn f300_a_stale_write_conflicts_and_writes_no_shard_rows() {
+    let Some(db) = common::claim_or_skip().await else {
+        return;
+    };
+    let pid = format!("f300-cas-{}", std::process::id());
+    let store = connect_store(&db, &pid).await;
+    let first = lived_in_state();
+    store.save(&first).await.expect("first save lands at rev 1");
+
+    let client = raw(&db.dsn()).await;
+    let before = shard_row_stamps(&client, &pid).await;
+
+    // A writer that captured revision 0 must conflict, not clobber.
+    let mut stale = first.clone();
+    stale.tickets.push(ready_feature("CXC-F303"));
+    match store.save_expecting(&stale, Some(0)).await {
+        Err(PortError::Conflict(_)) => {}
+        other => panic!("expected Conflict for a stale rev-0 write — got {other:?}"),
+    }
+    let after = shard_row_stamps(&client, &pid).await;
+    assert_eq!(
+        before, after,
+        "the losing writer must not rewrite any shard row"
+    );
+    assert_eq!(
+        head_revision(&client, &pid).await,
+        Some(1),
+        "the head revision is untouched by the losing write"
+    );
+
+    // Retrying against the current revision converges.
+    store
+        .save_expecting(&stale, Some(1))
+        .await
+        .expect("retry with the current revision");
+    assert_eq!(
+        store.load().await.expect("reload").tickets.len(),
+        2,
+        "the retried write is visible through the composed load"
+    );
+}
+
+/// AC4: a `gate_save` refusal (CXA-F229 structural-integrity audit) returns
+/// Err BEFORE any row is written — no shard row appears, moves or bumps.
+#[tokio::test]
+async fn f300_a_gate_refusal_writes_no_shard_rows() {
+    let Some(db) = common::claim_or_skip().await else {
+        return;
+    };
+    let pid = format!("f300-gate-{}", std::process::id());
+    let store = connect_store(&db, &pid).await;
+    store.save(&lived_in_state()).await.expect("seed");
+
+    let client = raw(&db.dsn()).await;
+    let before = shard_row_stamps(&client, &pid).await;
+
+    // Two doc pages sharing one id — the unhealable finding the F229 audit
+    // refuses (same fixture shape the C023 suite uses).
+    let mut bad = ProjectState {
+        tickets: vec![ready_feature("CXC-F304")],
+        ..ProjectState::default()
+    };
+    for _ in 0..2 {
+        bad.docs.push(coxagent_application::state::DocPage {
+            id: "dup-doc".to_owned(),
+            folder: String::new(),
+            category: "product".to_owned(),
+            title: "t".to_owned(),
+            body: String::new(),
+            updated_at: String::new(),
+            updated_by: String::new(),
+        });
+    }
+    assert!(
+        store.save(&bad).await.is_err(),
+        "the refused payload must not save"
+    );
+
+    assert_eq!(
+        shard_row_stamps(&client, &pid).await,
+        before,
+        "no shard row may appear, move or bump on a refused write"
+    );
+    assert_eq!(
+        head_revision(&client, &pid).await,
+        Some(1),
+        "the head revision is untouched by the refused write"
+    );
+    assert_eq!(
+        store.quarantined().await.len(),
+        1,
+        "the refusal is quarantined (CXA-F229 behaviour unchanged)"
+    );
 }
