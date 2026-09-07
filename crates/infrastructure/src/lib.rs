@@ -5,6 +5,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod archive_memory;
+pub mod archive_mongo;
 pub mod audit_sink;
 pub mod auth;
 pub mod backup_archive;
@@ -30,6 +31,7 @@ pub mod totp;
 pub mod workspace_files;
 
 pub use archive_memory::MemoryArchiveStore;
+pub use archive_mongo::MongoTicketArchive;
 pub use audit_sink::{MemoryAuditSink, SqlAuditSink};
 pub use auth::FileAuthService;
 pub use backup_archive::JsonHubArchive;
