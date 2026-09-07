@@ -10,7 +10,9 @@ use async_trait::async_trait;
 use coxagent_application::ports::outbound::{
     QuarantineEntry, StateStorePort, WorkerCaps, WorkerEntry,
 };
-use coxagent_application::state::{ProjectState, SCHEMA_VERSION};
+use coxagent_application::state::{
+    ProjectState, SCHEMA_VERSION, ShardKind, StateShard,
+};
 use coxagent_application::PortError;
 use coxagent_domain::{Role, TicketId};
 use deadpool_postgres::Pool;
@@ -54,7 +56,20 @@ ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS gitcheck TEXT;
 ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS tooling TEXT;
 -- Worker registry: the coxagent build that runner runs (CARGO_PKG_VERSION) —
 -- the hub self-upgrades but remote workers do not, and skew must be visible.
-ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS version TEXT;";
+ALTER TABLE project_coord ADD COLUMN IF NOT EXISTS version TEXT;
+-- CXA-C019b: per-shard JSONB columns, the native home of each bounded
+-- context's payload (see state::shards in the application crate and
+-- super::sql_shards). Nullable by design: rows written by a pre-shard
+-- writer leave them NULL, and a shard read of a NULL column falls back to
+-- projecting the legacy `data` envelope, which stays the rollback path.
+-- Every writer through this adapter dual-writes envelope + columns in one
+-- statement (including the JSON-mirror seed, which goes through save()), so
+-- the two never disagree.
+ALTER TABLE project_state ADD COLUMN IF NOT EXISTS shard_work JSONB;
+ALTER TABLE project_state ADD COLUMN IF NOT EXISTS shard_social JSONB;
+ALTER TABLE project_state ADD COLUMN IF NOT EXISTS shard_docs JSONB;
+ALTER TABLE project_state ADD COLUMN IF NOT EXISTS shard_governance JSONB;
+ALTER TABLE project_state ADD COLUMN IF NOT EXISTS shard_ops JSONB;";
 
 /// Leader lease lifetime (seconds) — a runner must renew within this or another
 /// takes over. Matches the JSON store.
@@ -251,6 +266,75 @@ impl StateStorePort for SqlStateStore {
         Ok(Some(row.map_or(0_i64, |r| r.get::<_, i64>(0))))
     }
 
+    /// Native shard read (CXA-C019b): ONE column of the row, never the whole
+    /// document. A row written by a pre-shard writer leaves the columns NULL;
+    /// those fall back to projecting the legacy `data` envelope, which is
+    /// also the rollback path, so the columns can never be the only copy of
+    /// a field.
+    ///
+    /// # Errors
+    /// [`PortError`] on a read or decode failure.
+    async fn load_shard(&self, kind: ShardKind) -> Result<StateShard, PortError> {
+        // The connection is scoped to the column read: the envelope fallback
+        // below takes its own client from the pool rather than sharing this
+        // call's slot.
+        let payload: Option<serde_json::Value> = {
+            let client = self.client().await?;
+            let sql = format!(
+                "SELECT {} FROM project_state WHERE project_id = $1",
+                super::sql_shards::shard_column(kind)
+            );
+            let row = client
+                .query_opt(sql.as_str(), &[&self.project_id])
+                .await
+                .map_err(|e| PortError::Backend(format!("select shard: {e}")))?;
+            match row {
+                // Never-written project: a fresh slice of the aggregate — the
+                // same state a full load would serve.
+                None => return Ok(super::sql_shards::default_shard(kind)),
+                Some(row) => row.get(0),
+            }
+        };
+        match payload {
+            Some(value) => super::sql_shards::decode_shard(kind, value),
+            None => Ok(self.load().await?.shard(kind)),
+        }
+    }
+
+    /// Merge ONE shard into the persisted aggregate (see
+    /// [`StateStorePort::save_shard`]): a native dual-write of the merged
+    /// aggregate, not the default's load-merge-save round trip through
+    /// [`Self::save`].
+    ///
+    /// # Errors
+    /// [`PortError`] — including [`PortError::Conflict`] when a concurrent
+    /// writer commits between this call's read and write — on a load, save or
+    /// validation failure.
+    async fn save_shard(&self, shard: &StateShard) -> Result<(), PortError> {
+        self.save_shard_expecting(shard, None).await
+    }
+
+    /// [`Self::save_shard`] with optimistic concurrency: the merged aggregate
+    /// commits only if the row's revision has not moved past what this caller
+    /// supplied — or, when no revision was supplied, past the revision this
+    /// call itself read as the merge base (the CAS token and the merge base
+    /// come from ONE `load_versioned` read, so a concurrent writer between
+    /// read and write is a conflict, never a silent clobber).
+    ///
+    /// # Errors
+    /// [`PortError`] — including [`PortError::Conflict`] on a stale revision —
+    /// on a load, save or validation failure.
+    async fn save_shard_expecting(
+        &self,
+        shard: &StateShard,
+        expected_revision: Option<i64>,
+    ) -> Result<(), PortError> {
+        let (revision, mut state) = self.load_versioned().await?;
+        state.with_shard(shard.clone());
+        self.persist_at_revision(state, Some(expected_revision.unwrap_or(revision)))
+            .await
+    }
+
     async fn claim_ticket(
         &self,
         id: &TicketId,
@@ -291,11 +375,21 @@ impl StateStorePort for SqlStateStore {
         }
         let newval =
             serde_json::to_value(&state).map_err(|e| PortError::Backend(format!("encode: {e}")))?;
+        // Dual-write (CXA-C019b): the claim mutates tickets — Work-shard
+        // fields — so the same statement must refresh the shard columns, or a
+        // native `load_shard(Work)` would serve the pre-claim backlog while
+        // the envelope showed the claim. One statement keeps both
+        // representations coherent with the commit.
+        let shard_doc = super::sql_shards::shard_doc(&state)?;
         tx.execute(
             "UPDATE project_state
-                SET data = $1, revision = revision + 1, updated_at = now()
+                SET data = $1,
+                    shard_work = $3::jsonb->'work', shard_social = $3::jsonb->'social',
+                    shard_docs = $3::jsonb->'docs', shard_governance = $3::jsonb->'governance',
+                    shard_ops = $3::jsonb->'ops',
+                    revision = revision + 1, updated_at = now()
               WHERE project_id = $2",
-            &[&newval, &self.project_id],
+            &[&newval, &self.project_id, &shard_doc],
         )
         .await
         .map_err(|e| PortError::Backend(format!("update: {e}")))?;
@@ -686,6 +780,10 @@ impl SqlStateStore {
         }
         let value =
             serde_json::to_value(&state).map_err(|e| PortError::Backend(format!("encode: {e}")))?;
+        // Dual-write (CXA-C019b): the same committed write refreshes the
+        // per-shard columns from the sharded view of the very snapshot being
+        // persisted, so envelope and shard readers can never disagree.
+        let shard_doc = super::sql_shards::shard_doc(&state)?;
 
         let client = self.client().await?;
         let expected = match expected_revision {
@@ -700,6 +798,7 @@ impl SqlStateStore {
                     &i32::try_from(state.schema_version).unwrap_or(i32::MAX),
                     &value,
                     &expected,
+                    &shard_doc,
                 ],
             )
             .await
