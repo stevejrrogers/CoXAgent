@@ -15,7 +15,10 @@ mod common;
 
 use common::shard_schema_f300 as schema;
 use coxagent_application::ports::outbound::StateStorePort;
-use coxagent_application::state::{ProjectState, ShardKind, SCHEMA_VERSION};
+use coxagent_application::state::{
+    ChatMsg, DocPage, ProjectState, ShardData, ShardKind, SocialShard, StateShard, GENERAL_CHANNEL,
+    SCHEMA_VERSION,
+};
 use coxagent_application::PortError;
 use coxagent_domain::{
     Complexity, Priority, Role, SemVer, Status, TechnicalDesign, Ticket, TicketId, TicketType,
@@ -324,8 +327,59 @@ fn lived_in_state() -> ProjectState {
     state
 }
 
+// ── CXA-C019b: shard-native reads and writes over the SQL adapter ──────────
+
+/// One populated field per bounded-context family, so every shard's
+/// payload carries non-default data and "only this shard changed" is
+/// observable.
+fn full_state() -> ProjectState {
+    let mut state = ProjectState {
+        current_version: SemVer::new(9, 9, 9),
+        tickets: vec![sample_ticket("C019B-001")],
+        ..ProjectState::default()
+    };
+    state.chat = vec![chat_msg("m1", "seeded social")];
+    state.docs = vec![DocPage {
+        id: "d1".to_owned(),
+        folder: "Technical/Architecture".to_owned(),
+        category: "technical".to_owned(),
+        title: "State shards".to_owned(),
+        body: "Five bounded contexts.".to_owned(),
+        updated_at: "2026-09-07T00:00:00Z".to_owned(),
+        updated_by: "SA".to_owned(),
+    }];
+    state.lessons = vec!["seeded governance".to_owned()];
+    state.ops_down = true;
+    state
+}
+
+fn chat_msg(id: &str, body: &str) -> ChatMsg {
+    ChatMsg {
+        id: id.to_owned(),
+        at: "2026-09-07T00:00:00Z".to_owned(),
+        user: "operator".to_owned(),
+        body: body.to_owned(),
+        edited: None,
+        channel: GENERAL_CHANNEL.to_owned(),
+        attachments: Vec::new(),
+        reactions: Vec::new(),
+        thread_id: None,
+        reply_count: 0,
+        deleted: false,
+    }
+}
+
+/// A Social shard whose only content is one chat message with `body` — the
+/// payload the shard-save tests merge in.
+fn social_shard_with(body: &str) -> StateShard {
+    let mut social = SocialShard::default();
+    social.chat.push(chat_msg("m1", body));
+    StateShard::new(ShardData::Social(social))
+}
+
 /// Raw access for the row-level assertions the port API deliberately does not
-/// expose (the physical shard layout IS adapter-internal).
+/// expose (the physical shard layout IS adapter-internal) — the same pattern
+/// the tombstone suite uses.
 async fn raw(dsn: &str) -> tokio_postgres::Client {
     let (client, connection) = tokio_postgres::connect(dsn, NoTls)
         .await
@@ -745,5 +799,256 @@ async fn f300_a_gate_refusal_writes_no_shard_rows() {
         store.quarantined().await.len(),
         1,
         "the refusal is quarantined (CXA-F229 behaviour unchanged)"
+    );
+}
+
+/// Projection: a never-written project serves fresh slices (the Work shard at
+/// the CURRENT schema version, never 0), and after a full save every shard
+/// read equals that aggregate's own slice of it.
+#[tokio::test]
+async fn sql_store_shard_reads_serve_fresh_slices_then_each_saved_shard() {
+    let Some(db) = common::claim_or_skip().await else {
+        return;
+    };
+    let store = connect_store(&db, "c019b-projection").await;
+
+    for kind in ShardKind::ALL {
+        assert_eq!(
+            store.load_shard(kind).await.expect("fresh shard"),
+            ProjectState::default().shard(kind),
+            "a never-written project's {kind:?} must read as a fresh slice"
+        );
+    }
+    let ShardData::Work(fresh_work) = store.load_shard(ShardKind::Work).await.expect("work").data
+    else {
+        panic!("the Work kind must serve a Work payload");
+    };
+    assert_eq!(
+        fresh_work.schema_version, SCHEMA_VERSION,
+        "a fresh Work shard starts at the current schema version, never 0 — \
+         a shard-native writer must produce a document the stores accept"
+    );
+
+    let state = full_state();
+    store.save(&state).await.expect("seed save");
+    for kind in ShardKind::ALL {
+        assert_eq!(
+            store.load_shard(kind).await.expect("load_shard"),
+            state.shard(kind),
+            "shard {kind:?} must project the saved aggregate"
+        );
+    }
+}
+
+/// Native-path proof: a payload written straight into the shard ROW is what
+/// `load_shard` serves — the read costs one row, not a whole-aggregate
+/// decode.
+#[tokio::test]
+async fn sql_store_load_shard_reads_the_native_row_payload() {
+    let Some(db) = common::claim_or_skip().await else {
+        return;
+    };
+    let pid = "c019b-native";
+    let store = connect_store(&db, pid).await;
+    store.save(&full_state()).await.expect("seed save");
+
+    let mut native_only = SocialShard::default();
+    native_only.chat.push(chat_msg("m9", "native row only"));
+    let payload = serde_json::to_value(ShardData::Social(native_only.clone()))
+        .expect("tagged social payload");
+    raw(&db.dsn())
+        .await
+        .execute(
+            &format!(
+                "UPDATE {} SET data = $1 WHERE project_id = $2 AND {} = 'social'",
+                schema::shard_table_name(),
+                kind_column()
+            ),
+            &[&payload, &pid],
+        )
+        .await
+        .expect("write the native-only shard row");
+
+    let shard = store
+        .load_shard(ShardKind::Social)
+        .await
+        .expect("native read");
+    assert_eq!(
+        shard.data,
+        ShardData::Social(native_only.clone()),
+        "the native shard row is the read path"
+    );
+    assert_eq!(
+        shard.kind,
+        ShardKind::Social,
+        "the served payload must agree with the requested kind"
+    );
+}
+
+/// Rollback path: a project with NO shard row for the requested kind — the
+/// pre-migration legacy single-blob layout — falls back to projecting the
+/// slice from the composed load, so the legacy row keeps serving honest
+/// shard reads until the migration runs.
+#[tokio::test]
+async fn sql_store_load_shard_falls_back_to_the_composed_load_when_no_shard_row_exists() {
+    let Some(db) = common::claim_or_skip().await else {
+        return;
+    };
+    let pid = "c019b-fallback";
+    let store = connect_store(&db, pid).await;
+
+    // The old code path's exact artifact: one full-aggregate JSONB row, no
+    // shard rows (seeded after connect, so the migration has nothing to do).
+    let state = full_state();
+    let legacy_json = serde_json::to_value(&state).expect("serialize aggregate");
+    raw(&db.dsn())
+        .await
+        .execute(
+            "INSERT INTO project_state (project_id, schema_version, revision, data)
+             VALUES ($1, $2, $3, $4)",
+            &[
+                &pid,
+                &i32::try_from(SCHEMA_VERSION).expect("schema version fits i32"),
+                &3_i64,
+                &legacy_json,
+            ],
+        )
+        .await
+        .expect("seed the legacy single-blob row");
+
+    assert_eq!(
+        store
+            .load_shard(ShardKind::Governance)
+            .await
+            .expect("fallback read"),
+        state.shard(ShardKind::Governance),
+        "a missing shard row must project the composed (legacy) aggregate, \
+         never serve defaults"
+    );
+}
+
+/// Isolation: a shard-scoped save lands only that shard's ROW — every other
+/// shard row's write counter and updated_at stay byte-identical — and the
+/// composed load reflects the merge, so full-document readers never miss a
+/// shard write.
+#[tokio::test]
+async fn sql_store_save_shard_merges_only_its_own_shard_row() {
+    let Some(db) = common::claim_or_skip().await else {
+        return;
+    };
+    let store = connect_store(&db, "c019b-isolation").await;
+    let before = full_state();
+    store.save(&before).await.expect("seed save");
+    let client = raw(&db.dsn()).await;
+    let stamps_before = shard_row_stamps(&client, "c019b-isolation").await;
+
+    // Mutate ONLY the social payload of the seeded aggregate.
+    let mut social = match before.shard(ShardKind::Social).data {
+        ShardData::Social(social) => social,
+        other => panic!("the Social kind must serve a Social payload, got {other:?}"),
+    };
+    social.chat.push(chat_msg("m2", "shard-scoped write"));
+    let social_save = StateShard::new(ShardData::Social(social));
+    store.save_shard(&social_save).await.expect("save_shard");
+
+    assert_eq!(
+        store.load_shard(ShardKind::Social).await.expect("social"),
+        social_save,
+        "the shard's own fields landed"
+    );
+    let stamps_after = shard_row_stamps(&client, "c019b-isolation").await;
+    for (label, stamp) in &stamps_after {
+        if label == "social" {
+            continue;
+        }
+        assert_eq!(
+            stamps_before.get(label),
+            Some(stamp),
+            "shard row '{label}' must survive a Social save untouched"
+        );
+    }
+
+    let mut expected = before.clone();
+    expected.with_shard(social_save);
+    assert_eq!(
+        store.load().await.expect("composed reload"),
+        expected,
+        "the composed load must reflect the shard merge — no lost or \
+         defaulted fields"
+    );
+
+    // The merged document still passes the write-boundary integrity audit as
+    // a whole: a full save of it round-trips.
+    let merged = store.load().await.expect("merged");
+    store
+        .save(&merged)
+        .await
+        .expect("full save of merged state");
+}
+
+/// Optimistic concurrency: `save_shard_expecting` CASes the HEAD revision —
+/// a stale caller conflicts and changes nothing (no shard row, no revision
+/// bump), a fresh caller converges, and the unguarded `save_shard` merge
+/// path still works.
+#[tokio::test]
+async fn sql_store_save_shard_expecting_conflicts_on_a_stale_revision_and_changes_nothing() {
+    let Some(db) = common::claim_or_skip().await else {
+        return;
+    };
+    let store = connect_store(&db, "c019b-cas").await;
+    store.save(&full_state()).await.expect("seed save");
+    let captured = store.current_version().await.expect("version after seed");
+
+    store
+        .save_shard_expecting(&social_shard_with("first"), captured)
+        .await
+        .expect("a write against the captured revision wins");
+    let after_first = store
+        .current_version()
+        .await
+        .expect("version after first shard save");
+
+    let refused = store
+        .save_shard_expecting(&social_shard_with("stale"), captured)
+        .await;
+    assert!(
+        matches!(refused, Err(PortError::Conflict(_))),
+        "the now-stale captured revision must conflict, got {refused:?}"
+    );
+    assert_eq!(
+        store.load_shard(ShardKind::Social).await.expect("social"),
+        social_shard_with("first"),
+        "the refused write must not touch the shard row"
+    );
+    assert_eq!(
+        store.load().await.expect("composed load").chat[0].body,
+        "first",
+        "the refused write must not touch the composed aggregate either"
+    );
+    assert_eq!(
+        store
+            .current_version()
+            .await
+            .expect("version after refusal"),
+        after_first,
+        "the refused write must not advance the revision"
+    );
+
+    store
+        .save_shard_expecting(&social_shard_with("fresh"), after_first)
+        .await
+        .expect("a write against the current revision converges");
+    store
+        .save_shard(&social_shard_with("scoped"))
+        .await
+        .expect("the unguarded merge path still works");
+    assert_eq!(
+        store.load_shard(ShardKind::Social).await.expect("social"),
+        social_shard_with("scoped")
+    );
+    assert_eq!(
+        store.load().await.expect("composed load").chat[0].body,
+        "scoped",
+        "the unguarded merge is coherent in the composed aggregate too"
     );
 }

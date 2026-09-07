@@ -17,7 +17,7 @@ use coxagent_application::ports::outbound::{
     QuarantineEntry, StateStorePort, WorkerCaps, WorkerEntry,
 };
 use coxagent_application::state::{
-    ProjectState, ShardData, ShardKind, ShardedState, SCHEMA_VERSION,
+    ProjectState, ShardData, ShardKind, ShardedState, StateShard, SCHEMA_VERSION,
 };
 use coxagent_application::PortError;
 use coxagent_domain::{Role, TicketId};
@@ -588,6 +588,75 @@ impl StateStorePort for SqlStateStore {
         Ok(Some(legacy.map_or(0_i64, |r| r.get::<_, i64>(0))))
     }
 
+    /// Native shard read (CXA-C019b): ONE shard row, never the whole
+    /// aggregate. A project that has no row for `kind` yet — never written,
+    /// a pre-migration legacy-only layout, or a partial row set — falls back
+    /// to projecting the slice from the composed load (whose legacy fallback
+    /// is also the rollback path), so a shard row can never be the only copy
+    /// of a field.
+    ///
+    /// # Errors
+    /// [`PortError`] on a read or decode failure.
+    async fn load_shard(&self, kind: ShardKind) -> Result<StateShard, PortError> {
+        // The connection is scoped to the row read: the composed-load
+        // fallback below takes its own client from the pool rather than
+        // sharing this call's slot.
+        let payload: Option<serde_json::Value> = {
+            let client = self.client().await?;
+            let row = client
+                .query_opt(
+                    "SELECT data FROM project_state_shard
+                      WHERE project_id = $1 AND shard = $2",
+                    &[&self.project_id, &shard_label(kind)],
+                )
+                .await
+                .map_err(|e| PortError::Backend(format!("select shard: {e}")))?;
+            row.map(|row| row.get::<_, serde_json::Value>(0))
+        };
+        match payload {
+            Some(value) => super::sql_shards::decode_shard(kind, value),
+            // A never-written project composes to the default aggregate, so
+            // this one path serves both the fresh slice and the legacy
+            // projection — the slice can never disagree with a full load.
+            None => Ok(self.load().await?.shard(kind)),
+        }
+    }
+
+    /// Merge ONE shard into the persisted aggregate (see
+    /// [`StateStorePort::save_shard`]): the merged aggregate is persisted at
+    /// the caller's (or this call's own) revision through the same guarded
+    /// path as [`Self::save_expecting`] — the head CAS plus only the shard
+    /// rows whose payload actually changed.
+    ///
+    /// # Errors
+    /// [`PortError`] — including [`PortError::Conflict`] when a concurrent
+    /// writer commits between this call's read and write — on a load, save or
+    /// validation failure.
+    async fn save_shard(&self, shard: &StateShard) -> Result<(), PortError> {
+        self.save_shard_expecting(shard, None).await
+    }
+
+    /// [`Self::save_shard`] with optimistic concurrency: the merged aggregate
+    /// commits only if the head revision has not moved past what this caller
+    /// supplied — or, when no revision was supplied, past the revision this
+    /// call itself read as the merge base (the CAS token and the merge base
+    /// come from ONE `load_versioned` read, so a concurrent writer between
+    /// read and write is a conflict, never a silent clobber).
+    ///
+    /// # Errors
+    /// [`PortError`] — including [`PortError::Conflict`] on a stale revision —
+    /// on a load, save or validation failure.
+    async fn save_shard_expecting(
+        &self,
+        shard: &StateShard,
+        expected_revision: Option<i64>,
+    ) -> Result<(), PortError> {
+        let (revision, mut state) = self.load_versioned().await?;
+        state.with_shard(shard.clone());
+        self.persist_at_revision(state, Some(expected_revision.unwrap_or(revision)))
+            .await
+    }
+
     async fn claim_ticket(
         &self,
         id: &TicketId,
@@ -656,6 +725,10 @@ impl StateStorePort for SqlStateStore {
         if ticket.claimed_by().is_some() || ticket.claim(Role::System, worker, now).is_err() {
             return Ok(false);
         }
+        // The claim mutates tickets — Work-shard fields — so updating the
+        // Work shard ROW in the same transaction is what keeps a native
+        // `load_shard(Work)` from serving the pre-claim backlog: the row and
+        // the composed load move together with the commit.
         let updated = serde_json::to_value(ShardData::Work(work))
             .map_err(|e| PortError::Backend(format!("encode: {e}")))?;
         tx.execute(
