@@ -151,10 +151,9 @@ pub(super) fn lite_state_value(state: &coxagent_application::ProjectState) -> se
     // serves, riding the snapshot the way the radars do — zero new requests on
     // the 1 Hz stream. Present only when a roadmap exists; absence stays an
     // empty read model for every existing client.
-    let milestones = serde_json::to_value(
-        coxagent_application::milestone_projection::project_milestones(state),
-    )
-    .unwrap_or_default();
+    let milestones =
+        serde_json::to_value(coxagent_application::milestone_projection::project_milestones(state))
+            .unwrap_or_default();
     if milestones.as_array().is_some_and(|a| !a.is_empty()) {
         if !derived.is_object() {
             derived = serde_json::json!({});
@@ -682,10 +681,7 @@ mod radar_state_tests {
 
         // No roadmap → no projection rows → the omission rule still holds.
         let v = lite_state_value(&state_with(vec![ready_feature("FEAT-A", &[])]));
-        let no_rows = v
-            .get("derived")
-            .and_then(|d| d.get("milestones"))
-            .is_none();
+        let no_rows = v.get("derived").and_then(|d| d.get("milestones")).is_none();
         assert!(
             no_rows,
             "a roadmap-less project must not emit derived.milestones"

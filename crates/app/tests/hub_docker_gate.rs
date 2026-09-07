@@ -116,16 +116,14 @@ fn hub_docker_reachability(compose_src: &str) -> Result<(), String> {
         .ok_or_else(|| "docker-compose.yml: no services map".to_string())?;
     for (name, svc) in services {
         let name = name.as_str().unwrap_or("<unnamed>");
-        let publishes_hub_port = svc["ports"]
-            .as_sequence()
-            .is_some_and(|ports| {
-                ports.iter().any(|port| {
-                    port.as_str()
-                        .is_some_and(|p| p.trim_matches('"').ends_with(":4000"))
-                        || port["target"].as_str().is_some_and(|t| t == "4000")
-                        || port["target"].as_i64() == Some(4000)
-                })
-            });
+        let publishes_hub_port = svc["ports"].as_sequence().is_some_and(|ports| {
+            ports.iter().any(|port| {
+                port.as_str()
+                    .is_some_and(|p| p.trim_matches('"').ends_with(":4000"))
+                    || port["target"].as_str().is_some_and(|t| t == "4000")
+                    || port["target"].as_i64() == Some(4000)
+            })
+        });
         if !publishes_hub_port {
             continue;
         }
@@ -166,9 +164,7 @@ fn the_hub_service_mounts_the_host_docker_socket() {
 /// A minimal compose whose coxagent service publishes the hub port and mounts
 /// the given volume (or none).
 fn compose_with_hub_volumes(volume: Option<&str>) -> String {
-    let volume_line = volume
-        .map(|v| format!("      - {v}\n"))
-        .unwrap_or_default();
+    let volume_line = volume.map(|v| format!("      - {v}\n")).unwrap_or_default();
     format!(
         "services:\n  coxagent:\n    image: coxagent\n    ports:\n\
          \x20   - \"${{APP_PORT:-8101}}:4000\"\n    volumes:\n{volume_line}"
@@ -180,7 +176,10 @@ fn compose_with_hub_volumes(volume: Option<&str>) -> String {
 fn a_compose_without_the_socket_is_caught() {
     let why = hub_docker_reachability(&compose_with_hub_volumes(None)).unwrap_err();
     assert!(why.contains("docker.sock"), "unhelpful message: {why}");
-    assert!(why.contains("CXA-B153"), "message must cite the ticket: {why}");
+    assert!(
+        why.contains("CXA-B153"),
+        "message must cite the ticket: {why}"
+    );
 }
 
 /// A read-only socket authenticates nothing the janitor needs: it cannot
@@ -272,7 +271,10 @@ fn a_dockerfile_without_the_cli_copy_is_caught() {
         why.contains("/usr/local/bin/docker"),
         "unhelpful message: {why}"
     );
-    assert!(why.contains("CXA-B153"), "message must cite the ticket: {why}");
+    assert!(
+        why.contains("CXA-B153"),
+        "message must cite the ticket: {why}"
+    );
 }
 
 /// Dropping just the compose plugin breaks `docker compose …` probes only —

@@ -229,11 +229,13 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/ticket/:id/attachments", &["post"]),
     route("/api/projects/:pid/ticket/:id/edit", &["post"]),
     route("/api/projects/:pid/ticket/:id/goal", &["post"]),
+    route("/api/projects/:pid/ticket/:id/handback", &["post"]),
     route("/api/projects/:pid/ticket/:id/priority", &["post"]),
     route("/api/projects/:pid/ticket/:id/ready", &["post"]),
     route("/api/projects/:pid/ticket/:id/reject", &["post"]),
     route("/api/projects/:pid/ticket/:id/reproduction-url", &["get"]),
     route("/api/projects/:pid/ticket/:id/send-back", &["post"]),
+    route("/api/projects/:pid/ticket/:id/takeover", &["post"]),
     route("/api/projects/:pid/ticket/:id/undo-approval", &["post"]),
     route("/api/projects/:pid/ticket/:id/unpark", &["post"]),
     route("/api/projects/:pid/ticket/:id/verify", &["post"]),
@@ -348,6 +350,32 @@ const SUMMARY_OVERRIDES: &[(&str, &str)] = &[
         "Go-live readiness preflight: engine/model allowlist per role, host_port assignment \
          & collision state, auth mode (open vs provisioned), docker + compose availability, \
          publish-port availability",
+    ),
+    (
+        "/api/projects/:pid/ticket/:id/takeover",
+        // The human claim lifecycle (CXA-F283): pull work into your own claim,
+        // or take over a stalled run. No body.
+        "Pull a claimable ticket (Ready feature/chore, Open bug) into the caller's own \
+         InProgress claim as account@host, or swap the holder of a stalled InProgress \
+         claim (response names the displaced previous_holder). Person-gated: a manager, \
+         or the account whose own run holds the claim; 409 'runner <op>@<host> is \
+         actively working this ticket — pause it first' while the hub's runner is \
+         running it. Deploy of the human's work follows the existing deploy triggers \
+         — out of scope here",
+    ),
+    (
+        "/api/projects/:pid/ticket/:id/handback",
+        // The human claim lifecycle (CXA-F283): a person completing work they
+        // did by hand. The note is mandatory — it IS the handback's audit
+        // trail; the optional `ref` names the branch/commit.
+        "Complete work a person did by hand: body {reason: string (non-empty \
+         implementation note), ref?: string (branch/commit)}. Feature/chore \
+         land Done (DOCS queue), a bug Fixed (TEST verification); the claim \
+         clears and the note is recorded on the ticket thread. Person-gated: \
+         a manager or the account whose own run holds the claim; 409 while \
+         the hub's runner is actively working the ticket. Deploy of the \
+         human's work follows the existing deploy triggers (next shipped \
+         ticket or failed-deploy retry) — out of scope here",
     ),
     (
         "/api/projects/:pid/ticket/:id",

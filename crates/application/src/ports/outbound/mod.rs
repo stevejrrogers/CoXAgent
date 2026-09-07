@@ -44,7 +44,8 @@ pub use pr_report::{NullPrReporter, PrOpen, PrReporterPort, StorePrReporter};
 pub use probe::{ApiProbePort, ApiProof};
 pub use screenshot::ScreenshotPort;
 pub use state_store::{
-    mutate_state, GitCheck, QuarantineEntry, StateStorePort, WorkerCaps, WorkerEntry,
+    mutate_shard, mutate_state, GitCheck, QuarantineEntry, ShardData, ShardKind, StateShard,
+    StateStorePort, WorkerCaps, WorkerEntry,
 };
 pub use storage::StoragePort;
 pub use workspace::{FileMeta, WorkspaceFilesPort};

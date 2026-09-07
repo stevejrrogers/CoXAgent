@@ -261,7 +261,7 @@ async fn ac1_every_block_of_the_dev_brief_carries_its_origin_tag() {
         config,
         Arc::clone(&files),
     );
-    uc.execute().await.expect("run completes");
+    Box::pin(uc.execute()).await.expect("run completes");
 
     let req = engine.first_request();
     let prompt = &req.task_prompt;
@@ -333,7 +333,7 @@ async fn ac2_poisoned_wiki_text_is_withheld_from_the_brief() {
         Config::default(),
         Arc::new(MemFiles::new()),
     );
-    uc.execute().await.expect("run completes");
+    Box::pin(uc.execute()).await.expect("run completes");
 
     let prompt = engine.first_request().task_prompt;
     assert!(
@@ -366,7 +366,7 @@ async fn ac2_agent_journal_payload_is_flagged_not_removed() {
         Config::default(),
         Arc::new(MemFiles::new()),
     );
-    uc.execute().await.expect("run completes");
+    Box::pin(uc.execute()).await.expect("run completes");
 
     let prompt = engine.first_request().task_prompt;
     assert!(prompt.contains("[provenance: agent] FLAGGED by brief screening"));
@@ -405,7 +405,7 @@ async fn ac3_a_withheld_brief_note_posts_an_injection_flagged_item() {
         Config::default(),
         Arc::new(MemFiles::new()),
     );
-    uc.execute().await.expect("run completes");
+    Box::pin(uc.execute()).await.expect("run completes");
 
     let state = store.load().await.expect("load");
     let journal = &state.ticket_journal[TICKET];
@@ -518,7 +518,7 @@ async fn ac5_screening_off_restores_the_untagged_untainted_brief() {
         config,
         Arc::new(MemFiles::new()),
     );
-    uc.execute().await.expect("run completes");
+    Box::pin(uc.execute()).await.expect("run completes");
 
     let prompt = engine.first_request().task_prompt;
     assert!(

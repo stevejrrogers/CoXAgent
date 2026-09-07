@@ -187,7 +187,11 @@ async fn a_username_with_like_wildcards_never_backfills_another_users_token() {
         .principal_for_bearer(&minted)
         .await
         .expect("resolve the fresh personal token");
-    assert_eq!(mine.projects, vec!["proj-a"], "own token inherits own reach");
+    assert_eq!(
+        mine.projects,
+        vec!["proj-a"],
+        "own token inherits own reach"
+    );
 
     // And the colliding token is untouched: still owner-less, so its bearer
     // gains nothing from the underscore user's memberships.
