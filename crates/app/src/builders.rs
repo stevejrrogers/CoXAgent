@@ -824,14 +824,29 @@ pub(crate) async fn build_doc_store(
     }
 }
 
-/// Cold store for archived (evicted) tickets (CXA-F272/F274). The Mongo
-/// adapter takes this slot in production once F272 lands; until then the
-/// env-gated in-memory adapter stands in for dev/e2e runs
-/// (`COXAGENT_ARCHIVE_MEMORY=1`, optionally seeded via
-/// `COXAGENT_ARCHIVE_MEMORY_SEED`). Off by default: with nothing wired every
-/// archive read-back answers empty, exactly the pre-archive behavior.
-pub(crate) fn build_archive_store(
+/// Cold store for archived (evicted) tickets (CXA-F264b). The Mongo adapter
+/// (`MongoTicketArchive`, the `COXAGENT_MONGO_*` knobs shared with the docs
+/// store) takes the slot in production; the env-gated in-memory adapter
+/// stands in for dev/e2e runs (`COXAGENT_ARCHIVE_MEMORY=1`, optionally seeded
+/// via `COXAGENT_ARCHIVE_MEMORY_SEED`). Off by default: with nothing wired
+/// every archive read-back answers empty, exactly the pre-archive behavior,
+/// and an unreachable Mongo degrades to that same empty archive with a warn.
+pub(crate) async fn build_archive_store(
 ) -> Option<std::sync::Arc<dyn coxagent_application::ports::outbound::ArchiveStorePort>> {
+    match coxagent_infrastructure::MongoTicketArchive::from_env().await {
+        Ok(Some(store)) => {
+            tracing::info!("ticket archive: MongoDB cold store");
+            return Some(std::sync::Arc::new(store));
+        }
+        Ok(None) => {} // Mongo not configured: the dev/e2e memory gate decides below.
+        Err(e) => {
+            tracing::warn!(
+                "MongoDB ticket archive configured but unreachable ({e}); \
+                 falling back — archive read-back stays empty unless the \
+                 in-memory dev/e2e archive is enabled"
+            );
+        }
+    }
     match coxagent_infrastructure::MemoryArchiveStore::from_env() {
         Ok(Some(store)) => {
             tracing::info!("ticket archive: in-memory (dev/e2e; no Mongo cold store wired)");
