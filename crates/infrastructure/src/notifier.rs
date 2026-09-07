@@ -293,15 +293,22 @@ mod tests {
 
     #[tokio::test]
     async fn flusher_spawns_and_drains_in_the_background() {
-        // End-to-end through the public seam: spawn + notify, then wait for
-        // the background flusher to deliver and record the acknowledgement.
+        // End-to-end through the public seam: spool first, THEN spawn, and
+        // wait for the background flusher to deliver the acknowledgement.
+        // The order matters for determinism: spawned before the notify, the
+        // flusher's first pass can see an empty spool and sleep the full
+        // FLUSH_POLL_SECS — the same 5s this test's poll budget covers — so
+        // under load the wake-up raced the budget and the assert read
+        // Pending. Spawned after, the first pass always finds the entry due
+        // and delivers without that sleep; the loop below stays as the
+        // bounded wait for the (fast) localhost delivery.
         let (handle, url) = one_shot_listener(200);
         let spool: Arc<dyn OutboxStorePort> =
             Arc::new(FileOutboxStore::new(spool_dir()).expect("spool"));
-        spawn_outbox_flusher(Arc::clone(&spool), url);
         WebhookNotifier::new(Arc::clone(&spool))
             .notify(event())
             .await;
+        spawn_outbox_flusher(Arc::clone(&spool), url);
         for _ in 0..100 {
             tokio::time::sleep(Duration::from_millis(50)).await;
             if spool

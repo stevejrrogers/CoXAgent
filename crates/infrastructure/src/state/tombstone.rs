@@ -33,12 +33,26 @@ CREATE TABLE IF NOT EXISTS project_tombstone (
 /// atomically inside ONE statement — no lock regime needed for READ COMMITTED.
 /// Zero rows affected means "refused or stale"; the caller disambiguates with
 /// a fresh tombstone re-check.
+///
+/// Dual-write (CXA-C019b): `$5` is the aggregate's `ShardedState` document
+/// (see `state::shards` in the application crate and `super::sql_shards`),
+/// and BOTH branches refresh every per-shard JSONB column alongside the
+/// legacy `data` envelope, so envelope readers and native shard readers can
+/// never disagree about a committed write. Revisions stay envelope-level:
+/// `$4` CASes the row's single revision BIGINT.
 pub(crate) const GUARDED_SAVE_SQL: &str = "
-INSERT INTO project_state (project_id, schema_version, revision, data)
-SELECT $1, $2, 1, $3
+INSERT INTO project_state (project_id, schema_version, revision, data,
+                           shard_work, shard_social, shard_docs, shard_governance, shard_ops)
+SELECT $1, $2, 1, $3,
+       $5::jsonb->'work', $5::jsonb->'social', $5::jsonb->'docs', $5::jsonb->'governance', $5::jsonb->'ops'
  WHERE NOT EXISTS (SELECT 1 FROM project_tombstone WHERE project_id = $1)
 ON CONFLICT (project_id) DO UPDATE
     SET data = EXCLUDED.data,
+        shard_work = EXCLUDED.shard_work,
+        shard_social = EXCLUDED.shard_social,
+        shard_docs = EXCLUDED.shard_docs,
+        shard_governance = EXCLUDED.shard_governance,
+        shard_ops = EXCLUDED.shard_ops,
         schema_version = EXCLUDED.schema_version,
         revision = project_state.revision + 1,
         updated_at = now()
@@ -130,6 +144,42 @@ mod tests {
             GUARDED_SAVE_SQL.contains("WHERE project_state.revision = $4"),
             "the revision predicate is unchanged: {GUARDED_SAVE_SQL}"
         );
+    }
+
+    #[test]
+    fn the_guarded_save_dual_writes_every_shard_column_in_both_branches() {
+        // CXA-C019b: a committed write must refresh the shard columns in the
+        // SAME statement as the envelope — a writer that updated only `data`
+        // would make native shard reads serve stale fields. Every column is
+        // named in the INSERT column list (pinned exactly, not by a loose
+        // substring that could match the UPDATE branch), set from EXCLUDED in
+        // the conflict branch, and extracted from the sharded document $5.
+        let insert_list = GUARDED_SAVE_SQL
+            .split("INSERT INTO project_state (")
+            .nth(1)
+            .and_then(|tail| tail.split(')').next())
+            .expect("INSERT column list present");
+        for column in [
+            "shard_work",
+            "shard_social",
+            "shard_docs",
+            "shard_governance",
+            "shard_ops",
+        ] {
+            let shard = column.strip_prefix("shard_").expect("shard_ prefix");
+            assert!(
+                insert_list.split(',').any(|c| c.trim() == column),
+                "the INSERT branch must populate {column}: {GUARDED_SAVE_SQL}"
+            );
+            assert!(
+                GUARDED_SAVE_SQL.contains(&format!("{column} = EXCLUDED.{column}")),
+                "the ON CONFLICT branch must refresh {column}: {GUARDED_SAVE_SQL}"
+            );
+            assert!(
+                GUARDED_SAVE_SQL.contains(&format!("$5::jsonb->'{shard}'")),
+                "{column} must come from the sharded document parameter: {GUARDED_SAVE_SQL}"
+            );
+        }
     }
 
     #[test]
