@@ -57,13 +57,29 @@ pub fn kill_orphaned_drivers(work_dir: &Path) {
     let Some(scope) = work_dir.to_str().filter(|s| !s.trim().is_empty()) else {
         return; // no scope, no kills — never fall back to machine-wide
     };
+    // A worker runner's work_dir is a worktree slot
+    // (`<project>/.coxagent-worktrees/<slot>`), but a wedged engine's command
+    // line names whichever workspace IT was launched in — often the project's
+    // main `codebase`. Widening the ENGINE nets to the project root (the path
+    // above `.coxagent-worktrees`) lets any runner's sweep reap any of the
+    // project's engines; without it, the only runner whose scope matches is
+    // usually the one wedged awaiting that engine, so the sweep never fires
+    // (live incident, 2026-09-08). Still never machine-wide: the root is this
+    // project's own directory. Driver kills keep the narrow per-slot scope —
+    // a sibling slot's `cargo test` is legitimate work, not a leak.
+    let scope = scope.to_owned();
+    let engine_scope = scope
+        .split_once("/.coxagent-worktrees")
+        .map_or(scope.clone(), |(root, _)| root.to_owned());
+    let scope = scope.as_str();
+    let engine_scope = engine_scope.as_str();
     let my_pid = std::process::id().to_string();
     for pattern in ORPHAN_PATTERNS {
         let _ = kill_by_pattern(pattern, scope, &my_pid);
     }
     for pattern in ENGINE_PATTERNS {
-        let _ = kill_reparented_engines(pattern, scope, &my_pid);
-        let _ = kill_overbudget_engines(pattern, scope, &my_pid);
+        let _ = kill_reparented_engines(pattern, engine_scope, &my_pid);
+        let _ = kill_overbudget_engines(pattern, engine_scope, &my_pid);
     }
 }
 
@@ -261,6 +277,23 @@ mod tests {
         assert_eq!(etime_minutes("01:02:03"), 62);
         assert_eq!(etime_minutes("2-01:00:00"), 2 * 24 * 60 + 60);
         assert_eq!(etime_minutes("garbage"), 0, "unparseable = young = spared");
+    }
+
+    #[test]
+    fn slot_work_dir_widens_engine_scope_to_the_project_root() {
+        // A worker slot's path widens to the project root for the engine nets
+        // (the driver nets keep the narrow slot scope) — pure string law.
+        let slot = "/srv/proj/.coxagent-worktrees/proj-slot-2";
+        let widened = slot
+            .split_once("/.coxagent-worktrees")
+            .map_or(slot, |(root, _)| root);
+        assert_eq!(widened, "/srv/proj");
+        // A non-slot work_dir stays itself.
+        let plain = "/srv/proj/codebase";
+        let same = plain
+            .split_once("/.coxagent-worktrees")
+            .map_or(plain, |(root, _)| root);
+        assert_eq!(same, plain);
     }
 
     #[test]
