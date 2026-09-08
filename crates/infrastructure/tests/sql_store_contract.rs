@@ -9,8 +9,8 @@ mod common;
 
 use coxagent_application::ports::outbound::StateStorePort;
 use coxagent_application::state::{
-    ChatMsg, DocPage, ProjectState, SCHEMA_VERSION, ShardData, ShardKind, SocialShard, StateShard,
-    GENERAL_CHANNEL,
+    ChatMsg, DocPage, ProjectState, ShardData, ShardKind, SocialShard, StateShard, GENERAL_CHANNEL,
+    SCHEMA_VERSION,
 };
 use coxagent_application::PortError;
 use coxagent_domain::{Complexity, Priority, SemVer, Ticket, TicketId, TicketType};
@@ -347,14 +347,12 @@ async fn sql_store_shard_reads_serve_fresh_slices_then_each_saved_shard() {
             "a never-written project's {kind:?} must read as a fresh slice"
         );
     }
-    let ShardData::Work(fresh_work) =
-        store.load_shard(ShardKind::Work).await.expect("work").data
+    let ShardData::Work(fresh_work) = store.load_shard(ShardKind::Work).await.expect("work").data
     else {
         panic!("the Work kind must serve a Work payload");
     };
     assert_eq!(
-        fresh_work.schema_version,
-        SCHEMA_VERSION,
+        fresh_work.schema_version, SCHEMA_VERSION,
         "a fresh Work shard starts at the current schema version, never 0 — \
          a shard-native writer must produce a document the stores accept"
     );
@@ -394,7 +392,10 @@ async fn sql_store_load_shard_reads_the_native_column_not_the_envelope() {
         .await
         .expect("write the native-only column");
 
-    let shard = store.load_shard(ShardKind::Social).await.expect("native read");
+    let shard = store
+        .load_shard(ShardKind::Social)
+        .await
+        .expect("native read");
     assert_eq!(
         shard.data,
         ShardData::Social(native_only.clone()),
@@ -490,7 +491,10 @@ async fn sql_store_save_shard_merges_only_its_own_shard_and_keeps_the_envelope_c
     // The merged document still passes the write-boundary integrity audit as
     // a whole: a full save of it round-trips.
     let merged = store.load().await.expect("merged");
-    store.save(&merged).await.expect("full save of merged state");
+    store
+        .save(&merged)
+        .await
+        .expect("full save of merged state");
 }
 
 /// Optimistic concurrency: `save_shard_expecting` CASes the ENVELOPE
@@ -504,10 +508,7 @@ async fn sql_store_save_shard_expecting_conflicts_on_a_stale_revision_and_change
     };
     let store = connect_store(&db, "c019b-cas").await;
     store.save(&full_state()).await.expect("seed save");
-    let captured = store
-        .current_version()
-        .await
-        .expect("version after seed");
+    let captured = store.current_version().await.expect("version after seed");
 
     store
         .save_shard_expecting(&social_shard_with("first"), captured)
@@ -536,7 +537,10 @@ async fn sql_store_save_shard_expecting_conflicts_on_a_stale_revision_and_change
         "the refused write must not touch the envelope either"
     );
     assert_eq!(
-        store.current_version().await.expect("version after refusal"),
+        store
+            .current_version()
+            .await
+            .expect("version after refusal"),
         after_first,
         "the refused write must not advance the revision"
     );

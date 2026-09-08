@@ -832,6 +832,14 @@ pub struct GitConfig {
     /// Default 4. 0 = never surface the skip (old behaviour).
     #[serde(default = "default_review_max_skips")]
     pub review_max_skips: u32,
+    /// How many consecutive review rounds a kept-OPEN hold may be re-logged
+    /// identically (same reason, unchanged head) before the SAME cycle forces
+    /// a terminal decision: land the PR when it is safe to land, otherwise
+    /// close it. The counter lives in `pr_open_holds` (CXA-C026) — without it
+    /// a PR like #605 re-recorded "kept OPEN" eleven cycles in a row.
+    /// Default 3. 0 = holds never expire (the old behaviour).
+    #[serde(default = "default_hold_max_rounds")]
+    pub hold_max_rounds: u32,
     /// How long (hours) a mergeable CLEAN PR may sit open with NO review
     /// verdict before the runner stops waiting for the SA and verifies +
     /// merges it itself (an anti-starvation deadline, only when `auto_merge`
@@ -843,6 +851,10 @@ pub struct GitConfig {
 
 fn default_review_max_skips() -> u32 {
     4
+}
+
+fn default_hold_max_rounds() -> u32 {
+    3
 }
 
 fn default_review_deadline_hours() -> u32 {
@@ -883,6 +895,7 @@ impl Default for GitConfig {
             max_changed_lines: default_max_changed_lines(),
             server_url: String::new(),
             review_max_skips: default_review_max_skips(),
+            hold_max_rounds: default_hold_max_rounds(),
             review_deadline_hours: default_review_deadline_hours(),
         }
     }

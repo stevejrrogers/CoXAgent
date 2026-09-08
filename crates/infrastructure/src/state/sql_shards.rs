@@ -16,8 +16,8 @@
 //! fails compilation.
 
 use coxagent_application::state::{
-    DocsShard, GovernanceShard, OpsShard, ProjectState, SCHEMA_VERSION, ShardData, ShardKind,
-    SocialShard, StateShard, WorkShard,
+    DocsShard, GovernanceShard, OpsShard, ProjectState, ShardData, ShardKind, SocialShard,
+    StateShard, WorkShard, SCHEMA_VERSION,
 };
 use coxagent_application::PortError;
 
@@ -44,9 +44,7 @@ pub(crate) fn default_shard(kind: ShardKind) -> StateShard {
         ShardKind::Work => StateShard::new(ShardData::Work(WorkShard::default())),
         ShardKind::Social => StateShard::new(ShardData::Social(SocialShard::default())),
         ShardKind::Docs => StateShard::new(ShardData::Docs(DocsShard::default())),
-        ShardKind::Governance => {
-            StateShard::new(ShardData::Governance(GovernanceShard::default()))
-        }
+        ShardKind::Governance => StateShard::new(ShardData::Governance(GovernanceShard::default())),
         ShardKind::Ops => StateShard::new(ShardData::Ops(OpsShard::default())),
     }
 }
@@ -151,8 +149,7 @@ mod sql_shards_tests {
         let mut sharded = ProjectState::default().into_shards();
         for kind in ShardKind::ALL {
             let expected = sharded.take(kind);
-            let payload =
-                serde_json::to_value(&expected).expect("payload serializes");
+            let payload = serde_json::to_value(&expected).expect("payload serializes");
             assert_eq!(
                 decode_shard(kind, payload).expect("decodes"),
                 expected,

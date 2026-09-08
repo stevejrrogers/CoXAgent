@@ -290,6 +290,9 @@ struct SpyForge {
     /// untouched. Set it to an old RFC3339 stamp to exercise the
     /// anti-starvation deadline path.
     created: Option<String>,
+    /// What `recently_merged` reports: `(number, head branch)` pairs —
+    /// merges done by a human or another PR, for the merged-elsewhere path.
+    merged_list: Vec<(u64, String)>,
 }
 #[async_trait::async_trait]
 impl ForgePort for SpyForge {
@@ -297,8 +300,15 @@ impl ForgePort for SpyForge {
         unimplemented!()
     }
     async fn list_open_prs(&self) -> Result<Vec<PullRequest>, PortError> {
-        if let Some(items) = &self.competing {
-            return Ok(items
+        // Model the forge's truth: a PR this spy already closed or merged is
+        // no longer open — a later review pass must not see it again.
+        let gone: Vec<u64> = {
+            let closed = self.closed.lock().expect("lock");
+            let merged = self.merged.lock().expect("lock");
+            closed.iter().chain(merged.iter()).copied().collect()
+        };
+        let mut prs = if let Some(items) = &self.competing {
+            items
                 .iter()
                 .map(|(n, t, _)| PullRequest {
                     number: *n,
@@ -311,19 +321,22 @@ impl ForgePort for SpyForge {
                     mergeable: self.mergeable,
                     created: String::new(),
                 })
-                .collect());
-        }
-        Ok(vec![PullRequest {
-            number: 7,
-            title: "feat(X-1): add a".to_owned(),
-            head: "feat/X-1".to_owned(),
-            base: "main".to_owned(),
-            url: String::new(),
-            author: "coxagent-bot".to_owned(),
-            ci: self.ci.clone(),
-            mergeable: self.mergeable,
-            created: self.created.clone().unwrap_or_default(),
-        }])
+                .collect::<Vec<_>>()
+        } else {
+            vec![PullRequest {
+                number: 7,
+                title: "feat(X-1): add a".to_owned(),
+                head: "feat/X-1".to_owned(),
+                base: "main".to_owned(),
+                url: String::new(),
+                author: "coxagent-bot".to_owned(),
+                ci: self.ci.clone(),
+                mergeable: self.mergeable,
+                created: self.created.clone().unwrap_or_default(),
+            }]
+        };
+        prs.retain(|p| !gone.contains(&p.number));
+        Ok(prs)
     }
     async fn pr_diff(&self, n: u64) -> Result<String, PortError> {
         if let Some(items) = &self.competing {
@@ -344,6 +357,9 @@ impl ForgePort for SpyForge {
     async fn close_pr(&self, n: u64) -> Result<(), PortError> {
         self.closed.lock().expect("lock").push(n);
         Ok(())
+    }
+    async fn recently_merged(&self) -> Result<Vec<(u64, String)>, PortError> {
+        Ok(self.merged_list.clone())
     }
 }
 
@@ -716,6 +732,335 @@ async fn a_safe_subset_pr_is_not_held_by_a_load_bearing_competitor() {
     );
 }
 
+/// CXA-C026 wiring: drive the merged-elsewhere hold through consecutive
+/// review passes over ONE shared store, exactly how #605 burned eleven rounds.
+/// The single-entry `competing` list serves ONE open PR with a custom title.
+/// `max_rounds` is the expiry cap under test (0 = the brake is off).
+fn hold_expiry_uc(
+    forge: &Arc<SpyForge>,
+    store: &Arc<MemStore>,
+    max_rounds: u32,
+) -> RunCycleUseCase<MemStore, FailEngine> {
+    let mut cfg = Config::default();
+    cfg.git.enabled = true;
+    cfg.git.auto_merge = true;
+    cfg.git.review_deadline_hours = 0; // keep the anti-starvation path out
+    cfg.git.hold_max_rounds = max_rounds;
+    RunCycleUseCase::new(
+        Arc::clone(store),
+        Arc::new(FailEngine),
+        cfg,
+        PathBuf::from("/tmp"),
+        "goal".to_owned(),
+    )
+    .with_forge(Arc::clone(forge) as Arc<dyn ForgePort>)
+    .with_git(Arc::new(FakeGit {
+        ls_remote_sha: HEAD_SHA.to_owned(),
+        ..Default::default()
+    }) as Arc<dyn GitPort>)
+}
+
+#[tokio::test]
+async fn a_kept_open_hold_expires_after_three_rounds_and_closes() {
+    // CXA-C026: #605 re-recorded "kept OPEN — letting review land it" eleven
+    // cycles in a row — the merged-elsewhere hold runs BEFORE the head-sha
+    // dedup and records no review, so nothing ever counted the rounds. The
+    // hold now counts while the head is frozen and, at `hold_max_rounds`,
+    // forces the terminal close in favor of the merge that carried the ticket.
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: false, // unlandable → the terminal is a close
+        competing: Some(vec![(
+            7,
+            "fix(COX-B157): rebuild what the other merge missed".to_owned(),
+            "+ added a line".to_owned(),
+        )]),
+        merged_list: vec![(6, "feat/COX-B157".to_owned())],
+        ..Default::default()
+    });
+    let store = Arc::new(MemStore::default());
+    let uc = hold_expiry_uc(&forge, &store, 3);
+
+    // Round 1: first identical hold — logged with attribution, nothing ends.
+    uc.review_open_prs().await;
+    let hold = store
+        .load()
+        .await
+        .unwrap()
+        .pr_open_holds
+        .get(&7)
+        .expect("hold recorded")
+        .clone();
+    assert_eq!(hold.rounds, 1, "the first identical hold is round 1");
+    assert_eq!(hold.head_sha, HEAD_SHA, "rounds attribute to the head");
+    assert!(forge.closed.lock().expect("lock").is_empty());
+    assert!(forge.merged.lock().expect("lock").is_empty());
+
+    // Round 2: same hold, same head — counts up, still no terminal.
+    uc.review_open_prs().await;
+    let s = store.load().await.unwrap();
+    assert_eq!(s.pr_open_holds.get(&7).expect("held").rounds, 2);
+    assert!(
+        s.activity.iter().any(|a| a.action.contains("hold 2/3")),
+        "the log carries round attribution"
+    );
+    assert!(forge.closed.lock().expect("lock").is_empty());
+
+    // Round 3: at the cap — the SAME cycle forces the terminal close.
+    uc.review_open_prs().await;
+    assert_eq!(
+        *forge.closed.lock().expect("lock"),
+        vec![7],
+        "the unlandable held PR is closed exactly once at expiry"
+    );
+    assert!(forge.merged.lock().expect("lock").is_empty());
+    assert!(
+        !store.load().await.unwrap().pr_open_holds.contains_key(&7),
+        "the terminal decision clears the record"
+    );
+
+    // Round 4: the PR is gone from the forge — a no-op, never re-opened.
+    uc.review_open_prs().await;
+    assert_eq!(*forge.closed.lock().expect("lock"), vec![7]);
+    assert!(!store.load().await.unwrap().pr_open_holds.contains_key(&7));
+}
+
+#[tokio::test]
+async fn a_landable_hold_expires_into_a_forced_landing() {
+    // Same chain, but the PR IS landable (mergeable, marker- and
+    // scratch-free): at the cap the expiry lands it instead of closing —
+    // the hold itself says the diff carries work main lacks.
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: true,
+        competing: Some(vec![(
+            7,
+            "fix(COX-B157): rebuild what the other merge missed".to_owned(),
+            "+ added a line".to_owned(),
+        )]),
+        merged_list: vec![(6, "feat/COX-B157".to_owned())],
+        ..Default::default()
+    });
+    let store = Arc::new(MemStore::default());
+    let uc = hold_expiry_uc(&forge, &store, 3);
+
+    uc.review_open_prs().await;
+    uc.review_open_prs().await;
+    assert!(
+        forge.merged.lock().expect("lock").is_empty(),
+        "rounds 1-2 hold"
+    );
+
+    uc.review_open_prs().await;
+    assert_eq!(
+        *forge.merged.lock().expect("lock"),
+        vec![7],
+        "the landable held PR is merged exactly once at expiry"
+    );
+    assert!(forge.closed.lock().expect("lock").is_empty());
+    assert!(!store.load().await.unwrap().pr_open_holds.contains_key(&7));
+
+    uc.review_open_prs().await;
+    assert_eq!(*forge.merged.lock().expect("lock"), vec![7], "no re-merge");
+}
+
+#[tokio::test]
+async fn a_settled_ticket_hold_expires_the_same_way() {
+    // The OTHER kept-OPEN hold (settled ticket, diff not on main, unlandable)
+    // gets the same one-round expiry: rounds 1-2 log, round 3 closes.
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: false, // unlandable → the terminal is a close
+        competing: Some(vec![(
+            7,
+            "fix(COX-B200): a late second branch".to_owned(),
+            "+ added a line".to_owned(),
+        )]),
+        ..Default::default()
+    });
+    let store = Arc::new(MemStore::default());
+    let _ = crate::ports::outbound::mutate_state(store.as_ref(), |s| {
+        let mut settled = coxagent_domain::Ticket::new(
+            coxagent_domain::TicketId::new("COX-B200").expect("id"),
+            coxagent_domain::TicketType::Bug,
+            "d",
+            "",
+            coxagent_domain::Priority::High,
+            coxagent_domain::Complexity::Small,
+            false,
+        )
+        .expect("t");
+        settled
+            .transition_to(Role::DevBug, Status::InProgress)
+            .expect("claimed");
+        settled
+            .transition_to(Role::DevBug, Status::Fixed)
+            .expect("fixed");
+        settled
+            .transition_to(Role::Test, Status::Verified)
+            .expect("verified");
+        s.tickets.push(settled);
+        Ok(())
+    })
+    .await;
+    let uc = hold_expiry_uc(&forge, &store, 3);
+
+    uc.review_open_prs().await;
+    assert_eq!(
+        store
+            .load()
+            .await
+            .unwrap()
+            .pr_open_holds
+            .get(&7)
+            .expect("hold recorded")
+            .rounds,
+        1
+    );
+    assert!(forge.closed.lock().expect("lock").is_empty());
+
+    uc.review_open_prs().await;
+    assert_eq!(
+        store
+            .load()
+            .await
+            .unwrap()
+            .pr_open_holds
+            .get(&7)
+            .expect("held")
+            .rounds,
+        2
+    );
+    assert!(forge.closed.lock().expect("lock").is_empty());
+
+    uc.review_open_prs().await;
+    assert_eq!(
+        *forge.closed.lock().expect("lock"),
+        vec![7],
+        "the settled-ticket hold terminates at the cap"
+    );
+    assert!(!store.load().await.unwrap().pr_open_holds.contains_key(&7));
+}
+
+#[tokio::test]
+async fn a_restarted_hold_re_stamps_first_at_instead_of_inheriting_the_old_chain() {
+    // The hold on PR 7 was "merged elsewhere"; that merge aged out of the
+    // forge's recently-merged window and the ticket has since settled — so
+    // this round's hold is a DIFFERENT hold (the settled-site reason). A new
+    // chain starts at round 1, and `first_at` must be re-stamped now: the
+    // record would otherwise report an age this hold never accumulated.
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: false,
+        competing: Some(vec![(
+            7,
+            "fix(COX-B157): rebuild what the other merge missed".to_owned(),
+            "+ added a line".to_owned(),
+        )]),
+        ..Default::default()
+    });
+    let store = Arc::new(MemStore::default());
+    let _ = crate::ports::outbound::mutate_state(store.as_ref(), |s| {
+        let mut settled = coxagent_domain::Ticket::new(
+            coxagent_domain::TicketId::new("COX-B157").expect("id"),
+            coxagent_domain::TicketType::Bug,
+            "d",
+            "",
+            coxagent_domain::Priority::High,
+            coxagent_domain::Complexity::Small,
+            false,
+        )
+        .expect("t");
+        settled
+            .transition_to(Role::DevBug, Status::InProgress)
+            .expect("claimed");
+        settled
+            .transition_to(Role::DevBug, Status::Fixed)
+            .expect("fixed");
+        settled
+            .transition_to(Role::Test, Status::Verified)
+            .expect("verified");
+        s.tickets.push(settled);
+        s.pr_open_holds.insert(
+            7,
+            crate::state::PrOpenHold {
+                reason: "COX-B157 merged elsewhere but this diff is NOT on main".to_owned(),
+                rounds: 2,
+                head_sha: HEAD_SHA.to_owned(),
+                first_at: "2000-01-01T00:00:00Z".to_owned(),
+                last_at: "2000-01-01T00:00:00Z".to_owned(),
+            },
+        );
+        Ok(())
+    })
+    .await;
+    let uc = hold_expiry_uc(&forge, &store, 3);
+
+    uc.review_open_prs().await;
+    let hold = store
+        .load()
+        .await
+        .unwrap()
+        .pr_open_holds
+        .get(&7)
+        .expect("hold recorded")
+        .clone();
+    assert_eq!(
+        hold.reason, "COX-B157 is settled but the diff is NOT on main",
+        "the merged-elsewhere signal aged out; the settled site holds now"
+    );
+    assert_eq!(hold.rounds, 1, "a different reason is a different hold");
+    assert_eq!(hold.head_sha, HEAD_SHA);
+    assert_ne!(
+        hold.first_at, "2000-01-01T00:00:00Z",
+        "a fresh chain re-stamps first_at — inheriting the old hold's age is \
+         the stale attribution CXA-C026 exists to kill"
+    );
+}
+
+#[tokio::test]
+async fn hold_max_rounds_zero_is_the_legacy_never_expire_loop() {
+    // CXA-C026 ships armed at 3, but an operator pinning `git.hold_max_rounds`
+    // to 0 must get the exact pre-C026 loop back: the hold re-logs every
+    // round with the legacy (cap-free) line shape, nothing ever terminates,
+    // and no hold record is ever written — an old config must not grow new
+    // state or advertise a cap that does not exist.
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: false, // unlandable → nothing may merge it either
+        competing: Some(vec![(
+            7,
+            "fix(COX-B157): rebuild what the other merge missed".to_owned(),
+            "+ added a line".to_owned(),
+        )]),
+        merged_list: vec![(6, "feat/COX-B157".to_owned())],
+        ..Default::default()
+    });
+    let store = Arc::new(MemStore::default());
+    let uc = hold_expiry_uc(&forge, &store, 0);
+
+    for round in 1..=4 {
+        uc.review_open_prs().await;
+        let s = store.load().await.unwrap();
+        assert!(
+            s.activity
+                .iter()
+                .any(|a| a.action.contains("kept OPEN") && a.action.contains("merged elsewhere")),
+            "round {round} still re-logs the legacy kept-OPEN verdict"
+        );
+        assert!(
+            s.activity.iter().all(|a| !a.action.contains("/0")),
+            "the legacy shape never advertises a cap"
+        );
+        assert!(
+            s.pr_open_holds.is_empty(),
+            "with the brake off, no hold record is ever written"
+        );
+        assert!(forge.closed.lock().expect("lock").is_empty());
+        assert!(forge.merged.lock().expect("lock").is_empty());
+    }
+}
+
 // ---- COX-F001: auto-rollback to last known-good deploy on failure ----
 //
 // These encode the acceptance criteria only. No production rollback logic
@@ -833,6 +1178,9 @@ struct FakeGit {
     park_error: String,
     parks: Mutex<Vec<String>>,
     raw_calls: Mutex<Vec<String>>,
+    /// What `ls-remote origin refs/heads/<branch>` answers — the PR head sha
+    /// the review flow reads. Empty (the default) = git answered nothing.
+    ls_remote_sha: String,
 }
 impl FakeGit {
     fn raw_call_count(&self, needle: &str) -> usize {
@@ -887,6 +1235,7 @@ impl GitPort for FakeGit {
         match args.first() {
             Some(&"status") => (true, self.status_output.clone()),
             Some(&"for-each-ref") => (true, self.refs_output.clone()),
+            Some(&"ls-remote") => (true, self.ls_remote_sha.clone()),
             _ => (true, String::new()),
         }
     }

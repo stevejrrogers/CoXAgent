@@ -152,9 +152,8 @@ impl<S: StateStorePort + ?Sized> ClaimsUseCase<S> {
 fn runner_busy(holder: Option<&str>, active_runner: Option<&str>) -> Option<String> {
     let held = holder?;
     let runner = active_runner?;
-    (runner == held).then(|| {
-        format!("runner {held} is actively working this ticket — pause it first")
-    })
+    (runner == held)
+        .then(|| format!("runner {held} is actively working this ticket — pause it first"))
 }
 
 /// Pure takeover decision over one state snapshot (no IO — testable with a
@@ -252,9 +251,7 @@ fn handback_in_state(
         TicketType::Feature | TicketType::Chore => Status::Done,
     };
     let conflict = |e: coxagent_domain::DomainError| ClaimError::Conflict(e.to_string());
-    let t = state
-        .ticket_mut(id)
-        .ok_or(ClaimError::NotFound)?;
+    let t = state.ticket_mut(id).ok_or(ClaimError::NotFound)?;
     // Leaving InProgress through the transition table clears the claim —
     // the aggregate's own rule, not a separate un-claim.
     t.transition_to(Role::System, to).map_err(conflict)?;
@@ -356,7 +353,9 @@ mod tests {
         assert_eq!(out.claimed_by, "alice@hub");
         assert_eq!(out.ticket.claimed_by(), Some("alice@hub"));
         let state = store.load().await.expect("load");
-        let t = state.ticket(&TicketId::new("CXC-F1").expect("id")).expect("t");
+        let t = state
+            .ticket(&TicketId::new("CXC-F1").expect("id"))
+            .expect("t");
         assert_eq!(t.status(), Status::InProgress);
         assert_eq!(t.claimed_by(), Some("alice@hub"));
     }
@@ -443,8 +442,7 @@ mod tests {
         assert!(state
             .comments
             .iter()
-            .any(|c| c.body.contains("taken over by @carol")
-                && c.body.contains("was carol@mac")));
+            .any(|c| c.body.contains("taken over by @carol") && c.body.contains("was carol@mac")));
     }
 
     #[tokio::test]
@@ -485,7 +483,9 @@ mod tests {
             .expect("handback");
         assert_eq!(out.status, Status::Done);
         let state = store.load().await.expect("load");
-        let t = state.ticket(&TicketId::new("CXC-F1").expect("id")).expect("t");
+        let t = state
+            .ticket(&TicketId::new("CXC-F1").expect("id"))
+            .expect("t");
         assert_eq!(t.status(), Status::Done);
         assert_eq!(t.claimed_by(), None, "the transition clears the claim");
         // The note + ref are recorded on the ticket thread.
@@ -576,7 +576,10 @@ mod tests {
         assert!(may_touch_claim(false, "carol", Some("carol@hub")));
         assert!(may_touch_claim(false, "carol", Some("carol"))); // bare-account holder
         assert!(!may_touch_claim(false, "carol", Some("dev@mac")));
-        assert!(!may_touch_claim(false, "carol", None), "unclaimed -> managers only");
+        assert!(
+            !may_touch_claim(false, "carol", None),
+            "unclaimed -> managers only"
+        );
     }
 
     /// CXA-F283 AC5: the loop picks human work up with NO orchestrator change.
@@ -619,10 +622,7 @@ mod tests {
         assert!(documentable_candidates(&state).contains(&fid));
         // The bug sits on Fixed — the exact queue run_test.rs verifies against
         // regression before promoting to Verified.
-        assert_eq!(
-            state.ticket(&bid).expect("bug").status(),
-            Status::Fixed
-        );
+        assert_eq!(state.ticket(&bid).expect("bug").status(), Status::Fixed);
         // DEV's claim queue (Ready/Open) holds neither any more.
         assert!(
             !ready_feature_candidates(&state).contains(&fid),
