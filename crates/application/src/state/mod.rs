@@ -302,6 +302,12 @@ pub struct ProjectState {
     /// merge/close.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub pr_review_skips: std::collections::BTreeMap<u64, u32>,
+    /// The kept-OPEN review hold currently being counted per open PR
+    /// (CXA-C026): identical hold + unchanged head for `git.hold_max_rounds`
+    /// rounds forces a terminal decision (land or close) instead of re-logging
+    /// the hold forever. One entry per open PR; cleared on merge/close.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub pr_open_holds: std::collections::BTreeMap<u64, PrOpenHold>,
     /// Engine conversation id of the last fix run per PR — the next fix round
     /// RESUMES that conversation (the agent still has the branch, the feedback
     /// and its own changes in context) instead of starting cold. Dropped with
@@ -645,6 +651,7 @@ impl Default for ProjectState {
             last_digest_day: String::new(),
             pr_fix_attempts: std::collections::BTreeMap::new(),
             pr_review_skips: std::collections::BTreeMap::new(),
+            pr_open_holds: std::collections::BTreeMap::new(),
             pr_sessions: std::collections::BTreeMap::new(),
             ticket_sessions: std::collections::BTreeMap::new(),
             cost_holds: std::collections::BTreeMap::new(),

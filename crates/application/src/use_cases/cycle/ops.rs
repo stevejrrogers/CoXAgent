@@ -689,6 +689,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // rejection and force a redesign loop. Only externally-closed PRs
             // (a real person) must trigger that signal.
             s.seen_closed_prs.insert(number);
+            // A closed PR can never be held open again (CXA-C026): drop any
+            // kept-OPEN hold counter it was accumulating.
+            s.pr_open_holds.remove(&number);
             Ok(())
         })
         .await;

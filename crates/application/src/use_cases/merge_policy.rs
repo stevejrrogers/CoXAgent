@@ -304,6 +304,74 @@ pub fn commits_scratch(diff: &str) -> Option<String> {
         })
 }
 
+/// What this round should do with a kept-OPEN review hold (CXA-C026).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HoldExpiry {
+    /// Keep holding; the payload is the round count THIS round (1-based), for
+    /// the log line's attribution ("hold 2/3").
+    Keep(u32),
+    /// The identical hold reached `max_rounds` on an unchanged head and the PR
+    /// is landable — force the landing this same cycle.
+    Land(u32),
+    /// The identical hold reached `max_rounds` on an unchanged head and the PR
+    /// is NOT landable — close it this same cycle; a hold with no exit is how
+    /// a PR sits through eleven rounds of the identical re-log (#605).
+    Close(u32),
+}
+
+/// One-round expiry on a kept-OPEN review verdict (CXA-C026).
+///
+/// The SA's request-changes are deduped by head sha, but the two "kept OPEN"
+/// holds (merged-elsewhere, settled-ticket) run before that guard and never
+/// record a review — the only unbounded re-log path. This is the counting
+/// rule: a hold chain is `reason` + `head_sha`; an identical repeat advances
+/// it, and at `max_rounds` the SAME cycle forces a terminal decision instead
+/// of re-recording. `landable` decides which terminal — landing is preferred
+/// whenever the mechanical safeties hold, because the hold itself says the
+/// diff carries work main lacks; closing is for what cannot land.
+///
+/// `max_rounds == 0` disables the brake entirely (the pre-C026 behaviour,
+/// pinned so old configs keep working). An empty `head_sha` (git unavailable)
+/// never counts toward a terminal and never resets the chain: the round
+/// cannot be attributed to a head, and the irreversible side carries the
+/// burden of proof.
+#[must_use]
+pub fn open_hold_expiry(
+    prior: Option<&crate::state::PrOpenHold>,
+    reason: &str,
+    head_sha: &str,
+    landable: bool,
+    max_rounds: u32,
+) -> HoldExpiry {
+    if max_rounds == 0 {
+        return HoldExpiry::Keep(prior.map_or(1, |p| p.rounds));
+    }
+    let Some(prior) = prior else {
+        return HoldExpiry::Keep(1);
+    };
+    // A different reason is a different hold — new information, fresh chain.
+    if prior.reason != reason {
+        return HoldExpiry::Keep(1);
+    }
+    if head_sha.is_empty() {
+        // Git unavailable: the round can neither advance nor break the chain.
+        return HoldExpiry::Keep(prior.rounds.max(1));
+    }
+    if prior.head_sha != head_sha {
+        // The head moved — new code, fresh chain.
+        return HoldExpiry::Keep(1);
+    }
+    let rounds = prior.rounds.saturating_add(1);
+    if rounds < max_rounds {
+        return HoldExpiry::Keep(rounds);
+    }
+    if landable {
+        HoldExpiry::Land(rounds)
+    } else {
+        HoldExpiry::Close(rounds)
+    }
+}
+
 /// How many senior rescues one ticket may consume before the decision is a
 /// human's. Two, because the first rescue can misread the failure — a spec
 /// rewrite that turns out to hide a design dead end deserves the second look
@@ -674,6 +742,104 @@ mod merge_guard_tests {
             super::resolve_competing(safe, unsafe_other),
             super::CompeteOutcome::Hold(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod open_hold_expiry_tests {
+    use super::{open_hold_expiry, HoldExpiry};
+    use crate::state::PrOpenHold;
+
+    fn hold(reason: &str, rounds: u32, head: &str) -> PrOpenHold {
+        PrOpenHold {
+            reason: reason.to_owned(),
+            rounds,
+            head_sha: head.to_owned(),
+            first_at: "2026-09-06T00:00:00Z".to_owned(),
+            last_at: "2026-09-06T01:00:00Z".to_owned(),
+        }
+    }
+
+    const REASON: &str = "COX-B157 merged elsewhere but this diff is NOT on main";
+    const HEAD: &str = "abc123";
+
+    #[test]
+    fn a_fresh_hold_is_round_one_and_keeps_holding() {
+        assert_eq!(
+            open_hold_expiry(None, REASON, HEAD, false, 3),
+            HoldExpiry::Keep(1)
+        );
+    }
+
+    #[test]
+    fn the_same_hold_on_the_same_head_counts_up_until_the_cap() {
+        let prior = hold(REASON, 1, HEAD);
+        assert_eq!(
+            open_hold_expiry(Some(&prior), REASON, HEAD, false, 3),
+            HoldExpiry::Keep(2),
+            "under the cap: hold, but the count advances"
+        );
+    }
+
+    #[test]
+    fn at_the_cap_the_hold_forces_a_terminal_decision() {
+        let prior = hold(REASON, 2, HEAD);
+        // Landable: the diff is safe to land — landing beats closing, the
+        // hold itself says the work is not on main yet.
+        assert_eq!(
+            open_hold_expiry(Some(&prior), REASON, HEAD, true, 3),
+            HoldExpiry::Land(3)
+        );
+        // Not landable: close — a hold with no exit re-logs forever (#605).
+        assert_eq!(
+            open_hold_expiry(Some(&prior), REASON, HEAD, false, 3),
+            HoldExpiry::Close(3)
+        );
+    }
+
+    #[test]
+    fn a_moved_head_starts_a_fresh_chain() {
+        let prior = hold(REASON, 2, HEAD);
+        assert_eq!(
+            open_hold_expiry(Some(&prior), REASON, "def456", false, 3),
+            HoldExpiry::Keep(1),
+            "new code is new information for the reviewer"
+        );
+    }
+
+    #[test]
+    fn a_changed_reason_starts_a_fresh_chain() {
+        let prior = hold(REASON, 2, HEAD);
+        assert_eq!(
+            open_hold_expiry(Some(&prior), "a different hold entirely", HEAD, false, 3),
+            HoldExpiry::Keep(1)
+        );
+    }
+
+    #[test]
+    fn an_unattributable_head_neither_counts_nor_resets() {
+        // Git unavailable (empty sha): the round cannot be attributed to a
+        // head, so it must not push a PR toward a terminal — and it must not
+        // wipe an existing streak either.
+        let prior = hold(REASON, 2, HEAD);
+        assert_eq!(
+            open_hold_expiry(Some(&prior), REASON, "", false, 3),
+            HoldExpiry::Keep(2)
+        );
+    }
+
+    #[test]
+    fn max_rounds_zero_is_the_legacy_never_expire_behaviour() {
+        let prior = hold(REASON, 11, HEAD);
+        assert_eq!(
+            open_hold_expiry(Some(&prior), REASON, HEAD, false, 0),
+            HoldExpiry::Keep(11),
+            "0 = off, exactly like review_max_skips"
+        );
+        assert_eq!(
+            open_hold_expiry(Some(&prior), REASON, HEAD, true, 0),
+            HoldExpiry::Keep(11)
+        );
     }
 }
 

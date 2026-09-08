@@ -92,6 +92,7 @@ pub struct WorkShard {
     pub last_digest_day: String,
     pub pr_fix_attempts: std::collections::BTreeMap<u64, u32>,
     pub pr_review_skips: std::collections::BTreeMap<u64, u32>,
+    pub pr_open_holds: std::collections::BTreeMap<u64, PrOpenHold>,
     pub pr_sessions: std::collections::BTreeMap<u64, String>,
     pub ticket_sessions: std::collections::BTreeMap<String, String>,
     pub cost_holds: std::collections::BTreeMap<String, f64>,
@@ -161,6 +162,7 @@ impl Default for WorkShard {
             last_digest_day: String::new(),
             pr_fix_attempts: std::collections::BTreeMap::new(),
             pr_review_skips: std::collections::BTreeMap::new(),
+            pr_open_holds: std::collections::BTreeMap::new(),
             pr_sessions: std::collections::BTreeMap::new(),
             ticket_sessions: std::collections::BTreeMap::new(),
             cost_holds: std::collections::BTreeMap::new(),
@@ -401,6 +403,7 @@ impl ProjectState {
             last_digest_day,
             pr_fix_attempts,
             pr_review_skips,
+            pr_open_holds,
             pr_sessions,
             ticket_sessions,
             cost_holds,
@@ -478,6 +481,7 @@ impl ProjectState {
                 last_digest_day,
                 pr_fix_attempts,
                 pr_review_skips,
+                pr_open_holds,
                 pr_sessions,
                 ticket_sessions,
                 cost_holds,
@@ -599,6 +603,7 @@ impl ProjectState {
             last_digest_day,
             pr_fix_attempts,
             pr_review_skips,
+            pr_open_holds,
             pr_sessions,
             ticket_sessions,
             cost_holds,
@@ -723,6 +728,7 @@ impl ProjectState {
             last_digest_day,
             pr_fix_attempts,
             pr_review_skips,
+            pr_open_holds,
             pr_sessions,
             ticket_sessions,
             cost_holds,
@@ -1016,6 +1022,16 @@ mod shard_tests {
         s.last_digest_day = "2026-09-06".to_owned();
         s.pr_fix_attempts.insert(1, 1);
         s.pr_review_skips.insert(1, 2);
+        s.pr_open_holds.insert(
+            1,
+            PrOpenHold {
+                reason: "settled but diff not on main".to_owned(),
+                rounds: 2,
+                head_sha: "holdsha".to_owned(),
+                first_at: "2026-09-06T00:00:00Z".to_owned(),
+                last_at: "2026-09-06T01:00:00Z".to_owned(),
+            },
+        );
         s.pr_sessions.insert(1, "pr-session".to_owned());
         s.ticket_sessions.insert(
             "CXA-F293/dev_feature".to_owned(),

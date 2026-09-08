@@ -54,8 +54,8 @@ pub use backup::{
     is_excluded, path_stamp, rel_from, secret_statement, BackupOutcome, BackupRequest,
     BackupWorkspaceUseCase,
 };
-pub use conformance_check::RunConformanceUseCase;
 pub use claims::{may_touch_claim, ClaimError, ClaimsUseCase, HandbackOutcome, TakeoverOutcome};
+pub use conformance_check::RunConformanceUseCase;
 pub use coverage::{match_score, matches_criterion, record_verdicts};
 pub use cycle::{CycleReport, RunCycleUseCase};
 pub use duplicate_radar::{

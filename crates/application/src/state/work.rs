@@ -242,6 +242,31 @@ pub struct PrReview {
     pub latency_secs: Option<u64>,
 }
 
+/// One kept-OPEN review hold being counted toward its one-round expiry
+/// (CXA-C026). The SA's request-changes are head-sha deduped, but the two
+/// "kept OPEN" holds run before that guard and never record a review — so a
+/// PR like #605 re-logged the identical hold eleven cycles in a row with no
+/// counter and no terminal exit. This record IS the counter: one per open PR,
+/// counting identical holds while the head stays put, cleared the moment the
+/// PR merges or closes for any reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrOpenHold {
+    /// The hold being counted. A different reason is a different hold — the
+    /// chain restarts, because the situation changed and deserves fresh rounds.
+    pub reason: String,
+    /// Consecutive rounds this exact hold has now been recorded (1-based; the
+    /// first identical hold is round 1).
+    pub rounds: u32,
+    /// Head commit the rounds were counted against — a push resets the count,
+    /// because new code is new information for the reviewer.
+    #[serde(default)]
+    pub head_sha: String,
+    /// RFC3339 stamp of the first round — how long this has actually dragged.
+    pub first_at: String,
+    /// RFC3339 stamp of the most recent round.
+    pub last_at: String,
+}
+
 /// One ticket attachment (a PD design image, a screenshot): the record the UI
 /// lists. The bytes live in blob storage (`StoragePort`) under `key`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

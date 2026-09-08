@@ -13,18 +13,12 @@ use super::*;
 /// re-runs the same principal resolution against `AuthRole::can_manage` —
 /// on a hub with no accounts configured both read as the operator, who may
 /// manage everything.
-async fn claim_gate(
-    app: &AppState,
-    headers: &axum::http::HeaderMap,
-) -> Option<(String, bool)> {
+async fn claim_gate(app: &AppState, headers: &axum::http::HeaderMap) -> Option<(String, bool)> {
     let me = super::inbox::gate_principal(app, headers, |_| true).await?;
-    let can_manage = super::inbox::gate_principal(
-        app,
-        headers,
-        coxagent_application::AuthRole::can_manage,
-    )
-    .await
-    .is_some();
+    let can_manage =
+        super::inbox::gate_principal(app, headers, coxagent_application::AuthRole::can_manage)
+            .await
+            .is_some();
     Some((me, can_manage))
 }
 
@@ -178,16 +172,18 @@ pub(super) async fn handback_ticket_ep(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::store_rpc_test_support::{
-        app_with, body_text, CountingStore, StubAuth, INSIDE_SESSION, MEMBER_SESSION,
-        VIEWER_NOWHERE_SESSION, PID,
+        app_with, body_text, CountingStore, StubAuth, INSIDE_SESSION, MEMBER_SESSION, PID,
+        VIEWER_NOWHERE_SESSION,
     };
+    use super::*;
     use axum::body::Body;
     use coxagent_application::ports::outbound::StateStorePort;
     use coxagent_application::state::ProjectState;
     use coxagent_domain::ticket::Ticket;
-    use coxagent_domain::{Complexity, Priority, Role, Status, TechnicalDesign, TicketId, TicketType};
+    use coxagent_domain::{
+        Complexity, Priority, Role, Status, TechnicalDesign, TicketId, TicketType,
+    };
     use std::sync::Arc;
     use tower::ServiceExt;
 
@@ -254,10 +250,7 @@ mod tests {
                 "/api/projects/:pid/ticket/:id/handback",
                 post(handback_ticket_ep),
             )
-            .route_layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                auth_mw,
-            ))
+            .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth_mw))
             .with_state(state)
     }
 
@@ -324,7 +317,10 @@ mod tests {
         // Carol (member tier) may not pull fresh work — unclaimed tickets are
         // managers-only — and may not touch alice's stalled claim.
         let (app, _) = app_for(ProjectState {
-            tickets: vec![ready_feature("CXC-F1"), claimed_feature("CXC-F2", "alice@mac")],
+            tickets: vec![
+                ready_feature("CXC-F1"),
+                claimed_feature("CXC-F2", "alice@mac"),
+            ],
             ..ProjectState::default()
         })
         .await;
@@ -355,8 +351,8 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = serde_json::from_str::<serde_json::Value>(&body_text(resp).await)
-            .expect("json body");
+        let body =
+            serde_json::from_str::<serde_json::Value>(&body_text(resp).await).expect("json body");
         assert_eq!(body["ok"], json!(true));
         assert_eq!(body["claimed_by"], json!("alice@local"));
         assert_eq!(body["previous_holder"], json!(null));
@@ -385,10 +381,13 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = serde_json::from_str::<serde_json::Value>(&body_text(resp).await)
-            .expect("json body");
+        let body =
+            serde_json::from_str::<serde_json::Value>(&body_text(resp).await).expect("json body");
         assert_eq!(body["previous_holder"], json!("dev@mac"));
-        assert_eq!(store.snapshot().tickets[0].claimed_by(), Some("alice@local"));
+        assert_eq!(
+            store.snapshot().tickets[0].claimed_by(),
+            Some("alice@local")
+        );
     }
 
     #[tokio::test]
@@ -489,8 +488,8 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = serde_json::from_str::<serde_json::Value>(&body_text(resp).await)
-            .expect("json body");
+        let body =
+            serde_json::from_str::<serde_json::Value>(&body_text(resp).await).expect("json body");
         assert_eq!(body["status"], json!("done"));
 
         let snap = store.snapshot();

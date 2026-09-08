@@ -273,6 +273,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     if s.seen_merged_prs.contains(&number) {
                         return Ok(());
                     }
+                    // Merged PRs can never be held open again (CXA-C026).
+                    s.pr_open_holds.remove(&number);
                     // Stamp the merge time — the fix-on-fix brake reads it.
                     // Only for branches that NAME A REAL TICKET: an operator
                     // or infra branch ("fix/heal-names-refs") minted a
@@ -372,6 +374,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 crate::prompts::record_hub_lesson(self.files.as_deref(), &lesson).await;
                 let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
                     s.seen_closed_prs.insert(number);
+                    // A human already decided this PR's fate — the hold
+                    // counter is moot (CXA-C026).
+                    s.pr_open_holds.remove(&number);
                     s.add_lesson(&lesson);
                     s.journal_note(&ticket, &format!("human closed PR #{number} unmerged — redesign, don't recode"));
                     s.post_comment(
@@ -479,6 +484,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         s.pr_fix_attempts.remove(&pr.number);
                         s.pr_sessions.remove(&pr.number);
                         s.pr_review_skips.remove(&pr.number);
+                        // The PR is about to head to the merge sweep — its
+                        // kept-OPEN hold counter served its purpose (CXA-C026).
+                        s.pr_open_holds.remove(&pr.number);
                         Ok(())
                     })
                     .await;
@@ -508,6 +516,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             if forge.close_pr(pr.number).await.is_ok() {
                 let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
                     s.seen_closed_prs.insert(pr.number);
+                    // The agent's terminal close — the hold counter is moot (CXA-C026).
+                    s.pr_open_holds.remove(&pr.number);
                     Ok(())
                 })
                 .await;

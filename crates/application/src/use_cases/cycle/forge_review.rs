@@ -4,8 +4,8 @@
 use super::{diff_has_conflict_markers, ReviewVerdict, RunCycleUseCase};
 use crate::ports::outbound::{AgentEnginePort, AgentRequest, StateStorePort};
 use crate::use_cases::merge_policy::{
-    changed_files, competing_pr, needs_human_eyes, resolve_competing, CompeteCandidate,
-    CompeteOutcome,
+    changed_files, competing_pr, needs_human_eyes, open_hold_expiry, resolve_competing,
+    CompeteCandidate, CompeteOutcome, HoldExpiry,
 };
 use std::fmt::Write as _;
 
@@ -66,6 +66,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             if pr.base != target {
                 continue;
             }
+            // One head-sha read, two consumers: the kept-OPEN hold accounting
+            // below (CXA-C026 — it runs BEFORE the skip guard, which is the
+            // only place those holds can be seen) and the skip guard itself.
+            let head_sha = self.pr_head_sha(&pr.head).await;
             // These two run BEFORE the "head has not moved" guard below, and
             // that ordering is the whole point: a PR nobody should keep open
             // has a frozen head BY DEFINITION, so a check placed after the
@@ -82,12 +86,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     // still carry work the first one lacks. Same burden of
                     // proof as the settled-status close below: only close when
                     // this diff's substance is verifiably on main already.
-                    let landed = match forge.pr_diff(pr.number).await {
+                    let diff_read = forge.pr_diff(pr.number).await;
+                    let landed = match &diff_read {
                         Ok(d) => {
                             let mut on_main = std::collections::HashMap::new();
                             if let Some(files) = self.files.as_deref() {
                                 for (rel, _) in
-                                    crate::use_cases::merge_policy::added_lines_by_file(&d)
+                                    crate::use_cases::merge_policy::added_lines_by_file(d)
                                 {
                                     let path = self.work_dir.join(&rel);
                                     if let Some(body) = files.read(&path).await {
@@ -95,7 +100,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                                     }
                                 }
                             }
-                            crate::use_cases::merge_policy::diff_landed_on_main(&d, |rel| {
+                            crate::use_cases::merge_policy::diff_landed_on_main(d, |rel| {
                                 on_main.get(rel).cloned()
                             })
                         }
@@ -123,12 +128,85 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         }
                         continue;
                     }
-                    self.log_git(&format!(
-                        "review: PR #{} kept OPEN — {tid} merged elsewhere but this \
-                         diff is NOT on main; letting review land it",
-                        pr.number
-                    ))
-                    .await;
+                    // CXA-C026: this hold used to be re-logged identically
+                    // every cycle with no counter and no exit (#605 hit eleven
+                    // rounds) — the one path the head-sha dedup cannot reach,
+                    // because it records no review. It now counts and EXPIRES:
+                    // land it while the mechanical safeties hold, else close it
+                    // in favor of the merge that already carried {tid}.
+                    let landable = match &diff_read {
+                        Ok(d) => {
+                            pr.mergeable
+                                && !diff_has_conflict_markers(d)
+                                && crate::use_cases::merge_policy::commits_scratch(d).is_none()
+                        }
+                        Err(_) => false,
+                    };
+                    let reason = format!("{tid} merged elsewhere but this diff is NOT on main");
+                    match self
+                        .open_hold_round(pr.number, &reason, &head_sha, landable)
+                        .await
+                    {
+                        HoldExpiry::Keep(rounds) => {
+                            let at = self.hold_attribution(rounds);
+                            self.log_git(&format!(
+                                "review: PR #{} kept OPEN{at} — {tid} merged elsewhere but \
+                                 this diff is NOT on main; letting review land it",
+                                pr.number,
+                            ))
+                            .await;
+                        }
+                        HoldExpiry::Land(rounds) => {
+                            if forge.merge_pr(pr.number).await.is_ok() {
+                                let note = format!(
+                                    "Merged after {rounds} rounds held open on the same hold: \
+                                     {tid} is already merged elsewhere, review never landed \
+                                     this diff, and it is mergeable, conflict-marker- and \
+                                     scratch-free. Forcing the terminal decision instead of \
+                                     re-logging the hold."
+                                );
+                                let _ = forge.comment_pr(pr.number, &note).await;
+                                self.log_git(&format!(
+                                    "review: merged PR #{} — held {rounds} rounds on the \
+                                     merged-elsewhere hold; landed at expiry",
+                                    pr.number
+                                ))
+                                .await;
+                                continue;
+                            }
+                            // The forge refused the merge — fall through to
+                            // the normal review path. The record is already
+                            // cleared: a further hold starts a fresh chain.
+                        }
+                        HoldExpiry::Close(rounds) => {
+                            let note = format!(
+                                "Closing after {rounds} rounds held open on the same hold: \
+                                 {tid} is already merged elsewhere and this diff is not on \
+                                 main. Closing in favor of the merge that carried {tid}; \
+                                 reopen a fresh branch off current main if any of this work \
+                                 is still wanted."
+                            );
+                            let _ = forge.comment_pr(pr.number, &note).await;
+                            if forge.close_pr(pr.number).await.is_ok() {
+                                self.announce_pr_close(
+                                    pr.number,
+                                    &pr.title,
+                                    &format!(
+                                        "{rounds} rounds on the same hold: {tid} merged \
+                                         elsewhere — closed in its favor"
+                                    ),
+                                )
+                                .await;
+                                self.log_git(&format!(
+                                    "review: closed PR #{} — {tid} merged elsewhere, hold \
+                                     expired after {rounds} rounds",
+                                    pr.number
+                                ))
+                                .await;
+                            }
+                            continue;
+                        }
+                    }
                 }
                 let settled = self.store.load().await.ok().and_then(|s| {
                     s.tickets
@@ -223,6 +301,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                                  that keeps failing to happen."
                             );
                             let _ = forge.comment_pr(pr.number, &note).await;
+                            // Merged PRs can never be held open again (CXA-C026).
+                            let _ =
+                                crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                                    s.pr_open_holds.remove(&pr.number);
+                                    Ok(())
+                                })
+                                .await;
                             self.log_git(&format!(
                                 "review: merged PR #{} — {tid} settled, diff not on main, \
                                  mergeable and marker/scratch-free",
@@ -232,12 +317,57 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             continue;
                         }
                     }
-                    self.log_git(&format!(
-                        "review: PR #{} kept OPEN — {tid} is settled but the diff is \
-                         NOT on main; letting review land it",
-                        pr.number
-                    ))
-                    .await;
+                    // CXA-C026: the settled-ticket hold — same one-round
+                    // expiry as the merged-elsewhere hold above. `landable`
+                    // is false BY CONSTRUCTION here: the direct merge above
+                    // (mergeable + marker/scratch-free) was just attempted
+                    // and did not happen.
+                    let reason = format!("{tid} is settled but the diff is NOT on main");
+                    match self
+                        .open_hold_round(pr.number, &reason, &head_sha, false)
+                        .await
+                    {
+                        HoldExpiry::Close(rounds) => {
+                            let note = format!(
+                                "Closing after {rounds} rounds held open on the same hold: \
+                                 {tid} is settled, this diff is not on main, and it cannot \
+                                 land (conflicts or unsafe). The ticket's accepted work \
+                                 stays; reopen a fresh branch off current main if anything \
+                                 here is still missing."
+                            );
+                            let _ = forge.comment_pr(pr.number, &note).await;
+                            if forge.close_pr(pr.number).await.is_ok() {
+                                self.announce_pr_close(
+                                    pr.number,
+                                    &pr.title,
+                                    &format!(
+                                        "{rounds} rounds on the same hold: {tid} settled, \
+                                         diff unlandable — terminal close"
+                                    ),
+                                )
+                                .await;
+                                self.log_git(&format!(
+                                    "review: closed PR #{} — {tid} settled, hold expired \
+                                     after {rounds} rounds",
+                                    pr.number
+                                ))
+                                .await;
+                            }
+                            continue;
+                        }
+                        // `landable=false` means the pure core can never yield
+                        // Land here; keep holding either way — the legacy path
+                        // with round attribution, then the normal review below.
+                        HoldExpiry::Keep(rounds) | HoldExpiry::Land(rounds) => {
+                            let at = self.hold_attribution(rounds);
+                            self.log_git(&format!(
+                                "review: PR #{} kept OPEN{at} — {tid} is settled but the \
+                                 diff is NOT on main; letting review land it",
+                                pr.number,
+                            ))
+                            .await;
+                        }
+                    }
                     // fall through to the normal review path below
                 }
             }
@@ -272,7 +402,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
             // Skip PRs whose head has not moved since the last request-changes:
             // the verdict cannot change and the repeat comment is pure noise.
-            let head_sha = self.pr_head_sha(&pr.head).await;
             if self.already_reviewed_at(pr.number, &head_sha).await {
                 continue;
             }
@@ -404,6 +533,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                                     self.store.as_ref(),
                                     |s| {
                                         s.seen_closed_prs.insert(loser);
+                                        // Closed PRs can never be held open again (CXA-C026).
+                                        s.pr_open_holds.remove(&loser);
                                         Ok(())
                                     },
                                 )
@@ -535,6 +666,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                                             "landed via review-deadline (never reviewed)",
                                         )
                                         .await;
+                                    // Merged PRs can never be held open again (CXA-C026).
+                                    let _ = crate::ports::outbound::mutate_state(
+                                        self.store.as_ref(),
+                                        |s| {
+                                            s.pr_open_holds.remove(&pr.number);
+                                            Ok(())
+                                        },
+                                    )
+                                    .await;
                                 }
                                 Err(e) => {
                                     self.log_git(&format!("merge PR #{} failed: {e}", pr.number))
@@ -619,6 +759,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         }
                         match forge.merge_pr(pr.number).await {
                             Ok(()) => {
+                                // Merged PRs can never be held open again (CXA-C026).
+                                let _ = crate::ports::outbound::mutate_state(
+                                    self.store.as_ref(),
+                                    |s| {
+                                        s.pr_open_holds.remove(&pr.number);
+                                        Ok(())
+                                    },
+                                )
+                                .await;
                                 self.log_git(&format!("SA approved & merged PR #{}", pr.number))
                                     .await;
                             }
@@ -694,6 +843,93 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
         }
     }
+    /// The `(hold 2/3)` round attribution appended to a kept-OPEN log line —
+    /// how many identical rounds this hold has sat through and where the
+    /// terminal fires. Empty when the brake is off (`hold_max_rounds == 0`):
+    /// the legacy log shape must not advertise a cap that does not exist.
+    fn hold_attribution(&self, rounds: u32) -> String {
+        match self.config.git.hold_max_rounds {
+            0 => String::new(),
+            max => format!(" (hold {rounds}/{max})"),
+        }
+    }
+
+    /// CXA-C026: account one round of a kept-OPEN hold and decide whether it
+    /// expires. The DECISION is the pure [`open_hold_expiry`] in
+    /// `merge_policy`; this method is its state side-effect: `Keep` upserts
+    /// the round-attributed record, `Land`/`Close` clear it — the terminal
+    /// action itself belongs to the caller, whose hold branch knows what
+    /// landing and closing mean for that hold. With `git.hold_max_rounds == 0`
+    /// the brake is off and nothing is ever written, so old stores stay
+    /// byte-shaped.
+    async fn open_hold_round(
+        &self,
+        number: u64,
+        reason: &str,
+        head_sha: &str,
+        landable: bool,
+    ) -> HoldExpiry {
+        let max_rounds = self.config.git.hold_max_rounds;
+        let prior = if max_rounds == 0 {
+            None
+        } else {
+            self.store
+                .load()
+                .await
+                .ok()
+                .and_then(|s| s.pr_open_holds.get(&number).cloned())
+        };
+        let decision = open_hold_expiry(prior.as_ref(), reason, head_sha, landable, max_rounds);
+        if max_rounds > 0 {
+            let _ =
+                crate::ports::outbound::mutate_state(self.store.as_ref(), |s| match &decision {
+                    HoldExpiry::Keep(rounds) => {
+                        let now = crate::state::now_rfc3339();
+                        // The chain continues only when this round is the SAME
+                        // hold on the SAME head. A reset (new reason, moved
+                        // head) starts a fresh chain and must re-stamp
+                        // `first_at` — inheriting the old hold's stamp would
+                        // report an age the current hold never accumulated. An
+                        // unreadable head (empty sha) neither advances nor
+                        // breaks the chain, so it keeps the prior stamp.
+                        let (first_at, prev_sha) = match prior.as_ref() {
+                            Some(p)
+                                if p.reason == reason
+                                    && (head_sha.is_empty() || p.head_sha == head_sha) =>
+                            {
+                                (p.first_at.clone(), p.head_sha.clone())
+                            }
+                            _ => (now.clone(), String::new()),
+                        };
+                        s.pr_open_holds.insert(
+                            number,
+                            crate::state::PrOpenHold {
+                                reason: reason.to_owned(),
+                                rounds: *rounds,
+                                // Preserve the prior head's attribution when this
+                                // round's sha could not be read (git hiccup) —
+                                // the chain must survive the outage untouched.
+                                head_sha: if head_sha.is_empty() {
+                                    prev_sha
+                                } else {
+                                    head_sha.to_owned()
+                                },
+                                first_at,
+                                last_at: now,
+                            },
+                        );
+                        Ok(())
+                    }
+                    HoldExpiry::Land(_) | HoldExpiry::Close(_) => {
+                        s.pr_open_holds.remove(&number);
+                        Ok(())
+                    }
+                })
+                .await;
+        }
+        decision
+    }
+
     /// Persist the SA's verdict so the Review tab can show it as a suggestion.
     /// The PR head's current commit sha via `git ls-remote` — cheap, no
     /// checkout. Empty when it cannot be established (then no skip happens).

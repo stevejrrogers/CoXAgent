@@ -6,6 +6,7 @@
 
 use super::retry::{boot_backoff, retrying, BOOT_ATTEMPTS};
 use super::*;
+use std::pin::Pin;
 
 /// Build the state store for one project. Backend selection is ordered,
 /// REMOTE-first:
@@ -287,8 +288,34 @@ pub fn provision_local_token(_base: &Path) {
 
 /// Build one project: store, engine stack, runner (spawned, paused), returned as
 /// a `ProjectHandle` the hub server can host alongside others.
+///
+/// The future is boxed AT THE SOURCE: `ProjectState` grows with every feature
+/// (each new field widens every future that holds it), and this builder's
+/// future already sat just under clippy's `large_futures` bound — a single
+/// state field broke all four call sites at once. Boxing here once means the
+/// next field never breaks a caller again.
+/// The boxed future [`build_project`] returns — named once so the signature
+/// stays readable and the boxing stays in exactly one place.
+type BuildProjectFuture<'a> = Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<coxagent_presentation::ProjectHandle, Box<dyn std::error::Error>>,
+            > + Send
+            + 'a,
+    >,
+>;
+
+pub(crate) fn build_project<'a>(
+    id: &'a str,
+    state_dir: &'a Path,
+    work_dir: PathBuf,
+    auth: Option<&'a Arc<dyn coxagent_application::auth::AuthPort>>,
+) -> BuildProjectFuture<'a> {
+    Box::pin(build_project_inner(id, state_dir, work_dir, auth))
+}
+
 #[allow(clippy::too_many_lines)] // one linear wiring pass; splitting hurts readability
-pub(crate) async fn build_project(
+async fn build_project_inner(
     id: &str,
     state_dir: &Path,
     work_dir: PathBuf,

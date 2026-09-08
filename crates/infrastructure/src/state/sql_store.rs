@@ -10,9 +10,7 @@ use async_trait::async_trait;
 use coxagent_application::ports::outbound::{
     QuarantineEntry, StateStorePort, WorkerCaps, WorkerEntry,
 };
-use coxagent_application::state::{
-    ProjectState, SCHEMA_VERSION, ShardKind, StateShard,
-};
+use coxagent_application::state::{ProjectState, ShardKind, StateShard, SCHEMA_VERSION};
 use coxagent_application::PortError;
 use coxagent_domain::{Role, TicketId};
 use deadpool_postgres::Pool;
