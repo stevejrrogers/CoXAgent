@@ -28,6 +28,7 @@ mod pr_truth;
 mod preflight;
 mod scrum;
 mod ship_truth;
+mod sm_report;
 mod sm_watch;
 mod wiring;
 
@@ -840,6 +841,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // and inlining it here pushes the whole cycle future over 16KB.
             Box::pin(self.sm_unpark_tickets()).await;
             self.impediment_watch().await;
+            // SM status digest (CXA-F341): one deterministic board report per
+            // configured interval, only when the board moved. Pure snapshot
+            // in, chat post out — never an engine call on this tick.
+            self.sm_status_report().await;
 
             // Merge-queue recovery gate: with a blown-up queue the ONLY useful
             // work is merging — creative roles are paused below.

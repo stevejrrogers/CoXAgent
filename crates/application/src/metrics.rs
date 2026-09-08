@@ -322,7 +322,9 @@ pub use crate::metrics_brakes::{
     CHURN_BRAKE_OFF, CHURN_BRAKE_ON,
 };
 
-fn status_key(s: Status) -> &'static str {
+/// The stable snake_case key for a ticket status — the digest's counts line
+/// and its persisted delta baseline (`StatusDigestSnapshot`) are keyed by it.
+pub(crate) fn status_key(s: Status) -> &'static str {
     match s {
         Status::Pending => "pending",
         Status::Ready => "ready",

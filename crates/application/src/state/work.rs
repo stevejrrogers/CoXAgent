@@ -211,6 +211,32 @@ pub struct RoleHealth {
     pub last_error_at: String,
 }
 
+/// The digest-relevant counters as of the last SM status digest (CXA-F341).
+/// Persisted with the aggregate so the next digest — even after a hub
+/// restart — can report deltas ("in_progress 2 (+1)") against this baseline.
+/// Small derived state: written only by the status digest itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusDigestSnapshot {
+    /// Tickets per status key (`metrics::status_key`) at the last digest.
+    #[serde(default)]
+    pub counts: std::collections::BTreeMap<String, u32>,
+    /// Cumulative engine error+timeout counters (`role_health`) at the last
+    /// digest. The counters only ever grow (prunes reset them, and a reset
+    /// just reads as fewer new alerts), so `now - this` is how many
+    /// WARN/ERROR-level engine events happened since that digest.
+    #[serde(default)]
+    pub alerts: u64,
+}
+
+impl StatusDigestSnapshot {
+    /// True until the first digest has run — drives `skip_serializing_if`
+    /// so states that never used the digest stay byte-identical on save.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.counts.is_empty() && self.alerts == 0
+    }
+}
+
 /// A closed sprint's outcome — the velocity history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SprintRecord {

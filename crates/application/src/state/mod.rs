@@ -290,6 +290,26 @@ pub struct ProjectState {
     /// so exactly one digest lands per day regardless of restarts or operators.
     #[serde(default)]
     pub last_digest_day: String,
+    /// Wall-clock bucket of the last SM status digest (CXA-F341) — unix
+    /// seconds divided by the configured interval, so at most one digest is
+    /// consumed per bucket no matter how many runners or cycles tick in it.
+    #[serde(default)]
+    pub last_status_bucket: String,
+    /// Hash of the digest-relevant snapshot at the last SM status digest
+    /// (CXA-F341). An unchanged hash means the board didn't move and the SM
+    /// stays silent — a quiet system produces no 15-minute spam.
+    #[serde(default)]
+    pub last_status_hash: u64,
+    /// The per-status counts and alert totals at the last SM status digest
+    /// (CXA-F341) — the delta baseline, durable so deltas survive restarts.
+    #[serde(default, skip_serializing_if = "StatusDigestSnapshot::is_empty")]
+    pub last_status_snapshot: StatusDigestSnapshot,
+    /// Consecutive status-digest buckets suppressed because nothing changed
+    /// (CXA-F341). After a handful of them (see the SM status digest use
+    /// case) the SM posts one line acknowledging the quiet period, then
+    /// restarts the count — silence is deliberate, never a blackout.
+    #[serde(default)]
+    pub status_digest_quiet: u32,
     /// How many times a DEV agent has pushed fixes to each open PR (by number).
     /// Capped so a review↔fix ping-pong escalates to a human instead of
     /// burning tokens forever; entries are dropped when the PR closes.
@@ -600,6 +620,10 @@ pub const MAX_INCIDENTS: usize = 12;
 pub const MAX_TUNING_HISTORY: usize = 500;
 
 impl Default for ProjectState {
+    /// One line per field, mirroring the struct above — the same shape (and
+    /// the same allow) as [`crate::state::shards::WorkShard::default`], which
+    /// must stay field-for-field in lockstep with this.
+    #[allow(clippy::too_many_lines)]
     fn default() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
@@ -649,6 +673,10 @@ impl Default for ProjectState {
             cycle: 0,
             sprint_goal: String::new(),
             last_digest_day: String::new(),
+            last_status_bucket: String::new(),
+            last_status_hash: 0,
+            last_status_snapshot: StatusDigestSnapshot::default(),
+            status_digest_quiet: 0,
             pr_fix_attempts: std::collections::BTreeMap::new(),
             pr_review_skips: std::collections::BTreeMap::new(),
             pr_open_holds: std::collections::BTreeMap::new(),

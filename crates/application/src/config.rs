@@ -322,8 +322,11 @@ pub struct WorkflowConfig {
 }
 
 /// How often the periodic phases run. Zeros mean "use the built-in default" so
-/// an absent config block changes nothing.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// an absent config block changes nothing — except the CXA-F341 status-digest
+/// knobs, where an explicit `0` means OFF (digest disabled / no stale
+/// callout), so their defaults live in [`CadenceConfig::default`] instead of
+/// an accessor.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CadenceConfig {
     /// Wiki refresh budget per UTC day (0 = default 5).
@@ -332,6 +335,30 @@ pub struct CadenceConfig {
     pub debt_sweep_every_cycles: u64,
     /// SA architecture + docs audit every N sprints (0 = default 8).
     pub arch_review_every_sprints: u32,
+    /// SM status digest cadence in seconds (CXA-F341, default 900). `0`
+    /// disables the digest entirely.
+    pub status_report_interval_secs: u64,
+    /// Tickets sitting in the same active (non-terminal, non-held) status
+    /// longer than this many hours are called out by id in the SM status
+    /// digest (CXA-F341, default 48). `0` hides the callout line.
+    pub status_stale_hours: u64,
+}
+
+impl Default for CadenceConfig {
+    /// The derived zero-default of the three older knobs stays correct —
+    /// their accessors resolve 0 to the built-in default — but the
+    /// status-digest knobs need real defaults here, because for them a
+    /// resolved 0 would DISABLE the feature an absent config block must
+    /// keep on.
+    fn default() -> Self {
+        Self {
+            docs_refreshes_per_day: 0,
+            debt_sweep_every_cycles: 0,
+            arch_review_every_sprints: 0,
+            status_report_interval_secs: 900,
+            status_stale_hours: 48,
+        }
+    }
 }
 
 impl CadenceConfig {
@@ -1145,14 +1172,22 @@ mod tests {
         assert_eq!(c.docs_refreshes_per_day(), 5);
         assert_eq!(c.debt_sweep_every_cycles(), 10);
         assert_eq!(c.arch_review_every_sprints(), 8);
+        // CXA-F341: the status-digest knobs carry their defaults in
+        // `Default` itself, because 0 on the interval means DISABLED.
+        assert_eq!(c.status_report_interval_secs, 900);
+        assert_eq!(c.status_stale_hours, 48);
         let c = CadenceConfig {
             docs_refreshes_per_day: 2,
             debt_sweep_every_cycles: 50,
             arch_review_every_sprints: 3,
+            status_report_interval_secs: 1800,
+            status_stale_hours: 72,
         };
         assert_eq!(c.docs_refreshes_per_day(), 2);
         assert_eq!(c.debt_sweep_every_cycles(), 50);
         assert_eq!(c.arch_review_every_sprints(), 3);
+        assert_eq!(c.status_report_interval_secs, 1800);
+        assert_eq!(c.status_stale_hours, 72);
     }
 
     /// CXA-F259: a legacy `coxagent.json` without the stall knobs loads with
