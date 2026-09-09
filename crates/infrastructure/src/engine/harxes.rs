@@ -158,7 +158,10 @@ impl AgentEnginePort for HarxesEngine {
         let role = format!("{:?}", request.role).to_lowercase();
         let live = live_path(&request.work_dir, &role, request.label.as_deref());
         if let Some(p) = &live {
-            let _ = std::fs::write(p, format!("# {role} — harxes live @ run start\n"));
+            let _ = std::fs::write(
+                p,
+                format!("# {role} — harxes · {} — run start\n", self.model),
+            );
         }
         let handle = engine.run(RunRequest {
             prompt: request.task_prompt.clone(),
@@ -260,11 +263,18 @@ fn render_engine_error(e: &EngineError) -> String {
 
 /// Buffers streaming Text/Reasoning deltas into whole lines; tool events and
 /// retries flush the buffer first so ordering is preserved.
+///
+/// Lines are written in the dashboard's shared work-log line protocol
+/// (`parseWorklog` in shell.js): `🧠` thinking, `💬` message start (plain
+/// continuation lines attach to the open message), `🔧 name(args)` tool call,
+/// `↳` tool result with `┆`-indented preview, `↻` provider retry.
 #[derive(Default)]
 struct Coalescer {
     /// Pending partial line and whether it is reasoning (true) or text.
     buf: String,
     reasoning: bool,
+    /// A `💬` message is open: further plain text lines are continuations.
+    msg_open: bool,
 }
 
 impl Coalescer {
@@ -283,18 +293,32 @@ impl Coalescer {
                 }
             }
             RunEvent::ToolStart { name, summary } => {
-                self.flush(live_file, trace);
-                Self::emit_raw(&format!("▶ {name}: {summary}"), live_file, trace);
+                self.close_msg(live_file, trace);
+                Self::emit_raw(&format!("🔧 {name}({summary})"), live_file, trace);
             }
-            RunEvent::ToolEnd { name, summary } => {
-                self.flush(live_file, trace);
-                Self::emit_raw(&format!("✓ {name}: {summary}"), live_file, trace);
+            RunEvent::ToolEnd { name: _, summary } => {
+                self.close_msg(live_file, trace);
+                // Multi-line result: first line is the inline summary, the
+                // rest becomes the click-to-open preview body.
+                let mut lines = summary.lines();
+                let head = lines.next().unwrap_or_default();
+                Self::emit_raw(&format!("↳ {head}"), live_file, trace);
+                for l in lines {
+                    Self::emit_raw(&format!("┆ {l}"), live_file, trace);
+                }
             }
             RunEvent::Retry { wait_secs } => {
-                self.flush(live_file, trace);
+                self.close_msg(live_file, trace);
                 Self::emit_raw(&format!("↻ provider retry in {wait_secs}s"), live_file, trace);
             }
         }
+    }
+
+    /// Flush pending text and end the open message block, so the next text
+    /// line starts a fresh `💬` bubble instead of gluing onto the old one.
+    fn close_msg(&mut self, live_file: Option<&Path>, trace: &mut String) {
+        self.flush(live_file, trace);
+        self.msg_open = false;
     }
 
     fn flush(&mut self, live_file: Option<&Path>, trace: &mut String) {
@@ -306,14 +330,18 @@ impl Coalescer {
         self.emit(line.trim_end(), live_file, trace);
     }
 
-    fn emit(&self, line: &str, live_file: Option<&Path>, trace: &mut String) {
+    fn emit(&mut self, line: &str, live_file: Option<&Path>, trace: &mut String) {
         if line.is_empty() {
             return;
         }
         let rendered = if self.reasoning {
-            format!("[thinking] {line}")
-        } else {
+            self.msg_open = false;
+            format!("🧠 {line}")
+        } else if self.msg_open {
             line.to_owned()
+        } else {
+            self.msg_open = true;
+            format!("💬 {line}")
         };
         Self::emit_raw(&rendered, live_file, trace);
     }
@@ -461,8 +489,30 @@ mod tests {
         );
         assert_eq!(
             trace,
-            "[thinking] Let me begin.\n[thinking] Next\n▶ Bash: ls\n",
+            "🧠 Let me begin.\n🧠 Next\n🔧 Bash(ls)\n",
             "deltas coalesce into whole lines; tool events flush first"
+        );
+    }
+
+    #[test]
+    fn coalescer_speaks_the_worklog_line_protocol() {
+        let mut trace = String::new();
+        let mut co = Coalescer::default();
+        co.feed(&RunEvent::Text("Done. Summary:\nAll tests pass.\n".to_owned()), None, &mut trace);
+        co.feed(
+            &RunEvent::ToolEnd {
+                name: "Bash".to_owned(),
+                summary: "exit=0\n220 passed".to_owned(),
+            },
+            None,
+            &mut trace,
+        );
+        co.feed(&RunEvent::Text("Next step.\n".to_owned()), None, &mut trace);
+        co.feed(&RunEvent::Retry { wait_secs: 3 }, None, &mut trace);
+        assert_eq!(
+            trace,
+            "\u{1f4ac} Done. Summary:\nAll tests pass.\n\u{21b3} exit=0\n\u{2506} 220 passed\n\u{1f4ac} Next step.\n\u{21bb} provider retry in 3s\n",
+            "first text line opens a \u{1f4ac} bubble, continuations stay plain, tool end splits into summary + preview"
         );
     }
 

@@ -1407,6 +1407,12 @@ function wlShortPath(p){
 function wlSay(name,args){
   const n=String(name||"").toLowerCase().replace(/^mcp__[^_]*__/,"");
   const raw=String(args||"");
+  // harxes emits human summaries, not JSON args — show them verbatim under
+  // the tool's own verb/icon instead of trying to salvage JSON keys.
+  if(raw && !raw.trim().startsWith("{")){
+    const verbs={read:"Read",edit:"Edit",write:"Write",bash:"Run",grep:"Search",glob:"Find files",list:"List",skill:"Skill",webfetch:"Fetch"};
+    return {verb:verbs[n]||name,detail:raw.length>110?raw.slice(0,110)+"…":raw};
+  }
   let a={};
   try{a=JSON.parse(raw||"{}");}catch(e){
     // The log line is often TRUNCATED mid-JSON, which used to leave a bare
@@ -1494,6 +1500,20 @@ function parseWorklog(raw){
     if(/^#\s/.test(s)){ flush(); items.push({k:"meta",text:s.replace(/^#\s*/,"")}); continue; }
     if(/^\s*—\s*run finished/.test(s)){ flush(); items.push({k:"end"}); continue; }
     if(s.startsWith("💬")){ flush(); cur={k:"msg",text:s.slice(2).replace(/^\s+/,"")}; continue; }
+    // 🧠 thinking (harxes reasoning stream) — consecutive lines fold into ONE
+    // collapsible block so a long deliberation reads as a chapter, not a wall.
+    const th=s.startsWith("🧠")?s.slice(2).replace(/^\s+/,""):(s.match(/^\[thinking\]\s?(.*)$/)||[])[1];
+    if(th!=null){ const last=cur===null?items[items.length-1]:null;
+      if(last&&last.k==="think"){ last.text+="\n"+th; } else { flush(); items.push({k:"think",text:th}); }
+      continue; }
+    // ↻ provider retry (transient backoff — a status beat, not an error).
+    if(/^↻\s/.test(s)){ flush(); items.push({k:"retry",text:s.replace(/^↻\s*/,"")}); continue; }
+    // Legacy harxes markers (pre-protocol logs): ▶ tool start / ✓ tool end.
+    const lg=s.match(/^([▶✓])\s+(\w+):\s*(.*)$/);
+    if(lg){ flush();
+      if(lg[1]==="▶") items.push({k:"tool",name:lg[2],args:lg[3]});
+      else items.push({k:"result",info:lg[3],body:[]});
+      continue; }
     if(s.startsWith("🔧")){ flush(); const m=s.slice(2).trim(); const i=m.indexOf("(");
       items.push({k:"tool",name:i>=0?m.slice(0,i):m,args:i>=0?m.slice(i+1).replace(/\)$/,""):""}); continue; }
     // Result line: the backend now emits a human summary ("↳ ✓ 220 passed");
@@ -1552,6 +1572,15 @@ function wlVerdictCard(text){
 // "refresh" flicker on every SSE push).
 function wlItemHtml(it){
   if(it.k==="meta") return `<i class="ti ti-player-play"></i> ${esc(it.text)}`;
+  if(it.k==="think"){
+    // Collapsed by default: the first line as a teaser, the full chain of
+    // thought one click away. Keeps the log scannable while losing nothing.
+    const lines=String(it.text||"").split("\n");
+    const teaser=lines[0].length>110?lines[0].slice(0,110)+"…":lines[0];
+    const n=lines.length;
+    return `<details class="wl-think-d"><summary><i class="ti ti-bulb"></i><span class="wl-think-lbl">thinking${n>1?` · ${n} steps`:""}</span><span class="wl-think-tz">${wlFmt(teaser)}</span></summary><div class="wl-think-body">${wlFmt(it.text)}</div></details>`;
+  }
+  if(it.k==="retry") return `<span class="wl-chip wl-retry-chip"><i class="ti ti-refresh wl-tic" style="color:var(--amber)"></i><span class="wl-tname">${esc(it.text)}</span></span>`;
   if(it.k==="end")  return `<span><i class="ti ti-circle-check"></i> run finished</span>`;
   if(it.k==="tool"){ const m=wlToolMeta(it.name);
     // Harness-control calls read like errors to a person ("ScheduleWakeup
