@@ -1,0 +1,380 @@
+//! Adapter over the embedded `harxes-core` engine (CXA-F372) — the first
+//! IN-PROCESS engine: no child process is spawned for the agent loop itself,
+//! so the whole zombie class (a wedged CLI outliving its dropped caller)
+//! cannot exist. Dropping the run future cancels the LLM call and kills the
+//! process group of every Bash tool child (harxes-core's contract, covered by
+//! its `drop_mid_run_leaves_no_process` test).
+//!
+//! Provider routing mirrors the hub's `provider/model` string convention:
+//!   * `anthropic/<model>`  → Anthropic Messages API (`ANTHROPIC_API_KEY`,
+//!     optional `ANTHROPIC_BASE_URL`);
+//!   * `copilot/<model>`    → GitHub Copilot native API (`GH_TOKEN` /
+//!     `GITHUB_TOKEN` OAuth token; harxes-core exchanges + refreshes the
+//!     short-lived bearer itself);
+//!   * anything else        → OpenAI-compatible (LiteLLM — the primary path):
+//!     `COXAGENT_LLM_BASE_URL`/`COXAGENT_LLM_API_KEY`, falling back to
+//!     `OPENAI_BASE_URL`/`OPENAI_API_KEY`. The full `provider/model` string is
+//!     passed through as the model id, exactly as the opencode adapter does.
+//!
+//! Sandbox: the hub's confinement is injected as harxes-core's `ShellPort`
+//! (`ConfinedShell`) — every Bash command the agent runs goes through
+//! `proc::agent_command`, the same seatbelt/nice path the CLI engines use.
+//! Permission mode is `AllowUnlessDenied` precisely because the shell IS
+//! host-confined (the mode's documented precondition); parity with the CLI
+//! engines' `--dangerously-skip-permissions`-inside-seatbelt posture.
+//!
+//! Error mapping preserves the F370 infra/task split without string-matching
+//! on our side inventing anything: `EngineError::is_infra_fault()` decides,
+//! and the message is rendered with the vocabulary `faults::is_infra_fault`
+//! already recognizes ("timed out", "unavailable"), so the DEV failure
+//! counter and the runner breaker classify harxes outcomes identically to
+//! every other engine.
+
+use async_trait::async_trait;
+use coxagent_application::ports::outbound::engine::{
+    AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus, Usage,
+};
+use coxagent_application::PortError;
+use harxes_core::{
+    CommandOutput, CommandPolicy, EngineConfig, EngineError, LoopLimits, PermissionMode,
+    ProviderSpec, RunEvent, RunOutcome, RunRequest, ShellError, ShellExitStatus, ShellPort,
+};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+/// In-process Harxes engine for one model selection.
+pub struct HarxesEngine {
+    /// Full `provider/model` selection string from config.
+    model: String,
+    sandbox: bool,
+}
+
+impl HarxesEngine {
+    #[must_use]
+    pub fn new(model: impl Into<String>) -> Self {
+        Self {
+            model: model.into(),
+            sandbox: false,
+        }
+    }
+
+    /// Confine agent Bash commands to the workspace + tool caches.
+    #[must_use]
+    pub fn with_sandbox(mut self, sandbox: bool) -> Self {
+        self.sandbox = sandbox;
+        self
+    }
+
+    /// Resolve the provider from the hub's `provider/model` convention.
+    fn provider_spec(&self) -> Result<ProviderSpec, PortError> {
+        let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+        if let Some(rest) = self.model.strip_prefix("anthropic/") {
+            let _ = rest;
+            return Ok(ProviderSpec::Anthropic {
+                base_url: env("ANTHROPIC_BASE_URL")
+                    .unwrap_or_else(|| "https://api.anthropic.com/v1/messages".to_owned()),
+                api_key: env("ANTHROPIC_API_KEY").ok_or_else(|| {
+                    PortError::Backend("harxes: ANTHROPIC_API_KEY is not set".to_owned())
+                })?,
+            });
+        }
+        if self.model.strip_prefix("copilot/").is_some() {
+            return Ok(ProviderSpec::Copilot {
+                github_token: env("GH_TOKEN").or_else(|| env("GITHUB_TOKEN")).ok_or_else(
+                    || {
+                        PortError::Backend(
+                            "harxes: GH_TOKEN/GITHUB_TOKEN is not set for the copilot provider"
+                                .to_owned(),
+                        )
+                    },
+                )?,
+            });
+        }
+        let base_url = env("COXAGENT_LLM_BASE_URL")
+            .or_else(|| env("OPENAI_BASE_URL"))
+            .ok_or_else(|| {
+                PortError::Backend(
+                    "harxes: COXAGENT_LLM_BASE_URL/OPENAI_BASE_URL is not set".to_owned(),
+                )
+            })?;
+        let api_key = env("COXAGENT_LLM_API_KEY")
+            .or_else(|| env("OPENAI_API_KEY"))
+            .unwrap_or_default();
+        Ok(ProviderSpec::OpenAiCompatible { base_url, api_key })
+    }
+
+    /// The model id sent to the provider. Anthropic/Copilot get the bare
+    /// model (their APIs know no `provider/` namespace); OpenAI-compatible
+    /// keeps the full string — LiteLLM routes on it, same as opencode.
+    fn provider_model(&self) -> String {
+        for p in ["anthropic/", "copilot/"] {
+            if let Some(rest) = self.model.strip_prefix(p) {
+                return rest.to_owned();
+            }
+        }
+        self.model.clone()
+    }
+
+    fn build_engine(
+        &self,
+        work_dir: &Path,
+    ) -> Result<harxes_core::HarxesEngine, PortError> {
+        let cfg = EngineConfig {
+            provider: self.provider_spec()?,
+            model: self.provider_model(),
+            limits: LoopLimits::default(),
+            command_policy: CommandPolicy::default(),
+            // The shell below IS host-confined — the documented precondition
+            // for this mode. With DenyUnlessAllowed and no allowlist the
+            // agent could run nothing at all.
+            permission: PermissionMode::AllowUnlessDenied,
+            shell: Some(Arc::new(ConfinedShell {
+                sandbox: self.sandbox,
+                work_dir: work_dir.to_path_buf(),
+            })),
+            fs: None,
+        };
+        harxes_core::HarxesEngine::new(cfg)
+            .map_err(|e| PortError::Backend(format!("harxes: engine config: {e}")))
+    }
+}
+
+#[async_trait]
+impl AgentEnginePort for HarxesEngine {
+    fn id(&self) -> &'static str {
+        "harxes"
+    }
+
+    fn sandbox_status(&self) -> SandboxStatus {
+        crate::proc::sandbox_status(self.sandbox)
+    }
+
+    async fn run(&self, request: AgentRequest) -> Result<AgentOutcome, PortError> {
+        let engine = self.build_engine(&request.work_dir)?;
+        let handle = engine.run(RunRequest {
+            prompt: request.task_prompt.clone(),
+            system_prompt: Some(request.system_prompt.clone()),
+            history: Vec::new(),
+            timeout: Some(request.timeout),
+            model: None,
+        });
+        let (mut events, mut driver) = handle.split();
+
+        // Drain the live event stream into the work-log trace while driving
+        // the run. Dropping `driver` (this future being cancelled from above)
+        // cancels the whole run — harxes-core's contract.
+        let mut trace = String::new();
+        let outcome = loop {
+            tokio::select! {
+                ev = events.recv() => {
+                    if let Some(ev) = ev {
+                        append_trace(&mut trace, &ev);
+                    }
+                }
+                done = &mut driver => break done,
+            }
+        };
+        // Flush any events that raced the driver's completion.
+        while let Ok(ev) = events.try_recv() {
+            append_trace(&mut trace, &ev);
+        }
+
+        match outcome {
+            Ok(out) => Ok(finish(out, trace, self)),
+            Err(e) => Err(PortError::Backend(render_engine_error(&e))),
+        }
+    }
+}
+
+/// Map a completed run onto the port's outcome shape.
+fn finish(out: RunOutcome, trace: String, engine: &HarxesEngine) -> AgentOutcome {
+    let guardrail = matches!(out.stop_reason, harxes_core::StopReason::Guardrail);
+    AgentOutcome {
+        stdout: out.final_text,
+        stderr: if guardrail {
+            format!(
+                "harxes guardrail: run stopped at iteration/token cap ({} iterations, {} tokens)",
+                out.iterations, out.total_tokens
+            )
+        } else {
+            String::new()
+        },
+        // Guardrail = the loop was cut before the agent finished — a failed
+        // attempt (task-side: the budget spent proves the engine worked).
+        exit_code: Some(i32::from(guardrail)),
+        usage: Some(Usage {
+            input_tokens: out.input_tokens,
+            output_tokens: out.output_tokens,
+            // Pricing is provider-specific config the hub owns; the honest
+            // number here is 0, like the copilot adapter (never invent cost).
+            cost_usd: 0.0,
+        }),
+        trace,
+        session_id: None,
+        sandbox: crate::proc::sandbox_status(engine.sandbox),
+        engine: "harxes".to_owned(),
+        model: engine.model.clone(),
+        attempts: Vec::new(),
+    }
+}
+
+/// Render a typed engine error in the vocabulary `faults::is_infra_fault`
+/// already classifies, so harxes infra faults are recognized without adding
+/// engine-specific patterns. The typed source of truth is
+/// `EngineError::is_infra_fault()`; the words merely carry it across the
+/// string boundary of `PortError::Backend`.
+fn render_engine_error(e: &EngineError) -> String {
+    match e {
+        EngineError::Timeout => "harxes timed out".to_owned(),
+        EngineError::ProviderUnavailable(m) => {
+            format!("harxes provider service unavailable: {m}")
+        }
+        EngineError::AuthDead => {
+            "harxes provider auth dead (credentials rejected) — service unavailable until re-auth"
+                .to_owned()
+        }
+        EngineError::TaskFailed(m) => format!("harxes task failed: {m}"),
+        EngineError::Config(m) => format!("harxes config error: {m}"),
+    }
+}
+
+fn append_trace(trace: &mut String, ev: &RunEvent) {
+    use std::fmt::Write as _;
+    match ev {
+        RunEvent::Text(t) => {
+            let _ = writeln!(trace, "{t}");
+        }
+        RunEvent::Reasoning(t) => {
+            let _ = writeln!(trace, "[thinking] {t}");
+        }
+        RunEvent::ToolStart { name, summary } => {
+            let _ = writeln!(trace, "▶ {name}: {summary}");
+        }
+        RunEvent::ToolEnd { name, summary } => {
+            let _ = writeln!(trace, "✓ {name}: {summary}");
+        }
+        RunEvent::Retry { wait_secs } => {
+            let _ = writeln!(trace, "↻ provider retry in {wait_secs}s");
+        }
+    }
+}
+
+/// harxes-core `ShellPort` backed by the hub's own confinement: every Bash
+/// command the agent runs is spawned through `proc::agent_command` — the
+/// exact seatbelt/nice path the CLI engines get — in its own process group
+/// with kill-on-drop, so a cancelled run reaps its tool children.
+struct ConfinedShell {
+    sandbox: bool,
+    /// The workspace this run is confined to. The per-call `working_dir` from
+    /// harxes-core is honored as the cwd, but confinement is always anchored
+    /// to the run's workspace.
+    work_dir: PathBuf,
+}
+
+#[async_trait]
+impl ShellPort for ConfinedShell {
+    async fn run_command(
+        &self,
+        working_dir: &str,
+        cmd: &str,
+    ) -> Result<CommandOutput, ShellError> {
+        let (mut command, _status) =
+            crate::proc::agent_command("/bin/bash", &self.work_dir, self.sandbox);
+        command
+            .arg("-lc")
+            .arg(cmd)
+            .current_dir(working_dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        let child = command
+            .spawn()
+            .map_err(|e| ShellError::Spawn(e.to_string()))?;
+        let pid = child.id();
+        // Guard the whole group: if this future is dropped mid-await (run
+        // cancelled), kill_on_drop only takes the leader — the group signal
+        // reaps grandchildren too (same rationale as proc::kill_group).
+        let guard = GroupGuard { pid };
+        let out = child
+            .wait_with_output()
+            .await
+            .map_err(|e| ShellError::Io(e.to_string()))?;
+        std::mem::forget(guard); // completed normally — nothing to reap
+        Ok(CommandOutput {
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            exit_status: match out.status.code() {
+                Some(0) => ShellExitStatus::Success,
+                Some(c) => ShellExitStatus::Failure(c),
+                None => ShellExitStatus::Failure(-1),
+            },
+        })
+    }
+}
+
+struct GroupGuard {
+    pid: Option<u32>,
+}
+
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.pid {
+            crate::proc::kill_group(pid);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_routing_follows_the_model_prefix() {
+        let e = HarxesEngine::new("anthropic/claude-sonnet-5");
+        assert_eq!(e.provider_model(), "claude-sonnet-5");
+        let e = HarxesEngine::new("copilot/gpt-4o");
+        assert_eq!(e.provider_model(), "gpt-4o");
+        // LiteLLM keeps the full provider/model string — it routes on it.
+        let e = HarxesEngine::new("bizbrain/GLM-5.3");
+        assert_eq!(e.provider_model(), "bizbrain/GLM-5.3");
+    }
+
+    #[test]
+    fn infra_faults_render_in_the_classifier_vocabulary() {
+        // The words must stay inside faults::is_infra_fault's pattern set —
+        // that is the whole contract of render_engine_error.
+        for (err, needle) in [
+            (EngineError::Timeout, "timed out"),
+            (
+                EngineError::ProviderUnavailable("502".to_owned()),
+                "unavailable",
+            ),
+            (EngineError::AuthDead, "unavailable"),
+        ] {
+            let msg = render_engine_error(&err).to_lowercase();
+            assert!(msg.contains(needle), "{msg} must contain {needle}");
+        }
+        // Task-side failures must NOT look like infra.
+        let msg = render_engine_error(&EngineError::TaskFailed("tests failed".to_owned()))
+            .to_lowercase();
+        assert!(!msg.contains("timed out") && !msg.contains("unavailable"));
+    }
+
+    #[test]
+    fn guardrail_maps_to_a_failed_attempt() {
+        let out = RunOutcome {
+            final_text: "partial".to_owned(),
+            transcript: Vec::new(),
+            iterations: 40,
+            input_tokens: 1,
+            output_tokens: 2,
+            total_tokens: 3,
+            stop_reason: harxes_core::StopReason::Guardrail,
+        };
+        let mapped = finish(out, String::new(), &HarxesEngine::new("bizbrain/GLM-5.3"));
+        assert_eq!(mapped.exit_code, Some(1));
+        assert!(mapped.stderr.contains("guardrail"));
+        assert!(!mapped.succeeded());
+    }
+}

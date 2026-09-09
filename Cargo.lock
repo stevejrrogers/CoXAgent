@@ -111,6 +111,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-recursion"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b43422f69d8ff38f95f1b2bb76517c91589a924d1559a0e935d7c8ce0274c11"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
+]
+
+[[package]]
 name = "async-trait"
 version = "0.1.89"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -508,7 +519,7 @@ dependencies = [
 
 [[package]]
 name = "coxagent-app"
-version = "2.37.0"
+version = "2.37.1"
 dependencies = [
  "async-trait",
  "coxagent-application",
@@ -528,7 +539,7 @@ dependencies = [
 
 [[package]]
 name = "coxagent-application"
-version = "2.37.0"
+version = "2.37.1"
 dependencies = [
  "async-trait",
  "coxagent-domain",
@@ -559,7 +570,7 @@ dependencies = [
 
 [[package]]
 name = "coxagent-contracts"
-version = "2.37.0"
+version = "2.37.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -567,7 +578,7 @@ dependencies = [
 
 [[package]]
 name = "coxagent-domain"
-version = "2.37.0"
+version = "2.37.1"
 dependencies = [
  "semver",
  "serde",
@@ -579,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "coxagent-infrastructure"
-version = "2.37.0"
+version = "2.37.1"
 dependencies = [
  "argon2",
  "async-trait",
@@ -587,6 +598,7 @@ dependencies = [
  "coxagent-domain",
  "deadpool-postgres",
  "fs4",
+ "harxes-core",
  "hmac 0.12.1",
  "mongodb",
  "percent-encoding",
@@ -610,7 +622,7 @@ dependencies = [
 
 [[package]]
 name = "coxagent-presentation"
-version = "2.37.0"
+version = "2.37.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -1094,6 +1106,98 @@ dependencies = [
  "r-efi 6.0.0",
  "rand_core 0.10.1",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "glob"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+
+[[package]]
+name = "harxes-app"
+version = "0.2.0"
+source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.3.1#302fa4a7b355b1360adbe7f767c765dcc897a991"
+dependencies = [
+ "async-recursion",
+ "async-trait",
+ "futures-util",
+ "harxes-core-domain",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "harxes-core"
+version = "0.2.0"
+source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.3.1#302fa4a7b355b1360adbe7f767c765dcc897a991"
+dependencies = [
+ "async-trait",
+ "harxes-app",
+ "harxes-core-domain",
+ "harxes-infra-fs",
+ "harxes-infra-llm",
+ "harxes-infra-shell",
+ "serde",
+ "tokio",
+]
+
+[[package]]
+name = "harxes-core-domain"
+version = "0.2.0"
+source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.3.1#302fa4a7b355b1360adbe7f767c765dcc897a991"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "harxes-infra-auth"
+version = "0.2.0"
+source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.3.1#302fa4a7b355b1360adbe7f767c765dcc897a991"
+dependencies = [
+ "harxes-core-domain",
+]
+
+[[package]]
+name = "harxes-infra-fs"
+version = "0.2.0"
+source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.3.1#302fa4a7b355b1360adbe7f767c765dcc897a991"
+dependencies = [
+ "async-trait",
+ "glob",
+ "harxes-core-domain",
+ "regex",
+ "tokio",
+]
+
+[[package]]
+name = "harxes-infra-llm"
+version = "0.2.0"
+source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.3.1#302fa4a7b355b1360adbe7f767c765dcc897a991"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "harxes-core-domain",
+ "harxes-infra-auth",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "harxes-infra-shell"
+version = "0.2.0"
+source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.3.1#302fa4a7b355b1360adbe7f767c765dcc897a991"
+dependencies = [
+ "async-trait",
+ "harxes-core-domain",
+ "libc",
+ "tokio",
 ]
 
 [[package]]
@@ -2276,6 +2380,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "futures-core",
+ "futures-util",
  "http",
  "http-body",
  "http-body-util",
@@ -2295,12 +2400,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls 0.26.4",
+ "tokio-util",
  "tower",
  "tower-http 0.6.11",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
  "webpki-roots 1.0.8",
 ]
@@ -3011,6 +3118,7 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
+ "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2 0.6.4",
@@ -3610,6 +3718,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc1b4cb0cc549fcf58d7dfc081778139b3d283a081644e833e84682ad71cea24"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "wasm-streams"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

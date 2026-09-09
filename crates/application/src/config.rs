@@ -28,6 +28,9 @@ pub enum EngineKind {
     Copilot,
     /// Deterministic offline engine for demos/tests (writes real code, no LLM).
     Scripted,
+    /// Harxes — in-process embedded engine (`harxes-core` crate, CXA-F372):
+    /// no child process, cancel-safe, typed infra-fault errors.
+    Harxes,
 }
 
 impl EngineKind {
@@ -42,6 +45,7 @@ impl EngineKind {
             EngineKind::Codex => "codex",
             EngineKind::Copilot => "copilot",
             EngineKind::Scripted => "scripted",
+            EngineKind::Harxes => "harxes",
         }
     }
 
@@ -55,6 +59,7 @@ impl EngineKind {
             EngineKind::Gemini,
             EngineKind::Codex,
             EngineKind::Copilot,
+            EngineKind::Harxes,
         ]
     }
 }
