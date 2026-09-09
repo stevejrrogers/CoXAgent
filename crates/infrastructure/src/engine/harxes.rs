@@ -37,7 +37,8 @@ use coxagent_application::ports::outbound::engine::{
 use coxagent_application::PortError;
 use harxes_core::{
     CommandOutput, CommandPolicy, EngineConfig, EngineError, LoopLimits, PermissionMode,
-    ProviderSpec, RunEvent, RunOutcome, RunRequest, ShellError, ShellExitStatus, ShellPort,
+    ProviderSpec, ReasoningEffort, RunEvent, RunOutcome, RunRequest, ShellError, ShellExitStatus,
+    ShellPort,
 };
 use crate::engine::live::{append_live, live_path};
 use std::path::{Path, PathBuf};
@@ -134,6 +135,8 @@ impl HarxesEngine {
                 work_dir: work_dir.to_path_buf(),
             })),
             fs: None,
+            // Per-run effort (below) wins; no engine-wide default.
+            reasoning_effort: None,
         };
         harxes_core::HarxesEngine::new(cfg)
             .map_err(|e| PortError::Backend(format!("harxes: engine config: {e}")))
@@ -188,6 +191,11 @@ impl AgentEnginePort for HarxesEngine {
             // shell (confined) but NOT fs, so the engine builds its rooted
             // host FS automatically — exactly the supported combination.
             working_dir: Some(request.work_dir.clone()),
+            // Spend deep thinking where it pays (design, code, verification)
+            // and stop the paperwork roles from ruminating a million tokens
+            // per run. Steve's rule: "cái nào cần suy nghĩ kỹ thì vẫn phải
+            // suy nghĩ kỹ" — engineering keeps High.
+            reasoning_effort: Some(effort_for(request.role)),
         });
         let (mut events, mut driver) = handle.split();
 
@@ -271,6 +279,17 @@ fn render_engine_error(e: &EngineError) -> String {
         }
         EngineError::TaskFailed(m) => format!("harxes task failed: {m}"),
         EngineError::Config(m) => format!("harxes config error: {m}"),
+    }
+}
+
+/// Reasoning depth by role: engineering thinks hard, coordination thinks
+/// briefly. PD sits in the middle — design judgement, but not proofs.
+fn effort_for(role: coxagent_domain::Role) -> ReasoningEffort {
+    use coxagent_domain::Role;
+    match role {
+        Role::DevFeature | Role::DevBug | Role::Sa | Role::Test => ReasoningEffort::High,
+        Role::Pd => ReasoningEffort::Medium,
+        _ => ReasoningEffort::Low,
     }
 }
 
@@ -562,6 +581,18 @@ mod tests {
             "🧠 Let me begin.\n🧠 Next\n🔧 Bash(ls)\n",
             "deltas coalesce into whole lines; tool events flush first"
         );
+    }
+
+    #[test]
+    fn engineering_roles_keep_deep_reasoning() {
+        use coxagent_domain::Role;
+        for r in [Role::DevFeature, Role::DevBug, Role::Sa, Role::Test] {
+            assert!(matches!(effort_for(r), ReasoningEffort::High));
+        }
+        for r in [Role::Docs, Role::Ba, Role::Po, Role::Sm] {
+            assert!(matches!(effort_for(r), ReasoningEffort::Low));
+        }
+        assert!(matches!(effort_for(Role::Pd), ReasoningEffort::Medium));
     }
 
     #[test]
