@@ -39,6 +39,7 @@ use harxes_core::{
     CommandOutput, CommandPolicy, EngineConfig, EngineError, LoopLimits, PermissionMode,
     ProviderSpec, RunEvent, RunOutcome, RunRequest, ShellError, ShellExitStatus, ShellPort,
 };
+use crate::engine::live::{append_live, live_path};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -151,6 +152,14 @@ impl AgentEnginePort for HarxesEngine {
 
     async fn run(&self, request: AgentRequest) -> Result<AgentOutcome, PortError> {
         let engine = self.build_engine(&request.work_dir)?;
+        // Stream the work log where the dashboard's agent-log endpoint tails
+        // it — an engine that only buffers into the outcome looks silent in
+        // the live view even while it is plainly working (live.rs's warning).
+        let role = format!("{:?}", request.role).to_lowercase();
+        let live = live_path(&request.work_dir, &role, request.label.as_deref());
+        if let Some(p) = &live {
+            let _ = std::fs::write(p, format!("# {role} — harxes live @ run start\n"));
+        }
         let handle = engine.run(RunRequest {
             prompt: request.task_prompt.clone(),
             system_prompt: Some(request.system_prompt.clone()),
@@ -168,6 +177,9 @@ impl AgentEnginePort for HarxesEngine {
             tokio::select! {
                 ev = events.recv() => {
                     if let Some(ev) = ev {
+                        if let Some(p) = &live {
+                            append_live(p, trace_line(&ev).trim_end());
+                        }
                         append_trace(&mut trace, &ev);
                     }
                 }
@@ -176,6 +188,9 @@ impl AgentEnginePort for HarxesEngine {
         };
         // Flush any events that raced the driver's completion.
         while let Ok(ev) = events.try_recv() {
+            if let Some(p) = &live {
+                append_live(p, trace_line(&ev).trim_end());
+            }
             append_trace(&mut trace, &ev);
         }
 
@@ -238,25 +253,18 @@ fn render_engine_error(e: &EngineError) -> String {
     }
 }
 
-fn append_trace(trace: &mut String, ev: &RunEvent) {
-    use std::fmt::Write as _;
+fn trace_line(ev: &RunEvent) -> String {
     match ev {
-        RunEvent::Text(t) => {
-            let _ = writeln!(trace, "{t}");
-        }
-        RunEvent::Reasoning(t) => {
-            let _ = writeln!(trace, "[thinking] {t}");
-        }
-        RunEvent::ToolStart { name, summary } => {
-            let _ = writeln!(trace, "▶ {name}: {summary}");
-        }
-        RunEvent::ToolEnd { name, summary } => {
-            let _ = writeln!(trace, "✓ {name}: {summary}");
-        }
-        RunEvent::Retry { wait_secs } => {
-            let _ = writeln!(trace, "↻ provider retry in {wait_secs}s");
-        }
+        RunEvent::Text(t) => format!("{t}\n"),
+        RunEvent::Reasoning(t) => format!("[thinking] {t}\n"),
+        RunEvent::ToolStart { name, summary } => format!("▶ {name}: {summary}\n"),
+        RunEvent::ToolEnd { name, summary } => format!("✓ {name}: {summary}\n"),
+        RunEvent::Retry { wait_secs } => format!("↻ provider retry in {wait_secs}s\n"),
     }
+}
+
+fn append_trace(trace: &mut String, ev: &RunEvent) {
+    trace.push_str(&trace_line(ev));
 }
 
 /// harxes-core `ShellPort` backed by the hub's own confinement: every Bash
