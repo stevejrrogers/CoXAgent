@@ -36,9 +36,9 @@ use coxagent_application::ports::outbound::engine::{
 };
 use coxagent_application::PortError;
 use harxes_core::{
-    EngineConfig, EngineError, PermissionMode, ProviderSpec, RunEvent, RunOutcome, RunRequest,
+    CommandOutput, CommandPolicy, EngineConfig, EngineError, LoopLimits, PermissionMode,
+    ProviderSpec, RunEvent, RunOutcome, RunRequest, ShellError, ShellExitStatus, ShellPort,
 };
-use harxes_core_domain::ports::{CommandOutput, ShellError, ShellExitStatus, ShellPort};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -119,19 +119,21 @@ impl HarxesEngine {
         &self,
         work_dir: &Path,
     ) -> Result<harxes_core::HarxesEngine, PortError> {
-        // Start from the defaults-bearing constructor (limits/command-policy
-        // types are not re-exported by harxes-core yet), then override the
-        // fields this adapter owns.
-        let mut cfg = EngineConfig::openai("", "", self.provider_model());
-        cfg.provider = self.provider_spec()?;
-        // The shell below IS host-confined — the documented precondition for
-        // this mode. With DenyUnlessAllowed and no allowlist the agent could
-        // run nothing at all.
-        cfg.permission = PermissionMode::AllowUnlessDenied;
-        cfg.shell = Some(Arc::new(ConfinedShell {
-            sandbox: self.sandbox,
-            work_dir: work_dir.to_path_buf(),
-        }));
+        let cfg = EngineConfig {
+            provider: self.provider_spec()?,
+            model: self.provider_model(),
+            limits: LoopLimits::default(),
+            command_policy: CommandPolicy::default(),
+            // The shell below IS host-confined — the documented precondition
+            // for this mode. With DenyUnlessAllowed and no allowlist the
+            // agent could run nothing at all.
+            permission: PermissionMode::AllowUnlessDenied,
+            shell: Some(Arc::new(ConfinedShell {
+                sandbox: self.sandbox,
+                work_dir: work_dir.to_path_buf(),
+            })),
+            fs: None,
+        };
         harxes_core::HarxesEngine::new(cfg)
             .map_err(|e| PortError::Backend(format!("harxes: engine config: {e}")))
     }
