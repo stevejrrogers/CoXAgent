@@ -614,12 +614,24 @@ fn ac4_the_complete_f248_delta_lands_as_exactly_one_truthful_merge_off_feat_cxa_
     );
 
     // "...as exactly ONE merge OFF feat/CXA-B121": the slice is cut from the
-    // B121 line.
+    // B121 line. The branch is a LIVE ref that gets deleted once its line is
+    // fully landed — after that the ancestry below is unverifiable, while the
+    // merge-truth this test exists for stays pinned by the assertions above.
+    // Without this guard the deleted branch turned the whole workspace suite
+    // red for every fresh clone and every agent worktree (CXA-B166: a full
+    // evening of "tests red" gate bounces traced back here).
+    if !git_ok(&["rev-parse", "--verify", &format!("{BASE_BRANCH}^{{commit}}")]) {
+        eprintln!(
+            "skipping ancestry check: {BASE_BRANCH} no longer resolves \
+             (deleted after landing); the exactly-one-truthful-merge \
+             assertions above still hold"
+        );
+        return;
+    }
     let base_tip = git(&["rev-parse", BASE_BRANCH]);
     let base_tip = base_tip.trim();
     assert!(
-        !base_tip.is_empty()
-            && git_ok(&["rev-parse", "--verify", &format!("{base_tip}^{{commit}}")]),
+        !base_tip.is_empty(),
         "{BASE_BRANCH} must resolve — point this guard at the branch the slice is cut from"
     );
     assert!(
