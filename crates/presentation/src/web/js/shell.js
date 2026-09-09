@@ -1758,7 +1758,7 @@ function updateTyping(body){
   if(want&&!typing){
     const n=document.createElement("div");
     n.className="wl-typing";
-    n.innerHTML='<span class="wl-ic"><i class="ti ti-sparkles"></i></span><span class="dots"><i></i><i></i><i></i></span>';
+    n.innerHTML='<span class="wl-ic"><i class="ti ti-sparkles"></i></span><span class="dots"><i></i><i></i><i></i></span><span class="wl-typing-lbl">working — waiting for the next step</span>';
     body.appendChild(n);
   } else if(!want&&typing){ typing.remove(); }
 }
