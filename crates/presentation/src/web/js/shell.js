@@ -1542,7 +1542,11 @@ function parseWorklog(raw){
 // Tool output, readable: ANSI escape codes stripped, each line classified so
 // diffs/test results/errors read at a glance instead of as a grey slab.
 function wlPre(body){
-  const lines=body.join("\n").replace(/\[[0-9;]*[A-Za-z]/g,"").split("\n");
+  const lines=body.join("\n").replace(/\[[0-9;]*[A-Za-z]/g,"").split("\n")
+    // opencode wraps file reads in pseudo-XML (<path>..., <type>file</type>,
+    // <content>) — transport framing, not output. The chip already names the
+    // file, so these lines are pure noise in a human-facing preview.
+    .filter(l=>!/^\s*<\/?(path|type|content|file)>/.test(l));
   const cls=l=>{
     if(/^\+(?!\+\+)/.test(l))return "add";
     if(/^-(?!--)/.test(l))return "del";
