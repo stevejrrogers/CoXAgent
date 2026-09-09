@@ -157,6 +157,14 @@ impl HarxesEngine {
             // 429 (up to 2 min) keeps the run on the strong model instead of
             // bouncing it to the weak failover engine mid-task.
             rate_limit_patience: Some(std::time::Duration::from_secs(120)),
+            // v0.4.4 distinct-key aging ended hot-file thrash (one file
+            // re-read 29x had been eating a quarter of the iteration
+            // budget). Deep-work roles keep a wider window of hot files.
+            aging_keep_recent: if matches!(effort_for(role), ReasoningEffort::High) {
+                Some(10)
+            } else {
+                None
+            },
         };
         harxes_core::HarxesEngine::new(cfg)
             .map_err(|e| PortError::Backend(format!("harxes: engine config: {e}")))
