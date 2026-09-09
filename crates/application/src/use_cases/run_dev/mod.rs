@@ -1424,20 +1424,26 @@ pub fn ticket_brief(ticket: Option<&coxagent_domain::Ticket>) -> String {
     }
     if let Some(d) = &t.design().technical {
         out.push_str("\nTECHNICAL DESIGN (from the SA — follow it, flag if it's wrong):\n");
+        // These caps date from when every prompt byte was precious. A rich
+        // SA design is ~6k chars (~1.5k tokens) — cutting it at 1200 made
+        // the DEV spend a hundred iterations re-deriving what the SA had
+        // already written (CXA-B167: C031 burned 2.4M tokens against a
+        // design whose key sections were sliced off mid-sentence). The cap
+        // now only guards against a runaway/degenerate design blob.
         if !d.approach.trim().is_empty() {
-            let _ = writeln!(out, "- Approach: {}", cap(&d.approach, 1200));
+            let _ = writeln!(out, "- Approach: {}", cap(&d.approach, 8000));
         }
         if !d.files.is_empty() {
-            let _ = writeln!(out, "- Files: {}", cap(&d.files.join(", "), 600));
+            let _ = writeln!(out, "- Files: {}", cap(&d.files.join(", "), 1500));
         }
         if !d.api_contract.trim().is_empty() {
-            let _ = writeln!(out, "- API contract: {}", cap(&d.api_contract, 800));
+            let _ = writeln!(out, "- API contract: {}", cap(&d.api_contract, 3000));
         }
         if !d.data_changes.trim().is_empty() {
-            let _ = writeln!(out, "- Data changes: {}", cap(&d.data_changes, 600));
+            let _ = writeln!(out, "- Data changes: {}", cap(&d.data_changes, 3000));
         }
         if !d.test_plan.trim().is_empty() {
-            let _ = writeln!(out, "- Test plan: {}", cap(&d.test_plan, 800));
+            let _ = writeln!(out, "- Test plan: {}", cap(&d.test_plan, 3000));
         }
     }
     out
