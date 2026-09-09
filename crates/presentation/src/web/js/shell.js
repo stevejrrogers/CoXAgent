@@ -1418,9 +1418,11 @@ function wlSay(name,args){
     // The log line is often TRUNCATED mid-JSON, which used to leave a bare
     // "Run" with no command. Salvage the value we care about by hand.
     const grab=k=>{const m=raw.match(new RegExp('"'+k+'"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)'));return m?m[1].replace(/\\"/g,'"').replace(/\\n/g," "):"";};
-    a={command:grab("command"),file_path:grab("file_path"),pattern:grab("pattern"),path:grab("path"),url:grab("url"),description:grab("description")};
+    a={command:grab("command"),file_path:grab("file_path")||grab("filePath"),pattern:grab("pattern"),path:grab("path"),url:grab("url"),description:grab("description")};
   }
-  const f=a.file_path||a.path||a.notebook_path;
+  // opencode uses camelCase arg keys (filePath) where the CLI engines use
+  // snake_case — accept both, or its Read/Edit chips render with no path.
+  const f=a.file_path||a.filePath||a.path||a.notebook_path||a.notebookPath;
   const where=f?wlShortPath(f):"";
   const span=(a.offset!=null)?`:${a.offset}${a.limit?"-"+(a.offset+a.limit):""}`:"";
   if(n==="read")return {verb:"Read",detail:where?where+span:""};
