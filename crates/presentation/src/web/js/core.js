@@ -14,7 +14,7 @@ const UCOLS=[
   ["shipped","Shipped","--teal",["documented","verified"]],
 ];
 const ROLES=["ba","po","sm","sa","pd","dev_bug","dev_feature","test","docs"];
-const MODELS={claude:["sonnet","opus","haiku"],copilot:["auto","claude-sonnet-4.6","claude-sonnet-4.5","claude-haiku-4.5","gpt-5.4","gpt-5.4-mini","gpt-5.3-codex","gemini-3.1-pro-preview","grok-4.5"],scripted:["n/a"],mock:["n/a"],opencode:null,hermes:["hermes-3-llama-3.1-70b","hermes-2-pro-mistral-7b"],gemini:["gemini-2.5-pro","gemini-2.5-flash","gemini-2.0-flash"],codex:["gpt-4o","gpt-5","gpt-4"]};
+const MODELS={claude:["sonnet","opus","haiku"],copilot:["auto","claude-sonnet-4.6","claude-sonnet-4.5","claude-haiku-4.5","gpt-5.4","gpt-5.4-mini","gpt-5.3-codex","gemini-3.1-pro-preview","grok-4.5"],scripted:["n/a"],mock:["n/a"],opencode:null,harxes:null,hermes:["hermes-3-llama-3.1-70b","hermes-2-pro-mistral-7b"],gemini:["gemini-2.5-pro","gemini-2.5-flash","gemini-2.0-flash"],codex:["gpt-4o","gpt-5","gpt-4"]};
 // Common opencode provider/model choices (it accepts any, incl. local ollama).
 const OPENCODE_PROVIDERS=[{id:"anthropic",label:"Anthropic"},{id:"openai",label:"OpenAI"},{id:"google",label:"Google"},{id:"openrouter",label:"OpenRouter"},{id:"groq",label:"Groq"},{id:"deepseek",label:"DeepSeek"},{id:"ollama",label:"Ollama (local)"},{id:"mistral",label:"Mistral"}];
 let OC_MODELS=["claude-sonnet-4-5","claude-opus-4-1","gpt-5","gpt-4o","gemini-2.5-pro","gemini-2.5-flash","llama3.1","qwen2.5-coder","mixtral-8x7b","deepseek-v3","deepseek-r1"];
