@@ -409,14 +409,19 @@ impl Coalescer {
                 input_tokens,
                 output_tokens,
                 reasoning_tokens,
+                context_tokens,
             } => {
                 self.close_msg(live_file, trace);
                 let reasoning = reasoning_tokens
                     .map(|r| format!(" ({} reasoning)", fmt_tokens(r)))
                     .unwrap_or_default();
+                // ctx = this call's context size. Flat/shrinking across
+                // iterations proves tool-output aging is working; linear
+                // growth means something isn't aging — report it upstream.
                 Self::emit_raw(
                     &format!(
-                        "⏱ iteration {n} · {} tokens{reasoning}",
+                        "⏱ iteration {n} · ctx {} · {} total{reasoning}",
+                        fmt_tokens(*context_tokens),
                         fmt_tokens(input_tokens + output_tokens)
                     ),
                     live_file,
