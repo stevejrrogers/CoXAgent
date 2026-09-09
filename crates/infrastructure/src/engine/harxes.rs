@@ -521,7 +521,7 @@ impl ShellPort for ConfinedShell {
         } else {
             self.work_dir.clone()
         };
-        let (mut command, _status) =
+        let (mut command, sandbox) =
             crate::proc::agent_command("/bin/bash", &self.work_dir, self.sandbox);
         command
             .arg("-lc")
@@ -531,8 +531,14 @@ impl ShellPort for ConfinedShell {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        let child = command
-            .spawn()
+        // Spawn through the COX-B013 retry wrapper, not `.spawn()`: macOS
+        // Seatbelt's sandbox_apply() fails transiently, and a raw spawn turns
+        // that into a silently denied in-workspace write. The exhausted-retry
+        // case is already warned by the mechanism itself; ShellPort's
+        // CommandOutput has no confinement channel, so the (possibly
+        // downgraded) status is not re-surfaced here.
+        let (child, _sandbox) = crate::proc::spawn_confined(&mut command, sandbox)
+            .await
             .map_err(|e| ShellError::Spawn(e.to_string()))?;
         let pid = child.id();
         // Guard the whole group: if this future is dropped mid-await (run
