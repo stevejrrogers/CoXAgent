@@ -120,11 +120,23 @@ impl HarxesEngine {
     fn build_engine(
         &self,
         work_dir: &Path,
+        role: coxagent_domain::Role,
     ) -> Result<harxes_core::HarxesEngine, PortError> {
+        // The default cap (40 iters / 1.5M cumulative tokens) is dominated by
+        // RE-SENT INPUT, not thinking: measured runs carry 1k-10k reasoning
+        // tokens inside 1.5M totals (~40k context x 40 iterations). Deep-work
+        // roles were dying at the cap mid-task with the budget spent on
+        // context re-sends, so they get room to finish; the cap stays a
+        // runaway backstop, not a working budget.
+        let mut limits = LoopLimits::default();
+        if matches!(effort_for(role), ReasoningEffort::High) {
+            limits.max_iterations = 60;
+            limits.max_total_tokens = 4_000_000;
+        }
         let cfg = EngineConfig {
             provider: self.provider_spec()?,
             model: self.provider_model(),
-            limits: LoopLimits::default(),
+            limits,
             command_policy: CommandPolicy::default(),
             // The shell below IS host-confined — the documented precondition
             // for this mode. With DenyUnlessAllowed and no allowlist the
@@ -154,7 +166,7 @@ impl AgentEnginePort for HarxesEngine {
     }
 
     async fn run(&self, request: AgentRequest) -> Result<AgentOutcome, PortError> {
-        let engine = self.build_engine(&request.work_dir)?;
+        let engine = self.build_engine(&request.work_dir, request.role)?;
         // Stream the work log where the dashboard's agent-log endpoint tails
         // it — an engine that only buffers into the outcome looks silent in
         // the live view even while it is plainly working (live.rs's warning).
@@ -235,11 +247,13 @@ fn finish(out: RunOutcome, mut trace: String, engine: &HarxesEngine) -> AgentOut
     // Final accounting line: how much of the spend was deliberation. This is
     // the number the reasoning_effort mapping is judged by.
     if let Some(r) = out.reasoning_tokens {
-        trace.push_str(&format!(
-            "⏱ run total · {} tokens ({} reasoning)\n",
+        use std::fmt::Write as _;
+        let _ = writeln!(
+            trace,
+            "⏱ run total · {} tokens ({} reasoning)",
             fmt_tokens(out.total_tokens),
             fmt_tokens(r)
-        ));
+        );
     }
     let guardrail = matches!(out.stop_reason, harxes_core::StopReason::Guardrail);
     AgentOutcome {
