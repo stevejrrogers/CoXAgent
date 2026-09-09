@@ -134,8 +134,8 @@ impl HarxesEngine {
             // ~10-20k tokens, so iterations — not tokens — became the
             // binding cap: runs died at 60 iters holding only ~1.1-1.5M of
             // the 4M budget. 100 x ~12k stays well inside it.
-            limits.max_iterations = 100;
-            limits.max_total_tokens = 4_000_000;
+            limits.max_iterations = 150;
+            limits.max_total_tokens = 5_000_000;
         }
         let cfg = EngineConfig {
             provider: self.provider_spec()?,
