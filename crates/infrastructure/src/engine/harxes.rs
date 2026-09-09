@@ -166,6 +166,12 @@ impl AgentEnginePort for HarxesEngine {
             history: Vec::new(),
             timeout: Some(request.timeout),
             model: None,
+            // v0.3.2: anchors the engine-side FileSystemPort (Read/Write/
+            // Glob/Grep walk from here, relative results) and is what the
+            // engine hands our ConfinedShell as `working_dir`. We inject
+            // shell (confined) but NOT fs, so the engine builds its rooted
+            // host FS automatically — exactly the supported combination.
+            working_dir: Some(request.work_dir.clone()),
         });
         let (mut events, mut driver) = handle.split();
 
