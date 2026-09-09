@@ -171,16 +171,17 @@ impl AgentEnginePort for HarxesEngine {
 
         // Drain the live event stream into the work-log trace while driving
         // the run. Dropping `driver` (this future being cancelled from above)
-        // cancels the whole run — harxes-core's contract.
+        // cancels the whole run — harxes-core's contract. Text/Reasoning
+        // events are STREAMING DELTAS (token fragments) — a coalescer buffers
+        // them into whole lines so the live log reads as prose, not one
+        // fragment per line.
         let mut trace = String::new();
+        let mut co = Coalescer::default();
         let outcome = loop {
             tokio::select! {
                 ev = events.recv() => {
                     if let Some(ev) = ev {
-                        if let Some(p) = &live {
-                            append_live(p, trace_line(&ev).trim_end());
-                        }
-                        append_trace(&mut trace, &ev);
+                        co.feed(&ev, live.as_deref(), &mut trace);
                     }
                 }
                 done = &mut driver => break done,
@@ -188,11 +189,9 @@ impl AgentEnginePort for HarxesEngine {
         };
         // Flush any events that raced the driver's completion.
         while let Ok(ev) = events.try_recv() {
-            if let Some(p) = &live {
-                append_live(p, trace_line(&ev).trim_end());
-            }
-            append_trace(&mut trace, &ev);
+            co.feed(&ev, live.as_deref(), &mut trace);
         }
+        co.flush(live.as_deref(), &mut trace);
 
         match outcome {
             Ok(out) => Ok(finish(out, trace, self)),
@@ -253,18 +252,73 @@ fn render_engine_error(e: &EngineError) -> String {
     }
 }
 
-fn trace_line(ev: &RunEvent) -> String {
-    match ev {
-        RunEvent::Text(t) => format!("{t}\n"),
-        RunEvent::Reasoning(t) => format!("[thinking] {t}\n"),
-        RunEvent::ToolStart { name, summary } => format!("▶ {name}: {summary}\n"),
-        RunEvent::ToolEnd { name, summary } => format!("✓ {name}: {summary}\n"),
-        RunEvent::Retry { wait_secs } => format!("↻ provider retry in {wait_secs}s\n"),
-    }
+/// Buffers streaming Text/Reasoning deltas into whole lines; tool events and
+/// retries flush the buffer first so ordering is preserved.
+#[derive(Default)]
+struct Coalescer {
+    /// Pending partial line and whether it is reasoning (true) or text.
+    buf: String,
+    reasoning: bool,
 }
 
-fn append_trace(trace: &mut String, ev: &RunEvent) {
-    trace.push_str(&trace_line(ev));
+impl Coalescer {
+    fn feed(&mut self, ev: &RunEvent, live_file: Option<&Path>, trace: &mut String) {
+        match ev {
+            RunEvent::Text(t) | RunEvent::Reasoning(t) => {
+                let is_reasoning = matches!(ev, RunEvent::Reasoning(_));
+                if self.reasoning != is_reasoning && !self.buf.is_empty() {
+                    self.flush(live_file, trace);
+                }
+                self.reasoning = is_reasoning;
+                self.buf.push_str(t);
+                while let Some(nl) = self.buf.find('\n') {
+                    let line: String = self.buf.drain(..=nl).collect();
+                    self.emit(line.trim_end(), live_file, trace);
+                }
+            }
+            RunEvent::ToolStart { name, summary } => {
+                self.flush(live_file, trace);
+                Self::emit_raw(&format!("▶ {name}: {summary}"), live_file, trace);
+            }
+            RunEvent::ToolEnd { name, summary } => {
+                self.flush(live_file, trace);
+                Self::emit_raw(&format!("✓ {name}: {summary}"), live_file, trace);
+            }
+            RunEvent::Retry { wait_secs } => {
+                self.flush(live_file, trace);
+                Self::emit_raw(&format!("↻ provider retry in {wait_secs}s"), live_file, trace);
+            }
+        }
+    }
+
+    fn flush(&mut self, live_file: Option<&Path>, trace: &mut String) {
+        if self.buf.trim().is_empty() {
+            self.buf.clear();
+            return;
+        }
+        let line = std::mem::take(&mut self.buf);
+        self.emit(line.trim_end(), live_file, trace);
+    }
+
+    fn emit(&self, line: &str, live_file: Option<&Path>, trace: &mut String) {
+        if line.is_empty() {
+            return;
+        }
+        let rendered = if self.reasoning {
+            format!("[thinking] {line}")
+        } else {
+            line.to_owned()
+        };
+        Self::emit_raw(&rendered, live_file, trace);
+    }
+
+    fn emit_raw(line: &str, live_file: Option<&Path>, trace: &mut String) {
+        if let Some(p) = live_file {
+            append_live(p, line);
+        }
+        trace.push_str(line);
+        trace.push('\n');
+    }
 }
 
 /// harxes-core `ShellPort` backed by the hub's own confinement: every Bash
@@ -286,12 +340,27 @@ impl ShellPort for ConfinedShell {
         working_dir: &str,
         cmd: &str,
     ) -> Result<CommandOutput, ShellError> {
+        // harxes-core passes "." for "the project" — in-process that would be
+        // the HUB's cwd, not this run's workspace. Anchor every relative dir
+        // (and any path outside the workspace) to the run's work_dir.
+        let wd = std::path::Path::new(working_dir);
+        let cwd = if wd.is_relative() {
+            if working_dir == "." || working_dir.is_empty() {
+                self.work_dir.clone()
+            } else {
+                self.work_dir.join(wd)
+            }
+        } else if wd.starts_with(&self.work_dir) {
+            wd.to_path_buf()
+        } else {
+            self.work_dir.clone()
+        };
         let (mut command, _status) =
             crate::proc::agent_command("/bin/bash", &self.work_dir, self.sandbox);
         command
             .arg("-lc")
             .arg(cmd)
-            .current_dir(working_dir)
+            .current_dir(&cwd)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -367,6 +436,28 @@ mod tests {
         let msg = render_engine_error(&EngineError::TaskFailed("tests failed".to_owned()))
             .to_lowercase();
         assert!(!msg.contains("timed out") && !msg.contains("unavailable"));
+    }
+
+    #[test]
+    fn coalescer_joins_streaming_deltas_into_lines() {
+        let mut trace = String::new();
+        let mut co = Coalescer::default();
+        for d in ["Let", " me", " begin", ".\n", "Next"] {
+            co.feed(&RunEvent::Reasoning((*d).to_owned()), None, &mut trace);
+        }
+        co.feed(
+            &RunEvent::ToolStart {
+                name: "Bash".to_owned(),
+                summary: "ls".to_owned(),
+            },
+            None,
+            &mut trace,
+        );
+        assert_eq!(
+            trace,
+            "[thinking] Let me begin.\n[thinking] Next\n▶ Bash: ls\n",
+            "deltas coalesce into whole lines; tool events flush first"
+        );
     }
 
     #[test]
