@@ -155,7 +155,20 @@ impl AgentEnginePort for HarxesEngine {
         // Stream the work log where the dashboard's agent-log endpoint tails
         // it — an engine that only buffers into the outcome looks silent in
         // the live view even while it is plainly working (live.rs's warning).
-        let role = format!("{:?}", request.role).to_lowercase();
+        // The dashboard resolves live files by the role's serde key
+        // (`dev_bug`), not its Debug name (`DevBug` -> "devbug") — a
+        // mismatched name makes the whole run invisible in the UI.
+        let role = {
+            let dbg = format!("{:?}", request.role);
+            let mut out = String::with_capacity(dbg.len() + 2);
+            for (i, c) in dbg.chars().enumerate() {
+                if c.is_ascii_uppercase() && i > 0 {
+                    out.push('_');
+                }
+                out.push(c.to_ascii_lowercase());
+            }
+            out
+        };
         let live = live_path(&request.work_dir, &role, request.label.as_deref());
         if let Some(p) = &live {
             let _ = std::fs::write(
