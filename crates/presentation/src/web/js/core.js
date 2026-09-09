@@ -42,10 +42,17 @@ function modelControl(eng,cur,sid){
   if(!eng)return `<input id="mdl-${sid}" value="" placeholder="uses default model" disabled style="flex:1;opacity:.45"/>`;
   const list=MODELS[eng];
   if(eng==="harxes"){
-    // Harxes talks to one OpenAI-compatible endpoint (LiteLLM) — the model is
-    // a BARE id, never provider-prefixed (upstream WAFs 403 on '/' in model).
-    return `<input id="mdl-${sid}" value="${esc(cur||"GLM-5.3")}" placeholder="model id (bare, e.g. GLM-5.3)" style="flex:1;min-width:140px"/>
-      <span style="font-size:10px;color:var(--dim);padding:0 4px;white-space:nowrap">bare model — no provider/ prefix</span>`;
+    // Harxes routes by model prefix: anthropic/<m> and copilot/<m> hit those
+    // native APIs; anything WITHOUT a prefix goes to the LiteLLM endpoint
+    // (which 403s on '/' in the model name — so litellm composes NO prefix).
+    const HX=[{id:"",label:"litellm"},{id:"anthropic",label:"anthropic"},{id:"copilot",label:"copilot"}];
+    const [curProv,curModel]=(cur||"").includes("/")?cur.split("/",2):["",(cur||"GLM-5.3")];
+    const effective=curProv?`${curProv}/${curModel}`:curModel;
+    return `<select id="mdl-prov-${sid}" onchange="harxesModelChange('${sid}')" style="width:140px;flex:none">`+
+      HX.map(p=>`<option value="${p.id}" ${p.id===curProv?'selected':''}>${p.label}</option>`).join("")+
+      `</select>
+      <input id="mdl-${sid}" value="${esc(curModel)}" oninput="harxesModelChange('${sid}')" placeholder="model id" style="flex:1;min-width:140px"/>
+      <span id="mdl-hint-${sid}" style="font-size:10px;color:var(--dim);padding:0 4px;white-space:nowrap">= ${esc(effective)}</span>`;
   }
   if(!list){ // opencode: provider picker + model with datalist
     const providers=OC_PROVIDERS.length?OC_PROVIDERS:OPENCODE_PROVIDERS;
@@ -60,6 +67,12 @@ function modelControl(eng,cur,sid){
   }
   const opts=[...list]; if(cur&&!opts.includes(cur))opts.unshift(cur);
   return `<select id="mdl-${sid}" style="flex:1">${opts.map(m=>`<option ${m===cur?'selected':''}>${esc(m)}</option>`).join("")}</select>`;
+}
+function harxesModelChange(sid){
+  const prov=document.getElementById("mdl-prov-"+sid)?.value||"";
+  const model=document.getElementById("mdl-"+sid)?.value||"";
+  const hint=document.getElementById("mdl-hint-"+sid);
+  if(hint)hint.textContent="= "+(prov?prov+"/"+model:model);
 }
 function opencodeModelChange(sid){
   const prov=document.getElementById("mdl-prov-"+sid)?.value;
