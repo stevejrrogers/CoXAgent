@@ -257,6 +257,7 @@
   .wl-end{display:flex;justify-content:center;margin:16px 0 4px}
   .wl-end span{display:inline-flex;align-items:center;gap:7px;color:var(--green);font-size:11.5px;font-weight:700;background:color-mix(in srgb,var(--green) 14%,transparent);border:1px solid color-mix(in srgb,var(--green) 33%,transparent);padding:4px 12px;border-radius:999px}
   .wl-typing{display:flex;gap:11px;align-items:center;padding:7px 0 2px}
+  .wl-typing-lbl{font-size:11px;color:var(--dim);font-style:italic}
   .wl-typing .wl-ic{flex-shrink:0;width:27px;height:27px;border-radius:9px;background:var(--accentbg);color:var(--accent2);display:flex;align-items:center;justify-content:center;font-size:14px}
   .wl-typing .dots{display:inline-flex;gap:5px}
   .wl-typing .dots i{width:6px;height:6px;border-radius:50%;background:var(--accent2);animation:wldot 1.1s infinite}
