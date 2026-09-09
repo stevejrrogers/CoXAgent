@@ -153,6 +153,10 @@ impl HarxesEngine {
             fs: None,
             // Per-run effort (below) wins; no engine-wide default.
             reasoning_effort: None,
+            // Bizbrain rate-limits under 3 parallel workers; waiting out a
+            // 429 (up to 2 min) keeps the run on the strong model instead of
+            // bouncing it to the weak failover engine mid-task.
+            rate_limit_patience: Some(std::time::Duration::from_secs(120)),
         };
         harxes_core::HarxesEngine::new(cfg)
             .map_err(|e| PortError::Backend(format!("harxes: engine config: {e}")))
