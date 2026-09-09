@@ -231,7 +231,16 @@ impl AgentEnginePort for HarxesEngine {
 }
 
 /// Map a completed run onto the port's outcome shape.
-fn finish(out: RunOutcome, trace: String, engine: &HarxesEngine) -> AgentOutcome {
+fn finish(out: RunOutcome, mut trace: String, engine: &HarxesEngine) -> AgentOutcome {
+    // Final accounting line: how much of the spend was deliberation. This is
+    // the number the reasoning_effort mapping is judged by.
+    if let Some(r) = out.reasoning_tokens {
+        trace.push_str(&format!(
+            "⏱ run total · {} tokens ({} reasoning)\n",
+            fmt_tokens(out.total_tokens),
+            fmt_tokens(r)
+        ));
+    }
     let guardrail = matches!(out.stop_reason, harxes_core::StopReason::Guardrail);
     AgentOutcome {
         stdout: out.final_text,
@@ -385,10 +394,17 @@ impl Coalescer {
                 n,
                 input_tokens,
                 output_tokens,
+                reasoning_tokens,
             } => {
                 self.close_msg(live_file, trace);
+                let reasoning = reasoning_tokens
+                    .map(|r| format!(" ({} reasoning)", fmt_tokens(r)))
+                    .unwrap_or_default();
                 Self::emit_raw(
-                    &format!("⏱ iteration {n} · {} tokens", fmt_tokens(input_tokens + output_tokens)),
+                    &format!(
+                        "⏱ iteration {n} · {} tokens{reasoning}",
+                        fmt_tokens(input_tokens + output_tokens)
+                    ),
                     live_file,
                     trace,
                 );
@@ -629,6 +645,7 @@ mod tests {
             output_tokens: 2,
             total_tokens: 3,
             stop_reason: harxes_core::StopReason::Guardrail,
+            reasoning_tokens: Some(900_000),
         };
         let mapped = finish(out, String::new(), &HarxesEngine::new("bizbrain/GLM-5.3"));
         assert_eq!(mapped.exit_code, Some(1));
