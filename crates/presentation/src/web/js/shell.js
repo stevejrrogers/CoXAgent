@@ -1539,6 +1539,21 @@ function parseWorklog(raw){
   flush();
   return items;
 }
+// Tool output, readable: ANSI escape codes stripped, each line classified so
+// diffs/test results/errors read at a glance instead of as a grey slab.
+function wlPre(body){
+  const lines=body.join("\n").replace(/\[[0-9;]*[A-Za-z]/g,"").split("\n");
+  const cls=l=>{
+    if(/^\+(?!\+\+)/.test(l))return "add";
+    if(/^-(?!--)/.test(l))return "del";
+    if(/^(error|thread '.*' panicked|FAILED|✗)|error\[E\d+\]/.test(l.trim()))return "err";
+    if(/^(warning)\b/.test(l.trim()))return "warn";
+    if(/\b(test result: ok|passed|Finished|✓)\b/.test(l))return "ok";
+    return "";
+  };
+  const rows=lines.map(l=>`<div class="wl-pl ${cls(l)}">${esc(l)||" "}</div>`).join("");
+  return `<div class="wl-pre">${rows}</div>`;
+}
 // A review/structured-output line is often the model's final answer dumped as
 // raw JSON — `{"decision":"approve","summary":"…"}`. Rendered verbatim it is a
 // wall of braces; parse it into a verdict badge + the summary as prose.
@@ -1609,7 +1624,7 @@ function wlItemHtml(it){
     if(!body.length) return `<span class="wl-rin">${head}</span>`;
     // The real output, revealed on click — a summary you can open, not a
     // dead-end count.
-    return `<details class="wl-out"><summary class="wl-rin">${head} <span class="wl-more">show output</span></summary><pre class="wl-pre">${esc(body.join("\n"))}</pre></details>`;
+    return `<details class="wl-out"><summary class="wl-rin">${head} <span class="wl-more">show output</span></summary>${wlPre(body)}</details>`;
   }
   const card=wlVerdictCard(it.text);
   if(card) return card;

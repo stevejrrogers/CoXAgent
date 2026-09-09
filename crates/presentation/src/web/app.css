@@ -225,6 +225,12 @@
   .wl-out .wl-more{color:var(--accent2);font-size:10.5px;margin-left:4px}
   .wl-out[open] .wl-more::after{content:" ▾"}
   .wl-out:not([open]) .wl-more::after{content:" ▸"}
+  .wl-pre .wl-pl{white-space:pre-wrap;word-break:break-word;min-height:1em}
+  .wl-pre .wl-pl.add{color:var(--green);background:color-mix(in srgb,var(--green) 7%,transparent)}
+  .wl-pre .wl-pl.del{color:var(--red);background:color-mix(in srgb,var(--red) 7%,transparent)}
+  .wl-pre .wl-pl.err{color:var(--red);font-weight:600}
+  .wl-pre .wl-pl.warn{color:var(--amber)}
+  .wl-pre .wl-pl.ok{color:var(--green)}
   .wl-pre{margin:6px 0 2px;padding:9px 11px;background:var(--card);border:1px solid var(--border2);
     border-radius:8px;font-family:ui-monospace,monospace;font-size:11px;line-height:1.5;color:var(--text);
     white-space:pre-wrap;word-break:break-word;max-height:280px;overflow:auto}
