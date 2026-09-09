@@ -6,8 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-harxes-core = { git = "ssh://git@github.com/stevejrrogers/Harxes.git", tag = "v0.3.0" }
-harxes-core-domain = { git = "ssh://git@github.com/stevejrrogers/Harxes.git", tag = "v0.3.0" }
+harxes-core = { git = "ssh://git@github.com/stevejrrogers/Harxes.git", tag = "v0.3.1" }
 coxagent-domain.workspace = true
 coxagent-application.workspace = true
 serde.workspace = true

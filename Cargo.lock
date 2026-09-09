@@ -599,7 +599,6 @@ dependencies = [
  "deadpool-postgres",
  "fs4",
  "harxes-core",
- "harxes-core-domain",
  "hmac 0.12.1",
  "mongodb",
  "percent-encoding",
@@ -1118,7 +1117,7 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 [[package]]
 name = "harxes-app"
 version = "0.2.0"
-source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.3.0#b28f7467c4bb167eb80c86599ce9ce2f1845eaed"
+source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.3.1#302fa4a7b355b1360adbe7f767c765dcc897a991"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -1132,7 +1131,7 @@ dependencies = [
 [[package]]
 name = "harxes-core"
 version = "0.2.0"
-source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.3.0#b28f7467c4bb167eb80c86599ce9ce2f1845eaed"
+source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.3.1#302fa4a7b355b1360adbe7f767c765dcc897a991"
 dependencies = [
  "async-trait",
  "harxes-app",
@@ -1147,7 +1146,7 @@ dependencies = [
 [[package]]
 name = "harxes-core-domain"
 version = "0.2.0"
-source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.3.0#b28f7467c4bb167eb80c86599ce9ce2f1845eaed"
+source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.3.1#302fa4a7b355b1360adbe7f767c765dcc897a991"
 dependencies = [
  "async-trait",
  "serde",
@@ -1158,7 +1157,7 @@ dependencies = [
 [[package]]
 name = "harxes-infra-auth"
 version = "0.2.0"
-source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.3.0#b28f7467c4bb167eb80c86599ce9ce2f1845eaed"
+source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.3.1#302fa4a7b355b1360adbe7f767c765dcc897a991"
 dependencies = [
  "harxes-core-domain",
 ]
@@ -1166,7 +1165,7 @@ dependencies = [
 [[package]]
 name = "harxes-infra-fs"
 version = "0.2.0"
-source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.3.0#b28f7467c4bb167eb80c86599ce9ce2f1845eaed"
+source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.3.1#302fa4a7b355b1360adbe7f767c765dcc897a991"
 dependencies = [
  "async-trait",
  "glob",
@@ -1178,7 +1177,7 @@ dependencies = [
 [[package]]
 name = "harxes-infra-llm"
 version = "0.2.0"
-source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.3.0#b28f7467c4bb167eb80c86599ce9ce2f1845eaed"
+source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.3.1#302fa4a7b355b1360adbe7f767c765dcc897a991"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1193,7 +1192,7 @@ dependencies = [
 [[package]]
 name = "harxes-infra-shell"
 version = "0.2.0"
-source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.3.0#b28f7467c4bb167eb80c86599ce9ce2f1845eaed"
+source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.3.1#302fa4a7b355b1360adbe7f767c765dcc897a991"
 dependencies = [
  "async-trait",
  "harxes-core-domain",
