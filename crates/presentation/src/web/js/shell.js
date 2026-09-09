@@ -1506,6 +1506,13 @@ function parseWorklog(raw){
     if(th!=null){ const last=cur===null?items[items.length-1]:null;
       if(last&&last.k==="think"){ last.text+="\n"+th; } else { flush(); items.push({k:"think",text:th}); }
       continue; }
+    // ⏱ loop progress beat (iteration N · cumulative tokens) — the newest
+    // beat supersedes the previous one, so only the latest is kept and the
+    // log doesn't grow a ruler of stale counters.
+    if(/^⏱\s/.test(s)){ flush(); const t=s.replace(/^⏱\s*/,"");
+      const last=items[items.length-1];
+      if(last&&last.k==="iter") last.text=t; else items.push({k:"iter",text:t});
+      continue; }
     // ↻ provider retry (transient backoff — a status beat, not an error).
     if(/^↻\s/.test(s)){ flush(); items.push({k:"retry",text:s.replace(/^↻\s*/,"")}); continue; }
     // Legacy harxes markers (pre-protocol logs): ▶ tool start / ✓ tool end.
@@ -1575,11 +1582,14 @@ function wlItemHtml(it){
   if(it.k==="think"){
     // Collapsed by default: the first line as a teaser, the full chain of
     // thought one click away. Keeps the log scannable while losing nothing.
-    const lines=String(it.text||"").split("\n");
+    const lines=String(it.text||"").split("\n").filter(l=>l.trim());
     const teaser=lines[0].length>110?lines[0].slice(0,110)+"…":lines[0];
     const n=lines.length;
-    return `<details class="wl-think-d"><summary><i class="ti ti-bulb"></i><span class="wl-think-lbl">thinking${n>1?` · ${n} steps`:""}</span><span class="wl-think-tz">${wlFmt(teaser)}</span></summary><div class="wl-think-body">${wlFmt(it.text)}</div></details>`;
+    // Expanded: each thought is its own numbered step, not a wall of italics.
+    const steps=lines.map((l,i)=>`<div class="wl-think-step"><span class="wl-think-n">${i+1}</span><span>${wlFmt(l)}</span></div>`).join("");
+    return `<details class="wl-think-d"><summary><i class="ti ti-bulb"></i><span class="wl-think-lbl">thinking${n>1?` · ${n} steps`:""}</span><span class="wl-think-tz">${wlFmt(teaser)}</span></summary><div class="wl-think-body">${steps}</div></details>`;
   }
+  if(it.k==="iter") return `<span class="wl-iter-in"><i class="ti ti-activity-heartbeat"></i> ${esc(it.text)}</span>`;
   if(it.k==="retry") return `<span class="wl-chip wl-retry-chip"><i class="ti ti-refresh wl-tic" style="color:var(--amber)"></i><span class="wl-tname">${esc(it.text)}</span></span>`;
   if(it.k==="end")  return `<span><i class="ti ti-circle-check"></i> run finished</span>`;
   if(it.k==="tool"){ const m=wlToolMeta(it.name);
@@ -1591,7 +1601,9 @@ function wlItemHtml(it){
     return `<span class="wl-chip"><i class="ti ${m.ic} wl-tic" style="color:var(${m.col})"></i><span class="wl-tname">${esc(said.verb)}</span>${said.detail?`<span class="wl-targs">${esc(said.detail)}</span>`:""}</span>`; }
   if(it.k==="result"){
     const body=(it.body||[]).filter(x=>x!=null);
-    const head=`<i class="ti ti-corner-down-right"></i> ${esc(it.info)}`;
+    // A failed tool result (harxes marks it ✗) reads red, not the default green.
+    const bad=/^✗/.test(it.info||"");
+    const head=`<i class="ti ti-corner-down-right"${bad?' style="color:var(--red)"':''}></i> ${esc(it.info)}`;
     if(!body.length) return `<span class="wl-rin">${head}</span>`;
     // The real output, revealed on click — a summary you can open, not a
     // dead-end count.

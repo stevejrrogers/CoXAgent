@@ -261,6 +261,36 @@ fn render_engine_error(e: &EngineError) -> String {
     }
 }
 
+/// A tool duration a person can read: "480ms", "12.4s", "3m05s".
+fn fmt_duration(ms: u64) -> String {
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        {
+        #[allow(clippy::cast_precision_loss)] // sub-minute durations fit easily
+        let secs = ms as f64 / 1000.0;
+        format!("{secs:.1}s")
+    }
+    } else {
+        format!("{}m{:02}s", ms / 60_000, (ms % 60_000) / 1000)
+    }
+}
+
+/// Cumulative token counts a person can read: "481k", "1.5M".
+fn fmt_tokens(n: u64) -> String {
+    if n < 1_000 {
+        n.to_string()
+    } else if n < 1_000_000 {
+        format!("{}k", n / 1_000)
+    } else {
+        {
+        #[allow(clippy::cast_precision_loss)] // token counts are far below 2^52
+        let m = n as f64 / 1_000_000.0;
+        format!("{m:.1}M")
+    }
+    }
+}
+
 /// Buffers streaming Text/Reasoning deltas into whole lines; tool events and
 /// retries flush the buffer first so ordering is preserved.
 ///
@@ -296,21 +326,48 @@ impl Coalescer {
                 self.close_msg(live_file, trace);
                 Self::emit_raw(&format!("🔧 {name}({summary})"), live_file, trace);
             }
-            RunEvent::ToolEnd { name: _, summary } => {
+            RunEvent::ToolEnd {
+                name: _,
+                summary,
+                duration_ms,
+                ok,
+            } => {
                 self.close_msg(live_file, trace);
                 // Multi-line result: first line is the inline summary, the
                 // rest becomes the click-to-open preview body.
                 let mut lines = summary.lines();
                 let head = lines.next().unwrap_or_default();
-                Self::emit_raw(&format!("↳ {head}"), live_file, trace);
+                let mark = if *ok { '✓' } else { '✗' };
+                Self::emit_raw(
+                    &format!("↳ {mark} {head} · {}", fmt_duration(*duration_ms)),
+                    live_file,
+                    trace,
+                );
                 for l in lines {
                     Self::emit_raw(&format!("┆ {l}"), live_file, trace);
                 }
+            }
+            // Cumulative loop progress: the trail that shows how close a run
+            // is to its guardrail cap BEFORE it dies there.
+            RunEvent::Iteration {
+                n,
+                input_tokens,
+                output_tokens,
+            } => {
+                self.close_msg(live_file, trace);
+                Self::emit_raw(
+                    &format!("⏱ iteration {n} · {} tokens", fmt_tokens(input_tokens + output_tokens)),
+                    live_file,
+                    trace,
+                );
             }
             RunEvent::Retry { wait_secs } => {
                 self.close_msg(live_file, trace);
                 Self::emit_raw(&format!("↻ provider retry in {wait_secs}s"), live_file, trace);
             }
+            // RunEvent is #[non_exhaustive]: future variants stream past the
+            // live log rather than breaking the build.
+            _ => {}
         }
     }
 
@@ -503,6 +560,8 @@ mod tests {
             &RunEvent::ToolEnd {
                 name: "Bash".to_owned(),
                 summary: "exit=0\n220 passed".to_owned(),
+                duration_ms: 12_400,
+                ok: true,
             },
             None,
             &mut trace,
@@ -511,7 +570,7 @@ mod tests {
         co.feed(&RunEvent::Retry { wait_secs: 3 }, None, &mut trace);
         assert_eq!(
             trace,
-            "\u{1f4ac} Done. Summary:\nAll tests pass.\n\u{21b3} exit=0\n\u{2506} 220 passed\n\u{1f4ac} Next step.\n\u{21bb} provider retry in 3s\n",
+            "\u{1f4ac} Done. Summary:\nAll tests pass.\n\u{21b3} \u{2713} exit=0 \u{b7} 12.4s\n\u{2506} 220 passed\n\u{1f4ac} Next step.\n\u{21bb} provider retry in 3s\n",
             "first text line opens a \u{1f4ac} bubble, continuations stay plain, tool end splits into summary + preview"
         );
     }
