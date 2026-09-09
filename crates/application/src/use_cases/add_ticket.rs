@@ -174,11 +174,21 @@ pub(crate) fn mint_id(
     } else {
         format!("{}-{code}", state.alias)
     };
+    // max+1, NOT count+1: any deleted/deduped ticket makes the count lag
+    // the highest number, and count+1 then re-mints an EXISTING id — the BA
+    // failed every cycle re-minting CXA-F374 while 374 was live on the board
+    // (CXA-B169), which starved the whole cycle behind it.
     let next = state
         .tickets
         .iter()
-        .filter(|t| t.id().as_str().starts_with(&prefix))
-        .count()
+        .filter_map(|t| {
+            t.id()
+                .as_str()
+                .strip_prefix(&prefix)
+                .and_then(|n| n.parse::<u64>().ok())
+        })
+        .max()
+        .unwrap_or(0)
         + 1;
     Ok(TicketId::new(format!("{prefix}{next:03}"))?)
 }
