@@ -41,6 +41,12 @@ setTimeout(()=>{if(ME?.auth)loadOpencodeModels();},2000);
 function modelControl(eng,cur,sid){
   if(!eng)return `<input id="mdl-${sid}" value="" placeholder="uses default model" disabled style="flex:1;opacity:.45"/>`;
   const list=MODELS[eng];
+  if(eng==="harxes"){
+    // Harxes talks to one OpenAI-compatible endpoint (LiteLLM) — the model is
+    // a BARE id, never provider-prefixed (upstream WAFs 403 on '/' in model).
+    return `<input id="mdl-${sid}" value="${esc(cur||"GLM-5.3")}" placeholder="model id (bare, e.g. GLM-5.3)" style="flex:1;min-width:140px"/>
+      <span style="font-size:10px;color:var(--dim);padding:0 4px;white-space:nowrap">bare model — no provider/ prefix</span>`;
+  }
   if(!list){ // opencode: provider picker + model with datalist
     const providers=OC_PROVIDERS.length?OC_PROVIDERS:OPENCODE_PROVIDERS;
     const models=OC_MODELS.length?OC_MODELS:["sonnet","opus","gpt-4o"];
