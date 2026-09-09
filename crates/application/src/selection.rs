@@ -30,8 +30,13 @@ fn active_bug_burn_floor(state: &ProjectState) -> Option<Priority> {
 pub fn open_bug_candidates(state: &ProjectState) -> Vec<TicketId> {
     let floor = active_bug_burn_floor(state);
     candidates(state, |t| {
+        // A bug the SA has designed sits at Ready, not Open — it is MORE
+        // workable, not less. Excluding Ready orphaned every designed bug
+        // (invisible to the bug lane here, invisible to the feature lane by
+        // type) and starved DEV for whole cycles while the sprint was full
+        // (CXA-B168).
         t.ticket_type() == TicketType::Bug
-            && t.status() == Status::Open
+            && matches!(t.status(), Status::Open | Status::Ready)
             && !below_bug_burn_floor(floor, t.priority())
     })
 }
