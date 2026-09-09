@@ -62,7 +62,7 @@ async function saveSettings(){
   // Track engine config BEFORE changes for comparison
   const origEngine=JSON.stringify(window._cfg?.engine||{});
   
-  function mdl(id){const provEl=document.getElementById("mdl-prov-"+id);if(provEl)return provEl.value+"/"+(val("mdl-"+id)||"");return val("mdl-"+id)||"";}
+  function mdl(id){const provEl=document.getElementById("mdl-prov-"+id);if(provEl&&provEl.value)return provEl.value+"/"+(val("mdl-"+id)||"");return val("mdl-"+id)||"";}
   cfg.engine.default={engine:val("eng-default"),model:mdl("default")};
   const per={};ROLES.forEach(r=>{const e=val("eng-"+r),m=mdl(r);if(e)per[r]={engine:e,model:m||"sonnet"};});cfg.engine.per_role=per;
   cfg.engine.fallbacks=(val("eng-fallbacks")||"").split("\n").map(l=>l.trim()).filter(Boolean).map(l=>{const p=l.split(/\s+/);return{engine:p[0],model:p.slice(1).join(" ")||"sonnet"};}).filter(f=>f.engine);
