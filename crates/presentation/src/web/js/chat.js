@@ -1722,7 +1722,10 @@ function renderHealth(s){
   const sp=s.sprint; let velo="—", veloSub="no sprint";
   if(sp&&sp.committed){const done=sp.committed.filter(id=>t.some(x=>x.id===id&&isDone(x))).length;
     velo=`${done}/${sp.committed.length}`; veloSub=`sprint #${sp.number}`;}
-  const openBugs=t.filter(x=>(x.type||x.ticket_type||"").toLowerCase()==="bug"&&(x.status||"").toLowerCase()==="open").length;
+  // "unfixed" means unfixed: a designed (ready) or mid-fix (in_progress)
+  // bug is still broken software — counting only 'open' showed 0 while four
+  // sprint bugs sat ready on the same screen (CXA-B172).
+  const openBugs=t.filter(x=>(x.type||x.ticket_type||"").toLowerCase()==="bug"&&["open","ready","in_progress"].includes((x.status||"").toLowerCase())).length;
   // "inprogress" never matched the serde key — WIP read 0 while DEV was
   // mid-ticket on the same screen (CXA-B171).
   const wip=t.filter(x=>(x.status||"").toLowerCase()==="in_progress").length;

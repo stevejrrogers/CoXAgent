@@ -288,9 +288,11 @@ fn finish(out: RunOutcome, mut trace: String, engine: &HarxesEngine) -> AgentOut
         usage: Some(Usage {
             input_tokens: out.input_tokens,
             output_tokens: out.output_tokens,
-            // Pricing is provider-specific config the hub owns; the honest
-            // number here is 0, like the copilot adapter (never invent cost).
-            cost_usd: 0.0,
+            // Never INVENT cost — but when the operator declares the
+            // provider's price (COXAGENT_USD_PER_MTOK_IN/_OUT, $ per million
+            // tokens), report the real spend instead of a flat 0 that made
+            // the Cost tile undercount every harxes run (CXA-B172).
+            cost_usd: priced_usd(out.input_tokens, out.output_tokens),
         }),
         trace,
         session_id: None,
@@ -332,7 +334,22 @@ fn effort_for(role: coxagent_domain::Role) -> ReasoningEffort {
     }
 }
 
-/// A tool duration a person can read: "480ms", "12.4s", "3m05s".
+/// Cost from operator-declared $/Mtok prices; 0 when no price is set.
+fn priced_usd(input_tokens: u64, output_tokens: u64) -> f64 {
+    let rate = |k: &str| {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|r| r.is_finite() && *r >= 0.0)
+            .unwrap_or(0.0)
+    };
+    #[allow(clippy::cast_precision_loss)] // token counts fit f64 comfortably
+    let m = |n: u64| n as f64 / 1_000_000.0;
+    m(input_tokens) * rate("COXAGENT_USD_PER_MTOK_IN")
+        + m(output_tokens) * rate("COXAGENT_USD_PER_MTOK_OUT")
+}
+
+/// A tool duration a person can read:/// A tool duration a person can read: "480ms", "12.4s", "3m05s".
 fn fmt_duration(ms: u64) -> String {
     if ms < 1_000 {
         format!("{ms}ms")
