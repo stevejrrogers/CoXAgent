@@ -33,6 +33,7 @@ mod wiring;
 
 mod forge;
 mod forge_feedback;
+mod evict;
 mod forge_merge;
 mod forge_review;
 mod lesson_sweep;
@@ -154,6 +155,8 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     shot: Option<Arc<dyn crate::ports::outbound::ScreenshotPort>>,
     probe: Option<Arc<dyn crate::ports::outbound::ApiProbePort>>,
     storage: Option<Arc<dyn crate::ports::outbound::StoragePort>>,
+    /// Cold store for evicted terminal tickets (CXA-F273); None = eviction off.
+    archive: Option<std::sync::Arc<dyn crate::ports::outbound::ArchiveStorePort>>,
     deploy: Option<Arc<dyn DeployPort>>,
     notifier: Option<Arc<dyn crate::ports::outbound::NotifierPort>>,
     /// Reporter that pushes PR/review activity to the hub over HTTP. The runner
@@ -233,6 +236,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             shot: None,
             probe: None,
             storage: None,
+            archive: None,
             deploy: None,
             host_port_probe,
             notifier: None,
@@ -385,6 +389,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     }
 
     /// Attach local git so completed tickets are committed (and, later, pushed)
+    /// Attach the ticket cold store; eviction runs only when present.
+    #[must_use]
+    pub fn with_archive(
+        mut self,
+        archive: Option<std::sync::Arc<dyn crate::ports::outbound::ArchiveStorePort>>,
+    ) -> Self {
+        self.archive = archive;
+        self
+    }
+
+    /// Attach the git port for merge-queue and hygiene work, used
     /// when `config.git.enabled`.
     #[must_use]
     pub fn with_git(mut self, git: Arc<dyn GitPort>) -> Self {
@@ -902,6 +917,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
 
             // Team hygiene: reject any duplicate tickets before design/dev.
             self.dedup_backlog().await;
+            // CXA-F273: keep the hot state small — terminal tickets move to
+            // the cold archive; every save serializes the whole row, and an
+            // unbounded tickets array had grown saves into minute-long stalls.
+            self.evict_terminal_tickets().await;
 
             // Both of these are author-once jobs that re-check every cycle and
             // almost always exit early — but the early exit still costs a

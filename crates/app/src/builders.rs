@@ -489,6 +489,9 @@ async fn build_project_inner(
             coxagent_infrastructure::screenshot::ChromeScreenshot,
         )))
         .with_probe(Some(Arc::new(coxagent_infrastructure::probe::HttpProbe)))
+        // CXA-F273: the leader owns the eviction sweep; without a cold store
+        // the sweep is a no-op and the hot state simply keeps growing.
+        .with_archive(build_archive_store().await)
         // Evidence blobs go where the hub serves media from: S3/MinIO when
         // configured, else the default hub's local blob dir (~/CoXAgent/blobs).
         .with_storage(Some(build_storage().await.unwrap_or_else(|| {
