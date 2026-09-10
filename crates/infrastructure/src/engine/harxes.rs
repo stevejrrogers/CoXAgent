@@ -235,12 +235,31 @@ impl AgentEnginePort for HarxesEngine {
         // fragment per line.
         let mut trace = String::new();
         let mut co = Coalescer::default();
+        // First-event watchdog (CXA-B173): three times today a run froze at
+        // the bare header — the engine future went quiet before its FIRST
+        // event with no I/O in flight (thread dump showed zero harxes/reqwest
+        // frames), and nothing ever woke it. A run that produces no event at
+        // all within this window is dead, not slow; dropping the driver
+        // cancels it cleanly (harxes kills its children) and the infra-shaped
+        // error hands the ticket to the failover engine instead of eternity.
+        let first_event_deadline = tokio::time::sleep(std::time::Duration::from_secs(240));
+        tokio::pin!(first_event_deadline);
+        let mut saw_event = false;
         let outcome = loop {
             tokio::select! {
                 ev = events.recv() => {
                     if let Some(ev) = ev {
+                        saw_event = true;
                         co.feed(&ev, live.as_deref(), &mut trace);
                     }
+                }
+                () = &mut first_event_deadline, if !saw_event => {
+                    if let Some(p) = &live {
+                        append_live(p, "↻ run produced no events in 240s — cancelled, failing over");
+                    }
+                    return Err(PortError::Backend(
+                        "harxes provider service unavailable: run produced no events within 240s (stalled before first token)".to_owned(),
+                    ));
                 }
                 done = &mut driver => break done,
             }
