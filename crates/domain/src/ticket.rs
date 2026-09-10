@@ -480,6 +480,29 @@ impl Ticket {
         Ok(())
     }
 
+    /// Who this ticket was split from. Set once by the SA when an oversize
+    /// ticket is decomposed into subtasks (CXA-F381).
+    #[must_use]
+    pub fn parent_id(&self) -> Option<&TicketId> {
+        self.parent_id.as_ref()
+    }
+
+    /// Bind this ticket to the oversize parent it was split from.
+    ///
+    /// # Errors
+    /// [`DomainError::FieldNotPermitted`] unless the actor owns the
+    /// dependency graph (SA; System for bookkeeping).
+    pub fn set_parent(&mut self, actor: Role, parent: TicketId) -> Result<(), DomainError> {
+        if !field_permitted(actor, "parent_id") {
+            return Err(DomainError::FieldNotPermitted {
+                role: actor,
+                field: "parent_id",
+            });
+        }
+        self.parent_id = Some(parent);
+        Ok(())
+    }
+
     /// Declare a dependency on another ticket (SA during design/split).
     ///
     /// # Errors
