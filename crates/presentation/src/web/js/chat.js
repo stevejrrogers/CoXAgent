@@ -1951,6 +1951,9 @@ async function showTicket(id){
       </div></div>
     <div class="mrow"><span class="lbl">Blocked by</span>${depChips(t.depends_on,blockedStatuses(t))}</div>
     <div class="mrow"><span class="lbl">Blocks</span>${depChips((STATE.tickets||[]).filter(x=>(x.depends_on||[]).includes(t.id)).map(x=>x.id))}</div>
+    ${t.parent_id?`<div class="mrow"><span class="lbl">Split from</span>${depChips([t.parent_id])}</div>`:''}
+    ${(function(){const kids=(STATE.tickets||[]).filter(x=>x.parent_id===t.id).map(x=>x.id);
+      return kids.length?`<div class="mrow"><span class="lbl">Subtasks</span>${depChips(kids)}</div>`:'';})()}
     ${(t.unknown_dependencies||[]).length?`<div class="mrow"><span class="lbl">Unknown dependencies</span>${t.unknown_dependencies.map(id=>`<span title="no such ticket in this project — the scheduler treats it as NOT satisfied" style="display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:3px 8px;border-radius:7px;background:color-mix(in srgb,var(--red) 14%,transparent);color:var(--red);margin-right:5px"><i class="ti ti-alert-triangle" style="font-size:11px"></i>${esc(id)} · unknown</span>`).join("")}</div>`:''}
     ${depGraphSection}
     <div class="mrow" style="display:block"><span class="lbl">Description</span><div class="doc-body md" style="margin-top:7px;color:var(--muted);line-height:1.6;font-size:13px">${t.description?mdRender(t.description):'—'}</div></div>
