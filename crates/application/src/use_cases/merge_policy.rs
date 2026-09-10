@@ -391,6 +391,11 @@ pub enum EscalationRoute {
     Mechanical,
     /// A genuine technical dead end — the SA revises the approach.
     Design,
+    /// The work does not fit one run: repeated guardrail-cap deaths. The SA
+    /// decomposes it into subtasks instead of re-approaching the monolith
+    /// (CXA-F381) — C025/F375 each burned two full-cap runs before this
+    /// route existed.
+    Oversize,
 }
 
 /// Route from the structured failure log — the gates' own verdicts, so no
@@ -409,6 +414,16 @@ pub fn route_from_failures(
     if real.is_empty() {
         return EscalationRoute::Design;
     }
+    // Two or more attempts cut by the loop guardrail = the ticket exceeds a
+    // run, regardless of what else went wrong. Split beats re-approaching.
+    if real
+        .iter()
+        .filter(|f| f.detail.contains("iteration/token cap"))
+        .count()
+        >= 2
+    {
+        return EscalationRoute::Oversize;
+    }
     if real.iter().any(|f| f.layer == FailureLayer::Spec) || spec_gap {
         return EscalationRoute::Spec;
     }
@@ -423,6 +438,9 @@ pub fn route_from_failures(
 #[must_use]
 pub fn escalation_route(history: &str, spec_gap: bool) -> EscalationRoute {
     let low = history.to_lowercase();
+    if low.matches("iteration/token cap").count() >= 2 {
+        return EscalationRoute::Oversize;
+    }
     let unclear = [
         "unclear",
         "ambiguous",
