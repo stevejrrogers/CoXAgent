@@ -91,6 +91,9 @@ test('a repeating lesson renders its recurrence history with the prevention acti
   await setLessonLedger(seededLedger);
   try {
     await openApp(page);
+    // CXA-F383: diagnostic panels fold behind the Diagnostics disclosure —
+    // open it before asserting on their content.
+    await page.evaluate(() => { const d = document.getElementById('ov-diag') as HTMLDetailsElement | null; if (d) d.open = true; });
 
     const panel = page.locator('#ov-lessons');
     // The repeating section exists and names the repeating lesson (AC2).

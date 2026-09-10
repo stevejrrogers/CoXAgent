@@ -847,6 +847,10 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
         const mine=runners.find(x=>x.who===me);
         if(mine){mine.ticket=RUNNER.active_note||mine.ticket;} else {runners.unshift({who:me,ticket:RUNNER.active_note||''});}
       }
+      // Ground truth fallback (CXA-F386): a fresh live-log write means this
+      // role is working even when the claim registry hasn't caught up.
+      const lvHit=(window.LIVENESS||[]).find(l=>((l.role||"").replace(/_/g,"-").toUpperCase()===r)&&(l.age_secs??9999)<=120);
+      if(lvHit&&!runners.length)runners.push({who:"",ticket:lvHit.ticket||""});
       const working=runners.length>0;
       // Fallback ticket for the idle "last touched" line.
       let cur=null,live=working;
@@ -860,7 +864,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
       if(working){
         const rows=runners.map(rn=>`<div class="ag-run" onclick="event.stopPropagation();openAgent('${r}','${esc(rn.who)}')" style="cursor:pointer" title="View ${esc(short(rn.who))}'s live log">`
           +`<span class="ag-task">${rn.ticket?`<span class="tid">${esc(rn.ticket)}</span>`:'working'}</span>`
-          +`<span class="ag-by" title="${esc(rn.who)}"><i class="ti ti-user-cog"></i> ${esc(short(rn.who))}</span></div>`).join("");
+          +(rn.who?`<span class="ag-by" title="${esc(rn.who)}"><i class="ti ti-user-cog"></i> ${esc(short(rn.who))}</span>`:'<span class="ag-by"><i class="ti ti-activity-heartbeat"></i> live</span>')+`</div>`).join("");
         statusHtml=`<div class="ag-now"><i class="ti ti-loader-2 att-spin"></i> working now${runners.length>1?`<span class="ag-nteams">${runners.length} teams</span>`:''}</div>
           <div class="ag-runs">${rows}</div>`;
       }else{
@@ -1019,14 +1023,34 @@ function renderOvWorking(){
   const now=Date.now();
   if(now-OV_WORK_LAST<4000)return; // the 1 Hz snapshot repaints often; fetch gently
   OV_WORK_LAST=now;
-  fetch(api("/workers")).then(r=>r.json()).then(ws=>{
+  Promise.all([
+    fetch(api("/workers")).then(r=>r.json()).catch(()=>[]),
+    fetch(api("/agent-liveness")).then(r=>r.json()).catch(()=>[]),
+  ]).then(([ws,lv])=>{
     window.WORKERS=Array.isArray(ws)?ws:[];
-    const busy=(window.WORKERS||[]).filter(w=>!/^(leader|worker|idle)$/i.test(w.role||"idle"));
-    if(!busy.length){setHTML(el,"");return;}
-    setHTML(el,`<div class="ov-work">`+busy.map(w=>{
+    window.LIVENESS=Array.isArray(lv)?lv:[];
+    const chips=[];
+    const seen=new Set();
+    for(const w of (window.WORKERS||[])){
+      if(/^(leader|worker|idle)$/i.test(w.role||"idle"))continue;
       const role=(w.role||"").replace(/_/g,"-").toUpperCase();
-      return `<div class="ov-work-chip" onclick="openAgent('${esc(role)}','${esc(w.worker||"")}')" title="open ${esc(role)}'s live log">
-        <span class="ov-work-dot"></span><b>${esc(role)}</b>${w.ticket?`<span class="tk">${esc(w.ticket)}</span>`:""}<span class="ov-work-lbl">working now</span></div>`;
-    }).join("")+`</div>`);
+      seen.add(role);
+      chips.push({role,ticket:w.ticket||"",who:w.worker||""});
+    }
+    // Ground truth: a live-log file written in the last 2 minutes IS a
+    // working agent, whatever the claim registry says (CXA-F386 — in-process
+    // runs looked idle from outside while their log grew every second).
+    for(const l of (window.LIVENESS||[])){
+      if((l.age_secs??9999)>120)continue;
+      const role=(l.role||"").replace(/_/g,"-").toUpperCase();
+      if(seen.has(role))continue;
+      seen.add(role);
+      chips.push({role,ticket:l.ticket||"",who:""});
+    }
+    if(!chips.length){setHTML(el,"");return;}
+    setHTML(el,`<div class="ov-work">`+chips.map(w=>
+      `<div class="ov-work-chip" onclick="openAgent('${esc(w.role)}','${esc(w.who)}')" title="open ${esc(w.role)}'s live log">
+        <span class="ov-work-dot"></span><b>${esc(w.role)}</b>${w.ticket?`<span class="tk">${esc(w.ticket)}</span>`:""}<span class="ov-work-lbl">working now</span></div>`
+    ).join("")+`</div>`);
   }).catch(()=>{});
 }

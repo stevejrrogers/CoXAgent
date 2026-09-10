@@ -250,6 +250,7 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     // Global search (CXA-F275): labeled hits from tickets (open + closed),
     // wiki pages and chat threads, server-ranked and capped (8/kind, 30 total).
     route("/api/search", &["get"]),
+    route("/api/projects/:pid/agent-liveness", &["get"]),
     route("/api/spaces", &["get", "post"]),
     route("/api/spaces/:sid", &["delete", "put"]),
     route("/s/:token", &["get"]),
