@@ -611,9 +611,20 @@ function card(t){const a={high:"var(--red)",medium:"var(--amber)",low:"var(--dim
   // split from; a parent counts its children and how many already landed.
   const sub=t.parent_id?`<span class="b" style="background:color-mix(in srgb,var(--purple) 14%,transparent);color:var(--purple)" title="subtask of ${esc(t.parent_id)}"><i class="ti ti-corner-down-right" style="font-size:10px"></i> ${esc(t.parent_id)}</span>`:'';
   const kids=(STATE.tickets||[]).filter(x=>x.parent_id===t.id);
-  const split=kids.length?`<span class="b" style="background:color-mix(in srgb,var(--purple) 14%,transparent);color:var(--purple)" title="split into ${esc(kids.map(k=>k.id).join(', '))}"><i class="ti ti-axe" style="font-size:10px"></i> ${kids.filter(k=>doneSet.includes(k.status)).length}/${kids.length}</span>`:'';
+  // The 🪓 badge is a disclosure: click to unfold the subtask tree in place
+  // (stopPropagation so the card's own click keeps opening the detail).
+  const open=window.SUBTREE_OPEN&&SUBTREE_OPEN.has(t.id);
+  const split=kids.length?`<span class="b" onclick="event.stopPropagation();toggleSubtree('${t.id}')" style="cursor:pointer;background:color-mix(in srgb,var(--purple) 14%,transparent);color:var(--purple)" title="split into ${esc(kids.map(k=>k.id).join(', '))} — click to ${open?'collapse':'expand'}"><i class="ti ti-axe" style="font-size:10px"></i> ${kids.filter(k=>doneSet.includes(k.status)).length}/${kids.length} <i class="ti ti-chevron-${open?'up':'down'}" style="font-size:9px"></i></span>`:'';
+  const tree=(kids.length&&open)?`<div class="subtree">${kids.map(k=>{
+    const kdone=doneSet.includes(k.status);
+    const kc=kdone?"var(--green)":(k.status==="in_progress"?"var(--accent2)":"var(--dim)");
+    return `<div class="subtree-row" onclick="event.stopPropagation();showTicket('${k.id}')"><i class="ti ti-${kdone?'circle-check':'corner-down-right'}" style="color:${kc};font-size:11px"></i><span class="st-id">${esc(k.id)}</span><span class="st-title">${esc(k.title)}</span><span class="st-st" style="color:${kc}">${esc(k.status.replace(/_/g,' '))}</span></div>`;
+  }).join("")}</div>`:'';
   return `<div class="card-t" onclick="showTicket('${t.id}')" ${t.status==="on_hold"?'style="opacity:.65"':''}><div class="cid">${esc(t.id)}</div>
-    <div class="ct">${esc(t.title)}</div><div class="badges"><span class="b ${t.priority}">${t.priority}</span>${hold}${blocked}${sub}${split}${collisionBadge(STATE,t)}${age}${ui}${bug}${who}</div></div>`;}
+    <div class="ct">${esc(t.title)}</div><div class="badges"><span class="b ${t.priority}">${t.priority}</span>${hold}${blocked}${sub}${split}${collisionBadge(STATE,t)}${age}${ui}${bug}${who}</div>${tree}</div>`;}
+// Session-local set of parents whose subtask tree is unfolded on the board.
+window.SUBTREE_OPEN=window.SUBTREE_OPEN||new Set();
+function toggleSubtree(id){if(SUBTREE_OPEN.has(id))SUBTREE_OPEN.delete(id);else SUBTREE_OPEN.add(id);renderActive();}
 function column([k,l,c],ts){const items=ts.filter(t=>t.status===k);
   return `<div class="col"><h3><span class="dot" style="background:var(${c})"></span>${l}<span class="n">${items.length}</span></h3>${items.length?items.map(card).join(""):'<div class="empty">—</div>'}</div>`;}
 // Unified column: collects both features and bugs whose status maps to this stage.

@@ -1779,6 +1779,24 @@ function renderEngineAlert(s){
     </div>`;
   }).join("");
 }
+// Manually file a subtask under a parent ticket (CXA-F381d): two quick
+// prompts, then the shared create endpoint with parent_id — the backend
+// binds the lineage and inherits the parent's priority.
+async function addSubtask(parentId){
+  const title=await coxModal({title:"New subtask of "+parentId,message:"Short, buildable title:",input:{placeholder:"e.g. Extract the port trait"},confirmText:"Next"});
+  if(!title||!String(title).trim())return;
+  const desc=await coxModal({title:"Describe the subtask",message:"What to build and how to verify it (self-contained):",input:{placeholder:"description"},confirmText:"Create"});
+  if(desc===false||desc===null)return;
+  const parent=(STATE.tickets||[]).find(x=>x.id===parentId)||{};
+  try{
+    const r=await fetch(api("/tickets"),{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({title:String(title).trim(),description:String(desc||"").trim(),ticket_type:parent.type==="bug"?"chore":(parent.type||"chore"),parent_id:parentId})});
+    if(!r.ok){toast("subtask create failed");return;}
+  }catch(e){toast("subtask create failed");return;}
+  toast("subtask filed");
+  // The 1 Hz snapshot brings the new child; reopen the parent on the next beat.
+  setTimeout(()=>showTicket(parentId),900);
+}
 function depChips(ids,live){
   if(!ids||!ids.length)return '<span style="color:var(--dim)">—</span>';
   return ids.map(id=>{const dt=(STATE.tickets||[]).find(x=>x.id===id);
@@ -1953,7 +1971,8 @@ async function showTicket(id){
     <div class="mrow"><span class="lbl">Blocks</span>${depChips((STATE.tickets||[]).filter(x=>(x.depends_on||[]).includes(t.id)).map(x=>x.id))}</div>
     ${t.parent_id?`<div class="mrow"><span class="lbl">Split from</span>${depChips([t.parent_id])}</div>`:''}
     ${(function(){const kids=(STATE.tickets||[]).filter(x=>x.parent_id===t.id).map(x=>x.id);
-      return kids.length?`<div class="mrow"><span class="lbl">Subtasks</span>${depChips(kids)}</div>`:'';})()}
+      const addBtn=(!ARCH&&typeof canManage==="function"&&canManage())?` <button class="tk-btn" style="padding:3px 9px;font-size:11px" onclick="addSubtask('${t.id}')"><i class="ti ti-plus"></i> subtask</button>`:'';
+      return (kids.length||addBtn)?`<div class="mrow"><span class="lbl">Subtasks</span>${kids.length?depChips(kids):''}${addBtn}</div>`:'';})()}
     ${(t.unknown_dependencies||[]).length?`<div class="mrow"><span class="lbl">Unknown dependencies</span>${t.unknown_dependencies.map(id=>`<span title="no such ticket in this project — the scheduler treats it as NOT satisfied" style="display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:3px 8px;border-radius:7px;background:color-mix(in srgb,var(--red) 14%,transparent);color:var(--red);margin-right:5px"><i class="ti ti-alert-triangle" style="font-size:11px"></i>${esc(id)} · unknown</span>`).join("")}</div>`:''}
     ${depGraphSection}
     <div class="mrow" style="display:block"><span class="lbl">Description</span><div class="doc-body md" style="margin-top:7px;color:var(--muted);line-height:1.6;font-size:13px">${t.description?mdRender(t.description):'—'}</div></div>
