@@ -56,9 +56,12 @@ function overviewKpiTile(o){
   const ic=`<div class="ic"><i class="ti ${KPI_IC[o.label]||'ti-point'}"></i></div>`;
   if(dead)return `<div class="kpi">${ic}<div class="vhint">${o.hint}</div><div class="k">${o.label}</div></div>`;
   const {spark,delta}=window14(o.series);
-  const txt=o.money?signedMoney(delta):signedNum(delta)+(o.deltaWord?" "+o.deltaWord:"");
+  // noSign: the delta is a companion COUNT (e.g. "132 filed"), not a change
+  // of the headline number — a + glyph there implied "in flight grew by 132".
+  const txt=o.money?signedMoney(delta):(o.noSign?String(Math.abs(delta)):signedNum(delta))+(o.deltaWord?" "+o.deltaWord:"");
   const cls=o.neutral?"kd":delta>0?"kd up":delta<0?"kd dn":"kd z";
-  return `<div class="kpi">${ic}<div class="v">${o.text}</div><div class="k">${o.label} <span class="${cls}">${txt}</span> <span class="kwin">vs prior 14d</span></div><div title="${o.label} per day · last 14 days (UTC)">${sparkSvg(spark)}</div></div>`;
+  const go=o.go?` onclick="${o.go}" style="cursor:pointer" title="click to open"`:'';
+  return `<div class="kpi"${go}>${ic}<div class="v">${o.text}</div><div class="k">${o.label} <span class="${cls}">${txt}</span> <span class="kwin">vs prior 14d</span></div><div title="${o.label} per day · last 14 days (UTC)">${sparkSvg(spark)}</div></div>`;
 }
 
 // The five overview tiles. Each series counts the per-day events that feed the
@@ -79,21 +82,30 @@ function overviewKpis(s){
   const shipDays=keep=>(s.history||[]).filter(keep).map(r=>utcDay(r.at));
   const usd={};(s.spend_history||[]).forEach(d=>{usd[d.day]=d.usd||0;});
   if(s.spend_day)usd[s.spend_day]=s.spend_today_usd||0;
+  // Releases counts DISTINCT versions, not ship events: every shipped ticket
+  // writes a history row carrying the version it landed in, so history.length
+  // showed "202 releases" for ~30 actual tags (CXA-B171 — the number that
+  // most read as fake). The series buckets each version's FIRST ship day.
+  const verFirst={};
+  (s.history||[]).forEach(r=>{const v=r.version;if(!v)return;const d=utcDay(r.at);
+    if(!(v in verFirst)||d<verFirst[v])verFirst[v]=d;});
+  const relCount=Object.keys(verFirst).length;
   return [
     overviewKpiTile({label:"Shipped",num:m.shipped,text:String(m.shipped),
       series:bucketDaily(shipDays(r=>isF(byId[r.ticket])),days),
-      hint:"ships land here when a ticket reaches documented"}),
+      hint:"ships land here when a ticket reaches documented",go:"nav('board')"}),
     overviewKpiTile({label:"In flight",num:m.inflight,text:String(m.inflight),
       series:bucketDaily((s.tickets||[]).map(t=>utcDay(t.created_at)),days),
-      hint:"work lands here when a ticket is readied for an agent",deltaWord:"filed"}),
+      hint:"work lands here when a ticket is readied for an agent",deltaWord:"filed",noSign:true,go:"nav('board')"}),
     overviewKpiTile({label:"Documented",num:m.docd,text:String(m.docd),
       series:bucketDaily(shipDays(r=>byId[r.ticket]&&byId[r.ticket].status==="documented"),days),
-      hint:"docs land here when DOCS documents a shipped ticket"}),
-    overviewKpiTile({label:"Releases",num:m.releases,text:String(m.releases),
-      series:bucketDaily(shipDays(()=>true),days),
-      hint:"releases land here when a ticket ships"}),
+      hint:"docs land here when DOCS documents a shipped ticket",go:"nav('docs')"}),
+    overviewKpiTile({label:"Releases",num:relCount,text:String(relCount),
+      series:bucketDaily(Object.values(verFirst),days),
+      hint:"releases land here when a version is tagged",
+      go:"document.getElementById('ov-changelog').scrollIntoView({behavior:'smooth',block:'center'})"}),
     overviewKpiTile({label:"Cost",num:spend.total_cost_usd||0,text:money(spend.total_cost_usd),
       series:days.map(d=>usd[d]||0),
-      hint:"cost accrues here as agent runs burn tokens",money:true,neutral:true}),
+      hint:"cost accrues here as agent runs burn tokens",money:true,neutral:true,go:"nav('insights')"}),
   ].join("");
 }
