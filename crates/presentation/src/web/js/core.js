@@ -775,6 +775,7 @@ function rollbackOutcomeHtml(rb){
 function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overview")return;
   if(CUR==="overview"){
     renderDriftAlerts(s);
+    setTimeout(ovDiagAutoOpen,60);
     if(!(s.tickets||[]).length&&!(s.activity||[]).length){
       document.getElementById("kpis").innerHTML=`<div class="panel" style="grid-column:1/-1;text-align:center;padding:40px 20px">
         <i class="ti ti-rocket" style="font-size:34px;color:var(--accent2)"></i>
@@ -989,3 +990,20 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
     }).join(""):'<div class="empty">no engine failures recorded — all roles healthy</div>');
     renderTokenSaver();
   }else if(CUR==="discuss"){renderDiscuss();}else if(CUR==="roadmap"){renderRoadmap();}else if(CUR==="home"){renderHome();}else if(CUR==="mg-spaces"){renderManage();}else if(CUR==="mg-users"){renderManage();}else if(CUR==="mg-usage"){renderManage();}else if(CUR==="mg-fleet"){renderManage();}else if(CUR==="mg-audit"){renderManage();}}
+
+
+// CXA-F384: the collapsed Diagnostics disclosure must not HIDE bad news —
+// when drift has open alerts or go-live says not-ready, it opens itself.
+// A user's own toggle (click on the summary) wins for the session.
+window.OV_DIAG_TOUCHED=window.OV_DIAG_TOUCHED||false;
+function ovDiagAutoOpen(){
+  const d=document.getElementById("ov-diag");
+  if(!d||OV_DIAG_TOUCHED||d.open)return;
+  const txt=id=>{const e=document.getElementById(id);return e?e.innerText||"":"";};
+  const drift=txt("ov-drift");
+  const m=drift.match(/(\d+)\s+open/);
+  const driftBad=!!(m&&+m[1]>0);
+  const pf=txt("ov-preflight");
+  const pfBad=pf.length>0&&!/ready to go/i.test(pf)&&/FAIL|not ready|blocked/i.test(pf);
+  if(driftBad||pfBad)d.open=true;
+}

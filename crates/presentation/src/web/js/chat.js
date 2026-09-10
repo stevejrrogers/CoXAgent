@@ -1723,18 +1723,20 @@ function renderHealth(s){
   if(sp&&sp.committed){const done=sp.committed.filter(id=>t.some(x=>x.id===id&&isDone(x))).length;
     velo=`${done}/${sp.committed.length}`; veloSub=`sprint #${sp.number}`;}
   const openBugs=t.filter(x=>(x.type||x.ticket_type||"").toLowerCase()==="bug"&&(x.status||"").toLowerCase()==="open").length;
-  const wip=t.filter(x=>(x.status||"").toLowerCase()==="inprogress").length;
+  // "inprogress" never matched the serde key — WIP read 0 while DEV was
+  // mid-ticket on the same screen (CXA-B171).
+  const wip=t.filter(x=>(x.status||"").toLowerCase()==="in_progress").length;
   const refactors=t.filter(x=>(x.title||"").startsWith("Refactor:")&&!isDone(x)).length;
   const mem=((s.decisions||[]).length)+((s.lessons||[]).length);
-  const card=(lbl,val,sub,col)=>`<div class="hcard"><div class="hval" style="color:${col||'var(--text)'}">${val}</div><div class="hlbl">${lbl}</div>${sub?`<div class="hsub">${sub}</div>`:''}</div>`;
+  const card=(lbl,val,sub,col,go)=>`<div class="hcard"${go?` onclick="${go}" style="cursor:pointer"`:''}><div class="hval" style="color:${col||'var(--text)'}">${val}</div><div class="hlbl">${lbl}</div>${sub?`<div class="hsub">${sub}</div>`:''}</div>`;
   el.innerHTML=`<div class="sec" style="margin-top:20px"><i class="ti ti-heart-rate-monitor" style="color:var(--accent2)"></i> Team health</div>
     <div class="hgrid">
-      ${card("Sprint velocity",velo,veloSub,"var(--green)")}
-      ${card("WIP (in progress)",wip,wip>6?'high — consider reducing':'ok',wip>6?'var(--amber)':'var(--text)')}
-      ${card("Open bugs",openBugs,"unfixed",openBugs>4?'var(--red)':'var(--text)')}
-      ${card("PR reject rate",reviewTotal?rejectRate+'%':'—',`${appr}✓ / ${chg}✗`,rejectRate>50?'var(--amber)':'var(--text)')}
-      ${card("Refactor debt",refactors,"open refactor tickets",refactors>0?'var(--amber)':'var(--text)')}
-      ${card("Team memory",mem,"decisions + lessons","var(--accent2)")}
+      ${card("Sprint velocity",velo,veloSub,"var(--green)","nav('board');setWorkTab('sprint')")}
+      ${card("WIP (in progress)",wip,wip>6?'high — consider reducing':'ok',wip>6?'var(--amber)':'var(--text)',"nav('board')")}
+      ${card("Open bugs",openBugs,"unfixed",openBugs>4?'var(--red)':'var(--text)',"nav('board')")}
+      ${card("PR reject rate",reviewTotal?rejectRate+'%':'—',`${appr}✓ / ${chg}✗`,rejectRate>50?'var(--amber)':'var(--text)',"nav('review')")}
+      ${card("Refactor debt",refactors,"open refactor tickets",refactors>0?'var(--amber)':'var(--text)',"nav('board')")}
+      ${card("Team memory",mem,"decisions + lessons","var(--accent2)","nav('discuss')")}
     </div>`;
 }
 function render(s){STATE=s;renderSidebar(s);renderActive();ingestChatSnapshot(s.chat);renderEngineAlert(s);}
