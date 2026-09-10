@@ -234,6 +234,12 @@
   .wl-pre{margin:6px 0 2px;padding:9px 11px;background:var(--card);border:1px solid var(--border2);
     border-radius:8px;font-family:ui-monospace,monospace;font-size:11px;line-height:1.5;color:var(--text);
     white-space:pre-wrap;word-break:break-word;max-height:280px;overflow:auto}
+  .subtree{margin-top:8px;border-top:1px dashed var(--border);padding-top:7px;display:flex;flex-direction:column;gap:4px}
+  .subtree-row{display:flex;align-items:center;gap:6px;font-size:11px;padding:3px 6px;border-radius:6px;cursor:pointer;min-width:0}
+  .subtree-row:hover{background:var(--card2)}
+  .subtree-row .st-id{font-family:ui-monospace,monospace;color:var(--purple);flex-shrink:0}
+  .subtree-row .st-title{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1}
+  .subtree-row .st-st{flex-shrink:0;font-size:10px}
   .wl-think{padding:5px 0 5px 38px;position:relative}
   .wl-think::before{content:"";position:absolute;left:13px;top:0;bottom:0;width:1.5px;background:var(--border)}
   .wl-think-d summary{list-style:none;cursor:pointer;display:flex;align-items:baseline;gap:8px;min-width:0}

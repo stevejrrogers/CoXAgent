@@ -447,6 +447,26 @@ pub(super) async fn create_ticket(
     {
         Ok(id) => {
             if let Ok(mut state) = p.store.load().await {
+                // Manual subtask (CXA-F381): bind the child to its parent and
+                // inherit the parent's priority unless the form set one. Best
+                // effort — a vanished parent leaves a plain ticket, not a 500.
+                if let Some(pid_raw) = req.parent_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    let parent = state
+                        .tickets
+                        .iter()
+                        .find(|t| t.id().to_string() == pid_raw)
+                        .map(|t| (t.id().clone(), t.priority()));
+                    if let Some((ptid, pprio)) = parent {
+                        if let Some(child) =
+                            state.tickets.iter_mut().find(|t| t.id().to_string() == id.to_string())
+                        {
+                            let _ = child.set_parent(coxagent_domain::Role::System, ptid);
+                            if req.priority.is_none() {
+                                child.set_priority(coxagent_domain::Role::User, pprio).ok();
+                            }
+                        }
+                    }
+                }
                 state.log_activity("USER", "created ticket", Some(id.to_string()));
                 let _ = p.store.save(&state).await;
             }

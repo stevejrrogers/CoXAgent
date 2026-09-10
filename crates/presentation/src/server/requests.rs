@@ -58,6 +58,10 @@ pub(super) struct CreateTicketReq {
     pub(super) has_ui: bool,
     #[serde(default)]
     pub(super) acceptance_criteria: Vec<String>,
+    /// Optional oversize parent (CXA-F381): the created ticket is filed as a
+    /// subtask of it — `parent_id` set, priority inherited when unspecified.
+    #[serde(default)]
+    pub(super) parent_id: Option<String>,
     /// Declared product goal (stable id, e.g. `G001`) this ticket advances.
     /// Optional: absent/blank means no declared goal (unattributed until
     /// backfilled). Validated by the use case against the project's goals.
