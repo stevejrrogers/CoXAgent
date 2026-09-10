@@ -200,24 +200,29 @@
       <div class="view" id="view-river"><div id="river-body" style="max-width:900px"></div></div>
       <div class="view" id="view-dupes"><div id="dupes-body" style="max-width:900px"></div></div>
       <div class="view on" id="view-overview">
+        <!-- Above the fold: does the project need me, and is the team moving?
+             (CXA-F383 declutter — everything diagnostic folds below.) -->
         <div id="ov-drain"></div>
         <div id="ov-alerts"></div>
-        <div id="ov-drift"></div>
-        <div id="ov-preflight"></div>
-        <div id="ov-goal"></div>
         <div class="kpis" id="kpis"></div>
-        <div id="ov-velocity"></div>
         <div id="ov-health"></div>
-        <div id="ov-cycle-perf"></div>
-        <div id="ov-attention"></div>
-        <div id="ov-lessons"></div>
-        <div id="ov-deploy"></div>
-        <div class="row2" id="ov-charts"></div>
-        <div id="ov-design"></div>
         <div class="row2">
           <div class="panel"><h4><i class="ti ti-activity" style="color:var(--accent2)"></i> Recent activity <span class="mo" onclick="nav('activity')">view all</span></h4><div id="ov-activity"></div></div>
           <div class="panel"><h4><i class="ti ti-history" style="color:var(--accent2)"></i> Releases</h4><div id="ov-changelog"></div></div>
         </div>
+        <details class="ov-diag" id="ov-diag">
+          <summary><i class="ti ti-stethoscope"></i> Diagnostics &amp; gates <span class="ov-diag-hint">drift · go-live · goal · velocity · cycle grades · governance · lessons · deploys · charts · design system</span></summary>
+          <div id="ov-drift"></div>
+          <div id="ov-preflight"></div>
+          <div id="ov-goal"></div>
+          <div id="ov-velocity"></div>
+          <div id="ov-cycle-perf"></div>
+          <div id="ov-attention"></div>
+          <div id="ov-lessons"></div>
+          <div id="ov-deploy"></div>
+          <div class="row2" id="ov-charts"></div>
+          <div id="ov-design"></div>
+        </details>
       </div>
       <div class="view" id="view-team">
         <div class="kpis" id="team-summary"></div>
