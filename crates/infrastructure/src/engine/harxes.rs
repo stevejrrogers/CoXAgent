@@ -235,30 +235,35 @@ impl AgentEnginePort for HarxesEngine {
         // fragment per line.
         let mut trace = String::new();
         let mut co = Coalescer::default();
-        // First-event watchdog (CXA-B173): three times today a run froze at
-        // the bare header — the engine future went quiet before its FIRST
-        // event with no I/O in flight (thread dump showed zero harxes/reqwest
-        // frames), and nothing ever woke it. A run that produces no event at
-        // all within this window is dead, not slow; dropping the driver
-        // cancels it cleanly (harxes kills its children) and the infra-shaped
-        // error hands the ticket to the failover engine instead of eternity.
-        let first_event_deadline = tokio::time::sleep(std::time::Duration::from_secs(240));
-        tokio::pin!(first_event_deadline);
-        let mut saw_event = false;
+        // Inactivity watchdog (CXA-B173/B174): four freezes in one day — the
+        // engine future goes quiet (no I/O in flight, thread dump shows zero
+        // harxes/reqwest frames) and nothing ever wakes it. B173 only armed
+        // until the FIRST event; freeze #4 emitted one Iteration beat and
+        // THEN died, sailing past it. Every event now re-arms the deadline:
+        // a healthy run emits something (a delta, a tool event, a Retry, an
+        // Iteration beat) far more often than every 5 minutes, so total
+        // silence for 300s at ANY point is a dead run — drop the driver
+        // (harxes cancels its children) and fail over with an infra-shaped
+        // error instead of hanging the slot for the reaper.
+        let silence_limit = std::time::Duration::from_secs(300);
+        let silence_deadline = tokio::time::sleep(silence_limit);
+        tokio::pin!(silence_deadline);
         let outcome = loop {
             tokio::select! {
                 ev = events.recv() => {
                     if let Some(ev) = ev {
-                        saw_event = true;
+                        silence_deadline
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + silence_limit);
                         co.feed(&ev, live.as_deref(), &mut trace);
                     }
                 }
-                () = &mut first_event_deadline, if !saw_event => {
+                () = &mut silence_deadline => {
                     if let Some(p) = &live {
-                        append_live(p, "↻ run produced no events in 240s — cancelled, failing over");
+                        append_live(p, "↻ run silent for 300s — cancelled, failing over");
                     }
                     return Err(PortError::Backend(
-                        "harxes provider service unavailable: run produced no events within 240s (stalled before first token)".to_owned(),
+                        "harxes provider service unavailable: run went silent for 300s (engine stalled)".to_owned(),
                     ));
                 }
                 done = &mut driver => break done,
