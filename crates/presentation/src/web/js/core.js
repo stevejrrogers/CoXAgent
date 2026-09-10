@@ -607,8 +607,13 @@ function card(t){const a={high:"var(--red)",medium:"var(--amber)",low:"var(--dim
     if(days>=3){const c=days>=7?"var(--red)":"var(--amber)";
       age=`<span class="b" style="background:color-mix(in srgb,${c} 14%,transparent);color:${c}" title="filed ${esc(t.created_at.slice(0,10))}"><i class="ti ti-hourglass" style="font-size:10px"></i> ${days}d</span>`;}
   }
+  // Subtask lineage (CXA-F381): a child says which oversize parent it was
+  // split from; a parent counts its children and how many already landed.
+  const sub=t.parent_id?`<span class="b" style="background:color-mix(in srgb,var(--purple) 14%,transparent);color:var(--purple)" title="subtask of ${esc(t.parent_id)}"><i class="ti ti-corner-down-right" style="font-size:10px"></i> ${esc(t.parent_id)}</span>`:'';
+  const kids=(STATE.tickets||[]).filter(x=>x.parent_id===t.id);
+  const split=kids.length?`<span class="b" style="background:color-mix(in srgb,var(--purple) 14%,transparent);color:var(--purple)" title="split into ${esc(kids.map(k=>k.id).join(', '))}"><i class="ti ti-axe" style="font-size:10px"></i> ${kids.filter(k=>doneSet.includes(k.status)).length}/${kids.length}</span>`:'';
   return `<div class="card-t" onclick="showTicket('${t.id}')" ${t.status==="on_hold"?'style="opacity:.65"':''}><div class="cid">${esc(t.id)}</div>
-    <div class="ct">${esc(t.title)}</div><div class="badges"><span class="b ${t.priority}">${t.priority}</span>${hold}${blocked}${collisionBadge(STATE,t)}${age}${ui}${bug}${who}</div></div>`;}
+    <div class="ct">${esc(t.title)}</div><div class="badges"><span class="b ${t.priority}">${t.priority}</span>${hold}${blocked}${sub}${split}${collisionBadge(STATE,t)}${age}${ui}${bug}${who}</div></div>`;}
 function column([k,l,c],ts){const items=ts.filter(t=>t.status===k);
   return `<div class="col"><h3><span class="dot" style="background:var(${c})"></span>${l}<span class="n">${items.length}</span></h3>${items.length?items.map(card).join(""):'<div class="empty">—</div>'}</div>`;}
 // Unified column: collects both features and bugs whose status maps to this stage.
