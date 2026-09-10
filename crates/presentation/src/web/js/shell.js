@@ -1608,7 +1608,7 @@ function wlItemHtml(it){
     const n=lines.length;
     // Expanded: each thought is its own numbered step, not a wall of italics.
     const steps=lines.map((l,i)=>`<div class="wl-think-step"><span class="wl-think-n">${i+1}</span><span>${wlFmt(l)}</span></div>`).join("");
-    return `<details class="wl-think-d"><summary><i class="ti ti-bulb"></i><span class="wl-think-lbl">thinking${n>1?` · ${n} steps`:""}</span><span class="wl-think-tz">${wlFmt(teaser)}</span></summary><div class="wl-think-body">${steps}</div></details>`;
+    return `<details class="wl-think-d" open><summary><i class="ti ti-bulb"></i><span class="wl-think-lbl">thinking${n>1?` · ${n} steps`:""}</span><span class="wl-think-tz">${wlFmt(teaser)}</span></summary><div class="wl-think-body">${steps}</div></details>`;
   }
   if(it.k==="iter") return `<span class="wl-iter-in"><i class="ti ti-activity-heartbeat"></i> ${esc(it.text)}</span>`;
   if(it.k==="retry") return `<span class="wl-chip wl-retry-chip"><i class="ti ti-refresh wl-tic" style="color:var(--amber)"></i><span class="wl-tname">${esc(it.text)}</span></span>`;
@@ -1740,8 +1740,14 @@ function renderAgentLog(force){
     const nd=document.createElement("div");
     nd.className="wl-item wl-"+items[i].k;
     nd.innerHTML=wlItemHtml(items[i]);
-    if(body.children[i]) body.replaceChild(nd, body.children[i]);
-    else body.appendChild(nd);
+    if(body.children[i]){
+      // Replacing the still-being-written tail: NO entry animation — the
+      // fade re-triggering on every SSE push read as constant flicker.
+      body.replaceChild(nd, body.children[i]);
+    } else {
+      nd.classList.add("wl-in");
+      body.appendChild(nd);
+    }
     AGENT_LOG_SIGS[i]=sig;
     touched=true;
   }
