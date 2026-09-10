@@ -265,6 +265,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         } else {
             route_from_failures(&structured, spec_gap)
         };
+        if route == EscalationRoute::Oversize {
+            self.split_oversize_ticket(&id, &title, &history).await;
+            return;
+        }
         let claimed = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
             let done = s.ticket_redesigns.get(&id).copied().unwrap_or(0);
             if done >= MAX_TICKET_RESCUES {
@@ -283,6 +287,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             history.clone()
         };
         let (who, persona, brief) = match route {
+            // Diverted to split_oversize_ticket above.
+            EscalationRoute::Oversize => unreachable!("oversize is handled before this match"),
             EscalationRoute::Spec => (
                 "BA",
                 crate::prompts::BA,
@@ -347,6 +353,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
             if let Some(t) = s.tickets.iter_mut().find(|t| t.id().to_string() == id) {
                 match route {
+                    EscalationRoute::Oversize => unreachable!("oversize never reaches here"),
                     // A clarified requirement belongs in the ticket the DEV
                     // reads, not in a design field.
                     EscalationRoute::Spec => {
@@ -374,6 +381,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // Locale-gated like every other SM announcement: these were the
             // last hardcoded-Vietnamese templates leaking onto `en` hubs.
             let msg = match (route, vi) {
+                (EscalationRoute::Oversize, _) => unreachable!("oversize never reaches here"),
                 (EscalationRoute::Spec, true) => format!(
                     "🧯 SM→BA (rescues {attempt}): {id} bị 3 lần đỏ vì spec chưa rõ — BA đã \
                      viết lại yêu cầu, DEV làm lại. Đỏ tiếp là chuyển người quyết."
@@ -493,5 +501,191 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             Ok(())
         })
         .await;
+    }
+}
+
+
+impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
+    /// CXA-F381: an oversize ticket (two+ guardrail-cap deaths) is DECOMPOSED
+    /// instead of re-approached — the SA replies with 2-3 subtasks, the hub
+    /// files them as child tickets chained by `depends_on`, and the parent
+    /// goes OnHold until its children land. Agents were never "not smart
+    /// enough" to split; nothing in the loop ever asked them to.
+    #[allow(clippy::too_many_lines)] // one split, read top to bottom like the other rescues
+    pub(super) async fn split_oversize_ticket(&self, id: &str, title: &str, failures: &str) {
+        // Claim under the same rescue budget as the other routes.
+        let claimed = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            let done = s.ticket_redesigns.get(id).copied().unwrap_or(0);
+            if done >= MAX_TICKET_RESCUES {
+                return Err(crate::PortError::Conflict("rescues exhausted".into()));
+            }
+            s.ticket_redesigns.insert(id.to_owned(), done + 1);
+            Ok(())
+        })
+        .await;
+        if claimed.is_err() {
+            return;
+        }
+        self.report("SA", &format!("splitting oversize {id}"));
+        let brief = format!(
+            "Ticket {id} (\"{title}\") died TWICE at the agent loop's iteration/token \
+             cap — it does not fit one run and must be SPLIT, not re-approached. \
+             Failure log:\n{failures}\n\nReply with STRICT JSON only — an array of 2 \
+             or 3 subtasks, each an object {{\"title\": string, \"description\": string \
+             (what to build AND how to verify, self-contained), \
+             \"acceptance_criteria\": [string, ...], \"complexity\": \"small\"|\"medium\"}}. \
+             Order them so each builds on the previous. Each subtask must be \
+             completable in ~50 loop iterations. No prose outside the JSON."
+        );
+        let request = crate::ports::outbound::AgentRequest {
+            role: coxagent_domain::Role::Sa,
+            system_prompt: crate::prompts::system_prompt(crate::prompts::SA),
+            task_prompt: brief,
+            work_dir: self.work_dir.clone(),
+            timeout: std::time::Duration::from_secs(900),
+            escalation_level: 1,
+            label: Some(id.to_owned()),
+        };
+        let out = match self.engine.run(request).await {
+            Ok(o) if o.succeeded() => o.stdout,
+            _ => String::new(),
+        };
+        let Some(subs) = parse_subtasks(&out) else {
+            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                s.journal_note(id, "SA split attempt produced no parseable subtasks");
+                Ok(())
+            })
+            .await;
+            return;
+        };
+        let vi = self.config.workflow.language.is_vi();
+        let id_owned = id.to_owned();
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            let (ptype, parent_tid, parent_priority) = {
+                let Some(parent) = s.tickets.iter().find(|t| t.id().to_string() == id_owned)
+                else {
+                    return Ok(());
+                };
+                (parent.ticket_type(), parent.id().clone(), parent.priority())
+            };
+            let mut prev: Option<coxagent_domain::TicketId> = None;
+            let mut child_ids: Vec<String> = Vec::new();
+            for sub in &subs {
+                let Ok(cid) = crate::use_cases::add_ticket::mint_id(ptype, s) else {
+                    continue;
+                };
+                let complexity = if sub.complexity.eq_ignore_ascii_case("small") {
+                    coxagent_domain::Complexity::Small
+                } else {
+                    coxagent_domain::Complexity::Medium
+                };
+                let Ok(mut child) = coxagent_domain::Ticket::new(
+                    cid.clone(),
+                    ptype,
+                    format!("{} [{}/{}]", sub.title, child_ids.len() + 1, subs.len()),
+                    format!("Subtask of {id_owned} (\"{title}\"). {}", sub.description),
+                    parent_priority,
+                    complexity,
+                    false,
+                ) else {
+                    continue;
+                };
+                child.stamp_created_at(crate::state::now_rfc3339());
+                child.set_acceptance_criteria(sub.acceptance_criteria.clone());
+                let _ = child.set_parent(coxagent_domain::Role::Sa, parent_tid.clone());
+                if let Some(prev_id) = &prev {
+                    let _ = child.add_dependency(coxagent_domain::Role::Sa, prev_id.clone());
+                }
+                prev = Some(cid.clone());
+                child_ids.push(cid.to_string());
+                s.tickets.push(child);
+            }
+            if child_ids.is_empty() {
+                return Ok(());
+            }
+            if let Some(parent) = s.tickets.iter_mut().find(|t| t.id().to_string() == id_owned) {
+                // OnHold until the children land; System may take any legal edge.
+                let _ = parent
+                    .transition_to(coxagent_domain::Role::System, coxagent_domain::Status::OnHold);
+            }
+            s.ticket_fail_attempts.remove(&id_owned);
+            s.journal_note(
+                &id_owned,
+                &format!("split into subtasks: {}", child_ids.join(", ")),
+            );
+            let msg = if vi {
+                format!(
+                    "🪓 SM→SA: {id_owned} chết 2 lần ở trần vòng lặp — đã CHẺ thành {}: một \
+                     chuỗi subtask nhỏ, cha tạm giữ tới khi con xong.",
+                    child_ids.join(", ")
+                )
+            } else {
+                format!(
+                    "🪓 SM→SA: {id_owned} died twice at the loop cap — SPLIT into {}: a \
+                     chain of small subtasks; the parent holds until they land.",
+                    child_ids.join(", ")
+                )
+            };
+            s.post_chat("SM", &msg);
+            Ok(())
+        })
+        .await;
+    }
+}
+
+/// One subtask as the SA replies it (CXA-F381).
+#[derive(serde::Deserialize)]
+struct ProposedSubtask {
+    title: String,
+    description: String,
+    #[serde(default)]
+    acceptance_criteria: Vec<String>,
+    #[serde(default)]
+    complexity: String,
+}
+
+/// Parse the SA's reply into subtasks: strict JSON preferred, salvaged from
+/// the first `[`..`]` span when the model wrapped it in prose or fences.
+fn parse_subtasks(raw: &str) -> Option<Vec<ProposedSubtask>> {
+    let text = raw.trim();
+    let span = {
+        let start = text.find('[')?;
+        let end = text.rfind(']')?;
+        if end <= start {
+            return None;
+        }
+        &text[start..=end]
+    };
+    let subs: Vec<ProposedSubtask> = serde_json::from_str(span).ok()?;
+    let subs: Vec<ProposedSubtask> = subs
+        .into_iter()
+        .filter(|s| !s.title.trim().is_empty() && !s.description.trim().is_empty())
+        .take(3)
+        .collect();
+    if subs.len() < 2 {
+        return None;
+    }
+    Some(subs)
+}
+
+#[cfg(test)]
+mod subtask_split_tests {
+    use super::parse_subtasks;
+
+    #[test]
+    fn strict_json_and_fenced_json_both_parse() {
+        let strict = r#"[{"title":"Port trait","description":"Define the parsing port and move types.","acceptance_criteria":["trait exists"],"complexity":"small"},{"title":"Adapter","description":"Move tree-sitter behind the port.","acceptance_criteria":["gate green"],"complexity":"medium"}]"#;
+        assert_eq!(parse_subtasks(strict).expect("strict").len(), 2);
+        let fenced = format!("Here you go:\n```json\n{strict}\n```\nDone.");
+        assert_eq!(parse_subtasks(&fenced).expect("fenced").len(), 2);
+    }
+
+    #[test]
+    fn fewer_than_two_usable_subtasks_is_a_refusal() {
+        assert!(parse_subtasks("no json here").is_none());
+        assert!(
+            parse_subtasks(r#"[{"title":"only one","description":"x"}]"#).is_none(),
+            "a single subtask is not a split"
+        );
     }
 }

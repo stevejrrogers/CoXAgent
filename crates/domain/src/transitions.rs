@@ -131,8 +131,9 @@ pub fn field_permitted(actor: Role, field: &str) -> bool {
         // amend — the same authority that owns `clarify`. Agents never
         // relabel work, or the duplicate radar's carve-out becomes a dodge.
         "service_tag" => matches!(actor, Role::Ba | Role::Po | Role::User),
-        // SA owns technical design and dependency graph.
-        "design.technical" | "depends_on" => actor == Role::Sa,
+        // SA owns technical design and dependency graph — parent links are
+        // part of that graph (an oversize ticket split into subtasks).
+        "design.technical" | "depends_on" | "parent_id" => actor == Role::Sa,
         // PD owns UX; SA may cover it when PD is disabled.
         "design.ux" => matches!(actor, Role::Pd | Role::Sa),
         _ => false,
