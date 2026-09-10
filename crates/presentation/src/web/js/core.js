@@ -775,6 +775,7 @@ function rollbackOutcomeHtml(rb){
 function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overview")return;
   if(CUR==="overview"){
     renderDriftAlerts(s);
+    renderOvWorking();
     setTimeout(ovDiagAutoOpen,60);
     if(!(s.tickets||[]).length&&!(s.activity||[]).length){
       document.getElementById("kpis").innerHTML=`<div class="panel" style="grid-column:1/-1;text-align:center;padding:40px 20px">
@@ -1006,4 +1007,26 @@ function ovDiagAutoOpen(){
   const pf=txt("ov-preflight");
   const pfBad=pf.length>0&&!/ready to go/i.test(pf)&&/FAIL|not ready|blocked/i.test(pf);
   if(driftBad||pfBad)d.open=true;
+}
+
+
+// CXA-F385: the Overview breathes while agents work — a live strip naming
+// each busy agent and its ticket (click-through to the live log). The log
+// was alive behind a click; the front door showed nothing.
+let OV_WORK_LAST=0;
+function renderOvWorking(){
+  const el=document.getElementById("ov-working");if(!el)return;
+  const now=Date.now();
+  if(now-OV_WORK_LAST<4000)return; // the 1 Hz snapshot repaints often; fetch gently
+  OV_WORK_LAST=now;
+  fetch(api("/workers")).then(r=>r.json()).then(ws=>{
+    window.WORKERS=Array.isArray(ws)?ws:[];
+    const busy=(window.WORKERS||[]).filter(w=>!/^(leader|worker|idle)$/i.test(w.role||"idle"));
+    if(!busy.length){setHTML(el,"");return;}
+    setHTML(el,`<div class="ov-work">`+busy.map(w=>{
+      const role=(w.role||"").replace(/_/g,"-").toUpperCase();
+      return `<div class="ov-work-chip" onclick="openAgent('${esc(role)}','${esc(w.worker||"")}')" title="open ${esc(role)}'s live log">
+        <span class="ov-work-dot"></span><b>${esc(role)}</b>${w.ticket?`<span class="tk">${esc(w.ticket)}</span>`:""}<span class="ov-work-lbl">working now</span></div>`;
+    }).join("")+`</div>`);
+  }).catch(()=>{});
 }

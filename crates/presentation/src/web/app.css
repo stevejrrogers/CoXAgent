@@ -234,6 +234,12 @@
   .wl-pre{margin:6px 0 2px;padding:9px 11px;background:var(--card);border:1px solid var(--border2);
     border-radius:8px;font-family:ui-monospace,monospace;font-size:11px;line-height:1.5;color:var(--text);
     white-space:pre-wrap;word-break:break-word;max-height:280px;overflow:auto}
+  .ov-work{display:flex;flex-wrap:wrap;gap:9px;margin-bottom:14px}
+  .ov-work-chip{display:inline-flex;align-items:center;gap:8px;padding:7px 13px;border:1px solid color-mix(in srgb,var(--green) 30%,transparent);background:color-mix(in srgb,var(--green) 7%,transparent);border-radius:999px;font-size:12px;cursor:pointer}
+  .ov-work-chip b{font-size:11.5px;letter-spacing:.03em}
+  .ov-work-chip .ov-work-lbl{color:var(--dim);font-size:11px}
+  .ov-work-dot{width:8px;height:8px;border-radius:50%;background:var(--green);animation:ovpulse 1.6s ease-in-out infinite}
+  @keyframes ovpulse{0%,100%{opacity:1;box-shadow:0 0 0 0 color-mix(in srgb,var(--green) 45%,transparent)}50%{opacity:.6;box-shadow:0 0 0 5px transparent}}
   .ov-diag{margin-top:18px}
   .ov-diag summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:9px;padding:11px 14px;border:1px dashed var(--border);border-radius:11px;color:var(--muted);font-size:12.5px;font-weight:600}
   .ov-diag summary::-webkit-details-marker{display:none}
