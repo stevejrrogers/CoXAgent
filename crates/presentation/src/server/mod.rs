@@ -1111,6 +1111,7 @@ pub async fn serve_full(
         .route("/api/projects/:pid/prs/:num/diff", get(pr_diff_ep))
         .route("/api/projects/:pid/prs/:num/:action", post(pr_action_ep))
         .route("/api/projects/:pid/agent-log", get(agent_log_ep))
+        .route("/api/projects/:pid/agent-liveness", get(transcripts::agent_liveness_ep))
         .route(
             "/api/projects/:pid/agent-log/stream",
             get(agent_log_stream_ep),

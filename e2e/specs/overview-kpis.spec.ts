@@ -60,9 +60,10 @@ test('series math: deltas and sparklines from synthetic state (pure functions)',
   expect(html).not.toContain('vhint');
   // Shipped: feature ships 2 in the current window vs 1 in the prior one.
   expect(html).toContain('<span class="kd up">+1</span>');
-  // In flight: 3 filed in the window vs 1 prior.
-  expect(html).toContain('<span class="kd up">+2 filed</span>');
-  // Releases: 3 ships in the window (2 features + 1 bug) vs 1 prior.
+  // In flight: 3 filed in the window vs 1 prior — a companion count, no sign
+  // glyph (CXA-B171: '+N filed' implied in-flight itself grew by N).
+  expect(html).toContain('<span class="kd up">2 filed</span>');
+  // Releases counts DISTINCT versions: 3 first-seen in the window vs 1 prior.
   expect(html).toContain('<span class="kd up">+2</span>');
   // Cost: window spend 2.0 + 1.0 today = 3.0 vs 1.0 prior; neutral colour.
   expect(html).toContain('<span class="kd">+$2.00</span>');
@@ -104,8 +105,8 @@ test('delta signs: zero, negative-count and negative-money deltas render their c
   });
   // Shipped: 1 ship in each window — no movement.
   expect(html).toContain('<span class="kd z">±0</span>');
-  // In flight: 0 filings in the window vs 1 prior.
-  expect(html).toContain('<span class="kd dn">-1 filed</span>');
+  // In flight: 0 filings in the window vs 1 prior — unsigned companion count.
+  expect(html).toContain('<span class="kd dn">1 filed</span>');
   // Cost: nothing spent in the window vs $2.00 prior; stays neutral.
   expect(html).toContain('<span class="kd">-$2.00</span>');
   await assertNoConsoleErrors(errors);
@@ -122,7 +123,7 @@ test('all-zero state: hints replace the bare zeros', async ({ page }) => {
     'ships land here when a ticket reaches documented',
     'work lands here when a ticket is readied for an agent',
     'docs land here when DOCS documents a shipped ticket',
-    'releases land here when a ticket ships',
+    'releases land here when a version is tagged',
     'cost accrues here as agent runs burn tokens',
   ]) {
     expect(html).toContain(hint);
