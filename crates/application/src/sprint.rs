@@ -70,7 +70,38 @@ impl SprintPolicy {
     }
 }
 
+/// A sprint whose every committed ticket reached a terminal state (or left
+/// the board) is DONE — the window is only the re-plan cap for a sprint that
+/// stalls. An empty commitment list proves nothing and waits for the window.
+fn all_committed_done(state: &ProjectState, s: &Sprint) -> bool {
+    use coxagent_domain::ticket::Status;
+    !s.committed.is_empty()
+        && s.committed.iter().all(|id| {
+            state
+                .tickets
+                .iter()
+                .find(|t| t.id().as_str() == id.as_str())
+                .map_or(true, |t| {
+                    matches!(
+                        t.status(),
+                        Status::Documented | Status::Verified | Status::Rejected
+                    )
+                })
+        })
+}
+
 pub fn advance(state: &mut ProjectState, cycle: u64, policy: SprintPolicy) -> Option<u32> {
+    // Finishing the work ends the sprint — cycles are the stall cap, not the
+    // definition of done (Steve: "sprint xong là ticket xong hết chứ").
+    if let Some(s) = &state.sprint {
+        if all_committed_done(state, s) {
+            let length = match policy.window {
+                SprintWindow::Cycles(len) => len,
+                SprintWindow::Days(_) => s.length_cycles,
+            };
+            return Some(roll_over(state, cycle, length, policy.bug_burn_floor));
+        }
+    }
     let need_open = match &state.sprint {
         None => true,
         Some(s) => match policy.window {

@@ -846,8 +846,25 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // Debt sweep cadence (configurable): every Nth cycle files ONE
             // tech-debt chore (lint baseline, dead code, missing docs) — the
             // discipline of paying debt down on a schedule instead of never.
+            // Debt chores are intake too — only file one when the backlog
+            // has room (same demand gate as the BA above).
             if cycle % self.config.workflow.cadence.debt_sweep_every_cycles() == 0 {
-                self.file_debt_sweep(cycle).await;
+                let room = self.store.load().await.is_ok_and(|s| {
+                    use coxagent_domain::ticket::Status;
+                    s.tickets
+                        .iter()
+                        .filter(|t| {
+                            matches!(
+                                t.status(),
+                                Status::Open | Status::Pending | Status::Ready
+                            )
+                        })
+                        .count()
+                        < 30
+                });
+                if room {
+                    self.file_debt_sweep(cycle).await;
+                }
             }
 
             // SM dispatch FIRST (agents resolve), then report what remains.
@@ -901,7 +918,29 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     .errors
                     .push("BA: paused by self-tuning — backlog outgrew throughput".to_owned());
             }
-            if !ba_paused && !refactoring && ba_every > 0 && (cycle - 1) % ba_every == 0 {
+            // Demand-driven intake (Steve: clock-driven cadences went absurd
+            // once cycles shrank to minutes): the BA proposes only when the
+            // actionable backlog has ROOM. A board already deeper than the
+            // team can drain does not need more ideas — it needs finishing.
+            let backlog_has_room = self.store.load().await.is_ok_and(|s| {
+                use coxagent_domain::ticket::Status;
+                s.tickets
+                    .iter()
+                    .filter(|t| {
+                        matches!(
+                            t.status(),
+                            Status::Open | Status::Pending | Status::Ready
+                        )
+                    })
+                    .count()
+                    < 30
+            });
+            if !ba_paused
+                && !refactoring
+                && ba_every > 0
+                && (cycle - 1) % ba_every == 0
+                && backlog_has_room
+            {
                 if recovery {
                     report
                         .errors
