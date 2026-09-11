@@ -121,6 +121,15 @@ where
                 s.tickets.retain(|t| t.id().as_str() != id);
                 prune_ticket_bookkeeping(s, id);
             }
+            // Surviving tickets may still name the archived ones in
+            // `depends_on`; the save validator rejects unknown ids, which
+            // vetoed the whole sweep on the first live run. An archived
+            // dependency is terminal — satisfied — so drop the edge.
+            for t in &mut s.tickets {
+                for id in &archived {
+                    let _ = t.remove_dependency(coxagent_domain::Role::System, id);
+                }
+            }
             Ok(())
         })
         .await
@@ -202,6 +211,32 @@ mod eviction_tests {
             "eviction must shrink the serialized state ({before} -> {after})"
         );
         assert!(s.tickets.iter().any(|t| t.id().as_str() == "F002"));
+    }
+
+    #[test]
+    fn evicting_a_dependency_target_drops_the_edge_on_survivors() {
+        let mut s = ProjectState::default();
+        s.tickets.push(ticket("F020", "documented"));
+        let mut live = ticket("F021", "ready");
+        live.add_dependency(Role::Sa, TicketId::new("F020").unwrap())
+            .unwrap();
+        s.tickets.push(live);
+
+        let cands = eviction_candidates(&s);
+        assert_eq!(cands, vec!["F020".to_string()]);
+        for id in &cands {
+            s.tickets.retain(|t| t.id().as_str() != id);
+            prune_ticket_bookkeeping(&mut s, id);
+        }
+        for t in &mut s.tickets {
+            for id in &cands {
+                let _ = t.remove_dependency(Role::System, id);
+            }
+        }
+        assert!(
+            s.tickets[0].depends_on().is_empty(),
+            "a dangling dependency on an archived ticket must be dropped"
+        );
     }
 
     #[test]
