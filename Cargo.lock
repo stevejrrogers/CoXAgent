@@ -928,7 +928,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1117,7 +1117,7 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 [[package]]
 name = "harxes-app"
 version = "0.2.0"
-source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.4.5#74abe4a09384e61e50ebb89b8025bec56fe03a9b"
+source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.4.6#0fec18ba20a55d0664245de7b96272a2cbd5a9ae"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -1131,7 +1131,7 @@ dependencies = [
 [[package]]
 name = "harxes-core"
 version = "0.2.0"
-source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.4.5#74abe4a09384e61e50ebb89b8025bec56fe03a9b"
+source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.4.6#0fec18ba20a55d0664245de7b96272a2cbd5a9ae"
 dependencies = [
  "async-trait",
  "harxes-app",
@@ -1146,7 +1146,7 @@ dependencies = [
 [[package]]
 name = "harxes-core-domain"
 version = "0.2.0"
-source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.4.5#74abe4a09384e61e50ebb89b8025bec56fe03a9b"
+source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.4.6#0fec18ba20a55d0664245de7b96272a2cbd5a9ae"
 dependencies = [
  "async-trait",
  "serde",
@@ -1157,7 +1157,7 @@ dependencies = [
 [[package]]
 name = "harxes-infra-auth"
 version = "0.2.0"
-source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.4.5#74abe4a09384e61e50ebb89b8025bec56fe03a9b"
+source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.4.6#0fec18ba20a55d0664245de7b96272a2cbd5a9ae"
 dependencies = [
  "harxes-core-domain",
 ]
@@ -1165,7 +1165,7 @@ dependencies = [
 [[package]]
 name = "harxes-infra-fs"
 version = "0.2.0"
-source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.4.5#74abe4a09384e61e50ebb89b8025bec56fe03a9b"
+source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.4.6#0fec18ba20a55d0664245de7b96272a2cbd5a9ae"
 dependencies = [
  "async-trait",
  "glob",
@@ -1177,7 +1177,7 @@ dependencies = [
 [[package]]
 name = "harxes-infra-llm"
 version = "0.2.0"
-source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.4.5#74abe4a09384e61e50ebb89b8025bec56fe03a9b"
+source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.4.6#0fec18ba20a55d0664245de7b96272a2cbd5a9ae"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1192,7 +1192,7 @@ dependencies = [
 [[package]]
 name = "harxes-infra-shell"
 version = "0.2.0"
-source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.4.5#74abe4a09384e61e50ebb89b8025bec56fe03a9b"
+source = "git+ssh://git@github.com/stevejrrogers/Harxes.git?tag=v0.4.6#0fec18ba20a55d0664245de7b96272a2cbd5a9ae"
 dependencies = [
  "async-trait",
  "harxes-core-domain",
@@ -1401,7 +1401,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tokio",
  "tower-service",
  "tracing",
@@ -1885,7 +1885,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2134,7 +2134,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.42",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2172,9 +2172,9 @@ dependencies = [
  "cfg_aliases 0.2.1",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2467,7 +2467,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2972,7 +2972,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
