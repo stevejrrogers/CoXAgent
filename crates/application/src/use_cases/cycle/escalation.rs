@@ -276,7 +276,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         .filter(|f| f.detail.contains("iteration/token cap"))
                         .count();
                     done < MAX_TICKET_RESCUES
-                        || (caps >= 2 && done < MAX_TICKET_RESCUES + 3)
+                        || (caps >= 2 && done < MAX_TICKET_RESCUES + 5)
                 })
                 .filter_map(|(id, _)| {
                     state
@@ -595,7 +595,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             let done = s.ticket_redesigns.get(id).copied().unwrap_or(0);
             // Splits draw on an extended budget (see sm_unpark): a cap-dead
             // ticket has no other way forward.
-            if done >= MAX_TICKET_RESCUES + 3 {
+            if done >= MAX_TICKET_RESCUES + 5 {
                 return Err(crate::PortError::Conflict("rescues exhausted".into()));
             }
             s.ticket_redesigns.insert(id.to_owned(), done + 1);
@@ -615,7 +615,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
              (what to build AND how to verify, self-contained), \
              \"acceptance_criteria\": [string, ...], \"complexity\": \"small\"|\"medium\"}}. \
              Order them so each builds on the previous. Each subtask must be \
-             completable in ~50 loop iterations. No prose outside the JSON."
+             completable in ~50 loop iterations. No prose outside the JSON. \
+             Do NOT run tools or explore the repository — reply IMMEDIATELY \
+             with the JSON array as plain text."
         );
         let request = crate::ports::outbound::AgentRequest {
             role: coxagent_domain::Role::Sa,
@@ -635,7 +637,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // parked with no children after one provider glitch. Refund and let
         // the next cycle brief again. A real-but-unparseable reply still
         // burns the claim — that loop must not spin forever.
-        if out.trim().is_empty() {
+        // The engine's "finished without a text reply" placeholder is not
+        // output either — a reasoning-only completion burned four rescues on
+        // CXA-F376 because it slipped past the empty check.
+        let no_reply = out.trim().is_empty()
+            || out.trim_start().starts_with("(the model finished without a text reply");
+        if no_reply {
             let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
                 if let Some(n) = s.ticket_redesigns.get_mut(id) {
                     *n = n.saturating_sub(1);
