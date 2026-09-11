@@ -571,8 +571,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return;
         }
         let Some(subs) = parse_subtasks(&out) else {
+            // Blind "no parseable subtasks" notes hid three identical failures
+            // in a row — keep the head of what the model actually said.
+            let sample: String = out.chars().take(300).collect();
+            let note = format!("SA split attempt produced no parseable subtasks; reply head: {sample}");
             let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
-                s.journal_note(id, "SA split attempt produced no parseable subtasks");
+                s.journal_note(id, &note);
                 Ok(())
             })
             .await;
