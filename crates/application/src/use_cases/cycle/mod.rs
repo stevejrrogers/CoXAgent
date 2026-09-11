@@ -871,6 +871,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // Boxed: the escalation ladder holds a failure log across its awaits,
             // and inlining it here pushes the whole cycle future over 16KB.
             Box::pin(self.sm_unpark_tickets()).await;
+            self.sm_drive_sprint_flow().await;
             self.impediment_watch().await;
 
             // Merge-queue recovery gate: with a blown-up queue the ONLY useful
