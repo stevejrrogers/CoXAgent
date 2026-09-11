@@ -110,16 +110,31 @@ where
             return;
         }
         let n = archived.len();
-        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+        // The removal MUST commit — a swallowed optimistic-concurrency
+        // failure here reported "moved 50" while the hot row kept all 605
+        // tickets (first live run of this sweep). mutate_state retries
+        // conflicts internally; anything it still returns is a real failure
+        // worth a loud warn, and the archive copies are harmless duplicates
+        // the next sweep re-covers.
+        match crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
             for id in &archived {
                 s.tickets.retain(|t| t.id().as_str() != id);
                 prune_ticket_bookkeeping(s, id);
             }
             Ok(())
         })
-        .await;
-        self.report("SM", &format!("evicted {n} terminal ticket(s) to the archive"));
-        tracing::info!("eviction: {n} terminal ticket(s) moved to the cold archive");
+        .await
+        {
+            Ok(()) => {
+                self.report("SM", &format!("evicted {n} terminal ticket(s) to the archive"));
+                tracing::info!("eviction: {n} terminal ticket(s) moved to the cold archive");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "eviction: archived {n} ticket(s) but hot-state removal did not commit: {e}"
+                );
+            }
+        }
     }
 }
 
