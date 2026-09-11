@@ -916,7 +916,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
 
             // Team hygiene: reject any duplicate tickets before design/dev.
-            self.dedup_backlog().await;
+            // Dupes only appear when new tickets were minted (BA above, or
+            // through the API). The full token-set scan every cycle was
+            // eating the leader loop alive (146/168 stack samples in dedup
+            // while engine legs starved) — scan when BA just created work,
+            // plus a periodic sweep for API-minted tickets.
+            if !report.ba_created.is_empty() || cycle % 10 == 0 {
+                self.dedup_backlog().await;
+            }
             // CXA-F273: keep the hot state small — terminal tickets move to
             // the cold archive; every save serializes the whole row, and an
             // unbounded tickets array had grown saves into minute-long stalls.
