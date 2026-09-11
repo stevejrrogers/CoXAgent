@@ -503,6 +503,22 @@ impl Ticket {
         Ok(())
     }
 
+    /// Drop a dependency edge by id (System bookkeeping: the target ticket
+    /// was archived, and an archived dependency is terminal — satisfied).
+    ///
+    /// # Errors
+    /// [`DomainError::FieldNotPermitted`] if `actor` may not edit dependencies.
+    pub fn remove_dependency(&mut self, actor: Role, on: &str) -> Result<(), DomainError> {
+        if !field_permitted(actor, "depends_on") {
+            return Err(DomainError::FieldNotPermitted {
+                role: actor,
+                field: "depends_on",
+            });
+        }
+        self.depends_on.retain(|d| d.as_str() != on);
+        Ok(())
+    }
+
     /// Declare a dependency on another ticket (SA during design/split).
     ///
     /// # Errors
