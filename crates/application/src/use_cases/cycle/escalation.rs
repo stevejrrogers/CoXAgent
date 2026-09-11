@@ -554,6 +554,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             Ok(o) if o.succeeded() => o.stdout,
             _ => String::new(),
         };
+        // An engine that never answered (empty output) is an infra fault, not
+        // a spent rescue: burning the claim here left CXA-F376 permanently
+        // parked with no children after one provider glitch. Refund and let
+        // the next cycle brief again. A real-but-unparseable reply still
+        // burns the claim — that loop must not spin forever.
+        if out.trim().is_empty() {
+            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                if let Some(n) = s.ticket_redesigns.get_mut(id) {
+                    *n = n.saturating_sub(1);
+                }
+                s.journal_note(id, "oversize split brief got no engine output — rescue refunded");
+                Ok(())
+            })
+            .await;
+            return;
+        }
         let Some(subs) = parse_subtasks(&out) else {
             let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
                 s.journal_note(id, "SA split attempt produced no parseable subtasks");
