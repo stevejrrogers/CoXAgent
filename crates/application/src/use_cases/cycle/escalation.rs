@@ -191,6 +191,67 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// used to be told only that the ticket was parked. One escalation per
     /// ticket; parking again after that is a human decision.
     #[allow(clippy::too_many_lines)] // one escalation, three routes, read top to bottom
+    /// SM as a DRIVER, not a reporter (Steve: the SM must coordinate and
+    /// push like a human lead would). Every cycle, walk the sprint's
+    /// committed tickets and unstick what a human SM would unstick:
+    /// - OnHold with no live children resumes to Pending (a split parent
+    ///   stays held — its children ARE the plan).
+    /// - Actionable committed work below High priority is raised so
+    ///   selection front-runs it: committed means committed.
+    pub(super) async fn sm_drive_sprint_flow(&self) {
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            use coxagent_domain::ticket::Status;
+            let committed: Vec<String> = s
+                .sprint
+                .as_ref()
+                .map(|sp| sp.committed.iter().map(ToString::to_string).collect())
+                .unwrap_or_default();
+            if committed.is_empty() {
+                return Ok(());
+            }
+            let live_parents: std::collections::HashSet<String> = s
+                .tickets
+                .iter()
+                .filter(|t| {
+                    !matches!(
+                        t.status(),
+                        Status::Documented | Status::Verified | Status::Rejected
+                    )
+                })
+                .filter_map(|t| t.parent_id().map(ToString::to_string))
+                .collect();
+            let mut nudged: Vec<String> = Vec::new();
+            for id in &committed {
+                let Some(t) = s.tickets.iter_mut().find(|t| t.id().as_str() == id) else {
+                    continue;
+                };
+                match t.status() {
+                    Status::OnHold if !live_parents.contains(id) => {
+                        if t.transition_to(coxagent_domain::Role::Sm, Status::Pending).is_ok() {
+                            nudged.push(format!("{id} resumed from hold"));
+                        }
+                    }
+                    Status::Open | Status::Pending | Status::Ready
+                        if t.priority() != coxagent_domain::Priority::High
+                            && t.set_priority(
+                                coxagent_domain::Role::Po,
+                                coxagent_domain::Priority::High,
+                            )
+                            .is_ok() =>
+                    {
+                        nudged.push(format!("{id} raised to High"));
+                    }
+                    _ => {}
+                }
+            }
+            for n in &nudged {
+                tracing::info!("sm_drive: {n}");
+            }
+            Ok(())
+        })
+        .await;
+    }
+
     pub(super) async fn sm_unpark_tickets(&self) {
         let candidates: Vec<(String, String)> = {
             let Ok(state) = self.store.load().await else {
