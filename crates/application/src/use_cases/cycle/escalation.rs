@@ -200,9 +200,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 .ticket_fail_attempts
                 .iter()
                 .filter(|(id, n)| {
-                    **n >= 3
-                        && state.ticket_redesigns.get(*id).copied().unwrap_or(0)
-                            < MAX_TICKET_RESCUES
+                    if **n < 3 {
+                        return false;
+                    }
+                    let done = state.ticket_redesigns.get(*id).copied().unwrap_or(0);
+                    // A ticket dead at the loop's iteration/token cap can ONLY
+                    // move by being split — redesigns cannot shrink it. Splits
+                    // get their own budget on top of the redesign allowance,
+                    // otherwise one junk split reply exhausts the rescues and
+                    // parks the ticket forever (CXA-F376 did exactly that).
+                    let caps = state
+                        .attempt_failures(id)
+                        .iter()
+                        .filter(|f| f.detail.contains("iteration/token cap"))
+                        .count();
+                    done < MAX_TICKET_RESCUES
+                        || (caps >= 2 && done < MAX_TICKET_RESCUES + 3)
                 })
                 .filter_map(|(id, _)| {
                     state
@@ -519,7 +532,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // Claim under the same rescue budget as the other routes.
         let claimed = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
             let done = s.ticket_redesigns.get(id).copied().unwrap_or(0);
-            if done >= MAX_TICKET_RESCUES {
+            // Splits draw on an extended budget (see sm_unpark): a cap-dead
+            // ticket has no other way forward.
+            if done >= MAX_TICKET_RESCUES + 3 {
                 return Err(crate::PortError::Conflict("rescues exhausted".into()));
             }
             s.ticket_redesigns.insert(id.to_owned(), done + 1);
