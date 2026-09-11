@@ -214,6 +214,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 .take(1) // one redesign per cycle bounds cost
                 .collect()
         };
+        if let Some((id, _)) = candidates.first() {
+            tracing::info!("sm_unpark: escalating {id}");
+        }
         for (id, title) in candidates {
             Box::pin(self.escalate_parked_ticket(id, title)).await;
         }
@@ -526,6 +529,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         if claimed.is_err() {
             return;
         }
+        tracing::info!("oversize split: briefing SA to split {id}");
         self.report("SA", &format!("splitting oversize {id}"));
         let brief = format!(
             "Ticket {id} (\"{title}\") died TWICE at the agent loop's iteration/token \
