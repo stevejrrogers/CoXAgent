@@ -35,8 +35,12 @@ pub fn open_bug_candidates(state: &ProjectState) -> Vec<TicketId> {
         // (invisible to the bug lane here, invisible to the feature lane by
         // type) and starved DEV for whole cycles while the sprint was full
         // (CXA-B168).
+        // Pending joined the set with the split system: a bug subtask is
+        // minted (and an on_hold bug resumed by the SM) at Pending — leaving
+        // Pending out made every bug child invisible to this lane while the
+        // bugs-first tuning kept the feature lane paused: a full deadlock.
         t.ticket_type() == TicketType::Bug
-            && matches!(t.status(), Status::Open | Status::Ready)
+            && matches!(t.status(), Status::Open | Status::Ready | Status::Pending)
             && !below_bug_burn_floor(floor, t.priority())
     })
 }
