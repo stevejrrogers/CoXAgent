@@ -242,6 +242,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 })
                 .map(|t| t.id().to_string())
                 .collect();
+            tracing::info!(
+                "sm_drive: {} committed, {} held bugs eligible",
+                committed.len(),
+                held_bugs.len()
+            );
             for id in &held_bugs {
                 if let Some(t) = s.tickets.iter_mut().find(|t| t.id().as_str() == id) {
                     if t
