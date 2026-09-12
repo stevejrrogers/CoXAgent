@@ -436,7 +436,15 @@ impl Coalescer {
             }
             RunEvent::ToolStart { name, summary } => {
                 self.close_msg(live_file, trace);
-                Self::emit_raw(&format!("🔧 {name}({summary})"), live_file, trace);
+                // v0.4.7: Write/Edit summaries carry the code being written
+                // as extra lines — head stays inline, the code becomes the
+                // click-to-open preview body (same shape as ToolEnd).
+                let mut lines = summary.lines();
+                let head = lines.next().unwrap_or_default();
+                Self::emit_raw(&format!("🔧 {name}({head})"), live_file, trace);
+                for l in lines {
+                    Self::emit_raw(&format!("┆ {l}"), live_file, trace);
+                }
             }
             RunEvent::ToolEnd {
                 name: _,
