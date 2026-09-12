@@ -221,6 +221,37 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 .filter_map(|t| t.parent_id().map(ToString::to_string))
                 .collect();
             let mut nudged: Vec<String> = Vec::new();
+            // Held bug children are a special case beyond the sprint list: a
+            // childless on_hold bug is invisible to every lane (Steve's
+            // two-lane deadlock, CXA-B189) and — when its failures were not
+            // caps — to the escalation ladder too. Resume any that still have
+            // rescue budget; once the budget is spent they stay held for the
+            // daily-recovery feature (CXA-F376) or a human.
+            let held_bugs: Vec<String> = s
+                .tickets
+                .iter()
+                .filter(|t| {
+                    t.ticket_type() == coxagent_domain::ticket::TicketType::Bug
+                        && t.status() == Status::OnHold
+                        && !live_parents.contains(&t.id().to_string())
+                        && s.ticket_redesigns
+                            .get(&t.id().to_string())
+                            .copied()
+                            .unwrap_or(0)
+                            < crate::use_cases::MAX_TICKET_RESCUES + 5
+                })
+                .map(|t| t.id().to_string())
+                .collect();
+            for id in &held_bugs {
+                if let Some(t) = s.tickets.iter_mut().find(|t| t.id().as_str() == id) {
+                    if t
+                        .transition_to(coxagent_domain::Role::Sm, Status::Pending)
+                        .is_ok()
+                    {
+                        nudged.push(format!("{id} (held bug) resumed"));
+                    }
+                }
+            }
             for id in &committed {
                 let Some(t) = s.tickets.iter_mut().find(|t| t.id().as_str() == id) else {
                     continue;
