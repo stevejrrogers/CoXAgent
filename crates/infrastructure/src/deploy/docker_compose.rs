@@ -1795,7 +1795,9 @@ async fn compose_build_check(
     // to start services.
     let secrets = resolve_deploy_secrets(work_dir);
     let mut build = Command::new("docker");
-    build.args(["compose", "-p", &proj, "build"]);
+    // `--ssh default` forwards the host agent so the builder stage can fetch
+    // the private harxes-core git dependency (see Dockerfile).
+    build.args(["compose", "-p", &proj, "build", "--ssh", "default"]);
     build.current_dir(work_dir);
     seed_deploy_secrets(&mut build, &secrets);
     let out = tokio::time::timeout(DEPLOY_TIMEOUT, build.output())
@@ -1829,7 +1831,7 @@ async fn compose_build_check(
     let dockerfile_build = tokio::time::timeout(
         DEPLOY_TIMEOUT,
         Command::new("docker")
-            .args(["build", "-f", "Dockerfile", "."])
+            .args(["build", "--ssh", "default", "-f", "Dockerfile", "."])
             .current_dir(work_dir)
             .stdin(std::process::Stdio::null())
             .output(),

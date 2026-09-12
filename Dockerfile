@@ -1,12 +1,17 @@
+# syntax=docker/dockerfile:1
 # CoXAgent server image — the hub/control-plane + embedded dashboard.
 # Multi-stage: compile the release binary, then a slim runtime.
 FROM rust:1-slim-bookworm AS builder
 WORKDIR /build
-# rustls means no OpenSSL; git is handy for brownfield onboarding at runtime.
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config \
-    && rm -rf /var/lib/apt/lists/*
+# git + ssh: harxes-core is a PRIVATE ssh git dependency — cargo must fetch it
+# through the caller's forwarded ssh agent (BuildKit `--ssh default`). Without
+# this the Linux gate failed EVERY diff since the harxes flip (velocity 0).
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config git openssh-client \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p -m 0700 /root/.ssh \
+    && ssh-keyscan github.com >> /root/.ssh/known_hosts
 COPY . .
-RUN cargo build --release --bin coxagent
+RUN --mount=type=ssh CARGO_NET_GIT_FETCH_WITH_CLI=true cargo build --release --bin coxagent
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git \
