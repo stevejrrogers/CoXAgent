@@ -249,8 +249,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             );
             for id in &held_bugs {
                 if let Some(t) = s.tickets.iter_mut().find(|t| t.id().as_str() == id) {
+                    // The bug lifecycle has no Pending state — held bugs
+                    // resume to Open (all 11 silently failed as Pending).
                     if t
-                        .transition_to(coxagent_domain::Role::Sm, Status::Pending)
+                        .transition_to(coxagent_domain::Role::Sm, Status::Open)
                         .is_ok()
                     {
                         nudged.push(format!("{id} (held bug) resumed"));
