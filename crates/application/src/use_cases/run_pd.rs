@@ -381,7 +381,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunPdUseCase<S, E> {
                     self.config.workflow.token_saver,
                 )
                 .await,
-            ),
+            ) + "\n\nOUTPUT CONTRACT (hard requirement): your FINAL message must contain \
+                 the UX-design JSON object. When the mockups are saved, STOP running \
+                 tools and write the JSON as plain text. A reply without that JSON \
+                 object is a failed run.",
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1200),
             escalation_level: 0,
