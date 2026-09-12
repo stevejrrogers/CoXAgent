@@ -525,11 +525,18 @@ pub async fn run_forever<S: StateStorePort + 'static, E: AgentEnginePort>(
                 .notify(
                     "loop_paused",
                     "loop paused: engine infrastructure looks DOWN (auth/network) after 3 \
-                     empty cycles — fix the outage, then Resume"
+                     empty cycles — retrying with a canary every 10 minutes"
                         .to_owned(),
                 )
                 .await;
-            handle.pause();
+            // Self-healing back-off (Steve: the SM must unstick itself, not
+            // wait for a human Resume click). Provider outages here have all
+            // been transient slot starvation: park 10 minutes, then let the
+            // next cycle's canary decide. A human Resume still cuts the wait.
+            tokio::select! {
+                () = tokio::time::sleep(std::time::Duration::from_secs(600)) => {}
+                () = handle.resume.notified() => {}
+            }
             continue;
         }
         if stepping {
