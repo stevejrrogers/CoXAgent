@@ -264,7 +264,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
                              \"data_changes\":\"...\", \"test_plan\":\"...\"}}). \
                              Parse error: {parse_err}\n\nRepair it into VALID design JSON — \
                              preserve the content, fix the structure only. Output ONLY the JSON \
-                             object, no prose, no code fences.\n\nFAILED OUTPUT:\n{}",
+                             object, no prose, no code fences. Do NOT run tools or explore the \
+                             repository — reply IMMEDIATELY with the JSON object as plain \
+                             text.\n\nFAILED OUTPUT:\n{}",
                             &raw[..raw.len().min(8000)]
                         ),
                         work_dir: self.work_dir.clone(),
@@ -539,7 +541,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunSaUseCase<S, E> {
                 )
                 .await,
                 prompts::BRIEF_PROTOCOL,
-            ),
+            ) + "\n\nOUTPUT CONTRACT (hard requirement): your FINAL message must contain \
+                 the technical-design JSON object {\"approach\":..., \"alternatives\":..., \
+                 \"files\":[...], \"api_contract\":..., \"data_changes\":..., \
+                 \"test_plan\":...}. When you finish exploring, STOP running tools and \
+                 write the JSON as plain text. A reply without that JSON object is a \
+                 failed run.",
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1200),
             escalation_level: 0,
