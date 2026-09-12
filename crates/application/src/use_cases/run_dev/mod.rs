@@ -1296,12 +1296,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             }
             _ => Ok(None),
         };
-        if let Ok(mut state) = self.store.load().await {
-            if let Some(t) = state.ticket_mut(id) {
-                if t.release_claim(Role::System).is_ok() {
-                    let _ = self.store.save(&state).await;
-                }
+        // Retry on optimistic-concurrency conflicts: a bare load+save lost
+        // the release whenever TEST/RELEASE wrote concurrently, leaving the
+        // ticket InProgress forever — zombie claims filled the WIP limit and
+        // 'PR queue full' deadlocked the whole dev lane.
+        let released = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            if let Some(t) = s.ticket_mut(id) {
+                let _ = t.release_claim(Role::System);
             }
+            Ok(())
+        })
+        .await;
+        if let Err(e) = released {
+            tracing::warn!("release_claim: {id} may stay InProgress: {e}");
         }
         if let Ok(Some(p)) = &parked {
             tracing::info!(
