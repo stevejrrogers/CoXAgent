@@ -25,6 +25,7 @@ Wired verbatim into `.github/workflows/ci.yml`, job `fmt · clippy · test`, ste
 | 34761356136 | 8de7ce21 | push | **failure (billing)** | https://github.com/stevejrrogers/CoXAgent/actions/runs/34761356136 |
 | 34762777073 | 690b32c6 | push, then manual re-run 14:45:01Z | **failure (billing)** | https://github.com/stevejrrogers/CoXAgent/actions/runs/34762777073 |
 | 34764405594 | fef6c513 (current main tip) | push 15:02:33Z; manual re-runs 15:36Z, 15:43Z, 15:45Z (attempts 2–4) | **failure (billing), 4/4 attempts** | https://github.com/stevejrrogers/CoXAgent/actions/runs/34764405594 |
+| 34767566580 | 6861f868 (this evidence file, on main) | push 16:06:08Z; re-runs 16:10Z, 16:12Z (attempts 2–3) | **failure (billing), 3/3 attempts** | https://github.com/stevejrrogers/CoXAgent/actions/runs/34767566580 |
 | **PENDING** | _final commit_ | push | **green (required for closure)** | _to be recorded here_ |
 
 Every run since ~2026-08-08 dies ~2s in before any job starts, with the annotation: *"The job was not started because recent account payments have failed or your spending limit needs to be increased."* The 14:45Z re-run of 34762777073 failed identically — this is current, not stale, evidence. Jobs therefore never execute, so the gate has not yet been observed **executing** green in Actions (per the team lesson: verify a check *fired*, not that it is written).
@@ -40,3 +41,9 @@ cargo test -p coxagent-app --test hexagonal_gate
 SA answered (CXA-B211): the fix is **account-level and outside the repo** — no in-repo ticket can do it. Owner: **repo admin / account holder `stevejrrogers`**. Required action: fix billing / raise the spending limit (or make the repo public on the free plan), then re-run 34762777073 — or push this branch — and record the green run URL in the table above, then flip CXA-B174 (and CXA-B212) to closed with this file as the evidence link.
 
 `ASK SA: Actions remain billing-blocked (re-run 34762777073 at 14:45Z failed with the same spending-limit annotation) — after you lift the billing block, should the closing agent re-run 34762777073 on 690b32c6 or push a fresh commit, and may this evidence file be committed as-is with the green-run row marked PENDING until then?`
+
+## 5. Post-escalation update (16:13Z, same day)
+
+- The evidence commit `6861f868` is now **on main** (pushed 16:04Z after `fetch` + `--ff-only`; remote had not advanced). Its push-run **34767566580 failed 3/3 attempts with the same billing annotation** (re-runs 16:10:18Z and 16:12:35Z, jobs `steps:0`), so the blocker is confirmed **still active after** the SA escalation, not stale.
+- Meanwhile the hub (port 4000) shows **SA replied "the model finished without a text reply"** to both outstanding asks — no closure-path ruling exists. Per the standing instruction, the pending question is NOT re-asked; this file records the smallest safe progress instead of guessing the green row.
+- Close-out path recorded for the unblocked closer (evidence-only, no source changes): commit this file with the green row filled → push → the push-run is the enforced green run → record its URL in §3 → flip CXA-B174 (and CXA-B212) closed with this file as the evidence link. If the green run must precede the flip, the flip is one follow-up commit on the already-recorded URL.
