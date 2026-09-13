@@ -865,10 +865,7 @@ fn linux_c_toolchain_present() -> bool {
         "musl-clang",
         "zig", // zig cc can drive a configured cross build when present
     ];
-    if std::env::var("CARGO_BUILD_TARGET")
-        .ok()
-        .is_some_and(|v| v.contains("linux"))
-    {
+    if std::env::var("CARGO_BUILD_TARGET").is_ok_and(|v| v.contains("linux")) {
         return true;
     }
     let overrides = [
