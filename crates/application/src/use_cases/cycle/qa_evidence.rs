@@ -409,16 +409,31 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return false;
         }
         let fingerprint = waiting.join(",");
-        if state.daily_jobs.get("test-verified-set") == Some(&fingerprint) {
-            return false;
-        }
+        state.daily_jobs.get("test-verified-set-v2") != Some(&fingerprint)
+    }
+
+    /// Record the Fixed-set fingerprint AFTER a TEST run completed. Stamping it
+    /// up front (the old behaviour) meant a failed TEST run — provider stall,
+    /// iteration cap — still marked the set as verified, and every later cycle
+    /// skipped with "nothing new to verify" while the Fixed tickets sat
+    /// unverified forever.
+    pub(super) async fn record_test_pass_fingerprint(&self) {
+        let Ok(state) = self.store.load().await else {
+            return;
+        };
+        let fingerprint = state
+            .tickets
+            .iter()
+            .filter(|t| t.status() == coxagent_domain::Status::Fixed)
+            .map(|t| t.id().to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
             s.daily_jobs
-                .insert("test-verified-set".to_owned(), fingerprint.clone());
+                .insert("test-verified-set-v2".to_owned(), fingerprint.clone());
             Ok(())
         })
         .await;
-        true
     }
 
     /// Screenshot pass: attach a real screenshot to each UI ticket's test cases
