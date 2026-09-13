@@ -27,6 +27,7 @@ pub(super) struct BrakeHoldReq {
 /// needs a principal who is a member of `:pid`; WRITES additionally need
 /// ordinary write rights — viewers may inspect the cockpit but never steer
 /// it. Returns the acting username for the audit trail.
+#[allow(clippy::result_large_err)] // axum Response<Body> is ~128B; boxing it would ripple every handler return site
 async fn authorize_brake_call(
     app: &AppState,
     pid: &str,

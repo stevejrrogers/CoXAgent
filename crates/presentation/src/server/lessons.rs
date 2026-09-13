@@ -27,6 +27,7 @@ pub(super) struct LessonActionReq {
 /// with hub auth configured, a lesson write needs a project member with
 /// write rights — viewers may read the efficacy view but never steer it.
 /// Returns the acting username for the dismissal record.
+#[allow(clippy::result_large_err)] // axum Response<Body> is ~128B; boxing it would ripple every handler return site
 async fn authorize_lesson_write(
     app: &AppState,
     pid: &str,
