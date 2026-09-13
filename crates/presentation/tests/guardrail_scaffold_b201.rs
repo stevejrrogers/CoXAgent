@@ -335,7 +335,7 @@ fn a_missing_file_fails_closed() {
     // A scan over a tree whose files went missing must not report green.
     let inv = kpi_depth_invariant();
     let why = inv
-            .scan(
+        .scan(
             &["crates/presentation/src/web/js/kpis.js".to_owned()],
             &NullRepo,
         )
