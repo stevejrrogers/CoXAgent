@@ -273,7 +273,7 @@ fn workspace_ctx() -> (Vec<String>, Workspace) {
 
 #[test]
 fn an_allowlist_that_grows_is_rejected() {
-    let why = shrink_check(&["a.js"], &["a.js", "b.js"]).unwrap_err();
+    let why = shrink_check(&["a.js"], &["a.js", "b.js"]).expect_err("the gate must fail, not pass");
     assert!(why.contains("`b.js`"), "unhelpful: {why}");
     assert!(why.contains("fix the file instead"), "unhelpful: {why}");
 }
@@ -335,11 +335,11 @@ fn a_missing_file_fails_closed() {
     // A scan over a tree whose files went missing must not report green.
     let inv = kpi_depth_invariant();
     let why = inv
-        .scan(
+            .scan(
             &["crates/presentation/src/web/js/kpis.js".to_owned()],
             &NullRepo,
         )
-        .unwrap_err();
+        .expect_err("the gate must fail, not pass");
     assert!(
         why.contains("not readable"),
         "an unreadable tree must fail closed: {why}"
