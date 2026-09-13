@@ -102,11 +102,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
             task_prompt: format!(
                 "Test the current build and report new bugs.{context_block}{shipped}{memory}\
                  {repo_map}{surface}{knowledge}\n\nOUTPUT CONTRACT (hard requirement): your \
-                 FINAL message must contain the JSON array of bug/verdict objects the TEST \
-                 role's system prompt describes — `[]` if nothing was found. When you finish \
-                 testing, STOP running tools and write the JSON array as plain text. A reply \
-                 without that JSON array is a failed run: reasoning alone, or a summary \
-                 without the array, cannot be parsed."
+                 FINAL message must contain one JSON object of the form \
+                 {{\"bugs\":[…],\"verdicts\":[…]}}. `verdicts` MUST hold one entry per \
+                 acceptance criterion of every ticket listed under 'shipped / awaiting \
+                 verification' — {{\"ac\":\"<the EXACT criterion text>\",\"passed\":true|false,\
+                 \"note\":\"<one line of concrete evidence>\",\"route\":\"\",\"tests\":[]}}. \
+                 A Fixed ticket can ONLY be promoted to Verified through these verdicts; \
+                 omitting them wedges the pipeline. `bugs` is `[]` if nothing new was found. \
+                 When you finish testing, STOP running tools and write the JSON object as \
+                 plain text — reasoning alone, or a summary without it, is a failed run."
             ),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1800),
@@ -218,10 +222,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
                 state.post_chat_in("SYSTEM", &note, crate::state::APPROVALS_CHANNEL, Vec::new());
                 continue;
             }
-            if let Some(t) = state.ticket_mut(&id) {
-                if t.transition_to(Role::Test, coxagent_domain::Status::Verified)
-                    .is_ok()
-                {
+            let attempt = state
+                .ticket_mut(&id)
+                .map(|t| t.transition_to(Role::Test, coxagent_domain::Status::Verified));
+            match attempt {
+                Some(Ok(())) => {
                     // Reaching Verified MEANS its root-cause regression passed:
                     // this Fixed bug did not resurface as a new bug this run.
                     // Record that fact as QA provenance so burn-down tickets can
@@ -243,6 +248,20 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
                     state.record_verified_outcome(&id.to_string());
                     promoted = true;
                 }
+                // A blocked promotion (usually CoverageIncomplete: acceptance
+                // criteria with no passing test case) was silently swallowed
+                // here — tickets sat Fixed forever with no visible reason.
+                // Post the reason on the ticket, and save it (promoted=true
+                // only saves promotions; comments must persist too).
+                Some(Err(e)) => {
+                    let note = format!(
+                        "⛔ {id}: Verified blocked — {e}. TEST must render a passing \
+                         verdict for every acceptance criterion before promotion."
+                    );
+                    state.post_comment("TEST", &note, Some(id.to_string()));
+                    promoted = true;
+                }
+                None => {}
             }
         }
         if promoted {
