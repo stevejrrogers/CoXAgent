@@ -101,6 +101,13 @@ jobs:
         run: cargo test -p coxagent-app --test deploy_smoke --test ci_availability_gate --test test_env_guard_f326_gate
       - name: Hexagonal gate (CXA-B211 — application layer does no direct IO)
         run: cargo test -p coxagent-app --test hexagonal_gate -- --nocapture
+      # CXA-B225 (CXA-B181.3): the named guardrail regression suite — scaffold
+      # self-tests + the Overview KPI panel's depth contract. Merge-blocking
+      # here by construction (this job feeds branch protection's required
+      # checks); the invariant registry it enforces lives at
+      # docs/CXA-B204-overview-kpi-panel-inventory.md.
+      - name: Overview panel guardrails (CXA-B225 regression gate)
+        run: cargo test -p coxagent-presentation --test guardrail_scaffold_b201
 
   # CXA-F326: the DSN-gated Postgres/Redis integration tests are #[ignore]d —
   # this job is the only sanctioned way to run them. It brings its own

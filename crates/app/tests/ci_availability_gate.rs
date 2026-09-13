@@ -77,10 +77,13 @@ const QUALITY_GATES: [(&str, &[&str]); 2] = [
 const GUARD_TESTS_JOB: &str = "guard-tests";
 
 /// The gate commands the guard job must run, as exact run-payload substrings.
-const GUARD_TESTS_STEPS: [&str; 2] = [
+const GUARD_TESTS_STEPS: [&str; 3] = [
     "cargo test -p coxagent-infrastructure --lib reclaimable",
     "cargo test -p coxagent-app --test deploy_smoke --test ci_availability_gate \
      --test test_env_guard_f326_gate",
+    // CXA-B225: the named guardrail suite is wired into the PR gate — this
+    // pin makes its removal a red wiring guard, not a silent unhooking.
+    "cargo test -p coxagent-presentation --test guardrail_scaffold_b201",
 ];
 
 /// The job that runs the `#[ignore]`d DSN-gated integration tests (F326) —
@@ -590,6 +593,7 @@ jobs:
     steps:
       - run: cargo test -p coxagent-infrastructure --lib reclaimable
       - run: cargo test -p coxagent-app --test deploy_smoke --test ci_availability_gate --test test_env_guard_f326_gate
+      - run: cargo test -p coxagent-presentation --test guardrail_scaffold_b201
   integration:
     name: integration (ephemeral cxa_test postgres + redis)
     runs-on: ubuntu-latest
