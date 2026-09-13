@@ -15,8 +15,14 @@ use std::sync::LazyLock;
 /// User-facing DOM-writing calls whose first argument (or inline HTML) must
 /// come from the copy layer.
 const DOM_WRITE_FNS: [&str; 8] = [
-    "toast(", "toasty(", "toastCopy(", "copyText(",
-    "confirm(", "alert(", "prompt(", "coxModal(",
+    "toast(",
+    "toasty(",
+    "toastCopy(",
+    "copyText(",
+    "confirm(",
+    "alert(",
+    "prompt(",
+    "coxModal(",
 ];
 
 /// Files exempt as a group. `copy.js` IS the layer; `core.js` carries the
@@ -34,139 +40,671 @@ static INLINE_COPY_EXCEPTIONS: LazyLock<Vec<(&'static str, &'static str, &'stati
     LazyLock::new(|| {
         let owner = "CXA-B164 legacy (pre-gate inline copy)";
         vec![
-    ("crates/presentation/src/web/js/approval_policy.js:129", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/approval_policy.js:140", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:212", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:308", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:309", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:654", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:666", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:688", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:702", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:742", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:747", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:750", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:751", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:752", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:767", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:941", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:943", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:948", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:970", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:975", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:978", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:1041", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:1057", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:1065", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:1081", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:1084", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:1087", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:1339", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:1458", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:1459", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:1611", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:1614", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:1616", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:1618", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:1621", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:1623", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:1632", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:1662", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:1695", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:1854", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:2209", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:2212", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:2213", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:2219", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:2224", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:2229", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:2247", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/chat.js:2311", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/core.js:356", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/core.js:357", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/core.js:358", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/docs.js:177", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/docs.js:178", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/docs.js:179", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/docs.js:198", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/docs.js:199", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/docs.js:200", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/home.js:75", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/home.js:117", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/home.js:166", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/home.js:450", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/home.js:458", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/home.js:460", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/home.js:467", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/home.js:475", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/home.js:477", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/home.js:485", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/home.js:487", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/home.js:499", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/home.js:514", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/home.js:546", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/home.js:547", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/home.js:550", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/home.js:557", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/home.js:566", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/home.js:716", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/home.js:717", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/home.js:727", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/home.js:729", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/inbox.js:221", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/inbox.js:239", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/inbox.js:252", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/manage.js:110", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/manage.js:125", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/manage.js:126", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/manage.js:174", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/manage.js:304", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/manage.js:305", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/mcp.js:43", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/mcp.js:47", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/mcp.js:50", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/mcp.js:52", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/mcp.js:118", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/mcp.js:174", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:45", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:146", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:148", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:149", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:150", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:381", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:384", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:392", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:396", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:708", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:742", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:745", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:751", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:847", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:851", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:855", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:856", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:886", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:887", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:1129", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:1130", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:1179", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:1199", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:2202", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:2203", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:2208", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:2209", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:2217", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:2220", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:2270", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:2271", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:2279", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:2282", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:2285", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:2289", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:2292", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:2441", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:2447", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
-    ("crates/presentation/src/web/js/shell.js:2581", owner, "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched"),
+            (
+                "crates/presentation/src/web/js/approval_policy.js:129",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/approval_policy.js:140",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:212",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:308",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:309",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:654",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:666",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:688",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:702",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:742",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:747",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:750",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:751",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:752",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:767",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:941",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:943",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:948",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:970",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:975",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:978",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:1041",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:1057",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:1065",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:1081",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:1084",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:1087",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:1339",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:1458",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:1459",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:1611",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:1614",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:1616",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:1618",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:1621",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:1623",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:1632",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:1662",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:1695",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:1854",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:2209",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:2212",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:2213",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:2219",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:2224",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:2229",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:2247",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/chat.js:2311",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/core.js:356",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/core.js:357",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/core.js:358",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/docs.js:177",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/docs.js:178",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/docs.js:179",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/docs.js:198",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/docs.js:199",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/docs.js:200",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/home.js:75",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/home.js:117",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/home.js:166",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/home.js:450",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/home.js:458",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/home.js:460",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/home.js:467",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/home.js:475",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/home.js:477",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/home.js:485",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/home.js:487",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/home.js:499",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/home.js:514",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/home.js:546",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/home.js:547",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/home.js:550",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/home.js:557",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/home.js:566",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/home.js:716",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/home.js:717",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/home.js:727",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/home.js:729",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/inbox.js:221",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/inbox.js:239",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/inbox.js:252",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/manage.js:110",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/manage.js:125",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/manage.js:126",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/manage.js:174",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/manage.js:304",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/manage.js:305",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/mcp.js:43",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/mcp.js:47",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/mcp.js:50",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/mcp.js:52",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/mcp.js:118",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/mcp.js:174",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:45",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:146",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:148",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:149",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:150",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:381",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:384",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:392",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:396",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:708",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:742",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:745",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:751",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:847",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:851",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:855",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:856",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:886",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:887",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:1129",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:1130",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:1179",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:1199",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:2202",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:2203",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:2208",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:2209",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:2217",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:2220",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:2270",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:2271",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:2279",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:2282",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:2285",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:2289",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:2292",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:2441",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:2447",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
+            (
+                "crates/presentation/src/web/js/shell.js:2581",
+                owner,
+                "grandfathered inline literal; migrate to copyText()/toastCopy() when its panel is next touched",
+            ),
         ]
     });
 
@@ -174,23 +712,19 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../")
         .canonicalize()
-        .expect("repo root must resolve")
+        .unwrap_or_else(|e| panic!("repo root must resolve: {e}"))
 }
 
 fn web_js_files() -> Vec<PathBuf> {
     let dir = repo_root().join("crates/presentation/src/web/js");
     let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .expect("web/js directory must exist")
-        .filter_map(|e| e.ok())
+        .unwrap_or_else(|e| panic!("read web/js directory {}: {e}", dir.display()))
+        .filter_map(Result::ok)
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|x| x == "js"))
         .collect();
     files.sort();
     files
-}
-
-fn line_of(src: &str, offset: usize) -> usize {
-    src[..offset].bytes().filter(|b| *b == b'\n').count() + 1
 }
 
 /// A user-facing literal: starts with an uppercase letter or contains a
@@ -214,7 +748,9 @@ fn is_user_facing_literal(lit: &str) -> bool {
 fn presentation_js_resolves_user_facing_literals_through_the_copy_layer() {
     let mut violations: Vec<String> = Vec::new();
     for path in web_js_files() {
-        let name = path.file_name().expect("js file name").to_string_lossy().to_string();
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_string()) else {
+            continue;
+        };
         if EXEMPT_FILES.contains(&name.as_str()) {
             continue;
         }
@@ -229,23 +765,27 @@ fn presentation_js_resolves_user_facing_literals_through_the_copy_layer() {
                 let Some(idx) = line.find(fnd) else { continue };
                 // Only inspect the quoted argument directly after the call.
                 let after = &line[idx + fnd.len()..];
-                let quote = match after.trim_start().chars().next() {
-                    Some(q @ ('\'' | '"')) => q,
-                    _ => continue, // variable/template arg — already layer-resolved or checked elsewhere
+                let Some(quote) = after
+                    .trim_start()
+                    .chars()
+                    .next()
+                    .filter(|&q| q == '\'' || q == '"')
+                else {
+                    continue; // variable/template arg — already layer-resolved or checked elsewhere
                 };
                 let rest = after.trim_start();
-                let Some(end_rel) = rest[1..].find(quote) else { continue };
-                let lit = &rest[1..1 + end_rel];
+                let Some(end_rel) = rest[1..].find(quote) else {
+                    continue;
+                };
+                let lit = &rest[1..=end_rel];
                 if !is_user_facing_literal(lit) {
                     continue;
                 }
                 let rel = path
                     .strip_prefix(repo_root())
-                    .expect("js path under repo root")
+                    .unwrap_or_else(|e| panic!("js path must be under the repo root: {e}"))
                     .display()
                     .to_string();
-                let loc = format!("{}:{}", rel, line_of(&src, 0) + 0);
-                let _ = &loc;
                 violations.push(format!(
                     "{}:{}: inline user-facing literal {:?} passed to {} — resolve it through copyText()/toastCopy() (copy.js) or add a shrink-only exception in INLINE_COPY_EXCEPTIONS",
                     rel,
@@ -259,7 +799,10 @@ fn presentation_js_resolves_user_facing_literals_through_the_copy_layer() {
             }
         }
     }
-    let allowed: Vec<&str> = INLINE_COPY_EXCEPTIONS.iter().map(|(loc, _, _)| *loc).collect();
+    let allowed: Vec<&str> = INLINE_COPY_EXCEPTIONS
+        .iter()
+        .map(|(loc, _, _)| *loc)
+        .collect();
     let real: Vec<&String> = violations
         .iter()
         .filter(|v| !allowed.iter().any(|a| v.contains(a)))
@@ -268,7 +811,10 @@ fn presentation_js_resolves_user_facing_literals_through_the_copy_layer() {
         real.is_empty(),
         "inline copy-layer violations ({}):\n{}",
         real.len(),
-        real.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n")
+        real.iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
     );
     // Ratchet: an exception that no longer matches any live violation must be
     // removed (the list may only shrink, never accumulate dead entries).
@@ -277,21 +823,26 @@ fn presentation_js_resolves_user_facing_literals_through_the_copy_layer() {
             violations.iter().any(|v| v.contains(loc)),
             "stale copy-gate exception {loc} (owner {owner}): {reason} — the violation is gone, remove the entry"
         );
-        assert!(!owner.trim().is_empty(), "exception {loc} is missing its owner");
-        assert!(!reason.trim().is_empty(), "exception {loc} is missing its reason/ticket");
+        assert!(
+            !owner.trim().is_empty(),
+            "exception {loc} is missing its owner"
+        );
+        assert!(
+            !reason.trim().is_empty(),
+            "exception {loc} is missing its reason/ticket"
+        );
     }
     let _ = ATTRIBUTE_ALLOW;
 }
 
 #[test]
 fn copy_layer_assets_are_served_and_load_before_their_consumers() {
-    let server_mod = std::fs::read_to_string(
-        repo_root().join("crates/presentation/src/server/mod.rs"),
-    )
-    .expect("server/mod.rs must exist");
-    let pos_copy = server_mod
-        .find("\"copy.js\"")
-        .expect("copy.js must be registered in APP_JS (crates/presentation/src/server/mod.rs)");
+    let server_mod =
+        std::fs::read_to_string(repo_root().join("crates/presentation/src/server/mod.rs"))
+            .unwrap_or_else(|e| panic!("read server/mod.rs: {e}"));
+    let pos_copy = server_mod.find("\"copy.js\"").unwrap_or_else(|| {
+        panic!("copy.js must be registered in APP_JS (crates/presentation/src/server/mod.rs)")
+    });
     for consumer in ["kpis.js", "core.js", "manage.js", "home.js", "inbox.js"] {
         let pos = server_mod
             .find(&format!("\"{consumer}\""))
@@ -301,8 +852,9 @@ fn copy_layer_assets_are_served_and_load_before_their_consumers() {
             "copy.js must load BEFORE {consumer} so window.copyText exists at consumer load time"
         );
     }
-    let copy_js = std::fs::read_to_string(repo_root().join("crates/presentation/src/web/js/copy.js"))
-        .expect("copy.js must exist");
+    let copy_js =
+        std::fs::read_to_string(repo_root().join("crates/presentation/src/web/js/copy.js"))
+            .unwrap_or_else(|e| panic!("read copy.js: {e}"));
     assert!(
         copy_js.contains("window.copyText = function"),
         "copy.js must expose window.copyText"
@@ -313,8 +865,12 @@ fn copy_layer_assets_are_served_and_load_before_their_consumers() {
 fn gate_exception_list_documentation_is_present() {
     // The baseline must be documented where the next engineer will find it.
     let wiki = repo_root().join("docs/wiki/engineering/cxa-b191-microcopy-guardrails.md");
-    let doc = std::fs::read_to_string(&wiki)
-        .unwrap_or_else(|e| panic!("read {}: {e} — the gate baseline must be documented", wiki.display()));
+    let doc = std::fs::read_to_string(&wiki).unwrap_or_else(|e| {
+        panic!(
+            "read {}: {e} — the gate baseline must be documented",
+            wiki.display()
+        )
+    });
     assert!(
         doc.contains("shrink-only"),
         "the wiki page must state the exceptions list is shrink-only"

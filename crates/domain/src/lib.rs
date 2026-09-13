@@ -11,6 +11,7 @@ pub mod events;
 pub mod goal;
 pub mod ids;
 pub mod kinds;
+pub mod panel;
 pub mod test_case;
 pub mod ticket;
 pub mod transitions;
@@ -27,6 +28,7 @@ pub use ids::{GoalId, TicketId, WorkerId};
 // Value objects (kind/priority/sizing/status/role) come from `kinds`; the
 // aggregate and its design structs come from `ticket`.
 pub use kinds::{Complexity, InterventionKind, Priority, Role, Status, TicketType};
+pub use panel::{Panel, PanelLayoutSlot, PanelListing, PanelRegistry, PanelRegistryError, PanelVisibility, UnknownSlot};
 pub use ticket::{Design, TechnicalDesign, Ticket, UxDesign};
 pub use version::{Bump, SemVer};
 pub use wip_checkpoint::WipCheckpoint;
