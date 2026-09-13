@@ -14,6 +14,15 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
+  # github.com anonymized git-over-HTTPS works ONLY for public repos. The
+  # harxes-core workspace dependency (crates/infrastructure/Cargo.toml) still
+  # points at ssh:// — so every runner without a deploy key dies on
+  # "Permission denied (publickey)" while fetching the pinned commit. Rewrite
+  # the URL to HTTPS before any cargo/git step touches the network: with
+  # .cargo/config.toml setting git-fetch-with-cli, cargo shells out to plain
+  # git, so a global `insteadOf` here routes it as cleanly as for git itself.
+  HARXES_REPO_URL: ssh://git@github.com/stevejrrogers/Harxes.git
+
 jobs:
   # CXA-B079 re-enabled deploy-smoke; CXA-C016 re-enables `check` and
   # `deploy-build` now that the debt that kept them red is paid (fmt drift
@@ -25,6 +34,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Same Harxes-over-HTTPS rewrite as the `check` job — see the env block.
+      - name: Route harxes-core fetches over HTTPS (no deploy key on runners)
+        run: git config --global url."https://github.com/stevejrrogers/Harxes.git".insteadOf "$HARXES_REPO_URL"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -48,6 +60,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Same Harxes-over-HTTPS rewrite as the `check` job — see the env block.
+      - name: Route harxes-core fetches over HTTPS (no deploy key on runners)
+        run: git config --global url."https://github.com/stevejrrogers/Harxes.git".insteadOf "$HARXES_REPO_URL"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build the deploy binary
@@ -66,6 +81,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      # Same Harxes-over-HTTPS rewrite as the `check` job — see the env block.
+      - name: Route harxes-core fetches over HTTPS (no deploy key on runners)
+        run: git config --global url."https://github.com/stevejrrogers/Harxes.git".insteadOf "$HARXES_REPO_URL"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Bring the stack up and probe the published port
@@ -93,6 +111,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Same Harxes-over-HTTPS rewrite as the `check` job — see the env block.
+      - name: Route harxes-core fetches over HTTPS (no deploy key on runners)
+        run: git config --global url."https://github.com/stevejrrogers/Harxes.git".insteadOf "$HARXES_REPO_URL"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Reclaimable teardown policy (protected infra stays protected)
@@ -143,6 +164,9 @@ jobs:
       COXAGENT_TEST_REDIS_URL: redis://localhost:6379
     steps:
       - uses: actions/checkout@v4
+      # Same Harxes-over-HTTPS rewrite as the `check` job — see the env block.
+      - name: Route harxes-core fetches over HTTPS (no deploy key on runners)
+        run: git config --global url."https://github.com/stevejrrogers/Harxes.git".insteadOf "$HARXES_REPO_URL"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run the DSN-gated integration tests
