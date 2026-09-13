@@ -221,6 +221,37 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 .filter_map(|t| t.parent_id().map(ToString::to_string))
                 .collect();
             let mut nudged: Vec<String> = Vec::new();
+            // A child of a REJECTED parent is dead scope: burning attempts on
+            // it re-litigates a decision already made. Close them with it.
+            let rejected_parents: std::collections::HashSet<String> = s
+                .tickets
+                .iter()
+                .filter(|t| t.status() == Status::Rejected)
+                .map(|t| t.id().to_string())
+                .collect();
+            let dead_children: Vec<String> = s
+                .tickets
+                .iter()
+                .filter(|t| {
+                    !matches!(
+                        t.status(),
+                        Status::Documented | Status::Verified | Status::Rejected
+                    ) && t
+                        .parent_id()
+                        .is_some_and(|p| rejected_parents.contains(p.as_str()))
+                })
+                .map(|t| t.id().to_string())
+                .collect();
+            for id in &dead_children {
+                if let Some(t) = s.tickets.iter_mut().find(|t| t.id().as_str() == id) {
+                    if t
+                        .transition_to(coxagent_domain::Role::System, Status::Rejected)
+                        .is_ok()
+                    {
+                        nudged.push(format!("{id} rejected with its parent"));
+                    }
+                }
+            }
             // Held bug children are a special case beyond the sprint list: a
             // childless on_hold bug is invisible to every lane (Steve's
             // two-lane deadlock, CXA-B189) and — when its failures were not

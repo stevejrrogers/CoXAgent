@@ -287,7 +287,12 @@ change, and if the blocker is a real design gap, ASK instead of looping.\n\
 Your PR is born mergeable: before finishing, merge the latest base branch into \
 your branch; on conflict, read both sides, understand each change's intent, and \
 resolve preserving both — then make the build/tests green again. \
-When done, print a one-line summary.";
+When done, print a one-line summary.\n\
+BUDGET DISCIPLINE: your run has a hard iteration cap. Spend at most a third of \
+it exploring — by then you must be EDITING files. Prefer the Write and Edit \
+tools over shell heredocs/sed for file changes (safer, and the live log can \
+show your code). If prior WIP exists for this ticket, restore and CONTINUE it \
+instead of re-exploring from zero. Finish decisively: implement, test, summarize.";
 
 /// Self-healing boot: fix ALL compile errors so the project can build.
 /// Runs before any tickets are touched — infrastructure repair, not feature work.
