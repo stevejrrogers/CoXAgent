@@ -409,7 +409,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             return false;
         }
         let fingerprint = waiting.join(",");
-        state.daily_jobs.get("test-verified-set-v2") != Some(&fingerprint)
+        state.daily_jobs.get("test-verified-set-v3") != Some(&fingerprint)
     }
 
     /// Record the Fixed-set fingerprint AFTER a TEST run completed. Stamping it
@@ -430,7 +430,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .join(",");
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
             s.daily_jobs
-                .insert("test-verified-set-v2".to_owned(), fingerprint.clone());
+                .insert("test-verified-set-v3".to_owned(), fingerprint.clone());
             Ok(())
         })
         .await;
