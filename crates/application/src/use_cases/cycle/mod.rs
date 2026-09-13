@@ -1323,7 +1323,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             } else {
                 self.report("TEST", &verifying);
                 match self.test().execute().await {
-                    Ok(ids) => report.bugs_filed = ids,
+                    Ok(ids) => {
+                        report.bugs_filed = ids;
+                        // Only a COMPLETED run retires this Fixed set; a failed
+                        // run must leave it eligible for the next cycle.
+                        self.record_test_pass_fingerprint().await;
+                    }
                     Err(e) => report.errors.push(format!("TEST: {e}")),
                 }
                 // Deterministic screenshot pass: attach a real image to each UI
