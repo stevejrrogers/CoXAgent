@@ -144,6 +144,10 @@ const APP_JS: &[(&str, &str)] = &[
     // Vendored Mermaid (pinned v11 UMD build) so Wiki pages render
     // sequence/flow diagrams offline — the hub never loads from a CDN.
     ("mermaid.min.js", include_str!("../web/js/mermaid.min.js")),
+    // Copy layer (CXA-B191) — shared microcopy catalog + renderers; every
+    // feature script resolves user-facing strings through it, so it must load
+    // before kpis.js/core.js.
+    ("copy.js", include_str!("../web/js/copy.js")),
     // Overview KPI tiles (CXA-F360) — sparkline/delta series helpers that
     // core.js's overview render calls at runtime; loads before core.js.
     ("kpis.js", include_str!("../web/js/kpis.js")),
