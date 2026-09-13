@@ -101,7 +101,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
             system_prompt: prompts::system_prompt(prompts::TEST),
             task_prompt: format!(
                 "Test the current build and report new bugs.{context_block}{shipped}{memory}\
-                 {repo_map}{surface}{knowledge}"
+                 {repo_map}{surface}{knowledge}\n\nOUTPUT CONTRACT (hard requirement): your \
+                 FINAL message must contain the JSON array of bug/verdict objects the TEST \
+                 role's system prompt describes — `[]` if nothing was found. When you finish \
+                 testing, STOP running tools and write the JSON array as plain text. A reply \
+                 without that JSON array is a failed run: reasoning alone, or a summary \
+                 without the array, cannot be parsed."
             ),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(1800),
