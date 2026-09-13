@@ -105,6 +105,29 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         // on its next run instead of shouting into the void.
         let steering = prompts::human_steering_block(state, id.as_str());
         let journal = Self::attempts_brief(state, id);
+        // Prior-attempt continuity: a parked WIP ref means real work already
+        // exists — tell the agent to restore and CONTINUE it, not start over
+        // (every capped attempt used to re-explore from zero).
+        let wip_block = {
+            let wip_ref = super::wip::wip_ref_for(id);
+            let exists = match &self.git {
+                Some(g) => {
+                    g.raw(&self.work_dir, &["rev-parse", "--verify", "--quiet", &wip_ref])
+                        .await
+                        .0
+                }
+                None => false,
+            };
+            if exists {
+                format!(
+                    "\n## PRIOR WIP (continue, don't restart)\nA previous attempt's work is \
+                     parked at `{wip_ref}`. FIRST run `git checkout {wip_ref} -- .`, review \
+                     the restored diff with `git diff`, then CONTINUE from there.\n"
+                )
+            } else {
+                String::new()
+            }
+        };
         // What was already done to this code. A human opens the file's history
         // before editing it; nothing in the ticket text carries that.
         let knowledge =
@@ -292,7 +315,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             system_prompt: prompts::system_prompt(prompts::DEV),
             task_prompt: format!(
                 "Ticket {id}: {title}\n{brief}{stale_design}{collision_warning}{orientation}\nImplement it \
-                 now.{preamble}{stack}{deploy}{design}{context_block}{focus_t}{history}{knowledge}{repo_map_t}{memory_t}{hub_t}{steering}{journal}{asking_t}{protocol_t}"
+                 now.{preamble}{stack}{deploy}{design}{context_block}{focus_t}{history}{knowledge}{repo_map_t}{memory_t}{hub_t}{steering}{journal}{wip_block}{asking_t}{protocol_t}"
             ),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(3600),
