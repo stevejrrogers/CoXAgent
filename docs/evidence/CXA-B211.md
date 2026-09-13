@@ -35,7 +35,7 @@ Every Actions run on this private repo since ~2026-08-08 dies ~2s after trigger 
 | Positive (branch dispatch) | [34759804489](https://github.com/stevejrrogers/CoXAgent/actions/runs/34759804489) on `feat/cxa-b211-guardrail-ci-gate` | green | all jobs not started (billing) |
 | Positive (merge to main) | [34759884772](https://github.com/stevejrrogers/CoXAgent/actions/runs/34759884772) after `660b65ab` → main | green | all jobs not started (billing) |
 | Negative (deliberate violation) | [34760026764](https://github.com/stevejrrogers/CoXAgent/actions/runs/34760026764) after `d7ac5ae8` | red, naming the file | all jobs not started (billing) |
-| Final-commit run | [34761356136](https://github.com/stevejrrogers/CoXAgent/actions/runs/34761356136) at `ff25fd43` (+ manual re-run 2026-09-13T14:23Z) | green | all jobs not started (billing) |
+| Final-commit runs | [34761356136](https://github.com/stevejrrogers/CoXAgent/actions/runs/34761356136) at `ff25fd43` (+ manual re-run 2026-09-13T14:23Z); [34762710149](https://github.com/stevejrrogers/CoXAgent/actions/runs/34762710149) at `8de7ce21` (this record) | green | all jobs not started (billing) |
 
 For completeness: the last CI run that actually executed to a green conclusion is [31219380265](https://github.com/stevejrrogers/CoXAgent/actions/runs/31219380265) (`9f9b8a29`, 2026-08-07) — it **predates the gate wiring** and is not evidence for this ticket.
 
