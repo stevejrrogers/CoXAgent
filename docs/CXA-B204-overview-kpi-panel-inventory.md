@@ -146,3 +146,7 @@ panels follow in the ranked order above.
 *Audit trail: search passes described in §1; every `file:line` in §2 was read at
 HEAD `bef21bb`. No code, test, build or dependency file was created or modified
 by this ticket.*
+
+## Enforcement (CXA-B225)
+
+The depth contract each tile carries is enforced by the named guardrail suite `cargo test -p coxagent-presentation --test guardrail_scaffold_b201`, wired merge-blocking into CI's `guard-tests` job. The invariant registry lives at [docs/wiki/engineering/cxa-b225-guardrail-invariant-registry.md](wiki/engineering/cxa-b225-guardrail-invariant-registry.md).
