@@ -14,8 +14,8 @@ pub mod cycle;
 pub mod duplicate_radar;
 pub mod generate_docs;
 pub mod global_search;
-pub mod list_panels;
 pub mod json_repair;
+pub mod list_panels;
 pub mod manual_rollback;
 pub mod merge_policy;
 pub mod merge_sweep;
@@ -68,12 +68,12 @@ pub use global_search::{
     MAX_PER_KIND, MAX_QUERY_LEN, MAX_TOTAL, MIN_QUERY_LEN,
 };
 pub use json_repair::repair_json;
+pub use list_panels::{list_panels, PanelSlotFilter};
 pub use manual_rollback::{known_good_target, ManualRollbackInput, RollbackOutcome};
 pub use merge_policy::{
     competing_pr, escalation_route, needs_human_eyes, route_from_failures, EscalationRoute,
     MAX_TICKET_RESCUES,
 };
-pub use list_panels::{list_panels, PanelSlotFilter};
 pub use merge_sweep::{merge_sweep, SweepOutcome};
 pub use question_batching::{flush_batches, select_deferred, should_defer};
 pub use readiness_preflight::{

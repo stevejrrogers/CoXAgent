@@ -112,9 +112,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             let wip_ref = super::wip::wip_ref_for(id);
             let exists = match &self.git {
                 Some(g) => {
-                    g.raw(&self.work_dir, &["rev-parse", "--verify", "--quiet", &wip_ref])
-                        .await
-                        .0
+                    g.raw(
+                        &self.work_dir,
+                        &["rev-parse", "--verify", "--quiet", &wip_ref],
+                    )
+                    .await
+                    .0
                 }
                 None => false,
             };

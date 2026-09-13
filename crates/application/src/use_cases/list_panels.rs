@@ -55,16 +55,37 @@ mod tests {
 
     fn registry() -> PanelRegistry {
         PanelRegistry::try_new(vec![
-            panel("overview.summary", "Overview", PanelLayoutSlot::AboveTheFold, 0),
-            panel("delivery.tickets", "Delivery", PanelLayoutSlot::RowPrimary, 0),
+            panel(
+                "overview.summary",
+                "Overview",
+                PanelLayoutSlot::AboveTheFold,
+                0,
+            ),
+            panel(
+                "delivery.tickets",
+                "Delivery",
+                PanelLayoutSlot::RowPrimary,
+                0,
+            ),
             panel("quality.tests", "Quality", PanelLayoutSlot::RowPrimary, 5),
         ])
         .expect("unique ids")
     }
 
-    fn panel(id: &'static str, title: &'static str, slot: PanelLayoutSlot, order: u32) -> coxagent_domain::Panel {
-        coxagent_domain::Panel::new(id, title, slot, order, coxagent_domain::PanelVisibility::Always)
-            .expect("valid panel")
+    fn panel(
+        id: &'static str,
+        title: &'static str,
+        slot: PanelLayoutSlot,
+        order: u32,
+    ) -> coxagent_domain::Panel {
+        coxagent_domain::Panel::new(
+            id,
+            title,
+            slot,
+            order,
+            coxagent_domain::PanelVisibility::Always,
+        )
+        .expect("valid panel")
     }
 
     #[test]
@@ -93,7 +114,10 @@ mod tests {
     fn the_empty_registry_returns_the_defined_empty_result_for_every_filter() {
         let empty = PanelRegistry::empty();
         assert_eq!(list_panels(&empty, All), PanelListing::empty());
-        assert_eq!(list_panels(&empty, Only(PanelLayoutSlot::AboveTheFold)), PanelListing::empty());
+        assert_eq!(
+            list_panels(&empty, Only(PanelLayoutSlot::AboveTheFold)),
+            PanelListing::empty()
+        );
     }
 
     #[test]

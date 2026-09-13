@@ -31,9 +31,9 @@ mod ship_truth;
 mod sm_watch;
 mod wiring;
 
+mod evict;
 mod forge;
 mod forge_feedback;
-mod evict;
 mod forge_merge;
 mod forge_review;
 mod lesson_sweep;
@@ -854,10 +854,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     s.tickets
                         .iter()
                         .filter(|t| {
-                            matches!(
-                                t.status(),
-                                Status::Open | Status::Pending | Status::Ready
-                            )
+                            matches!(t.status(), Status::Open | Status::Pending | Status::Ready)
                         })
                         .count()
                         < 30
@@ -928,10 +925,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 s.tickets
                     .iter()
                     .filter(|t| {
-                        matches!(
-                            t.status(),
-                            Status::Open | Status::Pending | Status::Ready
-                        )
+                        matches!(t.status(), Status::Open | Status::Pending | Status::Ready)
                     })
                     .count()
                     < 30

@@ -30,6 +30,7 @@
 //! counter and the runner breaker classify harxes outcomes identically to
 //! every other engine.
 
+use crate::engine::live::{append_live, live_path};
 use async_trait::async_trait;
 use coxagent_application::ports::outbound::engine::{
     AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus, Usage,
@@ -40,7 +41,6 @@ use harxes_core::{
     ProviderSpec, ReasoningEffort, RunEvent, RunOutcome, RunRequest, ShellError, ShellExitStatus,
     ShellPort,
 };
-use crate::engine::live::{append_live, live_path};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -82,14 +82,14 @@ impl HarxesEngine {
         }
         if self.model.strip_prefix("copilot/").is_some() {
             return Ok(ProviderSpec::Copilot {
-                github_token: env("GH_TOKEN").or_else(|| env("GITHUB_TOKEN")).ok_or_else(
-                    || {
+                github_token: env("GH_TOKEN")
+                    .or_else(|| env("GITHUB_TOKEN"))
+                    .ok_or_else(|| {
                         PortError::Backend(
                             "harxes: GH_TOKEN/GITHUB_TOKEN is not set for the copilot provider"
                                 .to_owned(),
                         )
-                    },
-                )?,
+                    })?,
             });
         }
         let base_url = env("COXAGENT_LLM_BASE_URL")
@@ -379,10 +379,10 @@ fn fmt_duration(ms: u64) -> String {
         format!("{ms}ms")
     } else if ms < 60_000 {
         {
-        #[allow(clippy::cast_precision_loss)] // sub-minute durations fit easily
-        let secs = ms as f64 / 1000.0;
-        format!("{secs:.1}s")
-    }
+            #[allow(clippy::cast_precision_loss)] // sub-minute durations fit easily
+            let secs = ms as f64 / 1000.0;
+            format!("{secs:.1}s")
+        }
     } else {
         format!("{}m{:02}s", ms / 60_000, (ms % 60_000) / 1000)
     }
@@ -396,10 +396,10 @@ fn fmt_tokens(n: u64) -> String {
         format!("{}k", n / 1_000)
     } else {
         {
-        #[allow(clippy::cast_precision_loss)] // token counts are far below 2^52
-        let m = n as f64 / 1_000_000.0;
-        format!("{m:.1}M")
-    }
+            #[allow(clippy::cast_precision_loss)] // token counts are far below 2^52
+            let m = n as f64 / 1_000_000.0;
+            format!("{m:.1}M")
+        }
     }
 }
 
@@ -495,7 +495,11 @@ impl Coalescer {
             }
             RunEvent::Retry { wait_secs } => {
                 self.close_msg(live_file, trace);
-                Self::emit_raw(&format!("↻ provider retry in {wait_secs}s"), live_file, trace);
+                Self::emit_raw(
+                    &format!("↻ provider retry in {wait_secs}s"),
+                    live_file,
+                    trace,
+                );
             }
             // RunEvent is #[non_exhaustive]: future variants stream past the
             // live log rather than breaking the build.
@@ -558,11 +562,7 @@ struct ConfinedShell {
 
 #[async_trait]
 impl ShellPort for ConfinedShell {
-    async fn run_command(
-        &self,
-        working_dir: &str,
-        cmd: &str,
-    ) -> Result<CommandOutput, ShellError> {
+    async fn run_command(&self, working_dir: &str, cmd: &str) -> Result<CommandOutput, ShellError> {
         // harxes-core passes "." for "the project" — in-process that would be
         // the HUB's cwd, not this run's workspace. Anchor every relative dir
         // (and any path outside the workspace) to the run's work_dir.
@@ -662,8 +662,8 @@ mod tests {
             assert!(msg.contains(needle), "{msg} must contain {needle}");
         }
         // Task-side failures must NOT look like infra.
-        let msg = render_engine_error(&EngineError::TaskFailed("tests failed".to_owned()))
-            .to_lowercase();
+        let msg =
+            render_engine_error(&EngineError::TaskFailed("tests failed".to_owned())).to_lowercase();
         assert!(!msg.contains("timed out") && !msg.contains("unavailable"));
     }
 
@@ -683,8 +683,7 @@ mod tests {
             &mut trace,
         );
         assert_eq!(
-            trace,
-            "🧠 Let me begin.\n🧠 Next\n🔧 Bash(ls)\n",
+            trace, "🧠 Let me begin.\n🧠 Next\n🔧 Bash(ls)\n",
             "deltas coalesce into whole lines; tool events flush first"
         );
     }
@@ -705,7 +704,11 @@ mod tests {
     fn coalescer_speaks_the_worklog_line_protocol() {
         let mut trace = String::new();
         let mut co = Coalescer::default();
-        co.feed(&RunEvent::Text("Done. Summary:\nAll tests pass.\n".to_owned()), None, &mut trace);
+        co.feed(
+            &RunEvent::Text("Done. Summary:\nAll tests pass.\n".to_owned()),
+            None,
+            &mut trace,
+        );
         co.feed(
             &RunEvent::ToolEnd {
                 name: "Bash".to_owned(),

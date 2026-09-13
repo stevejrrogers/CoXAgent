@@ -25,7 +25,12 @@ pub fn eviction_candidates(state: &ProjectState) -> Vec<String> {
     let sprint_ids: std::collections::HashSet<&str> = state
         .sprint
         .as_ref()
-        .map(|s| s.committed.iter().map(coxagent_domain::TicketId::as_str).collect())
+        .map(|s| {
+            s.committed
+                .iter()
+                .map(coxagent_domain::TicketId::as_str)
+                .collect()
+        })
         .unwrap_or_default();
     state
         .tickets
@@ -35,11 +40,10 @@ pub fn eviction_candidates(state: &ProjectState) -> Vec<String> {
         .filter(|t| {
             // A parent with a live child stays: the child's "Split from" link
             // and the parent's hold-until-children-land contract need it hot.
-            !state
-                .tickets
-                .iter()
-                .any(|c| c.parent_id().map(coxagent_domain::TicketId::as_str) == Some(t.id().as_str())
-                    && !terminal(c.status()))
+            !state.tickets.iter().any(|c| {
+                c.parent_id().map(coxagent_domain::TicketId::as_str) == Some(t.id().as_str())
+                    && !terminal(c.status())
+            })
         })
         .map(|t| t.id().to_string())
         .collect()
@@ -93,7 +97,9 @@ where
         }
         let mut archived: Vec<String> = Vec::new();
         {
-            let Ok(state) = self.store.load().await else { return };
+            let Ok(state) = self.store.load().await else {
+                return;
+            };
             for id in &candidates {
                 let Some(t) = state.tickets.iter().find(|t| t.id().as_str() == id) else {
                     continue;
@@ -135,7 +141,10 @@ where
         .await
         {
             Ok(()) => {
-                self.report("SM", &format!("evicted {n} terminal ticket(s) to the archive"));
+                self.report(
+                    "SM",
+                    &format!("evicted {n} terminal ticket(s) to the archive"),
+                );
                 tracing::info!("eviction: {n} terminal ticket(s) moved to the cold archive");
             }
             Err(e) => {
@@ -174,7 +183,8 @@ mod eviction_tests {
         match status {
             "documented" => {
                 t.transition_to(Role::Sa, Status::Ready).unwrap();
-                t.transition_to(Role::DevFeature, Status::InProgress).unwrap();
+                t.transition_to(Role::DevFeature, Status::InProgress)
+                    .unwrap();
                 t.transition_to(Role::DevFeature, Status::Done).unwrap();
                 t.transition_to(Role::Docs, Status::Documented).unwrap();
             }
@@ -248,6 +258,9 @@ mod eviction_tests {
             .set_parent(Role::Sa, TicketId::new("F010").unwrap())
             .unwrap();
         s.tickets.push(child);
-        assert!(eviction_candidates(&s).is_empty(), "live child pins the parent");
+        assert!(
+            eviction_candidates(&s).is_empty(),
+            "live child pins the parent"
+        );
     }
 }

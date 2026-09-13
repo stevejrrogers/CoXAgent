@@ -338,11 +338,11 @@ impl PanelRegistry {
 
 #[cfg(test)]
 mod tests {
-        // Pure tests over the panel registry's real types — no mock harness, no
-        // IO: a registry is a value, so every assertion is a function over
-        // values.
+    // Pure tests over the panel registry's real types — no mock harness, no
+    // IO: a registry is a value, so every assertion is a function over
+    // values.
 
-        use super::*;
+    use super::*;
 
     /// The declared exemplar panel set (CXA-B186's above-the-fold Overview), used
     /// by the tests below and later by the registration wiring.
@@ -409,10 +409,30 @@ mod tests {
 
     #[test]
     fn an_invalid_panel_is_rejected_at_the_boundary() {
-        assert!(Panel::new("", "Title", PanelLayoutSlot::AboveTheFold, 0, PanelVisibility::Always).is_err());
-        assert!(Panel::new("id", "  ", PanelLayoutSlot::AboveTheFold, 0, PanelVisibility::Always).is_err());
-        let ok =
-            Panel::new("id", "Title", PanelLayoutSlot::AboveTheFold, 0, PanelVisibility::Always).expect("valid");
+        assert!(Panel::new(
+            "",
+            "Title",
+            PanelLayoutSlot::AboveTheFold,
+            0,
+            PanelVisibility::Always
+        )
+        .is_err());
+        assert!(Panel::new(
+            "id",
+            "  ",
+            PanelLayoutSlot::AboveTheFold,
+            0,
+            PanelVisibility::Always
+        )
+        .is_err());
+        let ok = Panel::new(
+            "id",
+            "Title",
+            PanelLayoutSlot::AboveTheFold,
+            0,
+            PanelVisibility::Always,
+        )
+        .expect("valid");
         assert_eq!(ok.id, "id");
     }
 
@@ -445,18 +465,54 @@ mod tests {
         // Declare deliberately out of fold order: the registry's list must not
         // care how the panels were handed in.
         let registry = PanelRegistry::try_new(vec![
-            Panel::new("b.diagnostics", "B", PanelLayoutSlot::Diagnostics, 0, PanelVisibility::Always)
-                .expect("valid panel"),
-            Panel::new("c.secondary", "C", PanelLayoutSlot::RowSecondary, 1, PanelVisibility::Always)
-                .expect("valid panel"),
-            Panel::new("a.fold", "A", PanelLayoutSlot::AboveTheFold, 5, PanelVisibility::Always)
-                .expect("valid panel"),
-            Panel::new("d.primary", "D", PanelLayoutSlot::RowPrimary, 0, PanelVisibility::Always)
-                .expect("valid panel"),
-            Panel::new("e.primary", "E", PanelLayoutSlot::RowPrimary, 7, PanelVisibility::Always)
-                .expect("valid panel"),
-            Panel::new("f.primary", "F", PanelLayoutSlot::RowPrimary, 2, PanelVisibility::Always)
-                .expect("valid panel"),
+            Panel::new(
+                "b.diagnostics",
+                "B",
+                PanelLayoutSlot::Diagnostics,
+                0,
+                PanelVisibility::Always,
+            )
+            .expect("valid panel"),
+            Panel::new(
+                "c.secondary",
+                "C",
+                PanelLayoutSlot::RowSecondary,
+                1,
+                PanelVisibility::Always,
+            )
+            .expect("valid panel"),
+            Panel::new(
+                "a.fold",
+                "A",
+                PanelLayoutSlot::AboveTheFold,
+                5,
+                PanelVisibility::Always,
+            )
+            .expect("valid panel"),
+            Panel::new(
+                "d.primary",
+                "D",
+                PanelLayoutSlot::RowPrimary,
+                0,
+                PanelVisibility::Always,
+            )
+            .expect("valid panel"),
+            Panel::new(
+                "e.primary",
+                "E",
+                PanelLayoutSlot::RowPrimary,
+                7,
+                PanelVisibility::Always,
+            )
+            .expect("valid panel"),
+            Panel::new(
+                "f.primary",
+                "F",
+                PanelLayoutSlot::RowPrimary,
+                2,
+                PanelVisibility::Always,
+            )
+            .expect("valid panel"),
         ])
         .expect("unique ids");
 
@@ -464,7 +520,14 @@ mod tests {
         let ids: Vec<&str> = listing.panels.iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
-            vec!["a.fold", "d.primary", "f.primary", "e.primary", "c.secondary", "b.diagnostics"]
+            vec![
+                "a.fold",
+                "d.primary",
+                "f.primary",
+                "e.primary",
+                "c.secondary",
+                "b.diagnostics"
+            ]
         );
         assert_eq!(listing.total, 6);
         assert_eq!(listing.registry_size, 6);
@@ -475,9 +538,15 @@ mod tests {
         let registry = PanelRegistry::try_new(declared_panels()).expect("unique ids");
 
         let fold = registry.list(Some(PanelLayoutSlot::AboveTheFold));
-        assert_eq!(fold.panels.iter().map(|p| p.id).collect::<Vec<_>>(), vec!["overview.summary"]);
+        assert_eq!(
+            fold.panels.iter().map(|p| p.id).collect::<Vec<_>>(),
+            vec!["overview.summary"]
+        );
         assert_eq!(fold.total, 1);
-        assert_eq!(fold.registry_size, 4, "the registry total is unchanged by the filter");
+        assert_eq!(
+            fold.registry_size, 4,
+            "the registry total is unchanged by the filter"
+        );
 
         let primary = registry.list(Some(PanelLayoutSlot::RowPrimary));
         assert_eq!(primary.total, 1);
@@ -489,7 +558,8 @@ mod tests {
         let empty_slot = registry.list(Some(PanelLayoutSlot::RowSecondary));
         // RowSecondary has one panel; a slot with no panels must still be a
         // defined, countable result — not an error and not the empty registry.
-        let missing = PanelRegistry::try_new(vec![declared_panels()[0].clone()]).expect("unique ids");
+        let missing =
+            PanelRegistry::try_new(vec![declared_panels()[0].clone()]).expect("unique ids");
         let empty_in_slot = missing.list(Some(PanelLayoutSlot::RowSecondary));
         assert_eq!(empty_in_slot.total, 0);
         assert_eq!(empty_in_slot.registry_size, 1);
@@ -512,12 +582,21 @@ mod tests {
         assert!(!approvals.visibility.allows(&[Role::DevBug]));
         assert!(!approvals.visibility.allows(&[]));
         // An empty required-role set hides the panel from everyone (fail closed).
-        let nobody =
-            Panel::new("x.locked", "X", PanelLayoutSlot::Diagnostics, 0, PanelVisibility::Roles(&[]))
-                .expect("valid panel");
+        let nobody = Panel::new(
+            "x.locked",
+            "X",
+            PanelLayoutSlot::Diagnostics,
+            0,
+            PanelVisibility::Roles(&[]),
+        )
+        .expect("valid panel");
         assert!(!nobody.visibility.allows(&[Role::Po]));
 
-        let overview = listing.panels.iter().find(|p| p.id == "overview.summary").expect("overview");
+        let overview = listing
+            .panels
+            .iter()
+            .find(|p| p.id == "overview.summary")
+            .expect("overview");
         assert!(overview.visibility.allows(&[]));
         assert_eq!(overview.visibility.role_names(), Vec::<&str>::new());
         assert_eq!(approvals.visibility.role_names(), vec!["po", "sa"]);

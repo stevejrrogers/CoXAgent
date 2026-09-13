@@ -244,8 +244,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 .collect();
             for id in &dead_children {
                 if let Some(t) = s.tickets.iter_mut().find(|t| t.id().as_str() == id) {
-                    if t
-                        .transition_to(coxagent_domain::Role::System, Status::Rejected)
+                    if t.transition_to(coxagent_domain::Role::System, Status::Rejected)
                         .is_ok()
                     {
                         nudged.push(format!("{id} rejected with its parent"));
@@ -282,8 +281,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 if let Some(t) = s.tickets.iter_mut().find(|t| t.id().as_str() == id) {
                     // The bug lifecycle has no Pending state — held bugs
                     // resume to Open (all 11 silently failed as Pending).
-                    if t
-                        .transition_to(coxagent_domain::Role::Sm, Status::Open)
+                    if t.transition_to(coxagent_domain::Role::Sm, Status::Open)
                         .is_ok()
                     {
                         nudged.push(format!("{id} (held bug) resumed"));
@@ -296,7 +294,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 };
                 match t.status() {
                     Status::OnHold if !live_parents.contains(id) => {
-                        if t.transition_to(coxagent_domain::Role::Sm, Status::Pending).is_ok() {
+                        if t.transition_to(coxagent_domain::Role::Sm, Status::Pending)
+                            .is_ok()
+                        {
                             nudged.push(format!("{id} resumed from hold"));
                         }
                     }
@@ -344,8 +344,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         .iter()
                         .filter(|f| f.detail.contains("iteration/token cap"))
                         .count();
-                    done < MAX_TICKET_RESCUES
-                        || (caps >= 2 && done < MAX_TICKET_RESCUES + 5)
+                    done < MAX_TICKET_RESCUES || (caps >= 2 && done < MAX_TICKET_RESCUES + 5)
                 })
                 .filter_map(|(id, _)| {
                     state
@@ -650,7 +649,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     }
 }
 
-
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// CXA-F381: an oversize ticket (two+ guardrail-cap deaths) is DECOMPOSED
     /// instead of re-approached — the SA replies with 2-3 subtasks, the hub
@@ -710,13 +708,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // output either — a reasoning-only completion burned four rescues on
         // CXA-F376 because it slipped past the empty check.
         let no_reply = out.trim().is_empty()
-            || out.trim_start().starts_with("(the model finished without a text reply");
+            || out
+                .trim_start()
+                .starts_with("(the model finished without a text reply");
         if no_reply {
             let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
                 if let Some(n) = s.ticket_redesigns.get_mut(id) {
                     *n = n.saturating_sub(1);
                 }
-                s.journal_note(id, "oversize split brief got no engine output — rescue refunded");
+                s.journal_note(
+                    id,
+                    "oversize split brief got no engine output — rescue refunded",
+                );
                 Ok(())
             })
             .await;
@@ -726,7 +729,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // Blind "no parseable subtasks" notes hid three identical failures
             // in a row — keep the head of what the model actually said.
             let sample: String = out.chars().take(300).collect();
-            let note = format!("SA split attempt produced no parseable subtasks; reply head: {sample}");
+            let note =
+                format!("SA split attempt produced no parseable subtasks; reply head: {sample}");
             let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
                 s.journal_note(id, &note);
                 Ok(())
@@ -738,8 +742,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let id_owned = id.to_owned();
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
             let (ptype, parent_tid, parent_priority) = {
-                let Some(parent) = s.tickets.iter().find(|t| t.id().to_string() == id_owned)
-                else {
+                let Some(parent) = s.tickets.iter().find(|t| t.id().to_string() == id_owned) else {
                     return Ok(());
                 };
                 (parent.ticket_type(), parent.id().clone(), parent.priority())
@@ -779,10 +782,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             if child_ids.is_empty() {
                 return Ok(());
             }
-            if let Some(parent) = s.tickets.iter_mut().find(|t| t.id().to_string() == id_owned) {
+            if let Some(parent) = s
+                .tickets
+                .iter_mut()
+                .find(|t| t.id().to_string() == id_owned)
+            {
                 // OnHold until the children land; System may take any legal edge.
-                let _ = parent
-                    .transition_to(coxagent_domain::Role::System, coxagent_domain::Status::OnHold);
+                let _ = parent.transition_to(
+                    coxagent_domain::Role::System,
+                    coxagent_domain::Status::OnHold,
+                );
             }
             s.ticket_fail_attempts.remove(&id_owned);
             s.journal_note(
