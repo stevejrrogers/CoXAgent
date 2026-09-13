@@ -6,7 +6,6 @@ pub mod approval_memory;
 pub mod approval_policy;
 pub mod approval_risk;
 pub mod backup;
-pub mod gate_violation_fixture_b211;
 pub mod ceremony;
 pub mod claims;
 pub mod conformance_check;
