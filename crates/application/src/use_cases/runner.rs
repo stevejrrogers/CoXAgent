@@ -49,6 +49,10 @@ pub struct RunnerHandle {
     /// dashboard which engines the team can actually run, which models its
     /// opencode reaches, and whether its git/forge credentials really work.
     caps: crate::ports::outbound::WorkerCaps,
+    /// When the loop was paused (CXA-F384). Volatile by design: the explainer
+    /// card says "since unknown after restart" rather than persisting a stamp
+    /// that would outlive the run it describes. Stamped once per pause.
+    paused_at: Mutex<Option<std::time::Instant>>,
 }
 
 impl Default for RunnerHandle {
@@ -67,6 +71,7 @@ impl Default for RunnerHandle {
                 host: None,
             }),
             caps: crate::ports::outbound::WorkerCaps::default(),
+            paused_at: Mutex::new(None),
         }
     }
 }
@@ -95,7 +100,19 @@ impl RunnerHandle {
     pub fn resume(&self) {
         self.mode.store(RUNNING, Ordering::SeqCst);
         self.set_mode_label("running");
+        // CXA-F384: the pause stamp describes the CURRENT pause only.
+        if let Ok(mut at) = self.paused_at.lock() {
+            *at = None;
+        }
         self.resume.notify_waiters();
+    }
+
+    /// Seconds since the current pause began, when this process stamped it.
+    /// `None` on a running loop, or after a hub restart (see [`Self::paused_at`]).
+    #[must_use]
+    pub fn paused_since_secs(&self) -> Option<u64> {
+        let at = self.paused_at.lock().ok()?;
+        Some(at?.elapsed().as_secs())
     }
 
     /// Whether the runner is currently paused — polled by the cycle BETWEEN
@@ -107,9 +124,17 @@ impl RunnerHandle {
     }
 
     /// Pause: no new phases start; the in-flight engine call finishes first.
+    /// This is the single choke point all four pause paths funnel through
+    /// (operator, budget cap, breaker, stall), so the CXA-F384 stamp is set
+    /// here once and only the FIRST pause of a run keeps its timestamp.
     pub fn pause(&self) {
         self.mode.store(PAUSED, Ordering::SeqCst);
         self.set_mode_label("paused");
+        if let Ok(mut at) = self.paused_at.lock() {
+            if at.is_none() {
+                *at = Some(std::time::Instant::now());
+            }
+        }
         // The phase label outlives the cycle it belonged to: pausing mid-cycle
         // left "SA · reviewing PRs" on the dashboard beside a paused runner,
         // which reads as "you asked it to stop and it ignored you".

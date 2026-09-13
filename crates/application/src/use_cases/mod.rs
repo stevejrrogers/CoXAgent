@@ -19,6 +19,7 @@ pub mod json_repair;
 pub mod manual_rollback;
 pub mod merge_policy;
 pub mod merge_sweep;
+pub mod pause_explainer;
 pub mod question_batching;
 pub mod readiness_preflight;
 pub mod recover;
