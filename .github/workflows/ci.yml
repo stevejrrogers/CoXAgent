@@ -107,7 +107,7 @@ jobs:
       # checks); the invariant registry it enforces lives at
       # docs/CXA-B204-overview-kpi-panel-inventory.md.
       - name: Overview panel guardrails (CXA-B225 regression gate)
-        run: cargo test -p coxagent-presentation --test guardrail_scaffold_b201
+        run: cargo test -p coxagent-presentation --test guardrail_scaffold_b201 --test panel_structural_contracts_b187_2
 
   # CXA-F326: the DSN-gated Postgres/Redis integration tests are #[ignore]d —
   # this job is the only sanctioned way to run them. It brings its own
