@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # CoXAgent server image — the hub/control-plane + embedded dashboard.
 # Multi-stage: compile the release binary, then a slim runtime.
 FROM rust:1-slim-bookworm AS builder
