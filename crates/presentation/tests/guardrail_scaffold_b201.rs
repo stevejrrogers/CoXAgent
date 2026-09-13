@@ -22,6 +22,13 @@
 //! step `cargo test -p coxagent-presentation --test guardrail_scaffold_b201`)
 //! and is itself guarded by `crates/app/tests/ci_availability_gate.rs`.
 
+// Test-binary lints: unwrap-family is the point of a failing gate assertion.
+#![allow(
+    clippy::unwrap_in_result,
+    clippy::expect_used,
+    clippy::case_sensitive_file_extension_comparisons
+)]
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -59,7 +66,6 @@ impl Ctx {
             reader: Box::new(NullRepo),
         }
     }
-
 }
 
 /// The never-readable repo — what an empty ctx hands back, so `read_utf8`
@@ -111,7 +117,11 @@ impl Invariant {
         if offenders.is_empty() {
             Ok(())
         } else {
-            Err(format!("[{}] violated:\n{}", self.name, offenders.join("\n")))
+            Err(format!(
+                "[{}] violated:\n{}",
+                self.name,
+                offenders.join("\n")
+            ))
         }
     }
 }
@@ -128,7 +138,10 @@ fn shrink_check(before: &[&str], after: &[&str]) -> Result<(), String> {
         Err(format!(
             "allowlist grew — re-granted exemption(s) {} must not come back; \
              fix the file instead",
-            grew.iter().map(|f| format!("`{f}`")).collect::<Vec<_>>().join(", ")
+            grew.iter()
+                .map(|f| format!("`{f}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
         ))
     }
 }
@@ -267,8 +280,7 @@ fn an_allowlist_that_grows_is_rejected() {
 
 #[test]
 fn an_allowlist_that_shrinks_is_accepted() {
-    shrink_check(&["a.js", "b.js"], &["a.js"])
-        .expect("shrinking is the only legal direction");
+    shrink_check(&["a.js", "b.js"], &["a.js"]).expect("shrinking is the only legal direction");
 }
 
 #[test]
@@ -288,7 +300,10 @@ fn the_exemplar_passes_a_compliant_panel() {
 
 #[test]
 fn the_exemplar_catches_a_tile_that_lost_its_zero_state_hint() {
-    let no_hint = TILE.replace("hint:\"ships land here when a ticket reaches documented\",", "");
+    let no_hint = TILE.replace(
+        "hint:\"ships land here when a ticket reaches documented\",",
+        "",
+    );
     let five = [no_hint.as_str(), TILE, TILE, TILE, TILE].join(";\n");
     let why = why_kpi_panel_shallow(&five).expect("the violation must be caught");
     assert!(why.contains("hint:"), "unhelpful: {why}");
@@ -297,7 +312,10 @@ fn the_exemplar_catches_a_tile_that_lost_its_zero_state_hint() {
 
 #[test]
 fn the_exemplar_catches_a_tile_that_lost_its_window() {
-    let no_series = TILE.replace("series:bucketDaily(shipDays(r=>isF(byId[r.ticket])),days),", "");
+    let no_series = TILE.replace(
+        "series:bucketDaily(shipDays(r=>isF(byId[r.ticket])),days),",
+        "",
+    );
     let five = [TILE, &no_series, TILE, TILE, TILE].join(";\n");
     let why = why_kpi_panel_shallow(&five).expect("the violation must be caught");
     assert!(why.contains("series:"), "unhelpful: {why}");
@@ -306,7 +324,10 @@ fn the_exemplar_catches_a_tile_that_lost_its_window() {
 #[test]
 fn the_exemplar_catches_a_dropped_tile() {
     let why = why_kpi_panel_shallow(TILE).expect("4 tiles must be caught");
-    assert!(why.contains("renders 1 tile(s), not the 5"), "unhelpful: {why}");
+    assert!(
+        why.contains("renders 1 tile(s), not the 5"),
+        "unhelpful: {why}"
+    );
 }
 
 #[test]
@@ -314,7 +335,10 @@ fn a_missing_file_fails_closed() {
     // A scan over a tree whose files went missing must not report green.
     let inv = kpi_depth_invariant();
     let why = inv
-        .scan(&["crates/presentation/src/web/js/kpis.js".to_owned()], &NullRepo)
+        .scan(
+            &["crates/presentation/src/web/js/kpis.js".to_owned()],
+            &NullRepo,
+        )
         .unwrap_err();
     assert!(
         why.contains("not readable"),
