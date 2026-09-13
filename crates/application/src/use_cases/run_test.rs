@@ -164,7 +164,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
                                 break;
                             }
                             Err(e) => {
-                                tracing::warn!("TEST repair attempt {attempt} still unparseable: {e}");
+                                tracing::warn!(
+                                    "TEST repair attempt {attempt} still unparseable: {e}"
+                                );
                             }
                         },
                         Ok(o) => {
