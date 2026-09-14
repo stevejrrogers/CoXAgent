@@ -1389,12 +1389,14 @@ async function openAgent(role,worker){
   // stream never delivers, showAgentLogError paints the error state instead.
   body.innerHTML='<div class="wl-empty"><i class="ti ti-moon-stars"></i> this agent hasn\'t run yet</div>';
   AGENT_LOG_SIGS=[];   // force a fresh render for this role/operator
+
   document.getElementById("ov-agent").classList.add("open");
   AGENT_LOG_ROLE=role.toLowerCase().replace(/-/g,"_");  // serde key: DEV-FEATURE→dev_feature
   restartAgentLog();
 }
 let AGENT_LOG_ES=null, AGENT_LOG_ROLE=null, AGENT_LOG_WORKER="", AGENT_LOG_BUF="", AGENT_LOG_LIVE=false, AGENT_LOG_DONE=false, AGENT_LOG_INIT=false, AGENT_LOG_SIGS=[];
 let AGENT_LOG_RETRIES=0, AGENT_LOG_RETRY_TIMER=null;
+
 // Icon + colour for a tool name, so every engine's tool calls read at a glance.
 // A tool call, said in words: "Read run_chat_reply.rs:400-500" instead of a
 // truncated JSON blob. Long absolute paths collapse to the part a reader
@@ -1633,6 +1635,7 @@ function wlItemHtml(it){
   const card=wlVerdictCard(it.text);
   if(card) return card;
   return `<span class="wl-ic"><i class="ti ti-sparkles"></i></span><div class="wl-body">${wlFmt(it.text)}</div>`;
+
 }
 // A content signature for one parsed item — two renders with the same signature
 // produce identical DOM, so the live renderer can leave them untouched.
@@ -1716,6 +1719,7 @@ function paintAgentLogIdle(){
   body.innerHTML='<div class="wl-empty"><i class="ti ti-moon-stars"></i> this agent hasn\'t run yet</div>';
 }
 function renderAgentLog(force){
+
   const body=document.getElementById("agent-transcript");
   const badge=document.getElementById("agent-live-badge");
   if(badge)badge.style.display=AGENT_LOG_LIVE?"inline-block":"none";
@@ -1757,6 +1761,7 @@ function renderAgentLog(force){
   updateTyping(body);
   // Only auto-scroll when the user is already pinned to the bottom.
   if(touched && (force||atBottom)) body.scrollTop=body.scrollHeight;
+
 }
 function updateTyping(body){
   const typing=body.querySelector(":scope > .wl-typing");
@@ -1789,6 +1794,7 @@ function stopAgentLog(){
   showAgentLogError(false);
 }
 function closeAgent(){stopAgentLog();AGENT_LOG_ROLE=null;AGENT_LOG_WORKER="";close_('ov-agent');}
+
 async function openTranscript(enc,name){
   document.getElementById("tr-title").textContent=name;
   document.getElementById("tr-body").textContent="loading…";
