@@ -572,7 +572,6 @@ pub struct ProjectState {
     /// serde-defaulted so state written before this existed loads untouched.
     #[serde(default)]
     pub liveness: Option<StallEpisode>,
-
 }
 
 /// One day's open/fixed/verified bug counts — the persisted burn-down point
@@ -599,7 +598,6 @@ pub const MAX_INCIDENTS: usize = 12;
 /// of daily flips plus every operator intervention; older entries drop as new
 /// ones arrive so the trail cannot grow without bound.
 pub const MAX_TUNING_HISTORY: usize = 500;
-
 
 impl Default for ProjectState {
     fn default() -> Self {
@@ -699,7 +697,6 @@ impl Default for ProjectState {
             governance_interventions: Vec::new(),
             drift_alerts: Vec::new(),
             liveness: None,
-
         }
     }
 }
