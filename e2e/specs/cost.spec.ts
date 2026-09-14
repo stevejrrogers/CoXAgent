@@ -5,6 +5,18 @@ import { armConsoleGate, assertNoConsoleErrors, openApp } from './helpers.mjs';
 test('the cost view draws all four panels plus KPI labels', async ({ page }) => {
   const errors: string[] = [];
   armConsoleGate(page, errors);
+  // The token-saver panel reads /api/token-saver, which aggregates a
+  // host-local savings.log (COXAGENT_SHIM_DIR) written only when agents have
+  // run here — so it is empty on a clean runner and non-empty on a dev box
+  // with leftover shim state. Pin one value so the panel renders identically
+  // on darwin and linux instead of whichever host happened to run agents.
+  await page.route('**/api/token-saver', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ samples: 3, before: 12000, after: 2000 }),
+    }),
+  );
   await openApp(page);
 
   await page.locator('a[data-v="insights"]').click();
@@ -18,6 +30,13 @@ test('the cost view draws all four panels plus KPI labels', async ({ page }) => 
   await expect(page.locator('#cost-operators')).toContainText(
     'no per-user spend yet',
   );
+  // Daily-spend trend: the fixture seeds three closed days, so real bars
+  // must render (one per day) with the day-range footer — not the empty
+  // state, and never a blank panel (a blank panel is how a JS error
+  // presents here).
+  await expect(page.locator('#cost-trend div[title*="2026-08-27"]')).toHaveCount(1);
+  await expect(page.locator('#cost-trend')).toContainText('2026-08-27');
+  await expect(page.locator('#cost-trend')).not.toContainText('no spend recorded');
   // Token-saver shows actual seeded compression stats in this fixture.
   await expect(page.locator('#cost-tokensaver')).toContainText('compressed');
   await expect(page.locator('#cost-tokensaver')).toContainText('saved');

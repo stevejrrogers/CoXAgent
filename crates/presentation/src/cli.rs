@@ -22,6 +22,16 @@ pub enum Command {
     Report,
     /// List agent engine CLIs detected on this machine's PATH.
     Discover,
+    /// Detect this machine's agent engine CLIs and report them to a hub, so its
+    /// dashboard shows them even before any runner cycle starts.
+    Probe {
+        /// Hub gateway origin without trailing slash (e.g., http://127.0.0.1:4000).
+        #[arg(long)]
+        hub: String,
+        /// Project id whose /store heartbeat records this machine's engines.
+        #[arg(long)]
+        project: String,
+    },
     /// Run the BA agent once: propose features and append them to the backlog.
     RunBa {
         /// Working directory handed to the engine (the managed codebase).
@@ -86,6 +96,42 @@ pub enum Command {
         /// Port to listen on.
         #[arg(long, default_value_t = 4000)]
         port: u16,
+    },
+    /// Back up the hub's own workspace state — registry, per-project configs
+    /// and state, auth, evidence blobs — into one restorable archive under
+    /// `<hub-dir>/backups/`. Session tokens are never captured; deploy
+    /// secrets only with --include-secrets; the applied policy is stated in
+    /// the output.
+    Backup {
+        /// Hub directory whose state is archived (the registry's directory).
+        #[arg(long, default_value = ".")]
+        hub_dir: PathBuf,
+        /// Archive file to write (default:
+        /// <hub-dir>/backups/coxagent-backup-<UTC-timestamp>.hubarchive.json).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Also capture this machine's deploy-secrets root (plaintext inside
+        /// the owner-only 0600 archive; restored to the CURRENT machine's root).
+        #[arg(long)]
+        include_secrets: bool,
+    },
+    /// Restore a hub workspace archive into <hub-dir> (the one-command move/
+    /// recovery side of `backup`). Refuses a non-empty target unless --force,
+    /// refuses an archive written by a newer schema, and refuses while a hub
+    /// holds a project state lock; --force snapshots the overwritten files to
+    /// <hub-dir>/.pre-restore-<ts>/ first.
+    Restore {
+        /// The .hubarchive.json file to restore from.
+        archive: PathBuf,
+        /// Hub directory to restore into.
+        #[arg(long, default_value = ".")]
+        hub_dir: PathBuf,
+        /// Overwrite a non-empty target (the overwritten set is snapshotted first).
+        #[arg(long)]
+        force: bool,
+        /// Verify the archive and print the plan without changing anything.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Read stdin and print a compressed version (rtk-style) — used by the
     /// command shims to shrink noisy tool output before an agent reads it.

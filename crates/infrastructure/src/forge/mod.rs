@@ -5,8 +5,23 @@ pub mod gh_forge;
 pub mod gl_forge;
 
 pub use gh_api_forge::GhApiForge;
-pub use gh_forge::GhForge;
+pub use gh_forge::{parse_issue_json, GhForge};
 pub use gl_forge::GlForge;
+
+/// Label names from a forge label list that may be objects (`{"name": …}`) or
+/// plain strings — gh and the REST API have shipped both shapes.
+pub(crate) fn label_names(labels: &[serde_json::Value]) -> Vec<String> {
+    labels
+        .iter()
+        .filter_map(|l| {
+            l.as_str().map(str::to_owned).or_else(|| {
+                l.get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+        })
+        .collect()
+}
 
 /// Probe, from THIS machine, what git and forge credentials can actually do for
 /// `repo`: push a branch, and open a pull request.

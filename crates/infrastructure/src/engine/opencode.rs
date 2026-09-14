@@ -278,9 +278,14 @@ impl AgentEnginePort for OpencodeEngine {
         // nice(+10) + optional write-confinement (see proc::agent_command).
         let (mut cmd, sandbox) =
             crate::proc::agent_command(&self.binary, &request.work_dir, self.sandbox);
+        // The model THIS run executes on — the escalation ladder swaps models
+        // inside this adapter, so the provenance stamp must be the actual
+        // choice, not the configured one (CXA-F257). Computed once: the
+        // detected-escalation lookup is IO.
+        let model = self.model_for(request.escalation_level, &request.work_dir);
         cmd.arg("run")
             .arg("--model")
-            .arg(self.model_for(request.escalation_level, &request.work_dir))
+            .arg(&model)
             .arg("--dangerously-skip-permissions")
             .arg("--dir")
             .arg(&request.work_dir)
@@ -308,7 +313,7 @@ impl AgentEnginePort for OpencodeEngine {
         }
         crate::engine::apply_shim_path(&mut cmd);
 
-        self.exec(cmd, live, request.timeout, sandbox).await
+        self.exec(cmd, live, request.timeout, sandbox, model).await
     }
 
     async fn resume_run(
@@ -347,21 +352,29 @@ impl AgentEnginePort for OpencodeEngine {
             cmd.env("OPENCODE_CONFIG", work_dir.join(COX_OPENCODE_CONFIG));
         }
         crate::engine::apply_shim_path(&mut cmd);
-        self.exec(cmd, live, timeout, sandbox).await
+        self.exec(cmd, live, timeout, sandbox, self.model.clone())
+            .await
     }
 }
 
 impl OpencodeEngine {
     /// Spawn `cmd`, stream NDJSON stdout to the live log, parse the outcome.
+    /// `model` is the model id passed on THIS command's `--model` — stamped
+    /// onto the outcome so provenance records the model that actually
+    /// executed, not the one config named (CXA-F257).
     async fn exec(
         &self,
         cmd: Command,
         live: Option<std::path::PathBuf>,
         timeout: std::time::Duration,
         sandbox: SandboxStatus,
+        model: String,
     ) -> Result<AgentOutcome, PortError> {
         let mut cmd = cmd;
-        let mut child = crate::proc::spawn_confined(&mut cmd, sandbox)
+        // The status comes BACK from the spawn: `Denied` when this host's
+        // Seatbelt refused the profile every time, so the outcome never claims
+        // a confinement that was not applied (COX-B016).
+        let (mut child, sandbox) = crate::proc::spawn_confined(&mut cmd, sandbox)
             .await
             .map_err(|e| PortError::Backend(format!("spawn opencode: {e}")))?;
         let out = child
@@ -440,6 +453,8 @@ impl OpencodeEngine {
             session_id: extract_session(&raw),
             sandbox,
             engine: "opencode".to_owned(),
+            model,
+            attempts: Vec::new(),
         })
     }
 }
@@ -966,7 +981,7 @@ mod tests {
                 system_prompt: "s".into(),
                 task_prompt: "t".into(),
                 work_dir: dir.clone(),
-                // Generous on purpose (CXA-B037): this spawns a real child via
+                // Generous on purpose (CXA-B041): this spawns a real child via
                 // the production path, and a one-line echo can still outlast a
                 // tight wall-clock budget when CI is heavily loaded. The test
                 // asserts argv/env plumbing only — latency is irrelevant.

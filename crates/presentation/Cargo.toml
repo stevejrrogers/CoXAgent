@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+coxagent-infrastructure = { path = "../infrastructure" }
 redis = { workspace = true }
 coxagent-contracts = { path = "../contracts" }
 coxagent-domain.workspace = true
@@ -21,13 +22,16 @@ serde.workspace = true
 serde_json.workspace = true
 time.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 portable-pty = "0.9.0"
 futures-util = "0.3.33"
 tower-http = { workspace = true }
+reqwest.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
+tower = { version = "0.5", features = ["util"] }
 
 [lints]
 workspace = true

@@ -16,7 +16,7 @@ members = [
 exclude = ["desktop/coxagent-desktop"]
 
 [workspace.package]
-version = "2.26.1"
+version = "2.37.2"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT"
@@ -58,6 +58,15 @@ sha1 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
 deadpool-postgres = "0.14"
+# Postgres TLS (CXA-C018). rustls is pinned to the ring provider because the
+# rustls default (aws-lc-rs) needs cmake/nasm to build and must not enter the
+# tree; ring is already here via reqwest.
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+rustls-pemfile = "2"
+tokio-postgres-rustls = "0.13"
+webpki-roots = "1"
+# Percent-decodes sslmode/sslrootcert out of libpq DSN query strings.
+percent-encoding = "2"
 redis = { version = "0.27", features = ["tokio-comp"] }
 mongodb = "=3.2.3"
 tree-sitter = "0.22"
@@ -86,3 +95,11 @@ module_name_repetitions = "allow"
 # "CoXAgent" is a CamelCase product name that appears throughout doc comments;
 # doc_markdown would flag every mention as a missing-backtick code item.
 doc_markdown = "allow"
+
+# Debug builds carried full DWARF for ~700 crates; with 5+ agent worktrees each
+# holding its own target/, that was 150+ GB of debug info alone. Line tables
+# keep panic backtraces and line numbers (all the agents ever use) at a
+# fraction of the size; attach a full debugger by overriding locally with
+# CARGO_PROFILE_DEV_DEBUG=2.
+[profile.dev]
+debug = "line-tables-only"

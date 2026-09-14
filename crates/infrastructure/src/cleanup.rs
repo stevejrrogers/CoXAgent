@@ -25,6 +25,21 @@ impl coxagent_application::ports::outbound::ProcessJanitorPort for OsProcessJani
     fn kill_orphaned_drivers(&self, work_dir: &Path) {
         kill_orphaned_drivers(work_dir);
     }
+
+    fn purge_target_cache(&self, work_dir: &Path) {
+        purge_target_cache(work_dir);
+    }
+}
+
+/// Best-effort removal of a build cache directory. Scoped to exactly
+/// `work_dir/target`, never touches anything else, and is never fatal —
+/// a cache we cannot remove just costs the next rebuild, not correctness.
+pub fn purge_target_cache(work_dir: &Path) {
+    let target = work_dir.join("target");
+    if !target.exists() {
+        return; // nothing cached — nothing to do
+    }
+    let _ = std::fs::remove_dir_all(&target);
 }
 
 static ORPHAN_PATTERNS: &[&str] = &["tl_driver", "cargo test", "pytest", "go test", "npm test"];
@@ -42,13 +57,87 @@ pub fn kill_orphaned_drivers(work_dir: &Path) {
     let Some(scope) = work_dir.to_str().filter(|s| !s.trim().is_empty()) else {
         return; // no scope, no kills — never fall back to machine-wide
     };
+    // A worker runner's work_dir is a worktree slot
+    // (`<project>/.coxagent-worktrees/<slot>`), but a wedged engine's command
+    // line names whichever workspace IT was launched in — often the project's
+    // main `codebase`. Widening the ENGINE nets to the project root (the path
+    // above `.coxagent-worktrees`) lets any runner's sweep reap any of the
+    // project's engines; without it, the only runner whose scope matches is
+    // usually the one wedged awaiting that engine, so the sweep never fires
+    // (live incident, 2026-09-08). Still never machine-wide: the root is this
+    // project's own directory. Driver kills keep the narrow per-slot scope —
+    // a sibling slot's `cargo test` is legitimate work, not a leak.
+    let scope = scope.to_owned();
+    let engine_scope = scope
+        .split_once("/.coxagent-worktrees")
+        .map_or(scope.clone(), |(root, _)| root.to_owned());
+    let scope = scope.as_str();
+    let engine_scope = engine_scope.as_str();
     let my_pid = std::process::id().to_string();
     for pattern in ORPHAN_PATTERNS {
         let _ = kill_by_pattern(pattern, scope, &my_pid);
     }
     for pattern in ENGINE_PATTERNS {
-        let _ = kill_reparented_engines(pattern, scope, &my_pid);
+        let _ = kill_reparented_engines(pattern, engine_scope, &my_pid);
+        let _ = kill_overbudget_engines(pattern, engine_scope, &my_pid);
     }
+}
+
+/// Wall-clock budget for a single engine run (CXA-F346). A legitimate run
+/// finishes in minutes; the operator-observed zombies (engine wedged on a
+/// dead network read while the hub-side caller had already failed over and
+/// DROPPED the future — so the adapter's own timeout-kill branch never ran)
+/// sat for 45 minutes to 3 DAYS. The budget sits well above the adapters'
+/// request timeouts and above [`MIN_ORPHAN_AGE_MINUTES`], so anything past it
+/// is a leak by definition, hub alive or not.
+const ENGINE_BUDGET_MINUTES: u64 = 50;
+
+/// Kill engine processes matching `pattern` whose command line mentions the
+/// workspace AND that have outlived [`ENGINE_BUDGET_MINUTES`] — regardless of
+/// parentage. This is the second reaper net: `kill_reparented_engines` catches
+/// children whose hub died; this catches children whose hub is alive but
+/// whose awaiting future was dropped on failover, leaving the child wedged
+/// forever. Never by name alone: workspace scope + age budget both gate.
+/// TERM first (the CLI flushes transcripts on TERM), then KILL the whole
+/// process group — each engine spawn is its own group leader (proc.rs), so
+/// `kill -9 -<pid>` reaps grandchildren too.
+fn kill_overbudget_engines(pattern: &str, scope: &str, my_pid: &str) -> Result<(), std::io::Error> {
+    let output = Command::new("pgrep").arg("-fl").arg(pattern).output()?;
+    if !output.status.success() {
+        return Ok(());
+    }
+    for pid in select_pids(&String::from_utf8_lossy(&output.stdout), scope) {
+        if pid == my_pid {
+            continue;
+        }
+        let Ok(pid_num) = pid.parse::<i32>() else {
+            continue;
+        };
+        if pid_num < 100 || !engine_over_budget(pid_num) {
+            continue;
+        }
+        let _ = Command::new("kill").args(["-TERM", &pid]).output();
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        // Escalate to the process GROUP so a wedged child's own children die
+        // with it. Harmless if TERM already worked (kill of a gone group is
+        // an ignored error).
+        let _ = Command::new("kill")
+            .args(["-9", &format!("-{pid}")])
+            .output();
+    }
+    Ok(())
+}
+
+/// Whether `pid` has outlived [`ENGINE_BUDGET_MINUTES`]. Unknown = within
+/// budget (never kill on uncertainty).
+fn engine_over_budget(pid: i32) -> bool {
+    let Ok(out) = Command::new("ps")
+        .args(["-o", "etime=", "-p", &pid.to_string()])
+        .output()
+    else {
+        return false;
+    };
+    etime_minutes(String::from_utf8_lossy(&out.stdout).trim()) >= ENGINE_BUDGET_MINUTES
 }
 
 /// Kill engine processes matching `pattern` whose command line mentions the
@@ -168,7 +257,7 @@ fn select_pids(pgrep_output: &str, scope: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::select_pids;
+    use super::{purge_target_cache, select_pids};
 
     #[test]
     fn only_kills_processes_inside_the_workspace() {
@@ -191,6 +280,37 @@ mod tests {
     }
 
     #[test]
+    fn slot_work_dir_widens_engine_scope_to_the_project_root() {
+        // A worker slot's path widens to the project root for the engine nets
+        // (the driver nets keep the narrow slot scope) — pure string law.
+        let slot = "/srv/proj/.coxagent-worktrees/proj-slot-2";
+        let widened = slot
+            .split_once("/.coxagent-worktrees")
+            .map_or(slot, |(root, _)| root);
+        assert_eq!(widened, "/srv/proj");
+        // A non-slot work_dir stays itself.
+        let plain = "/srv/proj/codebase";
+        let same = plain
+            .split_once("/.coxagent-worktrees")
+            .map_or(plain, |(root, _)| root);
+        assert_eq!(same, plain);
+    }
+
+    #[test]
+    fn fresh_engine_is_within_budget() {
+        // This test process itself is seconds old — never over the 50-minute
+        // engine budget, so the second reaper net must spare it.
+        assert!(!super::engine_over_budget(
+            std::process::id().try_into().unwrap()
+        ));
+    }
+
+    // The budget must stay ABOVE the generic 45-minute orphan age: the engine
+    // net is the LAST resort, never the first to fire. Compile-time law.
+    const _BUDGET_ABOVE_ORPHAN_GATE: () =
+        assert!(super::ENGINE_BUDGET_MINUTES >= super::MIN_ORPHAN_AGE_MINUTES);
+
+    #[test]
     fn fresh_process_is_not_old_enough() {
         // This test process itself is seconds old.
         assert!(!super::is_old_enough(
@@ -202,5 +322,34 @@ mod tests {
     fn ignores_malformed_lines() {
         assert!(select_pids("garbage\n\n", "/srv/p").is_empty());
         assert!(select_pids("abc cargo test /srv/p", "/srv/p").is_empty());
+    }
+
+    #[test]
+    fn purge_target_removes_only_the_build_cache() {
+        let tmp = std::env::temp_dir().join(format!("cxa-purge-test-{}", std::process::id()));
+        let target = tmp.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("artifacts.bin"), b"cache").unwrap();
+        std::fs::write(tmp.join("source.rs"), b"let code = 1;").unwrap();
+
+        purge_target_cache(&tmp);
+
+        assert!(!target.exists(), "target must be purged");
+        assert!(
+            tmp.join("source.rs").exists(),
+            "non-cache source files must survive"
+        );
+        // Second call on an already-clean dir is a no-op, never a panic.
+        purge_target_cache(&tmp);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn purge_target_is_a_noop_when_nothing_cached() {
+        let tmp = std::env::temp_dir().join(format!("cxa-purge-null-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        purge_target_cache(&tmp); // no `target` subdir — must not error
+        assert!(tmp.exists());
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }
