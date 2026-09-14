@@ -122,6 +122,8 @@ jobs:
         run: cargo test -p coxagent-app --test deploy_smoke --test ci_availability_gate --test test_env_guard_f326_gate
       - name: Hexagonal gate (CXA-B211 — application layer does no direct IO)
         run: cargo test -p coxagent-app --test hexagonal_gate -- --nocapture
+      - name: Layer purity gate (CXA-B246 — domain/application import no IO)
+        run: cargo test -p coxagent-presentation --test domain_application_purity_b246 -- --nocapture
 
   # CXA-F326: the DSN-gated Postgres/Redis integration tests are #[ignore]d —
   # this job is the only sanctioned way to run them. It brings its own
