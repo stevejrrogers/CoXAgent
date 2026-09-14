@@ -129,16 +129,12 @@ fn js_contract_mirrors_the_frozen_rust_manifest() {
         r#"console.log(JSON.stringify({S:window.TerminalState.STATES,R:window.TerminalState.REQUIRED,O:window.TerminalState.OPTIONAL,L:window.TerminalState.ROLES}));"#,
     );
     // Every Rust state name exists in the JS state list, in manifest order.
-    let rust_states = [
-        "loading",
-        "empty",
-        "error",
-        "ready",
-        "attention",
-        "zero",
-    ];
+    let rust_states = ["loading", "empty", "error", "ready", "attention", "zero"];
     for name in rust_states {
-        assert!(out.contains(&format!("\"{name}\"")), "JS missing state {name}: {out}");
+        assert!(
+            out.contains(&format!("\"{name}\"")),
+            "JS missing state {name}: {out}"
+        );
     }
     // The Rust slot table IS the expectation — no hand-copied duplicate.
     for state in [
@@ -152,19 +148,26 @@ fn js_contract_mirrors_the_frozen_rust_manifest() {
         let name = state.name();
         for slot in required_slots(state) {
             assert!(
-                out.contains(&format!("\"{}\":[", slot_key(slot)) ) || out.contains(&format!("\",\"{}\"", slot_key(slot))) || out.contains(&format!("[\"{}", slot_key(slot))),
+                out.contains(&format!("\"{}\":[", slot_key(slot)))
+                    || out.contains(&format!("\",\"{}\"", slot_key(slot)))
+                    || out.contains(&format!("[\"{}", slot_key(slot))),
                 "JS REQUIRED[{name}] missing Rust-required slot {}:\n{out}",
                 slot_key(slot)
             );
         }
         for slot in optional_slots(state) {
             assert!(
-                out.contains(&format!("\",\"{}\"", slot_key(slot))) || out.contains(&format!("[\"{}", slot_key(slot))),
+                out.contains(&format!("\",\"{}\"", slot_key(slot)))
+                    || out.contains(&format!("[\"{}", slot_key(slot))),
                 "JS OPTIONAL[{name}] missing Rust-optional slot {}:\n{out}",
                 slot_key(slot)
             );
         }
-        let expect_role = if state.requires_reason() { "alert" } else { "status" };
+        let expect_role = if state.requires_reason() {
+            "alert"
+        } else {
+            "status"
+        };
         assert!(
             out.contains(&format!("{name}\":\"{expect_role}\"")),
             "ROLES[{name}] must be {expect_role}:\n{out}"
@@ -235,7 +238,11 @@ fn every_state_renders_its_required_slots_and_announces_correctly() {
                 slot_key(slot)
             );
         }
-        let want_role = if state.requires_reason() { "alert" } else { "status" };
+        let want_role = if state.requires_reason() {
+            "alert"
+        } else {
+            "status"
+        };
         assert!(
             html.contains(&format!(r#"role="{want_role}""#)),
             "{:?}: expected role={want_role}\n{html}",
@@ -247,8 +254,14 @@ fn every_state_renders_its_required_slots_and_announces_correctly() {
 #[test]
 fn loading_paints_its_own_spinner_and_takes_no_icon() {
     let html = html_of(&good_spec(TerminalState::Loading));
-    assert!(html.contains("ts-spinner"), "loading must show the spinner\n{html}");
-    assert!(!html.contains("data-ts-slot=\"icon\""), "loading has no icon slot\n{html}");
+    assert!(
+        html.contains("ts-spinner"),
+        "loading must show the spinner\n{html}"
+    );
+    assert!(
+        !html.contains("data-ts-slot=\"icon\""),
+        "loading has no icon slot\n{html}"
+    );
 }
 
 #[test]
@@ -263,24 +276,36 @@ fn empty_body_is_the_hint_and_error_body_is_the_reason() {
         err.contains("GET /state returned 503"),
         "error body must surface the reason verbatim\n{err}"
     );
-    assert!(err.contains("ts-state--error") && err.contains("ts-alert") || err.contains("role=\"alert\""),
-        "error is an assertive alert\n{err}");
+    assert!(
+        err.contains("ts-state--error") && err.contains("ts-alert")
+            || err.contains("role=\"alert\""),
+        "error is an assertive alert\n{err}"
+    );
 }
 
 #[test]
 fn error_renders_the_retry_and_attention_both_actions() {
     let err = html_of(&good_spec(TerminalState::Error));
-    assert!(err.contains("data-ts-slot=\"primaryAction\""), "error needs retry\n{err}");
+    assert!(
+        err.contains("data-ts-slot=\"primaryAction\""),
+        "error needs retry\n{err}"
+    );
     assert!(err.contains(">Retry<"), "{err}");
     let att = html_of(&good_spec(TerminalState::Attention));
-    assert!(att.contains("data-ts-slot=\"primaryAction\"") && att.contains("data-ts-slot=\"secondaryAction\""),
-        "attention renders both actions\n{att}");
+    assert!(
+        att.contains("data-ts-slot=\"primaryAction\"")
+            && att.contains("data-ts-slot=\"secondaryAction\""),
+        "attention renders both actions\n{att}"
+    );
 }
 
 #[test]
 fn ready_is_caller_html_only_and_rejects_ready_without_it() {
     let ready = html_of(&good_spec(TerminalState::Ready));
-    assert!(ready.contains("<ul"), "ready keeps caller HTML verbatim\n{ready}");
+    assert!(
+        ready.contains("<ul"),
+        "ready keeps caller HTML verbatim\n{ready}"
+    );
     assert!(
         !ready.contains("data-ts-slot=\"body\"") && !ready.contains("data-ts-slot=\"icon\""),
         "ready demands no slots\n{ready}"
@@ -298,13 +323,19 @@ fn optional_slots_are_absent_unless_given() {
     let with = html_of(
         r#"{"state":"empty","icon":{"ti":"inbox"},"title":"t","body":"b","secondary":{"label":"Configure","onClick":null}}"#,
     );
-    assert!(with.contains("data-ts-slot=\"secondaryAction\"") && with.contains(">Configure<"), "{with}");
+    assert!(
+        with.contains("data-ts-slot=\"secondaryAction\"") && with.contains(">Configure<"),
+        "{with}"
+    );
     // error without secondary → exactly one action
     let err = html_of(&good_spec(TerminalState::Error));
     assert!(!err.contains("data-ts-slot=\"secondaryAction\""), "{err}");
     // loading with optional body → body present; without → absent
     let lb = html_of(r#"{"state":"loading","title":"t","body":"fetching /state"}"#);
-    assert!(lb.contains("data-ts-slot=\"body\"") && lb.contains("fetching /state"), "{lb}");
+    assert!(
+        lb.contains("data-ts-slot=\"body\"") && lb.contains("fetching /state"),
+        "{lb}"
+    );
     let l0 = html_of(r#"{"state":"loading","title":"t"}"#);
     assert!(!l0.contains("data-ts-slot=\"body\""), "{l0}");
 }
@@ -317,18 +348,38 @@ fn optional_slots_are_absent_unless_given() {
 fn every_required_slot_has_a_sensible_default_and_is_marked() {
     // Bare minimum spec per state → still no blank: title/body/action defaults.
     let l = html_of(r#"{"state":"loading"}"#);
-    assert!(l.contains("Loading…") && l.contains("data-ts-defaulted"), "{l}");
+    assert!(
+        l.contains("Loading…") && l.contains("data-ts-defaulted"),
+        "{l}"
+    );
     let e = html_of(r#"{"state":"empty","icon":{"ti":"inbox"},"title":"Nothing yet"}"#);
-    assert!(e.contains("data-ts-slot=\"body\"") && e.contains("data-ts-defaulted=\"1\""),
-        "empty defaults the hint body\n{e}");
+    assert!(
+        e.contains("data-ts-slot=\"body\"") && e.contains("data-ts-defaulted=\"1\""),
+        "empty defaults the hint body\n{e}"
+    );
     let err = html_of(r#"{"state":"error"}"#);
-    assert!(err.contains("data-ts-defaulted"), "error defaults missing slots\n{err}");
-    assert!(err.contains(">Retry<"), "error defaults the retry affordance\n{err}");
-    assert!(err.contains("data-ts-slot=\"body\""), "error defaults the reason slot\n{err}");
+    assert!(
+        err.contains("data-ts-defaulted"),
+        "error defaults missing slots\n{err}"
+    );
+    assert!(
+        err.contains(">Retry<"),
+        "error defaults the retry affordance\n{err}"
+    );
+    assert!(
+        err.contains("data-ts-slot=\"body\""),
+        "error defaults the reason slot\n{err}"
+    );
     let a = html_of(r#"{"state":"attention"}"#);
-    assert!(a.contains(">Review<") && a.contains(">Dismiss<"), "attention defaults both actions\n{a}");
+    assert!(
+        a.contains(">Review<") && a.contains(">Dismiss<"),
+        "attention defaults both actions\n{a}"
+    );
     let z = html_of(r#"{"state":"zero"}"#);
-    assert!(z.contains("data-ts-slot=\"body\""), "zero defaults the hint\n{z}");
+    assert!(
+        z.contains("data-ts-slot=\"body\""),
+        "zero defaults the hint\n{z}"
+    );
 }
 
 #[test]
@@ -336,7 +387,10 @@ fn caller_copy_always_wins_over_defaults() {
     let e = html_of(
         r#"{"state":"empty","icon":{"ti":"inbox"},"title":"No releases yet","body":"Releases appear when the first deploy lands."}"#,
     );
-    assert!(!e.contains("data-ts-defaulted"), "explicit copy must not be flagged\n{e}");
+    assert!(
+        !e.contains("data-ts-defaulted"),
+        "explicit copy must not be flagged\n{e}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -347,10 +401,20 @@ fn caller_copy_always_wins_over_defaults() {
 fn unknown_state_and_unknown_spec_keys_throw() {
     let out = threw_with(r#"{"state":"shimmering"}"#);
     assert!(out.contains("unknown state"), "{out}");
-    let out = threw_with(r#"{"state":"empty","icon":{"ti":"inbox"},"title":"t","body":"b","sparkle":true}"#);
-    assert!(out.contains("unknown spec key") && out.contains("sparkle"), "{out}");
-    let out = threw_with(r#"{"state":"error","icon":{"ti":"x"},"title":"t","body":"b","primary":"Retry"}"#);
-    assert!(out.contains("primary"), "non-object action is rejected\n{out}");
+    let out = threw_with(
+        r#"{"state":"empty","icon":{"ti":"inbox"},"title":"t","body":"b","sparkle":true}"#,
+    );
+    assert!(
+        out.contains("unknown spec key") && out.contains("sparkle"),
+        "{out}"
+    );
+    let out = threw_with(
+        r#"{"state":"error","icon":{"ti":"x"},"title":"t","body":"b","primary":"Retry"}"#,
+    );
+    assert!(
+        out.contains("primary"),
+        "non-object action is rejected\n{out}"
+    );
     let out = threw_with(r#"null"#);
     assert!(out.contains("spec object required"), "{out}");
 }
@@ -360,7 +424,10 @@ fn all_html_is_escaped_including_panel_id() {
     let e = html_of(
         r#"{"state":"empty","icon":{"ti":"inbox"},"title":"<img src=x onerror=alert(1)>","body":"<script>alert(2)</script>"}"#,
     );
-    assert!(!e.contains("<img") && !e.contains("<script>"), "copy must be escaped\n{e}");
+    assert!(
+        !e.contains("<img") && !e.contains("<script>"),
+        "copy must be escaped\n{e}"
+    );
     assert!(e.contains("&lt;img"), "{e}");
     let p = html_of(r#"{"state":"loading","title":"t","panelId":"<b>ov</b>"}"#);
     assert!(!p.contains("<b>"), "panelId must be escaped\n{p}");
@@ -391,11 +458,7 @@ fn every_manifest_panel_state_combination_renders_with_its_dom_id() {
                     r#"{{"state":"error","panelId":"{}","primary":{{"label":"Retry"}}}}"#,
                     p.dom_id
                 ),
-                other => format!(
-                    r#"{{"state":"{}","panelId":"{}"}}"#,
-                    other.name(),
-                    p.dom_id
-                ),
+                other => format!(r#"{{"state":"{}","panelId":"{}"}}"#, other.name(), p.dom_id),
             };
             let html = html_of(&spec);
             assert!(
@@ -422,8 +485,12 @@ var btns=host.querySelectorAll("[data-ts-act]");
 btns.forEach(function(b){b.fire();});
 console.log(JSON.stringify({primary:calls.p,secondary:calls.s,binds:btns.length}));"#,
     );
-    assert!(out.contains(r#""primary":1"#) && out.contains(r#""secondary":1"#) && out.contains(r#""binds":2"#),
-        "each bound button must fire exactly its own callback: {out}");
+    assert!(
+        out.contains(r#""primary":1"#)
+            && out.contains(r#""secondary":1"#)
+            && out.contains(r#""binds":2"#),
+        "each bound button must fire exactly its own callback: {out}"
+    );
 }
 
 #[test]
@@ -434,5 +501,8 @@ fn paint_without_callbacks_renders_inert_buttons() {
 var el=window.TerminalState.paint(host,{state:"error"});
 console.log(JSON.stringify({ok:!!el&&el.indexOf("ts-state--error")>=0}));"#,
     );
-    assert!(out.contains(r#""ok":true"#), "paint must work with zero callbacks: {out}");
+    assert!(
+        out.contains(r#""ok":true"#),
+        "paint must work with zero callbacks: {out}"
+    );
 }

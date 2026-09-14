@@ -188,7 +188,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
             }
         };
 
-
         // Dedupe against existing bug titles so re-runs don't pile up duplicates.
         let existing: HashSet<String> = self
             .store
@@ -240,7 +239,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunTestUseCase<S, E> {
                 let _ = self.store.save(&state).await;
             }
         }
-
 
         // Close the QA loop: a bug that was Fixed and did NOT resurface as a new
         // bug this run has passed regression — promote it to Verified.

@@ -60,7 +60,6 @@ pub fn transition_allowed(ticket_type: TicketType, from: Status, to: Status) -> 
                 | (OnHold, Open | Rejected)
                 // Ship-truth demotion: a claimed-fixed bug absent from main reopens.
                 | (Verified, Open)
-
         ),
     }
 }
