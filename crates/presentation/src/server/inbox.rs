@@ -97,9 +97,49 @@ pub(super) async fn inbox_ep(
             && t.status() == coxagent_domain::Status::Fixed
             && state.ticket_evidence.contains_key(&id)
         {
-            items.push(serde_json::json!({
+            // Live reproduction link (CXA-F244): where this project's fix runs
+            // right now, from the one resolvability source the F242 design
+            // pins (deploy.host_port — the base qa_evidence captures against).
+            // Null when no port is configured; additive to the card.
+            // `repro_url` (CXA-F246) is the per-ticket link the evidence
+            // funnel recorded at collection time — the exact base that
+            // ticket's evidence was captured against, null when none.
+            let mut card = serde_json::json!({
                 "kind": "verify", "ticket": id, "title": t.title(),
                 "role": "QA", "can_act": my_role.can_verify(),
+                "reproduce_url": coxagent_application::repro_url::compute_live_repro_url(
+                    cfg.deploy.host_port,
+                ),
+                "repro_url": state.repro_urls.get(&id),
+            });
+            // Engine & model provenance (CXA-F257): the attempts that produced
+            // the work this card asks the reviewer to approve — the most
+            // recent step's engine/model labels, rendered by the same pure
+            // function the detail view uses. Omitted when the ticket predates
+            // provenance capture, so the chip simply doesn't render.
+            let provenance: Vec<String> = state
+                .step_provenance(&id)
+                .last()
+                .map(|s| {
+                    s.attempts
+                        .iter()
+                        .map(coxagent_application::engine_provenance::attempt_label)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !provenance.is_empty() {
+                card["provenance"] = serde_json::json!(provenance);
+            }
+            items.push(card);
+            continue;
+        }
+        // On hold: parked on an outside blocker — the resume decision is a
+        // person's, so it lives in the inbox instead of only a board filter.
+        if t.status() == coxagent_domain::Status::OnHold {
+            items.push(serde_json::json!({
+                "kind": "on_hold", "ticket": id, "title": t.title(),
+                "reason": state.hold_reasons.get(&id).cloned().unwrap_or_default(),
+                "role": "PO", "can_act": my_role.can_approve_ready(),
             }));
             continue;
         }
@@ -128,7 +168,10 @@ pub(super) async fn inbox_ep(
             }));
         }
     }
-    // Questions addressed to me (`@username`, or my bare username).
+    // Questions addressed to me (`@username`, or my bare username). A
+    // question held for my focus-window digest (CXA-F176) still shows here —
+    // the queue stays honest — but carries `deferred` so the UI renders it
+    // as queued-for-digest rather than a fresh interrupt.
     for q in &state.questions {
         if q.answer.is_empty()
             && (q.to.eq_ignore_ascii_case(&me) || q.to.eq_ignore_ascii_case(&format!("@{me}")))
@@ -137,14 +180,48 @@ pub(super) async fn inbox_ep(
                 "kind": "question", "id": q.id, "ticket": q.ticket,
                 "from": q.from, "body": q.body,
                 "asked_at": q.asked_at, "escalated": q.escalated,
+                "deferred": q.deferred,
                 "role": "you", "can_act": true,
             }));
         }
+    }
+    // PRs the machine approved but refuses to land alone (`needs_human_eyes`):
+    // shown with the gate's REASON and one-click land/dismiss. Sourced from
+    // state so it works even on a hub with no forge credentials.
+    for (n, reason) in &state.human_holds {
+        let pr = state.open_prs.iter().find(|p| p.number == *n);
+        items.push(serde_json::json!({
+            "kind": "human_eyes", "number": n,
+            "title": pr.map(|p| p.title.clone()).unwrap_or_default(),
+            "url": pr.map(|p| p.url.clone()).unwrap_or_default(),
+            "reason": reason,
+            "role": "SA/dev", "can_act": my_role.can_review(),
+        }));
+    }
+    // Merged-then-reverted work (CXA-F047): the scan suspected a shipped
+    // ticket's work was undone. Only a person can confirm it — the verdict is
+    // what planning is allowed to learn from, so unconfirmed suspicions wait
+    // here instead of silently weighting the next sprint.
+    for ev in state
+        .reverted_work
+        .iter()
+        .filter(|e| e.decision == coxagent_application::state::RevertDecision::Pending)
+    {
+        items.push(serde_json::json!({
+            "kind": "reverted_work", "sha": ev.sha,
+            "ticket": ev.ticket, "subject": ev.subject,
+            "role": ev.role, "at": ev.reverted_at,
+            "can_act": my_role.can_review(),
+        }));
     }
     // PRs approved by the SA but held for human eyes.
     if let Some(forge) = &p.forge {
         if let Ok(prs) = forge.list_open_prs().await {
             for pr in prs {
+                // Already surfaced above with its hold reason.
+                if state.human_holds.contains_key(&pr.number) {
+                    continue;
+                }
                 let approved = state
                     .reviews
                     .iter()
@@ -173,11 +250,313 @@ pub(super) async fn inbox_ep(
                         "mergeable": pr.mergeable,
                         "role": "SA/dev", "can_act": my_role.can_review(),
                     }));
+                } else if pr.mergeable {
+                    // Auto-merge held the PR for another gate (merged-result
+                    // verification, CI, a competing PR) but didn't abandon it:
+                    // the SA either asked for changes at an unmoved head or the
+                    // sweep skipped it, so it sat parked and invisible while the
+                    // user waited for a notification. If it is genuinely
+                    // landable now, surface it — the person is always told a
+                    // mergeable PR is waiting on them instead of silently
+                    // letting it squat the queue.
+                    items.push(serde_json::json!({
+                        "kind": "review_pr", "number": pr.number,
+                        "title": pr.title, "url": pr.url,
+                        "held": true,
+                        "role": "SA/dev", "can_act": my_role.can_review(),
+                    }));
                 }
             }
         }
     }
     Json(serde_json::json!({ "user": me, "items": items })).into_response()
+}
+
+/// GET `/api/projects/:pid/attachment?key=…` — stream one attachment's bytes
+/// from blob storage (MinIO/S3 or the local blob dir) with its content type.
+pub(super) async fn attachment_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let key = params.get("key").cloned().unwrap_or_default();
+    if key.is_empty() || key.contains("..") {
+        return (axum::http::StatusCode::BAD_REQUEST, "bad key").into_response();
+    }
+    let Some(storage) = &p.storage else {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            "no blob storage configured",
+        )
+            .into_response();
+    };
+    // The record on the ticket is the authority for the content type; fall
+    // back to octet-stream for keys nothing references (e.g. pruned tickets).
+    let ct = p
+        .store
+        .load()
+        .await
+        .ok()
+        .and_then(|s| {
+            s.ticket_attachments
+                .values()
+                .flatten()
+                .find(|a| a.key == key)
+                .map(|a| a.content_type.clone())
+        })
+        .unwrap_or_else(|| "application/octet-stream".to_owned());
+    match storage.get(&key).await {
+        Ok(bytes) => (
+            [
+                (axum::http::header::CONTENT_TYPE, ct),
+                // Never let a stored SVG/HTML run script in the dashboard origin.
+                (
+                    axum::http::header::CONTENT_SECURITY_POLICY,
+                    "default-src 'none'; style-src 'unsafe-inline'".to_owned(),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => (axum::http::StatusCode::NOT_FOUND, e.to_string()).into_response(),
+    }
+}
+
+/// POST `/api/projects/:pid/ticket/:id/attachments?name=…` — a person uploads
+/// an attachment (raw bytes body, `Content-Type` header carries the MIME).
+pub(super) async fn upload_attachment_ep(
+    State(app): State<AppState>,
+    Path((pid, id)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let me = principal_name(&app, &headers)
+        .await
+        .unwrap_or_else(|| "operator".to_owned());
+    let name = params.get("name").cloned().unwrap_or_default();
+    let safe = |s: &str| -> String {
+        s.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect()
+    };
+    let name = safe(&name);
+    if name.is_empty() || body.is_empty() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            "name query param and a non-empty body are required",
+        )
+            .into_response();
+    }
+    let ct = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+    let Some(storage) = &p.storage else {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            "no blob storage configured",
+        )
+            .into_response();
+    };
+    let key = format!("uploads/{}/{}", safe(&id), name);
+    if let Err(e) = storage.put(&key, &body, &ct).await {
+        return internal_error(&e.to_string());
+    }
+    let rec = coxagent_application::state::TicketAttachment {
+        name,
+        key: key.clone(),
+        content_type: ct,
+        by: me,
+        at: coxagent_application::state::now_rfc3339(),
+    };
+    let saved = coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        s.ticket_attachments
+            .entry(id.clone())
+            .or_default()
+            .push(rec.clone());
+        Ok(())
+    })
+    .await;
+    match saved {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "attachment": rec })).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// POST `/api/projects/:pid/pr/:number/human` — a person decides a PR the
+/// machine held for human eyes. `{"action":"approve"}` lands it via the forge
+/// (this IS the human the gate waited for); `{"action":"dismiss"}` clears the
+/// Inbox entry and leaves the PR for handling on the forge itself.
+pub(super) async fn human_pr_ep(
+    State(app): State<AppState>,
+    Path((pid, number)): Path<(String, u64)>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<HumanActionReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Some(me) = gate_principal(&app, &headers, coxagent_application::AuthRole::can_review).await
+    else {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "your role may not take this decision",
+        )
+            .into_response();
+    };
+    match req.action.as_str() {
+        "approve" => {
+            let Some(forge) = &p.forge else {
+                return (
+                    axum::http::StatusCode::CONFLICT,
+                    "this hub has no forge access — merge it on the forge directly",
+                )
+                    .into_response();
+            };
+            if let Err(e) = forge.merge_pr(number).await {
+                return (
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    format!("merge failed: {e}"),
+                )
+                    .into_response();
+            }
+        }
+        "dismiss" => {}
+        other => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("action must be approve or dismiss, got {other}"),
+            )
+                .into_response()
+        }
+    }
+    let verb = if req.action == "approve" {
+        "landed"
+    } else {
+        "dismissed the hold on"
+    };
+    let note = format!("🧑‍⚖️ @{me} {verb} PR #{number} (held for human eyes).");
+    // Governance-attention ledger (CXA-F230): recorded inside the same atomic
+    // mutation, and ONLY when this call actually resolved the hold — the
+    // second of two concurrent resolutions finds nothing to remove and counts
+    // no effort (AC5).
+    let kind = if req.action == "approve" {
+        coxagent_domain::InterventionKind::HumanPrReviewed
+    } else {
+        coxagent_domain::InterventionKind::HumanPrDismissed
+    };
+    if coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), move |s| {
+        if s.human_holds.remove(&number).is_some() {
+            s.record_pr_intervention(kind, number, &me);
+        }
+        s.log_activity("USER", &format!("{me} {verb} PR #{number}"), None);
+        s.post_comment(&me, &note, None);
+        Ok(())
+    })
+    .await
+    .is_err()
+    {
+        return internal_error("store write failed");
+    }
+    Json(serde_json::json!({ "ok": true, "action": req.action })).into_response()
+}
+
+/// The one-field body every human one-click decision endpoint takes: which
+/// of the two verdicts the person chose ("approve" / "dismiss").
+#[derive(serde::Deserialize)]
+pub(super) struct HumanActionReq {
+    #[serde(default)]
+    pub(super) action: String,
+}
+
+/// POST `/api/projects/:pid/reverts/:sha` — a person decides one detected
+/// revert (CXA-F047). `{"action":"approve"}` confirms the shipped work really
+/// was undone — the only verdict next-cycle planning may learn from;
+/// `{"action":"dismiss"}` records it as a false positive. Already-decided
+/// events are final, so a double submit cannot flip a verdict.
+pub(super) async fn revert_decision_ep(
+    State(app): State<AppState>,
+    Path((pid, sha)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<HumanActionReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Some(me) = gate_principal(&app, &headers, coxagent_application::AuthRole::can_review).await
+    else {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "your role may not take this decision",
+        )
+            .into_response();
+    };
+    let decision = match req.action.as_str() {
+        "approve" => coxagent_application::state::RevertDecision::Approved,
+        "dismiss" => coxagent_application::state::RevertDecision::Dismissed,
+        other => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("action must be approve or dismiss, got {other}"),
+            )
+                .into_response()
+        }
+    };
+    let verb = if req.action == "approve" {
+        "approved"
+    } else {
+        "dismissed"
+    };
+    let sha = sha.trim().to_owned();
+    if sha.is_empty() {
+        return (axum::http::StatusCode::BAD_REQUEST, "missing sha").into_response();
+    }
+    let mut decided = false;
+    let mut ticket = String::new();
+    if coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        ticket = s
+            .reverted_work
+            .iter()
+            .find(|e| e.sha == sha)
+            .map(|e| e.ticket.clone())
+            .unwrap_or_default();
+        decided = s.decide_revert(&sha, decision, &me);
+        if decided {
+            s.log_activity(
+                "USER",
+                &format!("{me} {verb} reverted work {ticket}"),
+                Some(ticket.clone()),
+            );
+        }
+        Ok(())
+    })
+    .await
+    .is_err()
+    {
+        return internal_error("store write failed");
+    }
+    if !decided {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            "no pending revert with that sha",
+        )
+            .into_response();
+    }
+    Json(serde_json::json!({ "ok": true, "action": req.action })).into_response()
 }
 
 /// POST `/api/projects/:pid/ticket/:id/ready` — a person approves a designed
@@ -257,7 +636,11 @@ pub(super) async fn send_back_ep(
         format!("↩️ {id} sent back by @{me}: {}", reason.trim())
     };
     state.log_activity("USER", "verification refused", Some(id.clone()));
-    state.post_comment(&me, &note, Some(id));
+    state.post_comment(&me, &note, Some(id.clone()));
+    // Governance-attention ledger (CXA-F230): a send-back is re-review churn
+    // the operator paid for — the exact signal the ledger exists to surface.
+    // The transition above is guarded, so a duplicate submit is a 409 here.
+    state.record_intervention(coxagent_domain::InterventionKind::VerifySendBack, &id, &me);
     match p.store.save(&state).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => internal_error(&e.to_string()),
@@ -293,6 +676,32 @@ async fn human_transition(
     };
     if let Err(e) = t.transition_to(coxagent_domain::Role::User, to) {
         return (axum::http::StatusCode::CONFLICT, e.to_string()).into_response();
+    }
+    // Reaching Verified MEANS the human QA verdict was rendered; the burn-down
+    // (CXA-F032 AC#2) only counts bugs carrying their own REGRESSION TEST PASS
+    // record, so this path writes the same provenance the agent TEST path has
+    // written since F022.
+    if to == coxagent_domain::Status::Verified {
+        coxagent_application::use_cases::run_test::record_human_verify_evidence(
+            &mut state, id, &me,
+        );
+        // Goal-line outcome ledger (CXA-F228): a human verdict is a delivered
+        // outcome like the agent path's.
+        state.record_verified_outcome(id);
+    }
+    // Governance-attention ledger (CXA-F230): the verdict just taken is a
+    // measured moment of operator review effort, attributed to the ticket's
+    // class. The transition guards above make a duplicate submit a 409 before
+    // any record exists, so one resolution is one record. Explicitly mapped
+    // per target status — a future caller adding a third target must decide
+    // what kind it is, never silently inherit ReadyApprove.
+    let kind = match to {
+        coxagent_domain::Status::Verified => Some(coxagent_domain::InterventionKind::VerifyPass),
+        coxagent_domain::Status::Ready => Some(coxagent_domain::InterventionKind::ReadyApprove),
+        _ => None,
+    };
+    if let Some(kind) = kind {
+        state.record_intervention(kind, id, &me);
     }
     let label = format!("{to:?}").to_lowercase();
     // Teach the adaptive gate: every human decision is a sample
@@ -421,6 +830,10 @@ pub(super) async fn undo_approval_ep(
         state.ask_again_shapes.push(shape.clone());
     }
     state.auto_approved_at.remove(&id);
+    // Governance-attention ledger (CXA-F230): an undo is the strongest form of
+    // gate friction the ledger tracks. The window membership check above
+    // refuses a second undo with a 409, so one pull-back is one record.
+    state.record_intervention(coxagent_domain::InterventionKind::UndoAutoApprove, &id, &me);
     let note = format!(
         "↩️ @{me} undid the auto-approval of {id} — `{shape}` goes back to asking a person."
     );
@@ -435,4 +848,36 @@ pub(super) async fn undo_approval_ep(
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => internal_error(&e.to_string()),
     }
+}
+
+/// DELETE `/api/projects/:pid/ticket/:id/attachments?key=…` — remove one
+/// attachment record from the ticket and best-effort delete its blob.
+pub(super) async fn delete_attachment_ep(
+    State(app): State<AppState>,
+    Path((pid, id)): Path<(String, String)>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let key = params.get("key").cloned().unwrap_or_default();
+    if key.is_empty() || key.contains("..") {
+        return (axum::http::StatusCode::BAD_REQUEST, "bad key").into_response();
+    }
+    let removed = coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |s| {
+        if let Some(list) = s.ticket_attachments.get_mut(&id) {
+            list.retain(|a| a.key != key);
+            if list.is_empty() {
+                s.ticket_attachments.remove(&id);
+            }
+        }
+        Ok(())
+    })
+    .await;
+    if let Err(e) = removed {
+        return internal_error(&e.to_string());
+    }
+    // The record is the authority for what a ticket shows; the blob itself is
+    // left in storage (StoragePort has no delete) and is harmless stranded.
+    Json(serde_json::json!({ "ok": true })).into_response()
 }

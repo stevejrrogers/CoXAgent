@@ -7,18 +7,22 @@
 use super::*;
 
 /// Whether a preview project has a container created longer ago than `ttl`.
-/// Docker's own `until` filter does the age arithmetic, so no timestamp
-/// parsing (and no timezone bug) of ours stands between a forgotten preview
-/// and being reclaimed.
+/// `until` is an `image prune` / `docker images` filter, not a `docker ps`
+/// one — `docker ps --filter until=1h` exits 1 with "invalid filter 'until'",
+/// so the age arithmetic has to happen here: fetch each container's real
+/// creation timestamp via `docker inspect` and compare it to `ttl` ourselves.
+/// Stale only once EVERY container in the project has aged past `ttl` — one
+/// freshly restarted container should keep the whole preview alive.
 pub(super) async fn preview_is_stale(project: &str, ttl: &str) -> bool {
-    let Ok(out) = tokio::process::Command::new("docker")
+    let Some(max_age) = parse_ttl(ttl) else {
+        return false;
+    };
+    let Ok(ids_out) = tokio::process::Command::new("docker")
         .args([
             "ps",
             "-q",
             "--filter",
             &format!("label=com.docker.compose.project={project}"),
-            "--filter",
-            &format!("until={ttl}"),
         ])
         .stdin(std::process::Stdio::null())
         .output()
@@ -26,7 +30,63 @@ pub(super) async fn preview_is_stale(project: &str, ttl: &str) -> bool {
     else {
         return false;
     };
-    !String::from_utf8_lossy(&out.stdout).trim().is_empty()
+    let ids_out_str = String::from_utf8_lossy(&ids_out.stdout);
+    let ids: Vec<&str> = ids_out_str.split_whitespace().collect();
+    if ids.is_empty() {
+        return false;
+    }
+    let mut args = vec!["inspect", "--format", "{{.Created}}"];
+    args.extend(ids.iter().copied());
+    let Ok(out) = tokio::process::Command::new("docker")
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+    else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let timestamps: Vec<&str> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    all_created_before(&timestamps, time::OffsetDateTime::now_utc(), max_age)
+}
+
+/// Whether every RFC3339 timestamp in `created` is older than `now - max_age`.
+/// Empty input is never stale — no containers found means nothing to reclaim.
+/// An unparsable timestamp counts as not-old, erring toward keeping a preview
+/// alive rather than tearing one down on a read we don't understand.
+fn all_created_before(
+    created: &[&str],
+    now: time::OffsetDateTime,
+    max_age: time::Duration,
+) -> bool {
+    !created.is_empty()
+        && created.iter().all(|ts| {
+            time::OffsetDateTime::parse(ts, &time::format_description::well_known::Rfc3339)
+                .is_ok_and(|c| now - c > max_age)
+        })
+}
+
+/// Parse a short TTL like `"6h"` / `"45m"` / `"2d"` into a [`time::Duration`].
+/// Splits on the last `char`, not the last byte, so a non-ASCII unit can
+/// never land mid-character and panic.
+fn parse_ttl(ttl: &str) -> Option<time::Duration> {
+    let ttl = ttl.trim();
+    let unit = ttl.chars().last()?;
+    let n: i64 = ttl[..ttl.len() - unit.len_utf8()].parse().ok()?;
+    match unit {
+        's' => Some(time::Duration::seconds(n)),
+        'm' => Some(time::Duration::minutes(n)),
+        'h' => Some(time::Duration::hours(n)),
+        'd' => Some(time::Duration::days(n)),
+        _ => None,
+    }
 }
 
 /// The CLI + host env var for a git provider.
@@ -699,10 +759,11 @@ pub(super) async fn git_pv(dir: &std::path::Path, args: &[&str]) -> Result<(), S
 }
 
 /// Parse `deploy.host_port` out of a project's raw `coxagent.json` for the
-/// preview health-gate probe. Thin wrapper over the shared
-/// [`coxagent_application::ports::outbound::parse_deploy_host_port`] — every
-/// deploy call site (cycle, chat, PR preview) parses a malformed `host_port`
-/// the same way (COX-B025/COX-B026/COX-B035).
+/// preview health-gate probe (COX-B025/COX-B026). Thin alias over the shared
+/// [`coxagent_application::ports::outbound::parse_deploy_host_port`] — see
+/// its doc for the full contract — kept so call sites here read naturally as
+/// "preview" concerns; every deploy call site (cycle, chat, PR preview)
+/// parses a malformed `host_port` the same way (COX-B035).
 pub(super) fn parse_preview_host_port(raw_config: &str) -> Result<Option<u16>, ()> {
     coxagent_application::ports::outbound::parse_deploy_host_port(raw_config)
 }
@@ -710,15 +771,14 @@ pub(super) fn parse_preview_host_port(raw_config: &str) -> Result<Option<u16>, (
 /// Run the mandatory post-deploy health gate (COX-B004/COX-B009) for a probe
 /// port that may be invalid (COX-B025/COX-B026): a corrupt `host_port` fails
 /// the gate outright rather than being treated as "nothing configured",
-/// which would pass unconditionally and report a dead app as LIVE.
+/// which would pass unconditionally and report a dead app as LIVE. Thin
+/// alias over the shared
+/// [`coxagent_application::ports::outbound::verify_deploy_health_probe`].
 pub(super) async fn run_preview_health_gate(
     deploy: &Arc<dyn coxagent_application::ports::outbound::DeployPort>,
     probe_port: Result<Option<u16>, ()>,
 ) -> bool {
-    match probe_port {
-        Ok(port) => coxagent_application::ports::outbound::verify_deploy_health(deploy, port).await,
-        Err(()) => false,
-    }
+    coxagent_application::ports::outbound::verify_deploy_health_probe(deploy, probe_port).await
 }
 
 /// Deploy a PR's branch so the human can SEE the change running before
@@ -976,9 +1036,33 @@ pub(super) async fn pr_report_ep(
         }
         return Json(serde_json::json!({ "ok": true, "review": number })).into_response();
     }
+    if let Some(h) = body.get("hold") {
+        let number = h
+            .get("number")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let reason = h
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
+        if number == 0 {
+            return (StatusCode::BAD_REQUEST, "bad hold: number required").into_response();
+        }
+        if mutate_state(p.store.as_ref(), |s| {
+            s.human_holds.insert(number, reason.clone());
+            Ok(())
+        })
+        .await
+        .is_err()
+        {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "store write failed").into_response();
+        }
+        return Json(serde_json::json!({ "ok": true, "hold": number })).into_response();
+    }
     (
         StatusCode::BAD_REQUEST,
-        "expected {project, pr} or {project, review}",
+        "expected {project, pr}, {project, review} or {project, hold}",
     )
         .into_response()
 }
@@ -995,4 +1079,85 @@ pub(super) async fn pr_reviews_ep(
     };
     let reviews = p.store.load().await.map(|s| s.reviews).unwrap_or_default();
     Json(reviews).into_response()
+}
+
+#[cfg(test)]
+mod parse_ttl_tests {
+    use super::parse_ttl;
+
+    #[test]
+    fn hours_minutes_days_and_seconds_are_recognized() {
+        assert_eq!(parse_ttl("6h"), Some(time::Duration::hours(6)));
+        assert_eq!(parse_ttl("45m"), Some(time::Duration::minutes(45)));
+        assert_eq!(parse_ttl("2d"), Some(time::Duration::days(2)));
+        assert_eq!(parse_ttl("30s"), Some(time::Duration::seconds(30)));
+    }
+
+    #[test]
+    fn an_unknown_unit_or_empty_string_is_rejected_rather_than_defaulting() {
+        assert_eq!(parse_ttl("6x"), None);
+        assert_eq!(parse_ttl(""), None);
+        assert_eq!(parse_ttl("h"), None);
+    }
+
+    #[test]
+    fn a_multi_byte_unit_is_rejected_rather_than_panicking_on_the_byte_split() {
+        assert_eq!(parse_ttl("6ｈ"), None);
+    }
+}
+
+#[cfg(test)]
+mod all_created_before_tests {
+    use super::all_created_before;
+    use time::macros::datetime;
+
+    #[test]
+    fn stale_only_once_every_container_has_aged_past_ttl() {
+        let now = datetime!(2026 - 01 - 01 12:00:00 UTC);
+        let old = "2026-01-01T00:00:00Z"; // 12h old
+        assert!(all_created_before(
+            &[old, old],
+            now,
+            time::Duration::hours(6)
+        ));
+    }
+
+    #[test]
+    fn one_freshly_restarted_container_keeps_the_whole_preview_alive() {
+        let now = datetime!(2026 - 01 - 01 12:00:00 UTC);
+        let old = "2026-01-01T00:00:00Z"; // 12h old
+        let fresh = "2026-01-01T11:00:00Z"; // 1h old
+        assert!(!all_created_before(
+            &[old, fresh],
+            now,
+            time::Duration::hours(6)
+        ));
+    }
+
+    #[test]
+    fn no_containers_found_is_never_stale() {
+        let now = datetime!(2026 - 01 - 01 12:00:00 UTC);
+        assert!(!all_created_before(&[], now, time::Duration::hours(6)));
+    }
+
+    #[test]
+    fn an_unparsable_timestamp_is_treated_as_not_old_rather_than_reclaimed() {
+        let now = datetime!(2026 - 01 - 01 12:00:00 UTC);
+        assert!(!all_created_before(
+            &["not a timestamp"],
+            now,
+            time::Duration::hours(6)
+        ));
+    }
+
+    #[test]
+    fn exactly_at_the_ttl_boundary_is_not_yet_stale() {
+        let now = datetime!(2026 - 01 - 01 12:00:00 UTC);
+        let exactly_six_hours_old = "2026-01-01T06:00:00Z";
+        assert!(!all_created_before(
+            &[exactly_six_hours_old],
+            now,
+            time::Duration::hours(6)
+        ));
+    }
 }

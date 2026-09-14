@@ -33,6 +33,57 @@ fn live_role_suffix<'a>(name: &'a str, role_want: &str) -> Option<&'a str> {
     }
 }
 
+/// Resolve the newest live-log file for a role (optionally pinned to one
+/// operator), shared by the snapshot endpoint and the SSE stream endpoint.
+/// The writer keys a live file `<role_key>__<ticket>__<operator>.log` and every
+/// streaming engine (opencode, copilot, claude, …) lands here via `append_live`,
+/// so this resolver is engine-agnostic: whatever engine wrote the file, the tail
+/// machinery below just follows it.
+fn resolve_live_file(p: &ProjectHandle, role: &str, worker: &str) -> PathBuf {
+    let base = p.config_path.parent().unwrap_or(&p.config_path);
+    let live_dir = base.join("logs").join("live");
+    let want = role.to_ascii_lowercase().replace('-', "_");
+    let want_op = worker.to_ascii_lowercase();
+    std::fs::read_dir(&live_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+            let after = live_role_suffix(&name, &want)?;
+            let op_ok = want_op.is_empty() || after.contains(&want_op);
+            let mtime = e.metadata().and_then(|m| m.modified()).ok()?;
+            Some((op_ok, mtime, e.path()))
+        })
+        .max_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)))
+        .map_or_else(|| live_dir.join(format!("{role}.log")), |(_, _, path)| path)
+}
+
+/// Read a live log's current content plus its tail byte-offset, so a stream
+/// client can snapshot then resume exactly where it left off without re-reading
+/// the whole file on every push.
+fn read_live_upto(path: &std::path::Path, after: u64) -> (String, u64) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return (String::new(), 0);
+    };
+    let len = meta.len();
+    let start = after.min(len);
+    let mut tail = String::new();
+    if let Ok(mut f) = std::fs::File::open(path) {
+        use std::io::{Read as _, Seek as _};
+        let _ = f.seek(std::io::SeekFrom::Start(start));
+        let _ = f.read_to_string(&mut tail);
+        // If the file shrank (recreated/rotated) we couldn't have meant a
+        // non-zero start into the new empty file — restart from the top and
+        // let the client re-render.
+        if after > len && start != 0 {
+            tail.clear();
+        }
+    }
+    (tail, len)
+}
+
 /// The transcript directory for a project: `<workspace>/logs/transcripts`.
 pub(super) fn transcripts_dir(p: &ProjectHandle) -> PathBuf {
     p.config_path
@@ -40,6 +91,57 @@ pub(super) fn transcripts_dir(p: &ProjectHandle) -> PathBuf {
         .unwrap_or(&p.config_path)
         .join("logs")
         .join("transcripts")
+}
+
+/// GET `/api/projects/:pid/agent-liveness` — ground truth of who is working
+/// RIGHT NOW, read from the live-log files' mtimes (CXA-F386). The worker
+/// registry only updates at claim boundaries, so an in-process engine mid-run
+/// looked idle from outside while its live file grew every second. Returns
+/// entries whose file was written in the last 10 minutes.
+pub(super) async fn agent_liveness_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let base = p.config_path.parent().unwrap_or(&p.config_path);
+    let live_dir = base.join("logs").join("live");
+    let now = std::time::SystemTime::now();
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&live_dir) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            let Some(stem) = name.strip_suffix(".log") else {
+                continue;
+            };
+            let Ok(meta) = e.metadata() else { continue };
+            let age = meta
+                .modified()
+                .ok()
+                .and_then(|m| now.duration_since(m).ok())
+                .map_or(u64::MAX, |d| d.as_secs());
+            if age > 600 || meta.len() < 60 {
+                continue; // stale, or a bare header (a run that never streamed)
+            }
+            // `<role>__<label>__<account>` | `<role>__<account>` | `<role>` —
+            // fields join on DOUBLE underscore; role keys keep their single one.
+            let parts: Vec<&str> = stem.split("__").collect();
+            let (role, label) = match parts.as_slice() {
+                [r, l, _acct] => (*r, Some(*l)),
+                [r, _acct] => (*r, None),
+                [r] => (*r, None),
+                _ => continue,
+            };
+            out.push(serde_json::json!({
+                "role": role,
+                "ticket": label,
+                "age_secs": age,
+            }));
+        }
+    }
+    out.sort_by_key(|v| v["age_secs"].as_u64().unwrap_or(u64::MAX));
+    Json(out).into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -81,32 +183,7 @@ pub(super) async fn agent_log_ep(
         .chars()
         .filter(char::is_ascii_alphanumeric)
         .collect();
-    let base = p.config_path.parent().unwrap_or(&p.config_path);
-    let live_dir = base.join("logs").join("live");
-    // The writer keys a live file `<role_key>__<ticket>__<operator>.log`
-    // (role_key is lowercase snake, e.g. `dev_bug`; the ticket/operator
-    // suffixes vary per run). The old read path guessed `<role>__<account>.log`
-    // and never matched — so the fresh per-ticket log was orphaned and a stale
-    // `<role>.log` was served instead (its results had no output preview).
-    // Match by the role PREFIX, case-insensitively, and serve the newest.
-    let want = role.to_ascii_lowercase().replace('-', "_");
-    let want_op = account.to_ascii_lowercase();
-    let live = std::fs::read_dir(&live_dir)
-        .ok()
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().to_ascii_lowercase();
-            let after = live_role_suffix(&name, &want)?;
-            // When an operator is named, prefer that operator's own log.
-            let op_ok = want_op.is_empty() || after.contains(&want_op);
-            let mtime = e.metadata().and_then(|m| m.modified()).ok()?;
-            Some((op_ok, mtime, e.path()))
-        })
-        // Operator-matched files win; then newest mtime.
-        .max_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)))
-        .map_or_else(|| live_dir.join(format!("{role}.log")), |(_, _, path)| path);
+    let live = resolve_live_file(&p, &role, &account);
     // Local live file first (this machine's operators). If empty/absent, try
     // shared storage (MinIO) where remote operators mirror their live logs, so
     // the central hub can show an operator running on another machine.
@@ -150,6 +227,153 @@ pub(super) async fn agent_log_ep(
         (text, false)
     };
     Json(serde_json::json!({ "role": role, "live": live_flag, "log": body })).into_response()
+}
+
+/// The `after` byte-offset the SSE stream uses to resume. If a client connects
+/// without one we treat it as a fresh open: emit the full snapshot up front as
+/// an `init` event carrying the file's tail offset, then follow new appends.
+#[derive(serde::Deserialize, Debug)]
+pub(super) struct AgentLogStreamQuery {
+    role: String,
+    /// Optional operator pin (comma-joined), forwarded to `resolve_live_file`.
+    #[serde(default)]
+    worker: String,
+    /// Optional starting byte offset; 0 = snapshot from the top then stream.
+    #[serde(default)]
+    after: u64,
+}
+
+/// Real-time server-sent live log. The engine (opencode / copilot / claude)
+/// writes lines to `<workspace>/logs/live/<role>...log` via `append_live`, local
+/// on the machine, so the tail below is just a cheap local read every few
+/// hundred ms — no engine-specific protocol needed. The hub then presses those
+/// bytes down to the browser over SSE as `text/event-stream`, which replaces
+/// the old 1.5 s polling with push.
+///
+/// Events:
+///   * `init`   — `{ offset, role, live }` snapshot kick-off, sent on EVERY
+///     fresh open (live:false when the log file is absent/empty — the
+///     client's terminal empty state depends on it)
+///   * `line`   — one or more new bytes, JSON `{ text }` batched per poll
+///   * `done`   — file gone / ended, client should close
+///   * comment  — `: ping` heartbeat every ~15 s to keep proxies alive
+pub(super) async fn agent_log_stream_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<AgentLogStreamQuery>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let role: String = q
+        .role
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if role.is_empty() {
+        return (StatusCode::BAD_REQUEST, "role required").into_response();
+    }
+    let account: String = q
+        .worker
+        .split('@')
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect();
+
+    let live = resolve_live_file(&p, &role, &account);
+    let (snapshot, offset) = read_live_upto(&live, 0);
+    let live_flag = snapshot.trim().len() >= 20 && live.exists();
+
+    let mut after = q.after.min(offset);
+    // CXA-B128: a fresh open (after == 0) ALWAYS gets the `init` kick-off —
+    // even when the live log does not exist yet. Withholding init used to
+    // leave the client's work-log panel on its indefinite "loading…"
+    // placeholder forever: no init → no renderAgentLog → no empty state, and
+    // a healthy connection fires no error either. The empty-file init carries
+    // live:false so the client paints its terminal "hasn't run yet" state.
+    let fresh = q.after == 0;
+    let mut pending = if fresh {
+        // Fresh open: send the snapshot immediately.
+        after = offset;
+        snapshot
+    } else {
+        // Resume: only send what we haven't delivered yet (fetch now).
+        let (tail, _) = read_live_upto(&live, q.after);
+        tail
+    };
+
+    // Tail loop → channel → SSE stream. The engine writes locally so each poll
+    // is a cheap `stat` + read; no engine-specific protocol involved.
+    let offset_init = offset;
+    let (tx, rx) = tokio::sync::mpsc::channel::<
+        Result<axum::response::sse::Event, std::convert::Infallible>,
+    >(64);
+    let send_init = fresh || !pending.is_empty();
+    let has_snapshot = !pending.is_empty();
+    std::thread::spawn(move || {
+        let send = |tx: &tokio::sync::mpsc::Sender<_>, e: axum::response::sse::Event| {
+            tx.blocking_send(Ok(e)).is_err()
+        };
+        if send_init {
+            if send(
+                &tx,
+                axum::response::sse::Event::default().event("init").data(
+                    serde_json::json!({
+                        "offset": offset_init,
+                        "role": role,
+                        "live": live_flag,
+                    })
+                    .to_string(),
+                ),
+            ) {
+                return;
+            }
+            // Only a non-empty snapshot becomes a `line`; the init event above
+            // already told the client there is nothing to show yet.
+            if has_snapshot
+                && send(
+                    &tx,
+                    axum::response::sse::Event::default().event("line").data(
+                        serde_json::json!({ "text": std::mem::take(&mut pending) }).to_string(),
+                    ),
+                )
+            {
+                return;
+            }
+        }
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let now = std::fs::metadata(&live).map_or(0, |m| m.len());
+            if now < after {
+                // File truncated (rotated) — restart from the top.
+                after = 0;
+            }
+            if now > after {
+                let (text, o) = read_live_upto(&live, after);
+                after = o;
+                if !text.is_empty()
+                    && send(
+                        &tx,
+                        axum::response::sse::Event::default()
+                            .event("line")
+                            .data(serde_json::json!({ "text": text }).to_string()),
+                    )
+                {
+                    break;
+                }
+            }
+        }
+    });
+
+    axum::response::sse::Sse::new(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .keep_alive(
+            axum::response::sse::KeepAlive::new()
+                .interval(std::time::Duration::from_secs(15))
+                .text(": ping"),
+        )
+        .into_response()
 }
 
 /// List transcript files (name + size + modified), newest first.
@@ -218,7 +442,10 @@ mod live_log_tests {
     // would have: role `dev` picking up `dev_feature`'s live log.
     #[test]
     fn role_prefix_does_not_bleed_into_a_longer_role() {
-        assert_eq!(live_role_suffix("dev_feature__cox-f01__root.log", "dev"), None);
+        assert_eq!(
+            live_role_suffix("dev_feature__cox-f01__root.log", "dev"),
+            None
+        );
         assert_eq!(live_role_suffix("developer.log", "dev"), None);
     }
 

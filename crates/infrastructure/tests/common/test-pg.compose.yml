@@ -1,0 +1,52 @@
+# CXA-F327 — EPHEMERAL TEST FIXTURE, not a deployable stack.
+#
+# Brought up per-claim by crates/infrastructure/tests/common/mod.rs
+# (`TestDb::claim`) as its own compose project `cox-test-deps-<pid>-<nanos>`
+# with per-claim credentials and free loopback ports, and torn down by that
+# claim's Drop guard (`docker compose down -v`). All four variables are
+# REQUIRED — running this file by hand fails fast here instead of silently
+# booting a known-credential database, and the harness supplies throwaway
+# values so nothing here can ever reach the live cox-infra stack
+# (deploy/local-infra) or the product stack (root docker-compose.yml).
+#
+# Healthchecks AUTHENTICATE (CXA-B115): pg_isready, the unix socket and
+# 127.0.0.1 all stay on `trust` and prove nothing — dialing the container's
+# own docker-network IP with $POSTGRES_PASSWORD exercises the same
+# scram-sha-256 catch-all the suites themselves dial. `$$` defers expansion
+# to check time so credentials come from the container env, never baked in.
+#
+# No volumes: pgdata lives on tmpfs and Redis runs with persistence off, so
+# nothing outlives the container — there is no state to rotate, leak or clean
+# up beyond the claim's `down -v`.
+name: cox-test-deps
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: coxagent
+      POSTGRES_PASSWORD: ${TEST_PG_PASSWORD:?TEST_PG_PASSWORD is required — run this stack through the TestDb fixture, not by hand}
+    tmpfs:
+      - /var/lib/postgresql/data
+    ports:
+      # Loopback only: the claimed database is reachable from this machine
+      # and nothing else (COX-C012 rule 2 — datastores never bind 0.0.0.0).
+      - "127.0.0.1:${TEST_PG_HOST_PORT:?TEST_PG_HOST_PORT is required — run this stack through the TestDb fixture}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "PGPASSWORD=\"$${POSTGRES_PASSWORD}\" psql -h \"$$(hostname -i)\" -U postgres -c 'select 1'"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--requirepass", "${TEST_REDIS_PASSWORD:?TEST_REDIS_PASSWORD is required — run this stack through the TestDb fixture}", "--save", "", "--appendonly", "no"]
+    environment:
+      REDIS_PASSWORD: ${TEST_REDIS_PASSWORD:?TEST_REDIS_PASSWORD is required — run this stack through the TestDb fixture}
+    ports:
+      - "127.0.0.1:${TEST_REDIS_HOST_PORT:?TEST_REDIS_HOST_PORT is required — run this stack through the TestDb fixture}:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping | grep -q PONG"]
+      interval: 3s
+      timeout: 3s
+      retries: 15

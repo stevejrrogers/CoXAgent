@@ -14,8 +14,8 @@
 //! # Constants
 //! | Name | Value | Meaning |
 //! |---|---|---|
-//! | `AUTH_RATE_MAX` | 20 | Max requests per window |
-//! | `AUTH_RATE_WINDOW` | 60 s | Sliding window length |
+//! | `AUTH_RATE_MAX` | 20 | Max requests per window (env-overridable) |
+//! | `AUTH_RATE_WINDOW` | 60 s | Sliding window length (env-overridable) |
 
 use axum::extract::{ConnectInfo, Request};
 use axum::http::StatusCode;
@@ -30,6 +30,36 @@ use std::time::{Duration, Instant};
 pub const AUTH_RATE_MAX: usize = 20;
 /// Sliding-window length for the auth rate limiter.
 pub const AUTH_RATE_WINDOW: Duration = Duration::from_secs(60);
+
+/// Parse an unsigned integer env var, trimming whitespace; `None` when absent
+/// or not a valid number — a malformed override must never wedge the limiter.
+fn env_usize(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+}
+
+/// The effective auth rate limit: the `AUTH_RATE_MAX` env var when it names a
+/// positive count, else the [`AUTH_RATE_MAX`] default. Many-independent-
+/// client topologies (CI fixtures behind one proxy IP) raise it instead of
+/// starving logins into a 429 storm.
+#[must_use]
+pub fn auth_rate_max() -> usize {
+    match env_usize("AUTH_RATE_MAX") {
+        Some(max) if max > 0 => max,
+        _ => AUTH_RATE_MAX,
+    }
+}
+
+/// The effective sliding-window length: the `AUTH_RATE_WINDOW` env var
+/// (whole seconds) when positive, else the [`AUTH_RATE_WINDOW`] default.
+#[must_use]
+pub fn auth_rate_window() -> Duration {
+    match env_usize("AUTH_RATE_WINDOW") {
+        Some(secs) if secs > 0 => Duration::from_secs(secs as u64),
+        _ => AUTH_RATE_WINDOW,
+    }
+}
 
 /// Sliding-window rate limiter keyed by arbitrary string identities.
 ///
@@ -119,13 +149,30 @@ pub async fn rate_limit_mw(
     window: Duration,
     trust_proxy: bool,
 ) -> Result<Response, StatusCode> {
-    // Only the credential-guessing surface is limited: login and 2FA. The rest
-    // of /api/auth/* is read traffic the UI polls (`/me`, session lists) — and
-    // on a local hub every client shares 127.0.0.1, so limiting those 429'd the
-    // dashboard itself within a minute of normal use.
+    // The ticket's acceptance criteria require the limiter in front of all of
+    // /api/auth/*, not just the credential-guessing surface (COX-C016 AC3/4).
+    // Trade-off: on a hub where many users share one apparent IP (NAT, or a
+    // local dashboard with COXAGENT_HOST=127.0.0.1), this window is shared
+    // too — set COXAGENT_TRUST_PROXY=1 behind a real LB/proxy so the key is
+    // the actual client, not the shared TCP peer.
     let path = req.uri().path();
-    if path == "/api/auth/login" || path.starts_with("/api/auth/2fa/") {
-        let key = client_key(&req, trust_proxy);
+    if path.starts_with("/api/auth/") {
+        // Every /api/auth/* route stays limited (COX-C016 AC3/4), but the
+        // session-gated read-only GETs get their own, far roomier bucket:
+        // they are dashboard chrome fetched once per page load, and counting
+        // them against login's strict window let ordinary page loads (or a
+        // UI render burst) starve real sign-ins into a 429 storm. Credential
+        // guessing happens on POST login/2FA — that window is unchanged.
+        let read_only = req.method() == axum::http::Method::GET
+            && matches!(path, "/api/auth/sessions" | "/api/auth/me");
+        let (key, max) = if read_only {
+            (
+                format!("{}:ro", client_key(&req, trust_proxy)),
+                max.saturating_mul(12),
+            )
+        } else {
+            (client_key(&req, trust_proxy), max)
+        };
         if !limiter.check(&key, max, window, Instant::now()) {
             tracing::warn!(
                 client = %key,
@@ -179,7 +226,10 @@ mod tests {
         for _ in 0..MAX {
             assert!(rl.check("carol", MAX, WINDOW, t0));
         }
-        assert!(!rl.check("carol", MAX, WINDOW, t0), "should be denied before roll-over");
+        assert!(
+            !rl.check("carol", MAX, WINDOW, t0),
+            "should be denied before roll-over"
+        );
 
         // Advance past the window — all previous hits expire.
         let t1 = t0 + WINDOW + Duration::from_millis(1);
@@ -205,5 +255,59 @@ mod tests {
             rl.check("eve", MAX, WINDOW, now),
             "eve should be allowed; buckets must be independent"
         );
+    }
+
+    /// Serializes the env-var tests: process env is global state, and two
+    /// parallel tests writing the same variables would race (CXA-F350).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Sets one env var for the test's duration, removing it on drop so a
+    /// later test in another suite binary never inherits the override.
+    struct EnvVar(&'static str);
+
+    impl EnvVar {
+        fn set(name: &'static str, value: &str) -> Self {
+            std::env::set_var(name, value);
+            Self(name)
+        }
+    }
+
+    impl Drop for EnvVar {
+        fn drop(&mut self) {
+            std::env::remove_var(self.0);
+        }
+    }
+
+    #[test]
+    fn valid_env_overrides_configure_the_limiter() {
+        let _serial = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _max = EnvVar::set("AUTH_RATE_MAX", "77");
+        let _window = EnvVar::set("AUTH_RATE_WINDOW", "11");
+        assert_eq!(auth_rate_max(), 77);
+        assert_eq!(auth_rate_window(), Duration::from_secs(11));
+    }
+
+    #[test]
+    fn malformed_or_non_positive_overrides_fall_back_to_the_defaults() {
+        let _serial = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Absent, empty, non-numeric, and non-positive values must all yield
+        // the built-in defaults — a bad override must never wedge auth
+        // entirely.
+        assert_eq!(auth_rate_max(), AUTH_RATE_MAX);
+        assert_eq!(auth_rate_window(), AUTH_RATE_WINDOW);
+        for bad in ["", "   ", "soon", "-3", "0"] {
+            let _max = EnvVar::set("AUTH_RATE_MAX", bad);
+            let _window = EnvVar::set("AUTH_RATE_WINDOW", bad);
+            assert_eq!(auth_rate_max(), AUTH_RATE_MAX, "max fallback for {bad:?}");
+            assert_eq!(
+                auth_rate_window(),
+                AUTH_RATE_WINDOW,
+                "window fallback for {bad:?}"
+            );
+        }
     }
 }

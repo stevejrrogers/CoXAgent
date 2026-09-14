@@ -2,29 +2,28 @@
 //! Live integration test for the distributed coordination path: Postgres for
 //! durable state + transactional ticket claims, Redis for leader/stage leases.
 //!
-//! Skipped unless both are provided:
-//!   COXAGENT_TEST_PG_DSN=postgres://cox:test@localhost:55432/coxagent \
-//!   COXAGENT_TEST_REDIS_URL=redis://localhost:56379 \
+//! Every test claims its own ephemeral Postgres + Redis pair from the shared
+//! compose fixture (`common::TestDb`, CXA-F327): no exported DSN is honored,
+//! an unprovisionable database fails red naming the fixture, and a
+//! docker-less environment skips explicitly. Run:
 //!   cargo test -p coxagent-infrastructure --test distributed_coord -- --nocapture
 
 use coxagent_application::ports::outbound::{GitCheck, StateStorePort, WorkerCaps};
+
+mod common;
 use coxagent_application::state::ProjectState;
 use coxagent_domain::{
     Complexity, Priority, Role, Status, TechnicalDesign, Ticket, TicketId, TicketType,
 };
 use coxagent_infrastructure::state::SqlStateStore;
 
-fn env(k: &str) -> Option<String> {
-    std::env::var(k).ok().filter(|v| !v.is_empty())
-}
-
-async fn store(project: &str) -> SqlStateStore {
-    let dsn = env("COXAGENT_TEST_PG_DSN").expect("dsn");
-    let redis = env("COXAGENT_TEST_REDIS_URL").expect("redis");
-    SqlStateStore::connect(&dsn, project)
+/// The fixture ran the schema-init migration alone at claim time, so
+/// concurrent connects here never race the catalog.
+async fn store(db: &common::TestDb, project: &str) -> SqlStateStore {
+    SqlStateStore::connect(&db.dsn(), project)
         .await
         .expect("connect pg")
-        .with_redis(&redis)
+        .with_redis(&db.redis_url())
         .expect("attach redis")
 }
 
@@ -47,10 +46,11 @@ fn ready_feature(id: &str) -> Ticket {
 
 #[tokio::test]
 async fn distributed_coordination_across_two_hubs() {
-    if env("COXAGENT_TEST_PG_DSN").is_none() || env("COXAGENT_TEST_REDIS_URL").is_none() {
-        eprintln!("skipping: set COXAGENT_TEST_PG_DSN + COXAGENT_TEST_REDIS_URL");
+    // `None` is the docker-absent explicit skip — the only lawful green
+    // non-run, with its reason already printed by the fixture.
+    let Some(db) = common::claim_or_skip().await else {
         return;
-    }
+    };
     // Unique project id per run so reruns start clean.
     let project = format!(
         "test-{}",
@@ -61,8 +61,8 @@ async fn distributed_coordination_across_two_hubs() {
     );
 
     // Two stores on the same PG + Redis = two machines/hubs.
-    let hub_a = store(&project).await;
-    let hub_b = store(&project).await;
+    let hub_a = store(&db, &project).await;
+    let hub_b = store(&db, &project).await;
     let now = "2026-07-15T00:00:00Z";
 
     // Seed two ready features into the shared state.
@@ -111,6 +111,48 @@ async fn distributed_coordination_across_two_hubs() {
     worker_registry_carries_machine_capabilities(&hub_a, &hub_b, now).await;
 }
 
+/// CXA-B130: a project's delete must also sweep its Redis keyspace. The
+/// leases are TTL'd and would expire on their own, but the operator's
+/// desired-run state is a PERSISTENT key — leaving it behind would
+/// auto-resume the deleted project's runner the moment a new project reuses
+/// the id.
+#[tokio::test]
+async fn delete_sweeps_the_project_redis_keyspace_including_desired_state() {
+    let Some(db) = common::claim_or_skip().await else {
+        return;
+    };
+    let project = format!(
+        "del-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let store = store(&db, &project).await;
+
+    store
+        .set_desired("op@host", true)
+        .await
+        .expect("persist desired run state in Redis");
+    assert_eq!(
+        store.get_desired("op@host").await.expect("desired"),
+        Some(true),
+        "fixture: the desired state must be readable before the delete"
+    );
+
+    store.delete().await.expect("delete");
+
+    assert_eq!(
+        store
+            .get_desired("op@host")
+            .await
+            .expect("desired after delete"),
+        None,
+        "the deleted project's persistent Redis keys must be swept, or a \
+         recreated id auto-resumes its runner"
+    );
+}
+
 /// The registry is how a hub with no CLI, no key and no checkout of its own —
 /// the container serving the dashboard — learns what each machine can do.
 async fn worker_registry_carries_machine_capabilities(
@@ -140,6 +182,7 @@ async fn worker_registry_carries_machine_capabilities(
                 // The machine's OS, which the hub cannot infer: asking itself
                 // would answer with the container's.
                 tooling: Some(serde_json::json!({ "os": "macos", "has_brew": true })),
+                version: env!("CARGO_PKG_VERSION").to_owned(),
             },
             now,
         )

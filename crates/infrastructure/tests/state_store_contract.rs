@@ -58,7 +58,9 @@ async fn state_store_contract<S: StateStorePort>(store: S) {
 async fn json_store_satisfies_contract() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = JsonStateStore::new(dir.path()).expect("store");
-    state_store_contract(store).await;
+    // Box::pin: the contract future crossed the large-future bound when the
+    // deploy attempt record gained its forensics bundle (CXA-F289).
+    Box::pin(state_store_contract(store)).await;
 }
 
 #[tokio::test]

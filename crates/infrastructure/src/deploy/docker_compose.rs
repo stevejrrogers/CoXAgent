@@ -3,24 +3,28 @@
 //! compose file, so non-dockerised projects don't error the cycle.
 
 use async_trait::async_trait;
+use coxagent_application::ports::outbound::deploy::COMPOSE_FILES;
 use coxagent_application::ports::outbound::{DeployPort, DeployReport};
 use coxagent_application::PortError;
 use std::path::Path;
 use std::time::Duration;
 use tokio::process::Command;
 
-const COMPOSE_FILES: &[&str] = &[
-    "docker-compose.yml",
-    "docker-compose.yaml",
-    "compose.yml",
-    "compose.yaml",
-];
+// Deploy may tear down only what [`reclaimable_compose_project`] allows — see
+// that shared policy for why port-eviction must never touch the live hub.
+use super::reclaimable::{reclaimable_compose_project, reclaimable_raw_container};
+
 const DEPLOY_TIMEOUT: Duration = Duration::from_secs(900);
 
 /// Keys every secret-bearing compose file this adapter can meet requires via
 /// `${VAR:?}` interpolation (COX-C012): the root docker-compose.yml needs both
 /// or `up` dies before starting anything — the CXA-B010 symptom.
 const REQUIRED_SECRET_KEYS: &[&str] = &["PG_PASSWORD", "COXAGENT_ADMIN_PASSWORD"];
+
+/// Prefix of the ownership-stamp first line [`write_stored_secrets_owned`] writes
+/// into a store file (CXA-B043), which [`read_owner_stamp`] reads back so adoption
+/// can refuse credentials authored by a differently-named project sharing this dir.
+const OWNER_STAMP_PREFIX: &str = "# owner=";
 
 /// A cryptographically-random 32-char fallback secret. Used ONLY when an
 /// operator configured no value anywhere — never a baked constant, so no reader
@@ -106,6 +110,12 @@ fn resolve_deploy_secrets_in(
         &dot_env,
     );
     if missing.is_empty() {
+        // CXA-B040: retiring a SUPERSEDED path-keyed store must not be gated behind "a fallback was
+        // needed". When an operator now supplies EVERY required secret externally we short-circuit above,
+        // so without this explicit call an obsolete path-keyed duplicate (from CXA-B031-era software)
+        // holding live credentials would linger unreferenced forever — never adopted into the canonical
+        // store and never removed ([CXA-B044] ordering still holds: deletion is gated on durable persist).
+        retire_superseded_path_keyed_store(secret_root, work_dir);
         return Vec::new();
     }
     // CXA-B036 migration: an already-deployed pre-CXA-B032 app stored its fallback secrets under a
@@ -128,7 +138,13 @@ fn resolve_deploy_secrets_in(
     // Only a durable commit may authorise removal of the legacy source ([CXA-B044]): if this write
     // fails (best-effort), F(old)[`cxb031_store_file`] stays in place so the next pass re-adopts and
     // retries — never both stores gone at once.
-    if write_stored_secrets(&store_file(secret_root, work_dir), &stored) && legacy_converged {
+    let owner = compose_project_name(work_dir);
+    if write_stored_secrets_owned(
+        &store_file(secret_root, work_dir),
+        Some(owner.as_str()),
+        &stored,
+    ) && legacy_converged
+    {
         expire_converged_legacy_store(&cxb031_store_file(secret_root, work_dir));
     }
     resolved
@@ -176,7 +192,12 @@ fn read_dot_env(path: &std::path::Path) -> std::collections::HashSet<String> {
 /// where agents read diffs from and commit from (CXA-B028). Defaults to a
 /// per-user data dir, overridable with `COXAGENT_DEPLOY_SECRETS_DIR` so tests
 /// and sandboxes can point it at an isolated location.
-fn deploy_secrets_root() -> std::path::PathBuf {
+///
+/// Public since CXA-F262: the backup/restore commands need the SAME root to
+/// capture (`--include-secrets`) and to restore secret files onto the CURRENT
+/// machine — resolving it anywhere else would desynchronize the two.
+#[must_use]
+pub fn deploy_secrets_root() -> std::path::PathBuf {
     if let Some(dir) = std::env::var_os("COXAGENT_DEPLOY_SECRETS_DIR") {
         return std::path::PathBuf::from(dir);
     }
@@ -285,6 +306,16 @@ fn adopt_legacy_cxb031_secrets(
 ) -> bool {
     let legacy_path = cxb031_store_file(secret_root, work_dir);
     let legacy = read_stored_secrets(&legacy_path);
+    if legacy.is_empty() {
+        return false;
+    }
+    // CXA-B043: never adopt creds authored by a differently-named project sharing this dir.
+    if matches!(
+        read_owner_stamp(&legacy_path),
+        Some(author) if author != compose_project_name(work_dir)
+    ) {
+        return false;
+    }
     for (k, v) in &legacy {
         // Prefer the pre-switch value whenever it differs from / is absent from what resolution just
         // read at today's name-derived location — recovering exactly what initialised pgdata.
@@ -313,6 +344,85 @@ fn expire_converged_legacy_store(path: &std::path::Path) {
     let _ = std::fs::remove_file(path);
 }
 
+/// Retire a SUPERSEDED path-keyed secret store left behind for THIS project by an
+/// earlier software version — even on a pass where NO fallback secret is needed.
+///
+/// CXA-B032/B033 moved persistence onto per-compose-project NAME-keyed files; anything an old build
+/// stored under its obsolete SHA-of-absolute-path filename ([`cxb031_store_file`]) is therefore
+/// unreferenced yet still holds live DB/admin credentials at rest forever — a duplicate plaintext copy.
+/// When such a file exists for this same checkout we adopt any value our canonical store does not already
+/// know (so pgdata-initialized creds are not regenerated), persist them durably into [`store_file`], then
+/// DELETE the obsolete file so no duplicate credential remains on disk (CXA-B040).
+///
+/// Unlike [`adopt_legacy_cxb031_secrets`] — which only runs once a fallback is needed, inside
+/// [`resolve_deploy_secrets_in`] — this runs in the empty-missing shortcut, so the duplicate is removed
+/// on every post-upgrade resolution pass, including one where the operator supplies every required secret
+/// externally and would otherwise skip adoption/expiry entirely (CXA-B040).
+///
+/// Deletion is gated exactly like [`expire_converged_legacy_store`] ([CXA-B044]): only after the adopted values are
+/// DURABLY persisted into our canonical store do we remove the legacy file, so we can never lose live credentials
+/// before they are owned by their new location. The CXA-B043 ownership-stamp rule applies too: we never adopt or delete
+/// a legacy file authored by a differently-named project sharing this directory.
+///
+/// Best-effort like all persistence here: failures are logged via [`tracing`], never fatal to a deploy.
+fn retire_superseded_path_keyed_store(secret_root: &std::path::Path, work_dir: &std::path::Path) {
+    let legacy_path = cxb031_store_file(secret_root, work_dir);
+
+    // Nothing superseded anywhere? No-op without touching host state.
+    if !legacy_path.exists() {
+        return;
+    }
+
+    // Never adopt or delete creds authored by a differently-named project sharing this dir (CXA-B043).
+    if matches!(
+        read_owner_stamp(&legacy_path),
+        Some(author) if author != compose_project_name(work_dir)
+    ) {
+        tracing::debug!(
+            "skipping superseded secret store {} owned by another project",
+            legacy_path.display()
+        );
+        return;
+    }
+
+    // Merge every legacy value into our canonical store WITHOUT ever overriding one we already own there —
+    // operator-configured or previously-adopted creds win.
+    let mut merged = read_stored_secrets(&store_file(secret_root, work_dir));
+    for (k, v) in read_stored_secrets(&legacy_path) {
+        merged.entry(k).or_insert(v);
+    }
+
+    // Persist durably first; only once our canonical store owns every adopted value is it safe to remove the
+    // superseded duplicate — deleting first could strand live creds ([CXA-B044]). We persist unconditionally so an
+    // owner stamp lands even when nothing was newly adopted (the caller wants the pre-existing dup GONE regardless).
+    let owner = compose_project_name(work_dir);
+    let durable = write_stored_secrets_owned(
+        &store_file(secret_root, work_dir),
+        Some(owner.as_str()),
+        &merged,
+    );
+    if durable {
+        match std::fs::remove_file(&legacy_path) {
+            Ok(()) => tracing::info!(
+                "removed superseded path-keyed deploy secret store {} after adopting its \
+                 values into {}",
+                legacy_path.display(),
+                store_file(secret_root, work_dir).display()
+            ),
+            Err(e) => tracing::warn!(
+                "adopted values from superseded secret store {} but could not remove it: {e}",
+                legacy_path.display()
+            ),
+        }
+    } else {
+        tracing::warn!(
+            "could not durably persist adoption from superseded secret store {}; leaving \
+             it in place until adoption succeeds so no live credential is lost",
+            legacy_path.display()
+        );
+    }
+}
+
 /// Read a project's previously generated secrets back out of the out-of-tree
 /// store as `KEY -> value`. Absent or unreadable store = nothing persisted yet.
 fn read_stored_secrets(path: &std::path::Path) -> std::collections::HashMap<String, String> {
@@ -334,6 +444,20 @@ fn read_stored_secrets(path: &std::path::Path) -> std::collections::HashMap<Stri
         .collect()
 }
 
+/// Read the ownership stamp embedded by [`write_stored_secrets_owned`] as the
+/// first line of a store file (CXA-B043). Returns the owning compose project
+/// name, or `None` when the file predates stamping / is absent / unreadable.
+fn read_owner_stamp(path: &std::path::Path) -> Option<String> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    contents.lines().next().and_then(|line| {
+        line.trim()
+            .strip_prefix(OWNER_STAMP_PREFIX)
+            .map(str::trim)
+            .filter(|o| !o.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
 /// Persist a project's generated secrets into the out-of-tree store so later
 /// deploy cycles reuse them ([resolve_deploy_secrets_in]). Writes atomically
 /// via a temp sibling + rename so a crash mid-write can never leave a half-
@@ -346,8 +470,29 @@ fn read_stored_secrets(path: &std::path::Path) -> std::collections::HashMap<Stri
 /// change behind and drops its temp sibling ([CXA-B044]). Callers MUST treat
 /// non-`true` as "nothing durable exists yet" — e.g. deleting an adopted legacy
 /// source after this would risk losing both stores.
+///
+/// Production persistence goes through [`write_stored_secrets_owned`] (which stamps
+/// ownership); this unstamped form survives for writing fixtures / pre-stamp stores
+/// in [`mod deploy_secret_tests`].
+#[cfg(test)]
 fn write_stored_secrets(
     path: &std::path::Path,
+    secrets: &std::collections::HashMap<String, String>,
+) -> bool {
+    persist_store(path, None, secrets)
+}
+
+pub(crate) fn write_stored_secrets_owned(
+    path: &std::path::Path,
+    owner: Option<&str>,
+    secrets: &std::collections::HashMap<String, String>,
+) -> bool {
+    persist_store(path, owner, secrets)
+}
+
+fn persist_store(
+    path: &std::path::Path,
+    owner_stamp: Option<&str>,
     secrets: &std::collections::HashMap<String, String>,
 ) -> bool {
     let Some(parent) = path.parent() else {
@@ -357,6 +502,12 @@ fn write_stored_secrets(
         return false;
     }
     let mut body = String::new();
+    // CXA-B043 ownership stamp first line (when owned), before any KEY=VALUE line.
+    if let Some(owner) = owner_stamp {
+        body.push_str(OWNER_STAMP_PREFIX);
+        body.push_str(owner);
+        body.push('\n');
+    }
     for (k, v) in secrets {
         body.push_str(k);
         body.push('=');
@@ -443,30 +594,6 @@ async fn compose_project_on_port(port: &str) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-/// Whether the deploy may `down` a compose project that is squatting one of the
-/// agent's host ports. This is the blast-radius guard for the port-eviction
-/// self-heal: only agent-managed preview projects (`cox-{parent}-{dir}`) may be
-/// evicted. The live hub (`coxagent` / `coxagent-*`) and shared infra
-/// (`cox-infra`) are NEVER evocable — downing either is a self-inflicted outage,
-/// exactly the class of bug where an agent deploy took the whole control plane
-/// down trying to free a port it thought it owned.
-fn evictable_project(project: &str) -> bool {
-    // `compose_project_name` always yields `cox-<parent>-<dir>`, so an
-    // evocable preview is recognisable by its `cox-` prefix — provided it is
-    // NOT the live hub. `coxagent` and anything starting with `coxagent` (the
-    // production project plus any of its service containers) are protected, as
-    // is shared shared infrastructure (`cox-infra`).
-    let lower = project.to_ascii_lowercase();
-    if lower == "cox-infra"
-        || lower == "coxagent"
-        || lower.starts_with("coxagent")
-        || lower.starts_with("cox-infra")
-    {
-        return false;
-    }
-    lower.starts_with("cox-")
-}
-
 /// Clamp every container of this compose project to a CPU/memory budget via
 /// `docker update`, regardless of what the agent-authored compose file says —
 /// a runaway service (busy loop, leak) can then never take the whole host.
@@ -508,27 +635,49 @@ async fn apply_resource_limits(proj: &str) {
     }
 }
 
-/// The id of ANY container publishing `port` (compose-labelled or not).
-async fn container_on_port(port: &str) -> Option<String> {
+/// The `(id, container name)` of the first container publishing `port`, or
+/// `None` when docker yields nothing usable. Only reached on the label-less
+/// branch — [`compose_project_on_port`] is consulted first — and a holder this
+/// cannot name is treated as unknown, never as ours to stop (CXA-B083/B085).
+async fn raw_container_on_port(port: &str) -> Option<(String, String)> {
     let out = Command::new("docker")
         .args([
             "ps",
             "--filter",
             &format!("publish={port}"),
             "--format",
-            "{{.ID}}",
+            "{{.ID}}\t{{.Names}}",
         ])
         .stdin(std::process::Stdio::null())
         .output()
         .await
         .ok()?;
-    let id = String::from_utf8_lossy(&out.stdout)
+    String::from_utf8_lossy(&out.stdout)
         .lines()
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_owned();
-    (!id.is_empty()).then_some(id)
+        .find_map(parse_holder_line)
+}
+
+/// Pure parse of one `docker ps` identity line into `(id, name)`; `None` for
+/// anything malformed, so a holder with no recoverable name can never be
+/// classified as ours to stop (CXA-B085). Tolerates either separator docker
+/// renders between `{{.ID}}` and `{{.Names}}` (tab or space).
+fn parse_holder_line(line: &str) -> Option<(String, String)> {
+    let line = line.trim();
+    let (id, name) = line.split_once(char::is_whitespace)?;
+    let name = name.trim();
+    let name = name.strip_prefix('/').unwrap_or(name);
+    if id.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some((id.to_owned(), name.to_owned()))
+}
+
+/// Pure eviction verdict for one label-less port holder (CXA-B085):
+/// `Some(id)` — stop that exact container because its name proves an
+/// agent-managed `cox-` container; `None` — foreign, anonymous or protected,
+/// leave it strictly alone and report the collision instead.
+fn raw_stop_target(id: &str, name: &str) -> Option<String> {
+    reclaimable_raw_container(name).then(|| id.to_owned())
 }
 
 /// Deterministic compose project name for a deploy dir: `cox-<parent>-<dir>`
@@ -574,6 +723,86 @@ async fn running_services(work_dir: &Path) -> Vec<String> {
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+/// CXA-F289: resolved `${VAR}` secret values must never survive into a
+/// forensics bundle — replace every configured value with a marker before the
+/// text reaches the bundle (which masks secret-SHAPED `KEY=value` lines again
+/// at persistence). Values shorter than 8 chars are skipped: masking a short
+/// common word would mangle unrelated log lines without buying protection.
+fn mask_resolved_secrets(text: &str, secrets: &[(String, String)]) -> String {
+    let mut out = text.to_owned();
+    for (_, value) in secrets {
+        if value.len() >= 8 {
+            out = out.replace(value.as_str(), "***");
+        }
+    }
+    out
+}
+
+/// CXA-F289: the recent log tail of every container the compose project
+/// managed at failure time (`docker compose logs --tail 200` per service).
+/// An empty result — a validation failure, or no container ever started — is
+/// the caller's explicit "no container logs" signal: the bundle records that
+/// fact rather than rendering an empty log section.
+async fn capture_container_logs(proj: &str) -> Vec<coxagent_application::state::ContainerLogTail> {
+    // Which services does this compose project manage? `-a` so stopped/errored
+    // containers are listed too — they are exactly the interesting ones after
+    // a failed `up`. A non-zero exit here (invalid compose file, daemon down)
+    // means there is nothing to collect, same as an empty list.
+    let Ok(listed) = Command::new("docker")
+        .args([
+            "compose",
+            "-p",
+            proj,
+            "ps",
+            "-a",
+            "--format",
+            "{{.Service}}",
+        ])
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+    else {
+        return Vec::new();
+    };
+    if !listed.status.success() {
+        return Vec::new();
+    }
+    let services: Vec<String> = String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|service| !service.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    let mut logs = Vec::new();
+    for service in services {
+        // Recent tail of THIS service's output; `--no-log-prefix` so the
+        // service attribution comes from the listing above, not the line.
+        if let Ok(tailed) = Command::new("docker")
+            .args([
+                "compose",
+                "-p",
+                proj,
+                "logs",
+                "--no-log-prefix",
+                "--tail",
+                "200",
+                &service,
+            ])
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output()
+            .await
+        {
+            let tail = String::from_utf8_lossy(&tailed.stdout).to_string();
+            if !tail.trim().is_empty() {
+                logs.push(coxagent_application::state::ContainerLogTail { service, tail });
+            }
+        }
+    }
+    logs
 }
 
 /// Deploys via the `docker` CLI.
@@ -636,10 +865,7 @@ fn linux_c_toolchain_present() -> bool {
         "musl-clang",
         "zig", // zig cc can drive a configured cross build when present
     ];
-    if std::env::var("CARGO_BUILD_TARGET")
-        .ok()
-        .is_some_and(|v| v.contains("linux"))
-    {
+    if std::env::var("CARGO_BUILD_TARGET").is_ok_and(|v| v.contains("linux")) {
         return true;
     }
     let overrides = [
@@ -674,6 +900,19 @@ fn linux_c_toolchain_present() -> bool {
 
 #[async_trait]
 impl DeployPort for DockerComposeDeploy {
+    /// The one honest check that `docker compose` (CLI + plugin) can run:
+    /// asking it for its version, exactly like `daemon_up` asks the daemon.
+    async fn compose_available(&self) -> bool {
+        Command::new("docker")
+            .args(["compose", "version"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .is_ok_and(|s| s.success())
+    }
+
     async fn lint(&self, work_dir: &Path) -> Result<Option<u64>, PortError> {
         // Rust-only for now: clippy's error count is the lint currency the
         // DoD gate compares against the project baseline.
@@ -882,9 +1121,89 @@ impl DeployPort for DockerComposeDeploy {
         self.run_test_command(work_dir, &cmd, &refs).await
     }
 
+    async fn run_e2e(
+        &self,
+        work_dir: &Path,
+        seed_modules: Option<&std::path::Path>,
+    ) -> Result<DeployReport, PortError> {
+        let e2e = work_dir.join("e2e");
+        if !e2e.join("playwright.config.ts").exists() {
+            return Ok(DeployReport {
+                failure_bundle: None,
+                success: true,
+                deployed: false,
+                summary: "no e2e suite".to_owned(),
+            });
+        }
+        // The browser gate is OPTIONAL tooling: a user's machine without
+        // Node/Playwright must DEGRADE (skip with a visible warning), never
+        // hold every UI PR red for a missing dev tool.
+        let npx_ok = std::process::Command::new("npx")
+            .args(["playwright", "--version"])
+            .current_dir(&e2e)
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !npx_ok {
+            tracing::warn!(
+                "browser e2e gate skipped: Node/Playwright not available — \
+                 install Node and `cd e2e && npm ci && npx playwright install` to enable it"
+            );
+            return Ok(DeployReport {
+                failure_bundle: None,
+                success: true,
+                deployed: false,
+                summary: "e2e runner unavailable (Node/Playwright not installed) — gate skipped"
+                    .to_owned(),
+            });
+        }
+        // A fresh verification worktree has no node_modules; borrow the main
+        // checkout's via symlink instead of a per-PR npm install.
+        let nm = e2e.join("node_modules");
+        if !nm.exists() {
+            if let Some(seed) = seed_modules.filter(|s| s.exists()) {
+                let _ = std::os::unix::fs::symlink(seed, &nm);
+            }
+        }
+        if !nm.exists() {
+            let ok = std::process::Command::new("npm")
+                .arg("ci")
+                .arg("--silent")
+                .current_dir(&e2e)
+                .status()
+                .is_ok_and(|s| s.success());
+            if !ok {
+                return Ok(DeployReport {
+                    failure_bundle: None,
+                    success: false,
+                    deployed: true,
+                    summary: "e2e: npm ci failed".to_owned(),
+                });
+            }
+        }
+        let report = self
+            .run_test_command(&e2e, "npx", &["playwright", "test", "--reporter=line"])
+            .await?;
+        // Browsers not downloaded yet is the same class as no Node: optional
+        // tooling missing, not a red suite.
+        if !report.success && report.summary.contains("Executable doesn't exist") {
+            tracing::warn!(
+                "browser e2e gate skipped: Playwright browsers not installed — \
+                 run `cd e2e && npx playwright install`"
+            );
+            return Ok(DeployReport {
+                failure_bundle: None,
+                success: true,
+                deployed: false,
+                summary: "e2e browsers not installed — gate skipped".to_owned(),
+            });
+        }
+        Ok(report)
+    }
+
     async fn run_tests(&self, work_dir: &Path) -> Result<DeployReport, PortError> {
         let Some((cmd, args)) = test_command(work_dir) else {
             return Ok(DeployReport {
+                failure_bundle: None,
                 success: true,
                 deployed: false,
                 summary: "no recognised test runner".to_owned(),
@@ -894,6 +1213,11 @@ impl DeployPort for DockerComposeDeploy {
     }
 
     async fn down(&self, work_dir: &Path) -> Result<(), PortError> {
+        // Deliberately WITHOUT `-v`: callers use this to PAUSE a project (the
+        // forge preview swap/restore stops the main build and brings it back
+        // later), so the pgdata volume must survive the pause (CXA-B115).
+        // Dormant volumes of genuinely-destroyed projects are the janitor
+        // sweep's job (CXA-B143).
         let proj = compose_project_name(work_dir);
         let _ = Command::new("docker")
             .args(["compose", "-p", &proj, "down", "--remove-orphans"])
@@ -995,6 +1319,7 @@ impl DeployPort for DockerComposeDeploy {
     async fn deploy(&self, work_dir: &Path) -> Result<DeployReport, PortError> {
         if !COMPOSE_FILES.iter().any(|f| work_dir.join(f).exists()) {
             return Ok(DeployReport {
+                failure_bundle: None,
                 success: true,
                 deployed: false,
                 summary: "no compose file — deploy skipped".to_owned(),
@@ -1006,11 +1331,15 @@ impl DeployPort for DockerComposeDeploy {
         // ports, so `up` fails with "port is already allocated" — a recurring,
         // self-inflicted deploy blocker. `down --remove-orphans` releases the
         // project's own ports (and orphaned services) so `up` starts clean.
+        // Deliberately WITHOUT `-v`: this is a REDEPLOY, not a teardown — the
+        // pgdata volume must survive so the stored secrets keep matching the
+        // initialised database (CXA-B115/B032). Dormant-volume hygiene for
+        // genuinely-destroyed projects is the janitor's sweep (CXA-B143).
         let proj = compose_project_name(work_dir);
         // Safety: `compose_project_name` always yields `cox-<parent>-<dir>`,
         // but double-check it can never collide with the live hub project
         // before we `down --remove-orphans` anything.
-        if !evictable_project(&proj) {
+        if !reclaimable_compose_project(&proj) {
             return Err(PortError::Backend(format!(
                 "refusing to deploy project `{proj}` — collides with the live hub"
             )));
@@ -1061,9 +1390,11 @@ impl DeployPort for DockerComposeDeploy {
         // notices.
         let mut evicted = None;
         // Up to two eviction+retry rounds: round 1 handles a stale compose
-        // project; round 2 (or when no compose label exists) stops whatever
-        // raw container is squatting the port. Docker also needs a beat to
-        // release a freshly-stopped binding, hence the short sleep.
+        // project; round 2 (or when no compose label exists) stops a raw
+        // squatter only when its name proves this deploy namespace owns it —
+        // anything else is reported as a collision, never touched
+        // (CXA-B083/B085). Docker also needs a beat to release a
+        // freshly-stopped binding, hence the short sleep.
         for round in 0..2u8 {
             if output.status.success() {
                 break;
@@ -1080,24 +1411,41 @@ impl DeployPort for DockerComposeDeploy {
                 // to free the port — that is a self-inflicted outage, not a
                 // port eviction. Only agent preview projects (`cox-...`) are
                 // evictable; anything else is reported as a collision.
-                if !evictable_project(&project) {
+                if !reclaimable_compose_project(&project) {
                     break;
                 }
+                // `-v`: eviction DESTROYS this project — containers, networks
+                // and volumes alike. Leaving the volumes behind is how dormant
+                // pgdata/workspace residue accumulated on the host (CXA-B143).
                 let _ = Command::new("docker")
-                    .args(["compose", "-p", &project, "down", "--remove-orphans"])
+                    .args(["compose", "-p", &project, "down", "-v", "--remove-orphans"])
                     .stdin(std::process::Stdio::null())
                     .kill_on_drop(true)
                     .output()
                     .await;
                 evicted = Some(format!("compose project `{project}`"));
-            } else if let Some(id) = container_on_port(&port).await {
-                let _ = Command::new("docker")
-                    .args(["stop", &id])
-                    .stdin(std::process::Stdio::null())
-                    .kill_on_drop(true)
-                    .output()
-                    .await;
-                evicted = Some(format!("container `{id}`"));
+            } else if let Some((id, name)) = raw_container_on_port(&port).await {
+                // Same ownership policy as compose projects, applied to the
+                // container NAME — the only ownership signal a label-less
+                // container has (CXA-B083). A label-less holder is stopped by
+                // id only when its NAME proves an agent-managed `cox-`
+                // container; the live hub or shared infra launched via plain
+                // `docker run`, and any foreign or anonymous raw squatter
+                // (e.g. a bare `docker run -p 8101:80 nginx`), is never
+                // touched — the deploy reports the collision instead of
+                // killing an unrelated service (CXA-B085).
+                match raw_stop_target(&id, &name) {
+                    Some(target) => {
+                        let _ = Command::new("docker")
+                            .args(["stop", &target])
+                            .stdin(std::process::Stdio::null())
+                            .kill_on_drop(true)
+                            .output()
+                            .await;
+                        evicted = Some(format!("container `{name}`"));
+                    }
+                    None => break,
+                }
             } else if round > 0 {
                 break; // nothing visible holds the port — give up, report
             }
@@ -1121,6 +1469,7 @@ impl DeployPort for DockerComposeDeploy {
         if success {
             apply_resource_limits(&proj).await;
         }
+        let mut failure_bundle = None;
         let summary = if success {
             let note = evicted
                 .map(|p| format!(" (evicted stale {p} off the port)"))
@@ -1149,9 +1498,27 @@ impl DeployPort for DockerComposeDeploy {
                 .unwrap_or_else(|| {
                     format!("exit {} (no output)", output.status.code().unwrap_or(-1))
                 });
+            // CXA-F289: a failed deploy must not destroy its own evidence.
+            // Capture the stderr tail plus the recent per-container logs while
+            // this process still holds them, mask the resolved secret values,
+            // and let the bundle type bound + re-mask before anything
+            // persists. No container ever listed = the explicit AC3 marker.
+            let raw = if err.trim().is_empty() {
+                out.as_ref()
+            } else {
+                err.as_ref()
+            };
+            let logs = capture_container_logs(&proj).await;
+            let no_container_logs = logs.is_empty();
+            failure_bundle = Some(coxagent_application::state::DeployFailureBundle::new(
+                &mask_resolved_secrets(raw, &secrets),
+                logs,
+                no_container_logs,
+            ));
             format!("docker compose failed: {detail}")
         };
         Ok(DeployReport {
+            failure_bundle,
             success,
             deployed: true,
             summary,
@@ -1163,35 +1530,80 @@ impl DeployPort for DockerComposeDeploy {
 mod tests {
     use super::*;
 
-    /// The port-eviction blast-radius guard: agent preview projects are
-    /// evictable, the live hub and shared infra are not.
+    // The deploy port-eviction decision routes through the single shared
+    // reclaimability policy (`crate::deploy::reclaimable`), whose own unit
+    // tests own the full blast-radius matrix — live hub, shared infra,
+    // case-insensitivity and foreign projects — for both compose projects and
+    // label-less raw containers (CXA-B083/B085).
+
+    /// CXA-B085 regression guard: a label-less holder is stopped by id only
+    /// when its name proves an agent-managed `cox-` container.
     #[test]
-    fn evictable_project_protects_the_live_hub_and_infra() {
-        assert!(
-            evictable_project("cox-cxa-codebase"),
-            "agent preview evictable"
+    fn agent_named_raw_holder_is_stopped_by_id() {
+        assert_eq!(
+            raw_stop_target("deadbeef", "cox--slot-b-hub"),
+            Some("deadbeef".to_owned())
         );
-        assert!(
-            evictable_project("cox-my-project-preview"),
-            "any cox-<parent>-<dir> preview evictable"
+        assert_eq!(
+            raw_stop_target("deadbeef", "cox-my-project-web-1"),
+            Some("deadbeef".to_owned())
         );
-        // The live hub and anything sharing its prefix are NEVER evictable —
-        // downing them is the self-inflicted outage we guard against.
-        assert!(!evictable_project("coxagent"), "live hub protected");
-        assert!(
-            !evictable_project("coxagent-gateway"),
-            "hub service protected"
+    }
+
+    /// The CXA-B085 repro: a bare `docker run -p 8101:80 nginx` squatting the
+    /// port must never be force-stopped — the old code stopped whatever id
+    /// published the port with no ownership check at all.
+    #[test]
+    fn anonymous_raw_holder_is_never_stopped() {
+        assert_eq!(raw_stop_target("deadbeef", "nginx"), None);
+        assert_eq!(raw_stop_target("deadbeef", "sharp_poincare"), None);
+    }
+
+    #[test]
+    fn protected_and_foreign_raw_holders_are_never_stopped() {
+        for name in [
+            "coxagent",
+            "coxagent-gateway",
+            "cox-infra",
+            "cox-infra-db",
+            "COXAGENT",
+            "Cox-Infra-Db",
+            "someone-elses-stack",
+            "myapp-prod",
+        ] {
+            assert_eq!(
+                raw_stop_target("deadbeef", name),
+                None,
+                "{name} must never be stopped by id"
+            );
+        }
+    }
+
+    /// The identity parse fails closed: a holder line docker renders without a
+    /// usable id+name pair yields `None`, and the caller treats unknown as
+    /// never-touch.
+    #[test]
+    fn holder_line_parses_id_and_name_and_fails_closed() {
+        assert_eq!(
+            parse_holder_line("deadbeef nginx"),
+            Some(("deadbeef".to_owned(), "nginx".to_owned()))
         );
-        assert!(!evictable_project("cox-infra"), "shared infra protected");
-        assert!(
-            !evictable_project("cox-infra-db"),
-            "shared infra child protected"
+        // The `{{.ID}}\t{{.Names}}` format docker actually renders (tab).
+        assert_eq!(
+            parse_holder_line("deadbeef\tcox--slot-b-hub"),
+            Some(("deadbeef".to_owned(), "cox--slot-b-hub".to_owned()))
         );
-        // A non-preview project on our port is a collision, not an eviction.
-        assert!(
-            !evictable_project("someone-elses-stack"),
-            "foreign project protected"
+        // Defensively normalize a leading '/' (docker renders it in some name
+        // fields) so a cox-owned holder can never be misread as foreign.
+        assert_eq!(
+            parse_holder_line("deadbeef /cox--slot-b-hub"),
+            Some(("deadbeef".to_owned(), "cox--slot-b-hub".to_owned()))
         );
+        assert_eq!(parse_holder_line(""), None);
+        assert_eq!(parse_holder_line("deadbeef"), None);
+        assert_eq!(parse_holder_line("deadbeef "), None);
+        assert_eq!(parse_holder_line("deadbeef\t"), None);
+        assert_eq!(parse_holder_line("  /nginx"), None);
     }
 
     /// Regression guard for CXA-B010 + CXA-B017: every site that runs compose
@@ -1380,7 +1792,9 @@ async fn compose_build_check(
     // to start services.
     let secrets = resolve_deploy_secrets(work_dir);
     let mut build = Command::new("docker");
-    build.args(["compose", "-p", &proj, "build"]);
+    // `--ssh default` forwards the host agent so the builder stage can fetch
+    // the private harxes-core git dependency (see Dockerfile).
+    build.args(["compose", "-p", &proj, "build", "--ssh", "default"]);
     build.current_dir(work_dir);
     seed_deploy_secrets(&mut build, &secrets);
     let out = tokio::time::timeout(DEPLOY_TIMEOUT, build.output())
@@ -1414,7 +1828,7 @@ async fn compose_build_check(
     let dockerfile_build = tokio::time::timeout(
         DEPLOY_TIMEOUT,
         Command::new("docker")
-            .args(["build", "-f", "Dockerfile", "."])
+            .args(["build", "--ssh", "default", "-f", "Dockerfile", "."])
             .current_dir(work_dir)
             .stdin(std::process::Stdio::null())
             .output(),
@@ -1566,7 +1980,8 @@ mod cross_check_tests {
 mod deploy_secret_tests {
     use super::{
         compose_project_name, cxb031_store_file as legacy_key_file, missing_required_secrets,
-        random_secret, read_dot_env, resolve_deploy_secrets_in, store_file, write_stored_secrets,
+        random_secret, read_dot_env, read_stored_secrets, resolve_deploy_secrets_in, store_file,
+        write_stored_secrets, write_stored_secrets_owned,
     };
     use std::collections::{HashMap, HashSet};
 
@@ -1943,7 +2358,60 @@ mod deploy_secret_tests {
         );
     }
 
-    /// CXA-B039 regression guard: adoption must recover the correct pre-switch value V even when an
+    /// CXA-B040 regression guard: a SUPERSEDED path-keyed secret store left behind for THIS project
+    /// by an earlier software version must have its live value adopted into our canonical NAME-keyed
+    /// store AND its duplicate plaintext file REMOVED — even when every required secret is now supplied
+    /// externally, so resolution would otherwise take the empty-missing shortcut and never reach
+    /// [`adopt_legacy_cxb031_secrets`]/[`expire_converged_legacy_store`] (which only run in the fallback
+    /// path). Without this fix an obsolete duplicate holding live credentials lingers unreferenced on disk forever.
+    #[test]
+    fn superseded_path_keyed_store_is_adopted_and_removed_even_when_all_secrets_are_external() {
+        let proj = std::env::temp_dir().join(format!("cxab040-proj-{}", std::process::id()));
+        let secret_root =
+            std::env::temp_dir().join(format!("cxab040-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&secret_root);
+        std::fs::create_dir_all(&proj).expect("mkdir");
+
+        // Operator fully configures both required secrets -> resolution needs NO fallback.
+        std::fs::write(
+            proj.join(".env"),
+            "PG_PASSWORD=external-pg\nCOXAGENT_ADMIN_PASSWORD=external-admin\n",
+        )
+        .expect("write dot_env");
+
+        // B031-era on-disk state: ONLY an obsolete path-keyed store exists for THIS checkout,
+        // carrying a live credential that initialized pgdata.
+        let mut legacy: HashMap<String, String> = HashMap::new();
+        legacy.insert("PG_PASSWORD".to_owned(), "stable-b031-password".to_owned());
+        write_stored_secrets(legacy_key_file(&secret_root, &proj).as_path(), &legacy);
+        let legacy_path = legacy_key_file(&secret_root, &proj);
+        assert!(legacy_path.exists(), "premise: superseded store present");
+
+        // Resolution resolves nothing (everything supplied externally)...
+        let resolved = resolve_deploy_secrets_in(&proj, &secret_root);
+        assert!(
+            resolved.is_empty(),
+            "fully-externally-supplied project must resolve NO fallback secrets"
+        );
+
+        // ...yet still adopts into the canonical store and removes the obsolete duplicate.
+        assert!(
+            !legacy_path.exists(),
+            "superseded path-keyed store must be removed after adoption even when no \
+             fallback was needed (CXA-B040)"
+        );
+        assert_eq!(
+            read_stored_secrets(store_file(&secret_root, &proj).as_path()).get("PG_PASSWORD"),
+            Some(&"stable-b031-password".to_string()),
+            "the obsolete duplicate's live credential must be adopted into the canonical store \
+             before the superseded file is removed (CXA-B040)"
+        );
+
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&secret_root);
+    }
+
     /// INTERVENING B032-era deploy cycle already wrote a divergent fresh value P into today's
     /// name-derived store. CXA-B036's migration bailed out entirely once `stored` (read only from the
     /// name-derived file) was non-empty, so it never consulted F(old)==V; PG_PASSWORD then stayed at
@@ -1993,6 +2461,71 @@ mod deploy_secret_tests {
 
         let _ = std::fs::remove_dir_all(&proj);
         let _ = std::fs::remove_dir_all(&secret_root);
+    }
+
+    /// CXA-B043 regression guard: adoption must NOT drag ANOTHER project's credentials into
+    /// this one when their path-keyed legacy store is reused by a differently-named compose
+    /// project sharing this directory over time under one secret_root.
+    ///
+    /// Two distinct apps need only occupy one canonicalised absolute path across history plus
+    /// one shared deploy-secrets root; whoever moves in last finds THAT other app's pre-switch
+    /// value at today's F(old). With no ownership signal we would absorb it as our own — seeding
+    /// wrong PG_PASSWORD against OUR volume. The fix stamps every persisted store with its owning
+    /// compose project ([`write_stored_secrets_owned`]) and refuses to adopt any legacy file whose
+    /// stamp names a DIFFERENT project than today's [`compose_project_name`]; a self-stamped or
+    /// unstamped (pre-stamp-era) file remains eligible so genuine in-place migration still works.
+    #[test]
+    fn cross_project_legacy_store_is_not_adopted_but_own_is() {
+        let proj = std::env::temp_dir().join(format!("cxab043-proj-{}", std::process::id()));
+        let secret_root =
+            std::env::temp_dir().join(format!("cxab043-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&proj);
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let _ = std::fs::remove_dir_all(&secret_root);
+
+        // Another app (different compose name) previously deployed in THIS directory and left its
+        // credential at today's path-derived legacy filename, stamped with ITS owner identity.
+        let mut foreign: HashMap<String, String> = HashMap::new();
+        foreign.insert(
+            "PG_PASSWORD".to_owned(),
+            "foreign-other-app-secret".to_owned(),
+        );
+        write_stored_secrets_owned(
+            legacy_key_file(&secret_root, &proj).as_path(),
+            Some("cox-some-other-parent-app"),
+            &foreign,
+        );
+
+        // This checkout must NOT adopt that other app's credential as its own.
+        let resolved = resolve_deploy_secrets_in(&proj, &secret_root);
+        let pg = resolved
+            .iter()
+            .find(|(k, _)| k == "PG_PASSWORD")
+            .map(|(_, v)| v.clone())
+            .expect("unconfigured app must resolve a PG_PASSWORD");
+        assert_ne!(
+            pg, "foreign-other-app-secret",
+            "must not adopt credentials authored by a differently-named project sharing this \
+             directory (CXA-B043)"
+        );
+
+        // A self-authored (same compose identity) stamped legacy store IS adopted — proving the gate
+        // only blocks cross-project reuse, never legitimate in-place migration of this same app.
+        write_stored_secrets_owned(
+            legacy_key_file(&secret_root, &proj).as_path(),
+            Some(compose_project_name(&proj).as_str()),
+            &foreign,
+        );
+        let self_resolved = resolve_deploy_secrets_in(&proj, &secret_root);
+        assert_eq!(
+            self_resolved
+                .iter()
+                .find(|(k, _)| k == "PG_PASSWORD")
+                .map(|(_, v)| v.clone())
+                .as_deref(),
+            Some("foreign-other-app-secret"),
+            "a legacy store stamped by THIS compose project is still adopted"
+        );
     }
 
     /// CXA-B042 regression guard: once adoption converges (every key in F(old) matches what resolution
@@ -2109,6 +2642,73 @@ mod deploy_secret_tests {
         let _ = std::fs::remove_dir_all(&proj);
         let _ = std::fs::remove_dir_all(&secret_root);
     }
+
+    /// CXA-B040 regression guard: a SUPERSEDED path-keyed store left behind for
+    /// THIS project must be retired even when every required secret is now supplied
+    /// externally (so nothing needs a fallback seed this pass). origin/main only
+    /// adopted+expired inside the fallback-generation branch; without this hook an
+    /// obsolete duplicate of live credentials lingered on disk forever precisely in
+    /// the fully-externally-configured upgrade case CXA-B040 names.
+    #[test]
+    fn superseded_path_keyed_store_is_retired_even_when_fully_externally_supplied() {
+        let proj = std::env::temp_dir().join(format!("cxab040-ext-proj-{}", std::process::id()));
+        let secret_root =
+            std::env::temp_dir().join(format!("cxab040-ext-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&secret_root);
+        std::fs::create_dir_all(&proj).expect("mkdir");
+
+        // Operator now supplies every required secret via <project>/.env, so resolution
+        // has nothing missing and would otherwise take the early-return shortcut.
+        std::fs::write(
+            proj.join(".env"),
+            "PG_PASSWORD=external-pg\nCOXAGENT_ADMIN_PASSWORD=external-admin\n",
+        )
+        .expect("write dot_env");
+
+        // Pre-upgrade state: only the OLD path-hash store holds live-looking creds;
+        // today's name-derived store does not exist yet.
+        let mut old_store: HashMap<String, String> = HashMap::new();
+        old_store.insert("PG_PASSWORD".to_owned(), "stable-b031-password".to_owned());
+        old_store.insert(
+            "COXAGENT_ADMIN_PASSWORD".to_owned(),
+            "stable-b031-admin".to_owned(),
+        );
+        write_stored_secrets(legacy_key_file(&secret_root, &proj).as_path(), &old_store);
+        assert!(
+            legacy_key_file(&secret_root, &proj).exists(),
+            "premise: superseded legacy store present"
+        );
+
+        // No required secret is missing -> no fallback is generated...
+        let resolved = resolve_deploy_secrets_in(&proj, &secret_root);
+        assert!(
+            resolved.is_empty(),
+            "fully-externally-supplied project must resolve NO fallback secrets"
+        );
+
+        // ...but its obsolete path-keyed duplicate must be gone AND its live values
+        // durably owned by today's name-derived store — never lost mid-migration.
+        assert!(
+            !legacy_key_file(&secret_root, &proj).exists(),
+            "superseded path-keyed store must be removed even when all secrets are external \
+             (CXA-B040)"
+        );
+        let modern = read_stored_secrets(store_file(&secret_root, &proj).as_path());
+        assert_eq!(
+            modern.get("PG_PASSWORD").map(String::as_str),
+            Some("stable-b031-password"),
+            "legacy value must be durably owned by today's store"
+        );
+        assert_eq!(
+            modern.get("COXAGENT_ADMIN_PASSWORD").map(String::as_str),
+            Some("stable-b031-admin"),
+            "legacy value must be durably owned by today's store"
+        );
+
+        let _ = std::fs::remove_dir_all(&proj);
+        let _ = std::fs::remove_dir_all(&secret_root);
+    }
 }
 
 impl DockerComposeDeploy {
@@ -2167,6 +2767,7 @@ impl DockerComposeDeploy {
             format!("{cmd} tests failed:\n{err}\n{out}")
         };
         Ok(DeployReport {
+            failure_bundle: None,
             success,
             deployed: true,
             summary,

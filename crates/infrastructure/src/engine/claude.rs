@@ -174,12 +174,16 @@ impl AgentEnginePort for ClaudeEngine {
             Some(mcp) => format!("{}{}", request.system_prompt, mcp_prompt_hint(mcp)),
             None => request.system_prompt.clone(),
         };
+        // The model THIS run executes on — the escalation ladder swaps models
+        // inside this adapter, so the provenance stamp must be the actual
+        // choice, not the configured one (CXA-F257).
+        let model = self.model_for(request.escalation_level).to_owned();
         cmd.arg("-p")
             .arg(&request.task_prompt)
             .arg("--append-system-prompt")
             .arg(&system_prompt)
             .arg("--model")
-            .arg(self.model_for(request.escalation_level))
+            .arg(&model)
             // Stream-json + verbose emits every step (assistant text, tool_use,
             // tool_result) plus a final result carrying usage/cost — so we can
             // show the detailed work log, not just the answer.
@@ -218,6 +222,7 @@ impl AgentEnginePort for ClaudeEngine {
                 &request.work_dir,
                 request.timeout,
                 sandbox,
+                &model,
             )
             .await;
         drop(_mcp_config_file);
@@ -247,7 +252,7 @@ impl AgentEnginePort for ClaudeEngine {
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true);
         crate::engine::apply_shim_path(&mut cmd);
-        self.exec(cmd, "resume", None, work_dir, timeout, sandbox)
+        self.exec(cmd, "resume", None, work_dir, timeout, sandbox, &self.model)
             .await
     }
 }
@@ -255,7 +260,11 @@ impl AgentEnginePort for ClaudeEngine {
 impl ClaudeEngine {
     /// Spawn `cmd`, stream its NDJSON stdout into the live log, and parse the
     /// final outcome (including the conversation `session_id`, so callers can
-    /// continue this run later). Shared by `run` and `resume_run`.
+    /// continue this run later). Shared by `run` and `resume_run`. `model` is
+    /// the model id passed on THIS command's `--model` — stamped onto the
+    /// outcome so provenance records the model that actually executed, not
+    /// the one config named (CXA-F257).
+    #[allow(clippy::too_many_arguments)] // one linear spawn recipe, private
     async fn exec(
         &self,
         mut cmd: Command,
@@ -264,6 +273,7 @@ impl ClaudeEngine {
         work_dir: &std::path::Path,
         timeout: std::time::Duration,
         sandbox: SandboxStatus,
+        model: &str,
     ) -> Result<AgentOutcome, PortError> {
         // Stream stdout line-by-line: render each event to the live log as it
         // arrives (so the UI can tail it), while accumulating the raw NDJSON for
@@ -274,7 +284,11 @@ impl ClaudeEngine {
         }
         cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        let mut child = crate::proc::spawn_confined(&mut cmd, sandbox)
+        // The status comes BACK from the spawn: a host whose Seatbelt refused
+        // the profile on every attempt downgrades it to `Denied`, so the
+        // outcome reports a run that never happened instead of a confined one
+        // (COX-B016).
+        let (mut child, sandbox) = crate::proc::spawn_confined(&mut cmd, sandbox)
             .await
             .map_err(|e| PortError::Backend(format!("spawn claude: {e}")))?;
         let out = child
@@ -348,6 +362,8 @@ impl ClaudeEngine {
             session_id: extract_session(&raw),
             sandbox,
             engine: "claude".to_owned(),
+            model: model.to_owned(),
+            attempts: Vec::new(),
         })
     }
 }
@@ -630,15 +646,19 @@ mod tests {
     #[test]
     fn tool_result_summary_reads_as_an_outcome_not_a_byte_count() {
         assert_eq!(
-            summarize_tool_result("   Compiling…\ntest result: ok. 220 passed; 0 failed; 0 ignored"),
+            summarize_tool_result(
+                "   Compiling…\ntest result: ok. 220 passed; 0 failed; 0 ignored"
+            ),
             "✓ 220 passed"
         );
         assert_eq!(
             summarize_tool_result("test result: FAILED. 2 passed; 1 failed; 0 ignored"),
             "✗ 1 failed"
         );
-        assert!(summarize_tool_result("error[E0433]: cannot find `x`\nerror: aborting")
-            .starts_with("✗ 2 error"));
+        assert!(
+            summarize_tool_result("error[E0433]: cannot find `x`\nerror: aborting")
+                .starts_with("✗ 2 error")
+        );
         // A source dump full of `.map_err`/`Error` must NOT read as failures.
         assert_eq!(
             summarize_tool_result("fn f() -> Result<(), Error> { x.map_err(|e| e)?; Ok(()) }"),
@@ -646,9 +666,15 @@ mod tests {
         );
         // A git fatal is shown as itself.
         assert!(summarize_tool_result("fatal: path 'x.rs' does not exist").starts_with("✗ fatal:"));
-        assert_eq!(summarize_tool_result("warning: unused variable `y`"), "⚠ 1 warning");
+        assert_eq!(
+            summarize_tool_result("warning: unused variable `y`"),
+            "⚠ 1 warning"
+        );
         assert_eq!(summarize_tool_result("a\nb\nc"), "3 lines");
-        assert_eq!(summarize_tool_result("crates/app/src/lib.rs:42"), "crates/app/src/lib.rs:42");
+        assert_eq!(
+            summarize_tool_result("crates/app/src/lib.rs:42"),
+            "crates/app/src/lib.rs:42"
+        );
         assert_eq!(summarize_tool_result("   "), "done (no output)");
     }
 
