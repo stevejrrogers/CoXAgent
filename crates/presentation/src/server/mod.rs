@@ -150,6 +150,16 @@ const APP_JS: &[(&str, &str)] = &[
     // feature script resolves user-facing strings through it, so it must load
     // before kpis.js/core.js.
     ("copy.js", include_str!("../web/js/copy.js")),
+    // Shared terminal-state shell + Overview panel wiring (CXA-B196/B194) —
+    // index.html loads both before kpis.js/core.js.
+    (
+        "terminal_state.js",
+        include_str!("../web/js/terminal_state.js"),
+    ),
+    (
+        "overview_states.js",
+        include_str!("../web/js/overview_states.js"),
+    ),
     // Overview KPI tiles (CXA-F360) — sparkline/delta series helpers that
     // core.js's overview render calls at runtime; loads before core.js.
     ("kpis.js", include_str!("../web/js/kpis.js")),

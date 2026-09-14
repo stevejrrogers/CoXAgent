@@ -478,7 +478,7 @@ fn every_manifest_panel_state_combination_renders_with_its_dom_id() {
 #[test]
 fn paint_binds_the_callers_callbacks_and_nothing_else() {
     let out = run_js(
-        r#"var host={innerHTML:"",querySelectorAll:function(sel){var out=[],re=/data-ts-act="(\d)"/g,m;while((m=re.exec(this.innerHTML))){var b={i:m[1],clicked:0,slot:m[1]==="0"?"primaryAction":"secondaryAction"};b.getAttribute=function(){return this.slot;};b.addEventListener=function(ev,fn){this.fire=function(){this.clicked++;fn();};};out.push(b);}return out;},firstElementChild:null};
+        r#"var host={innerHTML:"",querySelectorAll:function(sel){if(this._btns)return this._btns;var out=[],re=/data-ts-act="(\d)"/g,m;while((m=re.exec(this.innerHTML))){var b={i:m[1],clicked:0,slot:m[1]==="0"?"primaryAction":"secondaryAction"};b.getAttribute=function(){return this.slot;};b.addEventListener=function(ev,fn){this.fire=function(){this.clicked++;fn();};};out.push(b);}this._btns=out;return out;},firstElementChild:null};
 var calls={p:0,s:0};
 window.TerminalState.paint(host,{state:"error",icon:{ti:"alert-triangle"},title:"boom",body:"503",primary:{label:"Retry",onClick:function(){calls.p++;}},secondary:{label:"Details",onClick:function(){calls.s++;}}});
 var btns=host.querySelectorAll("[data-ts-act]");
@@ -498,7 +498,7 @@ fn paint_without_callbacks_renders_inert_buttons() {
     // A defaulted retry (no caller onClick) must not throw and must not bind.
     let out = run_js(
         r#"var host={innerHTML:"",querySelectorAll:function(){return [];},firstElementChild:null};
-var el=window.TerminalState.paint(host,{state:"error"});
+var el=window.TerminalState.paint(host,{state:"error"}).innerHTML||host.innerHTML;
 console.log(JSON.stringify({ok:!!el&&el.indexOf("ts-state--error")>=0}));"#,
     );
     assert!(
