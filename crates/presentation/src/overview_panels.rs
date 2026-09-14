@@ -137,7 +137,7 @@ pub enum Slot {
 ///
 /// Contract summary for CXA-B173b/B173c:
 ///
-/// * `Loading` — title only (a spinner is the component's own affair). A
+/// * `Loading` — title only (the progress mark is the component's own affair). A
 ///   loading panel must never be the resting state: whoever starts the request
 ///   owns the transition out.
 /// * `Empty` — icon + title + body; the body says what fills the panel. No
