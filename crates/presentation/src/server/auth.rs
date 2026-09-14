@@ -155,6 +155,63 @@ pub(super) fn is_store_rpc_path(path: &str) -> bool {
         .is_some_and(|pid| !pid.is_empty() && !pid.contains('/'))
 }
 
+/// The audit-log form of a request path. Revoking a share link carries the
+/// token in the URL — the very credential being killed (CXA-F069 AC5: a share
+/// token may never appear in logs) — so that one segment is masked before
+/// anything is recorded. Every other path passes through untouched.
+fn audit_safe_path(path: &str) -> String {
+    const MARK: &str = "/share-links/";
+    match path.split_once(MARK) {
+        Some((head, token)) if !token.is_empty() && !token.contains('/') => {
+            format!("{head}{MARK}<redacted>")
+        }
+        _ => path.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod audit_safe_path_tests {
+    use super::audit_safe_path;
+
+    #[test]
+    fn a_share_link_revoke_url_is_recorded_without_its_token() {
+        assert_eq!(
+            audit_safe_path("/api/projects/demo/share-links/abc123"),
+            "/api/projects/demo/share-links/<redacted>",
+            "the token being revoked must never reach the audit log"
+        );
+    }
+
+    #[test]
+    fn every_other_path_is_recorded_verbatim() {
+        // Create/list have no token segment after the marker.
+        assert_eq!(
+            audit_safe_path("/api/projects/demo/share-links"),
+            "/api/projects/demo/share-links"
+        );
+        assert_eq!(
+            audit_safe_path("/api/projects/demo/ticket/CXC-F001/priority"),
+            "/api/projects/demo/ticket/CXC-F001/priority"
+        );
+        assert_eq!(audit_safe_path("/join/tok"), "/join/tok");
+    }
+
+    #[test]
+    fn shapes_that_are_not_a_bare_token_segment_are_not_masked() {
+        // An empty or multi-segment tail is not a token; masking it would
+        // misrecord the URL. The share-link route only ever puts one segment
+        // there, so anything else is a different (unrouted) path.
+        assert_eq!(
+            audit_safe_path("/api/projects/demo/share-links/"),
+            "/api/projects/demo/share-links/"
+        );
+        assert_eq!(
+            audit_safe_path("/api/projects/demo/share-links/a/b"),
+            "/api/projects/demo/share-links/a/b"
+        );
+    }
+}
+
 /// RBAC gate. Open (pass-through) when no auth is configured. Otherwise: the
 /// SPA shell, health, and login are public; every other route needs a valid
 /// session, and mutating methods (except logout) need an admin.
@@ -170,6 +227,10 @@ pub(super) async fn auth_mw(
     // (Realtime endpoints carry their own guard; this blocks the REST surface.)
     let realtime_path = path.ends_with("/ws")
         || path.ends_with("/events")
+        // The fleet river (CXA-F233) is an SSE stream like the per-project
+        // one — a realtime surface, so the physical service split keeps
+        // routing it to realtime pods instead of whichever pod answers REST.
+        || path.ends_with("/river")
         || path.ends_with("/terminal")
         || path.contains("/docs-ws");
     let role_ok = match hub_role() {
@@ -194,6 +255,9 @@ pub(super) async fn auth_mw(
     // webhook token is the credential, so no session is required).
     if path == "/"
         || path == "/api/health"
+        // OpenAPI spec - public, like health: MCP clients and SDK generators
+        // must discover endpoints without holding a hub session.
+        || path == "/api/openapi.json"
         || path == "/api/auth/login"
         // Embedded static assets (vendored JS/CSS) — same trust level as "/".
         || path.starts_with("/assets/")
@@ -204,6 +268,11 @@ pub(super) async fn auth_mw(
         // Invite flow: the invite token IS the credential for joining.
         || path.starts_with("/join/")
         || path == "/api/workspace/join"
+        // Share-link status page (CXA-F069): the unguessable share token IS
+        // the credential — no session, exactly like /join/:token. The page
+        // handler answers 404 for unknown/revoked tokens, so probing learns
+        // nothing.
+        || path.starts_with("/s/")
     {
         return next.run(req).await;
     }
@@ -214,6 +283,9 @@ pub(super) async fn auth_mw(
         )
             .into_response();
     };
+    // Audit entries record the path; share-link revoke URLs must not leak the
+    // token they are killing (see `audit_safe_path`).
+    let audit_path = audit_safe_path(&path);
     let is_write = matches!(
         *req.method(),
         axum::http::Method::POST
@@ -248,7 +320,7 @@ pub(super) async fn auth_mw(
         audit_push(
             &app.audit,
             &username,
-            format!("{method} {path}"),
+            format!("{method} {audit_path}"),
             StatusCode::FORBIDDEN.as_u16(),
         )
         .await;
@@ -261,7 +333,7 @@ pub(super) async fn auth_mw(
     // MCP dispatch requires write access, even for read-only JSON-RPC methods,
     // because the HTTP verb alone can't distinguish read from write operations.
     if path == "/api/mcp" && !user.role.can_write() {
-        audit_push(&app.audit, &username, format!("{method} {path}"), 403).await;
+        audit_push(&app.audit, &username, format!("{method} {audit_path}"), 403).await;
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({ "error": "insufficient role" })),
@@ -274,7 +346,7 @@ pub(super) async fn auth_mw(
         let is_super_or_admin = user.role == coxagent_application::auth::AuthRole::Super
             || user.role == coxagent_application::auth::AuthRole::Admin;
         if !is_super_or_admin && !user.projects.iter().any(|p| p == pid) {
-            audit_push(&app.audit, &username, format!("{method} {path}"), 403).await;
+            audit_push(&app.audit, &username, format!("{method} {audit_path}"), 403).await;
             return (
                 StatusCode::FORBIDDEN,
                 Json(serde_json::json!({ "error": "not a member of this project" })),
@@ -290,7 +362,7 @@ pub(super) async fn auth_mw(
         audit_push(
             &app.audit,
             &username,
-            format!("{method} {path}"),
+            format!("{method} {audit_path}"),
             StatusCode::FORBIDDEN.as_u16(),
         )
         .await;
@@ -306,7 +378,7 @@ pub(super) async fn auth_mw(
         audit_push(
             &app.audit,
             &username,
-            format!("{method} {path}"),
+            format!("{method} {audit_path}"),
             resp.status().as_u16(),
         )
         .await;
@@ -434,6 +506,45 @@ pub(super) async fn disable_2fa_ep(
     Json(serde_json::json!({ "ok": true })).into_response()
 }
 
+/// Canonical machine-local location of the persisted remote-store bearer token.
+///
+/// Mirrors `coxagent_app::builders::operator_token_path` exactly so the login
+/// writer (here) and the runner-side reader can never disagree about where the
+/// secret lives. Env override `COXAGENT_TOKEN_FILE` wins; else
+/// `<home>/CoXAgent/operator.token`. Inlined because coxagent-presentation must
+/// not import from coxagent-app (dependency cycle app -> presentation).
+fn operator_token_path() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("COXAGENT_TOKEN_FILE") {
+        let p = p.trim();
+        if !p.is_empty() {
+            return Some(PathBuf::from(p));
+        }
+    }
+    std::env::home_dir().map(|h| h.join("CoXAgent").join("operator.token"))
+}
+
+/// Persist a harvested personal API token to [`operator_token_path`], owner-only
+/// (0600), so separately-spawned operator processes can read it for `/store`
+/// auth. Silently no-ops when no path resolves or the write fails -- a missing
+/// token file only degrades remote-store provisioning, never login itself.
+fn persist_local_operator_token(secret: &str) {
+    let Some(path) = operator_token_path() else {
+        return;
+    };
+
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).ok();
+    }
+
+    std::fs::write(&path, secret.as_bytes()).ok();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+}
+
 pub(super) async fn login_ep(
     State(app): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -459,7 +570,8 @@ pub(super) async fn login_ep(
             // authenticated under P5a). Idempotent per user — first login mints,
             // later logins reuse without re-issuing the secret.
             if let Some(secret) = auth.auto_issue_personal_token(&req.username).await {
-                std::env::set_var("COXAGENT_REMOTE_TOKEN", secret);
+                std::env::set_var("COXAGENT_REMOTE_TOKEN", secret.clone());
+                persist_local_operator_token(&secret);
             }
             token
         }
@@ -517,4 +629,68 @@ pub(super) async fn logout_ep(
         Json(serde_json::json!({ "ok": true })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod operator_token_writer_tests {
+    use super::persist_local_operator_token;
+    use std::path::PathBuf;
+
+    /// These tests read/write process-global env vars; serialize them so they
+    /// cannot clobber one another's values when Rust runs them on many threads.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn persist_local_operator_token_writes_secret_at_env_path() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let base: PathBuf = dir.path().to_path_buf();
+        let target = base.join("operator.token");
+        // Point the canonical location at a throwaway path so we never touch a
+        // real ~/CoXAgent token while testing.
+        std::env::set_var("COXAGENT_TOKEN_FILE", &target);
+
+        persist_local_operator_token("super-secret");
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "super-secret",
+            "the secret should be persisted verbatim at the canonical location"
+        );
+
+        // Owner-only (0600) on unix — never a world-readable secret file.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = std::fs::metadata(&target).unwrap();
+            assert_eq!(
+                meta.permissions().mode() & 0o777,
+                0o600,
+                "the token file must be owner-only (0600)"
+            );
+            assert!(meta.is_file(), "a regular file should be written");
+        }
+
+        std::env::remove_var("COXAGENT_TOKEN_FILE");
+    }
+
+    #[test]
+    fn persist_local_operator_token_creates_parent_dir_and_overwrites() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        // Nest under a directory that does not exist yet.
+        let target: PathBuf = dir.path().join("nested/deeply").join("operator.token");
+        std::env::set_var("COXAGENT_TOKEN_FILE", &target);
+
+        persist_local_operator_token("first");
+        persist_local_operator_token("second");
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "second",
+            "re-persisting should overwrite the previous secret in place"
+        );
+
+        std::env::remove_var("COXAGENT_TOKEN_FILE");
+    }
 }

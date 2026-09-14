@@ -6,7 +6,7 @@
 <title>CoXAgent</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-<link href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.24.0/dist/tabler-icons.min.css" rel="stylesheet">
+<link href="/assets/tabler-icons.min.css" rel="stylesheet">
 <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body>
@@ -39,9 +39,9 @@
       <div class="frm">
         <div class="fr"><span class="lbl">Name</span><input id="spm-name" placeholder="e.g. Product Team A" maxlength="60"></div>
         <div class="fr"><span class="lbl">Tagline</span><input id="spm-tag" placeholder="what this space builds" maxlength="160"></div>
-        <div class="fr" id="spm-budget-row"><span class="lbl">Budget/mo</span><input id="spm-budget" type="number" min="0" step="10" placeholder="USD — 0 = không giới hạn" style="width:180px"><span class="hint" style="font-size:11px;color:var(--dim)">cảnh báo khi space đốt vượt mức</span></div>
+        <div class="fr" id="spm-budget-row"><span class="lbl">Budget/mo</span><input id="spm-budget" type="number" min="0" step="10" placeholder="USD — 0 = unlimited" style="width:180px"><span class="hint" style="font-size:11px;color:var(--dim)">warns when the space burns past this</span></div>
         <div class="fr" style="align-items:flex-start"><span class="lbl">Admins</span><div id="spm-admins-box" style="flex:1"></div></div>
-        <div class="fr" style="align-items:flex-start" id="spm-members-row"><span class="lbl">Members</span><div style="flex:1"><div id="spm-members-box"></div><div class="hint" style="font-size:11px;color:var(--dim);margin-top:5px">member được tự gán vào mọi project của space</div></div></div>
+        <div class="fr" style="align-items:flex-start" id="spm-members-row"><span class="lbl">Members</span><div style="flex:1"><div id="spm-members-box"></div><div class="hint" style="font-size:11px;color:var(--dim);margin-top:5px">members are auto-assigned to every project in the space</div></div></div>
         <div class="fr" style="align-items:flex-start"><span class="lbl">Projects</span><div id="spm-projects-box" style="flex:1"></div></div>
       </div>
       <div class="coxmodal-acts" style="margin-top:14px">
@@ -94,13 +94,14 @@
     </div>
     <nav class="nav" id="ws-nav">
       <a data-v="home" id="nav-home" onclick="nav('home')"><i class="ti ti-home"></i> Home</a>
+      <a data-v="river" onclick="nav('river')"><i class="ti ti-ripple"></i> Fleet river</a>
+      <a data-v="dupes" onclick="nav('dupes')"><i class="ti ti-copy"></i> Dupes radar</a>
       <a data-v="overview" class="on" onclick="nav('overview')"><i class="ti ti-layout-dashboard"></i> Overview</a>
       <a data-v="team" onclick="nav('team')"><i class="ti ti-robot"></i> Agents</a>
       <a data-v="inbox" onclick="nav('inbox')"><i class="ti ti-inbox"></i> Inbox <span id="inbox-badge" style="display:none;margin-left:auto;background:var(--red);color:#fff;border-radius:9px;font-size:10px;font-weight:700;padding:1px 6px;line-height:14px">0</span></a>
       <a data-v="board" onclick="nav('board')"><i class="ti ti-columns"></i> Work</a>
       <a data-v="roadmap" onclick="nav('roadmap')"><i class="ti ti-timeline"></i> Roadmap</a>
       <a data-v="review" onclick="nav('review')"><i class="ti ti-git-pull-request"></i> Review</a>
-      <a data-v="activity" onclick="nav('activity')"><i class="ti ti-activity"></i> Activity</a>
       <a data-v="discuss" onclick="nav('discuss')"><i class="ti ti-messages"></i> Scrum</a>
       <a data-v="docs" onclick="nav('docs')"><i class="ti ti-book-2"></i> Wiki</a>
       <a data-v="codemap" onclick="nav('codemap')"><i class="ti ti-sitemap"></i> Code map</a>
@@ -117,6 +118,7 @@
       <a data-v="mg-spaces" onclick="nav('mg-spaces')"><i class="ti ti-building-community"></i> Spaces</a>
       <a data-v="mg-users" onclick="nav('mg-users')"><i class="ti ti-users"></i> Users</a>
       <a data-v="mg-usage" onclick="nav('mg-usage')"><i class="ti ti-chart-bar"></i> Usage</a>
+      <a data-v="mg-fleet" onclick="nav('mg-fleet')"><i class="ti ti-report-money"></i> Fleet spend</a>
       <a data-v="mg-audit" onclick="nav('mg-audit')"><i class="ti ti-shield-search"></i> Audit</a>
     </nav>
     <div id="user-badge" class="userbox">
@@ -156,9 +158,11 @@
         <span class="rp-lbl" id="runlbl">idle</span>
         <button class="rp-ctl rp-go" id="ctl-primary" onclick="toggleRun()" title="Start"><i class="ti ti-player-play" id="ctl-primary-ic"></i></button>
         <button class="rp-ctl" id="ctl-step" onclick="ctl('step')" title="Step one cycle"><i class="ti ti-player-track-next"></i></button>
+        <button class="rp-ctl" id="ctl-menu" onclick="toggleRunMenu(event)" title="Run control — workspace &amp; machines"><i class="ti ti-chevron-down"></i></button>
+        <div class="runmenu" id="runmenu"></div>
       </div>
       <div class="tb-div"></div>
-      <button class="iconbtn" onclick="openCmdk()" title="Search &amp; jump — ⌘K"><i class="ti ti-search"></i></button>
+      <button class="iconbtn" onclick="openCmdk()" title="Search &amp; jump — ⌘/"><i class="ti ti-search"></i></button>
       <span class="iconbtn viewers-pill" id="viewers-chip" title="distinct users viewing" style="display:none"><i class="ti ti-eye"></i> <span id="viewers-n">1</span></span>
       <div class="tb-div"></div>
       <div style="position:relative;display:flex;align-items:center">
@@ -176,6 +180,7 @@
       <div class="view" id="view-mg-space"><div id="mg-space-body"></div></div>
       <div class="view" id="view-mg-users"><div id="mg-people-body"></div></div>
       <div class="view" id="view-mg-usage"><div id="mg-usage-body"></div></div>
+      <div class="view" id="view-mg-fleet"><div id="mg-fleet-body"></div></div>
       <div class="view" id="view-mg-audit"><div id="mg-audit-body"></div></div>
       <div class="view" id="view-home">
         <div id="ws-hero"></div>
@@ -192,22 +197,38 @@
           </aside>
         </div>
       </div>
+      <div class="view" id="view-river"><div id="river-body" style="max-width:900px"></div></div>
+      <div class="view" id="view-dupes"><div id="dupes-body" style="max-width:900px"></div></div>
       <div class="view on" id="view-overview">
+        <!-- Above the fold: does the project need me, and is the team moving?
+             (CXA-F383 declutter — everything diagnostic folds below.) -->
         <div id="ov-drain"></div>
         <div id="ov-alerts"></div>
-        <div id="ov-goal"></div>
+        <div id="ov-working"></div>
         <div class="kpis" id="kpis"></div>
         <div id="ov-health"></div>
-        <div id="ov-deploy"></div>
-        <div class="row2" id="ov-charts"></div>
-        <div id="ov-design"></div>
         <div class="row2">
           <div class="panel"><h4><i class="ti ti-activity" style="color:var(--accent2)"></i> Recent activity <span class="mo" onclick="nav('activity')">view all</span></h4><div id="ov-activity"></div></div>
           <div class="panel"><h4><i class="ti ti-history" style="color:var(--accent2)"></i> Releases</h4><div id="ov-changelog"></div></div>
         </div>
+        <details class="ov-diag" id="ov-diag">
+          <summary onclick="OV_DIAG_TOUCHED=true"><i class="ti ti-stethoscope"></i> Diagnostics &amp; gates <span class="ov-diag-hint">drift · go-live · goal · velocity · cycle grades · governance · lessons · deploys · charts · design system</span></summary>
+          <div id="ov-drift"></div>
+          <div id="ov-preflight"></div>
+          <div id="ov-goal"></div>
+          <div id="ov-velocity"></div>
+          <div id="ov-cycle-perf"></div>
+          <div id="ov-attention"></div>
+          <div id="ov-lessons"></div>
+          <div id="ov-deploy"></div>
+          <div class="row2" id="ov-charts"></div>
+          <div id="ov-design"></div>
+        </details>
       </div>
       <div class="view" id="view-team">
         <div class="kpis" id="team-summary"></div>
+        <div id="team-liveness"></div>
+        <div id="team-enginehealth"></div>
         <div id="team-online"></div>
         <div id="team-dupwarn"></div>
         <div id="team-sessions"></div>
@@ -233,6 +254,7 @@
         </div>
         <div id="work-board">
           <div class="filters" id="board-filters" style="margin:0 0 10px"></div>
+          <div id="board-reverts"></div>
           <div class="cols" id="board-cols"></div>
         </div>
         <div id="work-sprint" style="display:none"><div id="sprint-body"></div></div>
@@ -242,6 +264,8 @@
         <div class="filters"><span style="font-size:12px;color:var(--muted)">Filter</span><select class="sel" id="act-filter" onchange="renderActive()"><option value="">all agents</option></select>
           <div style="flex:1"></div><a onclick="window.open(api('/audit'))" class="fchip" style="text-decoration:none;cursor:pointer"><i class="ti ti-download" style="font-size:14px"></i> Export audit</a></div>
         <div class="panel"><div id="activity-full"></div></div>
+        <div class="sec" style="margin-top:20px">Outbound alerts <span style="font-size:11px;color:var(--dim);font-weight:400">· webhook delivery history — retried with backoff until acknowledged or failed</span></div>
+        <div class="panel"><div id="alerts-body"><div class="empty">loading…</div></div></div>
         <div class="sec" style="margin-top:20px">Agent transcripts <span style="font-size:11px;color:var(--dim);font-weight:400">· full prompt + output per run</span></div>
         <div class="panel"><div id="transcript-list"></div></div>
       </div>
@@ -252,8 +276,8 @@
         <div id="agent-picker" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"></div>
         <div class="sec" style="margin-top:10px">Recent actions</div>
         <div id="agent-acts" class="panel" style="max-height:16vh;overflow:auto"></div>
-        <div class="sec" style="margin-top:12px;display:flex;align-items:center;gap:8px">Work log <span id="agent-live-badge" style="font-size:10px;font-weight:700;padding:1px 7px;border-radius:5px;background:color-mix(in srgb,var(--green) 22%,transparent);color:var(--green);display:none">● LIVE</span> <span style="font-size:11px;color:var(--dim);font-weight:400">· what the agent is doing, step by step</span></div>
-        <div id="agent-transcript" class="worklog"><div class="wl-empty"><i class="ti ti-loader-2"></i> loading…</div></div>
+        <div class="sec" style="margin-top:12px;display:flex;align-items:center;gap:8px">Work log <span id="agent-live-badge" style="font-size:10px;font-weight:700;padding:1px 7px;border-radius:5px;background:color-mix(in srgb,var(--green) 22%,transparent);color:var(--green);display:none">● LIVE</span> <span id="agent-err-badge" style="font-size:10px;font-weight:700;padding:1px 7px;border-radius:5px;background:color-mix(in srgb,var(--red) 22%,transparent);color:var(--red);display:none"></span> <span style="font-size:11px;color:var(--dim);font-weight:400">· what the agent is doing, step by step</span></div>
+        <div id="agent-transcript" class="worklog"><div class="wl-empty"><i class="ti ti-moon-stars"></i> this agent hasn't run yet</div></div>
       </div></div>
       <div class="ov" id="ov-transcript" onclick="if(event.target===this)close_('ov-transcript')"><div class="modal" style="max-width:760px">
         <span class="x" onclick="close_('ov-transcript')"><i class="ti ti-x"></i></span>
@@ -354,9 +378,20 @@
         <div class="panel" style="margin-top:12px"><div id="people-body"></div></div>
       </div>
       <div class="view" id="view-audit">
-        <div class="filters"><span style="font-size:12px;color:var(--muted)">Security audit — authenticated mutations & sign-ins</span>
-          <div style="flex:1"></div><a onclick="window.open('/api/audit-log')" class="fchip" style="text-decoration:none;cursor:pointer"><i class="ti ti-download" style="font-size:14px"></i> Export</a></div>
-        <div class="panel"><div id="audit-body"></div></div>
+        <div class="filters">
+          <input id="audit-q" placeholder="filter by user or action…" style="background:var(--card);border:1px solid var(--border);border-radius:9px;padding:6px 11px;font-size:12px;color:var(--text);font-family:inherit;width:210px" oninput="AUDIT_PAGE=0;renderAuditRows()">
+          <select id="audit-kind" onchange="AUDIT_PAGE=0;renderAuditRows()" style="background:var(--card);border:1px solid var(--border);border-radius:9px;padding:6px 9px;font-size:12px;color:var(--text);font-family:inherit">
+            <option value="">all actions</option><option value="login">sign-ins</option><option value="mutation">mutations</option><option value="fail">failures only</option>
+          </select>
+          <select id="audit-range" onchange="AUDIT_PAGE=0;renderAuditRows()" style="background:var(--card);border:1px solid var(--border);border-radius:9px;padding:6px 9px;font-size:12px;color:var(--text);font-family:inherit">
+            <option value="">all time</option><option value="1">last 24h</option><option value="7">last 7 days</option><option value="30">last 30 days</option>
+          </select>
+          <span id="audit-count" style="font-size:11.5px;color:var(--dim)"></span>
+          <div style="flex:1"></div>
+          <a onclick="exportAuditCsv()" class="fchip" style="text-decoration:none;cursor:pointer"><i class="ti ti-download" style="font-size:14px"></i> CSV</a>
+          <a onclick="window.open('/api/audit-log')" class="fchip" style="text-decoration:none;cursor:pointer"><i class="ti ti-braces" style="font-size:14px"></i> JSON</a></div>
+        <div class="panel"><div id="audit-body"></div>
+          <div id="audit-pager" style="display:flex;justify-content:center;gap:8px;padding:10px 0 2px"></div></div>
       </div>
       <div class="view" id="view-access">
         <div class="acard">
@@ -400,7 +435,7 @@
             <div class="chatcompose">
               <input type="file" id="disc-file" multiple style="display:none" onchange="pickFiles('disc',this)">
               <button class="att-btn" onclick="document.getElementById('disc-file').click()" title="Attach files"><i class="ti ti-paperclip"></i></button>
-              <span id="disc-toolbar"></span><input id="disc-input" placeholder="Message the team…  (type / for commands · Enter to send)" oninput="slashMenu()" onkeydown="if(!imeEnter(event)&&event.key==='Enter')sendComment()">
+              <span id="disc-toolbar"></span><input id="disc-input" placeholder="Message the team…  (type / for commands · Enter to send)" oninput="slashMenu()" onkeydown="if(!imeEnter(event)&&event.key==='Enter')sendComment()" onpaste="pasteFiles('disc',event)">
               <button class="pri" onclick="sendComment()"><i class="ti ti-send"></i></button>
             </div>
           </div>
@@ -410,6 +445,8 @@
         <div class="sec">Cost by agent</div><div class="panel" id="cost-roles"></div>
         <div class="sec">Cost by user <span style="font-size:11px;color:var(--dim);font-weight:400">· token spend per operator (account@host)</span></div><div class="panel" id="cost-operators"></div>
         <div class="sec">Budget</div><div class="panel" id="cost-budget"></div>
+        <div class="sec">Daily spend <span style="font-size:11px;color:var(--dim);font-weight:400">&middot; closed UTC days + today</span></div><div class="panel" id="cost-trend"></div>
+        <div class="sec">Engine reliability <span style="font-size:11px;color:var(--dim);font-weight:400">&middot; errors &amp; timeouts per role, from role_health</span></div><div class="panel" id="cost-engines"></div>
         <div class="sec">Token-saver <span style="font-size:11px;color:var(--dim);font-weight:400">· rtk-style compression on tool output before agents read it</span></div>
         <div class="panel" id="cost-tokensaver"></div></div>
       <div class="view" id="view-settings"><div id="settings-body"></div></div>
@@ -422,6 +459,9 @@
                 <button class="chanadd" onclick="newFolder('')" title="New folder"><i class="ti ti-folder-plus"></i></button>
                 <button class="chanadd" onclick="newDoc()" title="New page"><i class="ti ti-plus"></i></button>
               </div>
+            </div>
+            <div class="docsearch"><i class="ti ti-search"></i>
+              <input id="doc-search" type="text" placeholder="Search titles &amp; bodies" aria-label="Search wiki pages" oninput="docSearchFilter(this.value)" autocomplete="off">
             </div>
             <div id="docs-list"></div>
           </div>
@@ -466,7 +506,7 @@
               <button class="att-btn" onmousedown="event.preventDefault()" onclick="chatWrap('**')" title="Bold (**text**)"><i class="ti ti-bold"></i></button>
               <button class="att-btn" onmousedown="event.preventDefault()" onclick="chatWrap('*')" title="Italic (*text*)"><i class="ti ti-italic"></i></button>
               <button class="att-btn" onmousedown="event.preventDefault()" onclick="chatWrap('\`')" title="Code (\`code\`)"><i class="ti ti-code"></i></button>
-              <input id="chat-input" placeholder="Message your team…  (Enter to send · @ to mention · **bold** *italic* \`code\`)" autocomplete="off" oninput="mentionOnInput(this);startTyping()" onkeydown="chatInputKey(event)" onblur="setTimeout(closeMention,150)">
+              <input id="chat-input" placeholder="Message your team…  (Enter to send · @ to mention · **bold** *italic* \`code\`)" autocomplete="off" oninput="mentionOnInput(this);startTyping()" onkeydown="chatInputKey(event)" onblur="setTimeout(closeMention,150)" onpaste="pasteFiles('chat',event)">
               <button class="pri" onclick="sendChat()"><i class="ti ti-send"></i></button>
             </div>
           </div>
@@ -584,6 +624,7 @@
       <div class="pfnav">
         <button id="pt-status" class="on" onclick="profileTab('status')"><i class="ti ti-mood-smile"></i> Status</button>
         <button id="pt-profile" onclick="profileTab('profile')"><i class="ti ti-user"></i> Profile</button>
+        <button id="pt-keys" onclick="profileTab('keys')"><i class="ti ti-key"></i> API keys</button>
         <button id="pt-prefs" onclick="profileTab('prefs')"><i class="ti ti-adjustments"></i> Preferences</button>
       </div>
       <div class="pfpane">
@@ -611,6 +652,17 @@
           <div class="fr"><span class="lbl">New password</span><input id="pp-pw" type="password" placeholder="leave empty to keep" style="flex:1"></div>
           <div id="pp-note" style="font-size:12px;margin:6px 0"></div>
           <div style="display:flex;justify-content:flex-end"><button class="save pf-btn" onclick="savePopupProfile()"><i class="ti ti-device-floppy"></i> Save profile</button></div>
+        </div>
+        <div id="pp-keys" hidden>
+          <div class="msub" style="margin:0 0 10px">Your own LLM provider key (BYOK). Your requests stop competing for the project pool's rate limits. Keys are verified live before saving and are never shown again — only the last 4 characters.</div>
+          <div id="pk-list" style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px"></div>
+          <div style="font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--dim);margin-bottom:7px">Add a key</div>
+          <div class="fr"><span class="lbl">Base URL</span><input id="pk-url" placeholder="https://api.example.com/v1" style="flex:1"></div>
+          <div class="fr"><span class="lbl">API key</span><input id="pk-key" type="password" placeholder="sk-…" style="flex:1" autocomplete="off"></div>
+          <div class="fr"><span class="lbl">Model</span><input id="pk-model" placeholder="e.g. GLM-5.3" style="flex:1"></div>
+          <div class="fr"><span class="lbl">Label</span><input id="pk-label" placeholder="optional — defaults to the host" style="flex:1"></div>
+          <div id="pk-note" style="font-size:12px;margin:6px 0"></div>
+          <div style="display:flex;justify-content:flex-end"><button id="pk-add" class="save pf-btn" onclick="addMyKey()"><i class="ti ti-plug-connected"></i> Test &amp; save</button></div>
         </div>
         <div id="pp-prefs" hidden>
           <div class="fr"><span class="lbl">Desktop notifications</span><select id="ppf-desktop" onchange="savePopupPrefs()"><option value="on">on</option><option value="off">off</option></select></div>
@@ -666,11 +718,12 @@
       <div class="pfpane" id="chset-body"></div>
     </div>
   </div></div>
-  <!-- Chat search: channels, people and messages in one palette. -->
+  <!-- Global search (CXA-F275): tickets, wiki and chat in one palette. -->
   <div class="ov" id="ov-chatsearch" onclick="if(event.target===this)closeChatSearch()"><div class="modal" style="max-width:620px;padding:0;overflow:hidden">
     <div class="cmdk-inp" style="border-radius:0"><i class="ti ti-search"></i>
-      <input id="chatsearch-input" placeholder="Search channels, people, messages, tickets, pages…" autocomplete="off"
+      <input id="chatsearch-input" placeholder="Search tickets, wiki, chat, people…" autocomplete="off"
         oninput="chatSearchRun()" onkeydown="if(event.key==='Escape')closeChatSearch()"><kbd>esc</kbd></div>
+    <div class="cs-chips" id="cs-chips"></div>
     <div class="cmdk-list" id="chatsearch-list" style="max-height:60vh"></div>
   </div></div>
   <div class="toasts" id="toasts"></div>
@@ -707,6 +760,8 @@
       <div id="nt-desc" class="rt-edit" contenteditable="true" data-empty="A rough note is enough — click ✨ and the team will refine it." style="min-height:96px;border-radius:0 0 8px 8px;border-top:none"></div>
     </div>
     <button id="nt-analyze" class="pri" onclick="teamAnalyze()" style="width:100%;justify-content:center"><i class="ti ti-sparkles"></i> <span id="nt-analyze-label">Let the team analyze &amp; refine</span></button>
+    <button id="nt-feas-btn" class="gc-btn" onclick="checkFeasibility()" style="width:100%;justify-content:center;margin-top:8px"><i class="ti ti-gauge"></i> <span id="nt-feas-label">Check feasibility</span></button>
+    <div id="nt-feas" class="tk-notes" style="display:none;margin-top:8px"></div>
     <div id="nt-notes" class="tk-notes" style="display:none"></div>
     <div class="mrow" style="gap:8px;flex-wrap:wrap">
       <div style="flex:1;min-width:90px;display:flex;flex-direction:column;gap:5px"><span class="lbl">Type</span><select id="nt-type" class="sel"><option value="feature">feature</option><option value="bug">bug</option><option value="chore">chore</option></select></div>
@@ -727,7 +782,7 @@
     <span class="x" onclick="close_('ov-newproj')"><i class="ti ti-x"></i></span>
     <div class="np-head">
       <div class="np-mark"><i class="ti ti-folder-plus"></i></div>
-      <div><h3>New project</h3><div class="np-sub">Team agents nhận việc ngay khi project sẵn sàng.</div></div>
+      <div><h3>New project</h3><div class="np-sub">Team agents pick up work as soon as the project is ready.</div></div>
     </div>
     <div style="display:flex;gap:4px;background:var(--card2);border:1px solid var(--border2);border-radius:11px;padding:3px;margin-bottom:16px">
       <button id="npm-new" class="npmode on" onclick="setProjMode('new')"><i class="ti ti-sparkles"></i> Start fresh</button>
@@ -773,13 +828,20 @@
   </div></div>
 
 <script src="/assets/js/mermaid.min.js"></script>
+<script src="/assets/js/kpis.js"></script>
 <script src="/assets/js/core.js"></script>
 <script src="/assets/js/manage.js"></script>
 <script src="/assets/js/home.js"></script>
 <script src="/assets/js/chat.js"></script>
+<script src="/assets/js/search.js"></script>
 <script src="/assets/js/mcp.js"></script>
 <script src="/assets/js/docs.js"></script>
 <script src="/assets/js/inbox.js"></script>
+<script src="/assets/js/drift.js"></script>
+<script src="/assets/js/alerts.js"></script>
+<script src="/assets/js/lessons.js"></script>
+<script src="/assets/js/river.js"></script>
+<script src="/assets/js/approval_policy.js"></script>
 <script src="/assets/js/shell.js"></script>
 </body>
 </html>

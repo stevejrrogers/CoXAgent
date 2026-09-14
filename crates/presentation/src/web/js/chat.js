@@ -89,15 +89,23 @@ function renderChannels(){
 // Keyboard activation for role="button" list rows (channels, DMs).
 function rowKey(e){if(e.key==="Enter"||e.key===" "){e.preventDefault();e.currentTarget.click();}}
 // Jump to a message, switching channels first when the hit is elsewhere. The
-// target only exists after the new history renders, so poll briefly for it.
+// target only exists after the history renders, so ALWAYS poll briefly for it
+// — even in the current channel its window may not be loaded yet (a search
+// deep-link lands here from any view, not just with chat warm).
 function gotoMsg(id,channel){
   closeThread();
   const scroll=()=>{const el=document.getElementById("msg-"+id);if(!el)return false;
     el.scrollIntoView({behavior:"smooth",block:"center"});
     el.classList.add("msg-flash");setTimeout(()=>el.classList.remove("msg-flash"),1600);return true;};
-  if(channel&&channel!==CURCHAN){selectChannel(channel);let n=0;
-    const t=setInterval(()=>{if(scroll()||++n>20)clearInterval(t);},100);}
-  else scroll();
+  if(channel&&channel!==CURCHAN)selectChannel(channel);
+  let n=0;
+  const t=setInterval(()=>{
+    if(scroll()||++n>20){clearInterval(t);return;}
+    // A hit older than the newest 50 only exists once "load older" has pulled
+    // its page in — nudge the loader while polling (bounded by the same 2s
+    // window; each pass prepends at most one 50-message page).
+    if(CHAT_MORE&&!CHAT_LOADING_MORE&&n%3===2)loadOlderChat();
+  },100);
 }
 function getActiveChannel(){return CURCHAN||"general";}
 function currentChannel(){return CHANNELS.find(c=>c.id===CURCHAN)||{id:"general",name:"general",owner:""};}
@@ -141,19 +149,46 @@ function selectChannel(id){
 async function loadChatHistory(){
   const chan=CURCHAN;
   try{
-    const r=await fetch("/api/chat/messages?channel="+encodeURIComponent(chan));
+    // Newest 50 only — history beyond that arrives via loadOlderChat().
+    const r=await fetch("/api/chat/messages?channel="+encodeURIComponent(chan)+"&limit=50");
     if(!r.ok)throw new Error(r.status);
     const data=await r.json();
     if(chan!==CURCHAN)return; // channel switched mid-flight
     CHAT=data;CHAT_LOAD_ERR=false;
+    CHAT_MORE=data.length>=50; // a full window suggests older history exists
   }catch(e){
     if(chan!==CURCHAN)return;
     // Distinguish a failed load from a genuinely empty room (see renderChatList):
     // clear so we never bleed another channel's messages, and flag the error.
-    CHAT=[];CHAT_LOAD_ERR=true;
+    CHAT=[];CHAT_LOAD_ERR=true;CHAT_MORE=false;
   }
   CHAT.forEach(markSeen); // history is not "new" — don't notify for it
   renderChatList(true);
+}
+// Load-more: fetch the window OLDER than the oldest rendered message and
+// prepend, keeping the scroll anchored on what the reader was looking at.
+let CHAT_MORE=false,CHAT_LOADING_MORE=false;
+async function loadOlderChat(){
+  if(CHAT_LOADING_MORE||!CHAT.length)return;
+  CHAT_LOADING_MORE=true;
+  const chan=CURCHAN,oldest=CHAT[0]&&CHAT[0].id;
+  try{
+    const r=await fetch("/api/chat/messages?channel="+encodeURIComponent(chan)
+      +"&limit=50&before="+encodeURIComponent(oldest||""));
+    if(r.ok){
+      const older=await r.json();
+      if(chan===CURCHAN&&older.length){
+        const box=document.getElementById("chat-msgs");
+        const keepH=box?box.scrollHeight:0;
+        older.forEach(markSeen);
+        CHAT=older.concat(CHAT);
+        CHAT_MORE=older.length>=50;
+        renderChatList(false);
+        if(box)box.scrollTop=box.scrollHeight-keepH; // anchor the view
+      }else{CHAT_MORE=false;renderChatList(false);}
+    }
+  }catch(e){}
+  CHAT_LOADING_MORE=false;
 }
 // `parent` is set when the + on a channel row was used: the new room is opened
 // inside that one and starts with its members.
@@ -178,7 +213,7 @@ async function createChannel(parent){
   }catch(e){toasty("could not create channel","err");}
 }
 async function inviteToChannel(){
-  const who=await coxModal({title:"Invite to channel",message:"Username cần mời. Tip: thêm \" +invite\" để họ cũng được quyền mời người khác.",input:{placeholder:"username  (+invite)"},confirmText:"Invite"});
+  const who=await coxModal({title:"Invite to channel",message:"Username to invite. Tip: add \" +invite\" so they can invite others too.",input:{placeholder:"username  (+invite)"},confirmText:"Invite"});
   if(!who||!who.trim())return;
   let user=who.trim(),delegate=false;
   if(/\+invite\s*$/i.test(user)){delegate=true;user=user.replace(/\+invite\s*$/i,"").trim();}
@@ -263,7 +298,7 @@ function renderChannelSettings(){
   }
 }
 async function deleteChannel(id){
-  const ok=await coxModal({title:"Delete #"+id,message:"Xoá channel này và mọi sub-channel của nó? Không hoàn tác được.",confirmText:"Delete"});
+  const ok=await coxModal({title:"Delete #"+id,message:"Delete this channel and all its sub-channels? This cannot be undone.",confirmText:"Delete"});
   if(!ok)return;
   try{
     const r=await fetch("/api/chat/channels/"+encodeURIComponent(id),{method:"DELETE"});
@@ -316,88 +351,6 @@ async function inviteToSettingsChannel(){
     await loadChannels();renderChannelSettings();
   }catch(e){toasty("could not invite","err");}
 }
-
-// ── Chat search: channels, people, messages, in one palette ─────────────────
-function openChatSearch(){
-  const ov=document.getElementById("ov-chatsearch");
-  document.getElementById("chatsearch-input").value="";
-  const sc=searchScope();
-  document.getElementById("chatsearch-input").placeholder=`Search ${sc.label}…`;
-  document.getElementById("chatsearch-list").innerHTML=`<div class="empty">Type to search ${sc.label}.</div>`;
-  ov.classList.add("open");
-  setTimeout(()=>document.getElementById("chatsearch-input").focus(),40);
-}
-// The rail's single search. In chat it looks at rooms, people and messages;
-// everywhere else it looks at the work — tickets and wiki pages — so the same
-// box is useful in all three modes instead of being a chat-only feature that
-// happens to sit above the switch.
-function openGlobalSearch(){ openChatSearch(); }
-
-// What the palette searches depends on where you are: rooms and messages in
-// Chat, work in Space, people and projects in Manage. One box, the answers of
-// the room you are standing in.
-function searchScope(){
-  if(MODE==="chat")return {kinds:["channel","person","message"],label:"channels, people, messages"};
-  if(MODE==="manage")return {kinds:["person","project"],label:"people and projects"};
-  return {kinds:["ticket","page","person"],label:"tickets, pages, people"};
-}
-
-function searchWorkItems(q){
-  const hit=[];
-  const s=STATE||{};
-  for(const t of (s.tickets||[])){
-    const hay=`${t.id} ${t.title} ${t.description||""}`.toLowerCase();
-    if(hay.includes(q)) hit.push({t:"ticket",label:`${t.id} · ${t.title}`,sub:t.status,act:`showTicket('${esc(t.id)}')`});
-    if(hit.length>=12)break;
-  }
-  for(const d of (s.docs||[])){
-    if(`${d.title} ${d.body||""}`.toLowerCase().includes(q))
-      hit.push({t:"page",label:d.title,sub:d.folder||"wiki",act:`nav('docs')`});
-    if(hit.length>=20)break;
-  }
-  return hit;
-}
-
-function chatSearchRun(){
-  const q=document.getElementById("chatsearch-input").value.trim().toLowerCase();
-  const list=document.getElementById("chatsearch-list");
-  const scope=searchScope();
-  if(!q){list.innerHTML=`<div class="empty">Type to search ${scope.label}.</div>`;return;}
-  let hit=[];
-  for(const c of CHANNELS){
-    if((c.name||"").toLowerCase().includes(q)||(c.topic||"").toLowerCase().includes(q))
-      hit.push({t:"channel",label:"#"+chanDisplay(c),sub:c.topic||((c.kind==="public")?"public channel":"private channel"),act:`selectChannel('${esc(c.id)}')`});
-  }
-  for(const m of (MEMBERS||[])){
-    const n=m.username||m.name||"";
-    if(n.toLowerCase().includes(q)) hit.push({t:"person",label:n,sub:m.role||"",act:`openDM('${esc(n)}')`});
-  }
-  for(const h of searchWorkItems(q)) hit.push(h);
-  for(const p of (PROJECTS||[])){
-    if(`${p.id} ${p.name||""}`.toLowerCase().includes(q))
-      hit.push({t:"project",label:p.name||p.id,sub:`${p.tickets||0} tickets · v${p.version||"0.0.0"}`,act:`switchProject('${esc(p.id)}')`});
-  }
-  for(const msg of (CHAT||[]).slice(-800).reverse()){
-    const b=(msg.body||"");
-    if(b.toLowerCase().includes(q)){
-      hit.push({t:"message",label:b.slice(0,90),sub:`${msg.user||""} · #${msg.channel||"general"}`,act:`selectChannel('${esc(msg.channel||"general")}')`});
-      if(hit.filter(h=>h.t==="message").length>=12)break;
-    }
-  }
-  const icon={channel:"hash",person:"user",message:"message-2",ticket:"ticket",page:"file-text",project:"folder"};
-  // Keep only what this tab is about; everything else is noise here.
-  hit=hit.filter(h=>scope.kinds.includes(h.t));
-  list.innerHTML=hit.length?hit.slice(0,30).map(h=>`
-    <div class="cs-item" onclick="closeChatSearch();${h.act}">
-      <i class="ti ti-${icon[h.t]}"></i>
-      <div class="cs-txt"><b>${esc(h.label)}</b>${h.sub?`<span>${esc(h.sub)}</span>`:''}</div>
-      <span class="cs-kind">${h.t}</span></div>`).join("")
-    :'<div class="empty">Nothing matched.</div>';
-}
-function closeChatSearch(){document.getElementById("ov-chatsearch").classList.remove("open");}
-document.addEventListener("keydown",e=>{
-  if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==="k"){e.preventDefault();openGlobalSearch();}
-});
 
 // Enterprise modal replacing browser prompt()/confirm(): returns a Promise —
 // resolves the input string (or true) on confirm, null on cancel.
@@ -457,7 +410,13 @@ function applyMode(){
     setTimeout(()=>{const i=document.getElementById("chat-input");if(i)i.focus();},40);}
   // Entering Manage lands on Spaces; leaving it returns to the workspace views.
   if(manage&&!String(CUR).startsWith("mg-"))nav("mg-spaces");
-  if(!manage&&String(CUR).startsWith("mg-"))nav("overview");
+  // Only nav() out of a manage view when landing in WORKSPACE. Going manage →
+  // chat must not call nav(): its exit-chat-on-sidebar-click guard fires on the
+  // internal call and stomps the chat mode we just set (Manage → Chat used to
+  // dump you on Overview). Park CUR quietly instead — the chat overlay covers
+  // the screen, and leaving chat later re-runs this branch and navs properly.
+  if(!manage&&!chat&&String(CUR).startsWith("mg-"))nav("overview");
+  if(chat&&String(CUR).startsWith("mg-"))CUR="overview";
   updateModeBadge();
   try{updateSegments();}catch(e){}
 }
@@ -557,7 +516,7 @@ function renderDMList(){
     return `<div class="chanitem dmitem${active?' on':''}${un?' unread':''}" role="button" tabindex="0" aria-label="Direct message ${esc(u.name||u.username)}${un?', '+un+' unread':''}" onkeydown="rowKey(event)" onclick="openDM('${esc(u.username)}')" title="@${esc(u.username)}${p.status_text?' · '+esc(p.status_text):''}">
       ${av}<span class="channm">${esc(u.name||u.username)}</span>${sub}${statusChip(u.username)}${un?`<span class="chanbadge">${un>99?'99+':un}</span>`:''}
       <button class="chansub" title="${pinned.has(dmChanId(u))?'Unpin':'Pin to top'}" onclick="event.stopPropagation();togglePin_('${esc(dmChanId(u))}')"><i class="ti ti-pin${pinned.has(dmChanId(u))?'-filled':''}"></i></button></div>`;
-  }).join("")+(hidden>0?`<div class="chanitem" role="button" tabindex="0" style="color:var(--dim);font-size:12px" onclick="openChatSearch()">+${hidden} more — search people</div>`:""):'<div class="dm-empty">No teammates yet</div>';
+  }).join("")+(hidden>0?`<div class="chanitem" role="button" tabindex="0" style="color:var(--dim);font-size:12px" onclick="openGlobalSearch()">+${hidden} more — search people</div>`:""):'<div class="dm-empty">No teammates yet</div>';
   railCount("count-dm",users.length);
   applyRailFold();
 }
@@ -844,7 +803,7 @@ function renderMeetUpNext(){
                     :d.toLocaleDateString([],{weekday:"short"})+" "+d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
     const live=meetLive(m);
     const n=(m.participants||[]).length;
-    return `<div class="meet-up" onclick="openMeeting('${esc(m.id)}')" title="${esc(m.title)} · ${n} người">
+    return `<div class="meet-up" onclick="openMeeting('${esc(m.id)}')" title="${esc(m.title)} · ${n} people">
       ${live?'<span class="mu-live"></span>':`<span class="mu-time">${esc(when)}</span>`}
       <span class="mu-title">${esc(m.title)}</span>
       ${live?`<span class="mu-join" onclick="event.stopPropagation();joinMeeting('${esc(m.id)}')">Join</span>`:`<span class="mu-time">${n}👤</span>`}</div>`;
@@ -1563,6 +1522,9 @@ function renderChatList(force){
     : '<div class="chatempty"><i class="ti ti-message-circle-2"></i><div>No messages yet</div><span>Say hello to your teammates.</span></div>';
     return;}
   let lastDay="",html="";
+  if(typeof CHAT_MORE!=="undefined"&&CHAT_MORE){
+    html+='<div class="chatmore"><button class="tk-btn" onclick="loadOlderChat()"><i class="ti ti-history"></i> Load older messages</button></div>';
+  }
   let prev=null;
   msgs.forEach(m=>{
     // Deleted messages always render as a tombstone (was inconsistent before:
@@ -1606,12 +1568,61 @@ const STATUS_PRESETS=[["🎯","Focusing"],["🍜","Lunch"],["🏠","WFH"],["📅
 setInterval(()=>{loadProfiles();loadMembers();},60000); // teammates' avatar/status/name refresh
 function profileTab(t){
   // Never leave every pane hidden: an unknown tab falls back to Status.
-  const tabs=["status","profile","prefs"];
+  const tabs=["status","profile","keys","prefs"];
   if(!tabs.includes(t))t="status";
   for(const k of tabs){
     document.getElementById("pt-"+k).classList.toggle("on",k===t);
     document.getElementById("pp-"+k).hidden=k!==t;
   }
+  if(t==="keys")loadMyKeys();
+}
+// ── BYOK: per-user LLM keys (CXA-F410) ─────────────────────────────────────
+async function loadMyKeys(){
+  const el=document.getElementById("pk-list");if(!el)return;
+  try{const r=await fetch("/api/me/llm-keys");
+    if(!r.ok){el.innerHTML='<div class="msub">Could not load keys.</div>';return;}
+    const d=await r.json();const keys=(d&&d.keys)||[];
+    if(!keys.length){el.innerHTML='<div class="msub">No personal keys yet — the project pool key is used for your work.</div>';return;}
+    el.innerHTML=keys.map(k=>{
+      const ok=k.probe==="ok";
+      const dot=`<span style="color:${ok?"var(--green)":"var(--red)"}" title="${esc(k.probe)}">●</span>`;
+      return `<div style="display:flex;gap:8px;align-items:center;border:1px solid var(--border2);border-radius:8px;padding:8px 10px">
+        ${dot}<div style="flex:1;min-width:0">
+          <div style="font-weight:700;font-size:13px">${esc(k.label)} <span class="msub" style="font-weight:400">· ${esc(k.model)} · ····${esc(k.key_last4)}</span></div>
+          <div class="msub" style="margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(k.base_url)}${ok?"":" — "+esc(k.probe)}</div>
+        </div>
+        <button class="btn-ghost" title="Re-test" onclick="retestMyKey('${esc(k.id)}')"><i class="ti ti-refresh"></i></button>
+        <button class="btn-ghost" title="Delete" onclick="delMyKey('${esc(k.id)}')"><i class="ti ti-trash"></i></button>
+      </div>`;}).join("");
+  }catch(e){el.innerHTML='<div class="msub">Network error.</div>';}
+}
+async function addMyKey(){
+  const n=document.getElementById("pk-note"),btn=document.getElementById("pk-add");
+  const body={base_url:document.getElementById("pk-url").value.trim(),
+    api_key:document.getElementById("pk-key").value.trim(),
+    model:document.getElementById("pk-model").value.trim(),
+    label:document.getElementById("pk-label").value.trim()};
+  n.innerHTML='<span class="msub">Testing the key against the provider…</span>';btn.disabled=true;
+  try{const r=await fetch("/api/me/llm-keys",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    const d=await r.json().catch(()=>({}));
+    if(r.ok){n.innerHTML='<span style="color:var(--green)">Key verified and saved.</span>';
+      for(const id of["pk-url","pk-key","pk-model","pk-label"])document.getElementById(id).value="";
+      loadMyKeys();}
+    else n.innerHTML=`<span style="color:var(--red)">${esc((d&&d.error)||"Could not save the key")}</span>`;
+  }catch(e){n.innerHTML='<span style="color:var(--red)">Network error</span>';}
+  btn.disabled=false;
+}
+async function retestMyKey(id){
+  try{const r=await fetch(`/api/me/llm-keys/${id}/retest`,{method:"POST"});
+    toasty(r.ok?"Key still works":"Key check failed — see the reason on the entry",r.ok?"ok":"err");
+  }catch(e){toasty("Network error","err");}
+  loadMyKeys();
+}
+async function delMyKey(id){
+  try{const r=await fetch(`/api/me/llm-keys/${id}`,{method:"DELETE"});
+    toasty(r.ok?"Key deleted":"Could not delete","ok");
+  }catch(e){toasty("Network error","err");}
+  loadMyKeys();
 }
 function openProfile(tab){const me=(ME&&ME.username)||"";const p=PROFILES[me]||{};
   document.getElementById("pf-av").innerHTML=avat(me,"pf-avbig");
@@ -1653,7 +1664,7 @@ async function removeAvatar(){
     else toasty(await r.text()||"Could not remove","err");
   }catch(e){toasty("Network error","err");}}
 async function uploadAvatar(input){const f=input.files[0];input.value="";if(!f)return;
-  if(f.size>2*1024*1024){toasty("Ảnh tối đa 2MB","err");return;}
+  if(f.size>2*1024*1024){toasty("Image max 2MB","err");return;}
   const fd=new FormData();fd.append("file",f);
   try{const r=await fetch("/api/profile/avatar",{method:"POST",body:fd});
     if(r.ok){await loadProfiles();try{renderMe();}catch(e){}openProfile("profile");toasty("Avatar updated","ok");renderChatList(true);}
@@ -1713,6 +1724,18 @@ async function uploadOne(file,surface){const fd=new FormData();fd.append("file",
 function pickFiles(surface,input){handleFiles(surface,[...input.files]);input.value="";}
 function dropFiles(surface,ev){ev.preventDefault();ev.currentTarget.classList.remove("dropping");
   handleFiles(surface,[...(ev.dataTransfer.files||[])]);}
+// Ctrl+V into a composer is a third input into the same attachment pipeline as
+// the attach button and drag-drop. A clipboard with no file item (plain text,
+// IME composition, @mentions) returns WITHOUT preventDefault so native
+// insertion is untouched; files win over text when both are present (same rule
+// as drop). Nameless clipboard screenshots are renamed pre-upload: the media
+// server derives the serving Content-Type from the stored filename's extension
+// (mime_of), so an empty name would come back as octet-stream and never render.
+function pasteFiles(surface,ev){const files=(ev.clipboardData&&ev.clipboardData.files)||[];
+  if(!files.length)return;
+  ev.preventDefault();
+  handleFiles(surface,[...files].map(f=>f.name?f:
+    new File([f],"pasted-image."+((f.type.split("/")[1]||"bin").split("+")[0]),{type:f.type})));}
 async function handleFiles(surface,files){
   for(const f of files){
     if(f.size>25*1024*1024){toasty(f.name+" too large (max 25MB)","err");continue;}
@@ -1748,19 +1771,24 @@ function renderHealth(s){
   const sp=s.sprint; let velo="—", veloSub="no sprint";
   if(sp&&sp.committed){const done=sp.committed.filter(id=>t.some(x=>x.id===id&&isDone(x))).length;
     velo=`${done}/${sp.committed.length}`; veloSub=`sprint #${sp.number}`;}
-  const openBugs=t.filter(x=>(x.type||x.ticket_type||"").toLowerCase()==="bug"&&(x.status||"").toLowerCase()==="open").length;
-  const wip=t.filter(x=>(x.status||"").toLowerCase()==="inprogress").length;
+  // "unfixed" means unfixed: a designed (ready) or mid-fix (in_progress)
+  // bug is still broken software — counting only 'open' showed 0 while four
+  // sprint bugs sat ready on the same screen (CXA-B172).
+  const openBugs=t.filter(x=>(x.type||x.ticket_type||"").toLowerCase()==="bug"&&["open","ready","in_progress"].includes((x.status||"").toLowerCase())).length;
+  // "inprogress" never matched the serde key — WIP read 0 while DEV was
+  // mid-ticket on the same screen (CXA-B171).
+  const wip=t.filter(x=>(x.status||"").toLowerCase()==="in_progress").length;
   const refactors=t.filter(x=>(x.title||"").startsWith("Refactor:")&&!isDone(x)).length;
   const mem=((s.decisions||[]).length)+((s.lessons||[]).length);
-  const card=(lbl,val,sub,col)=>`<div class="hcard"><div class="hval" style="color:${col||'var(--text)'}">${val}</div><div class="hlbl">${lbl}</div>${sub?`<div class="hsub">${sub}</div>`:''}</div>`;
+  const card=(lbl,val,sub,col,go)=>`<div class="hcard"${go?` onclick="${go}" style="cursor:pointer"`:''}><div class="hval" style="color:${col||'var(--text)'}">${val}</div><div class="hlbl">${lbl}</div>${sub?`<div class="hsub">${sub}</div>`:''}</div>`;
   el.innerHTML=`<div class="sec" style="margin-top:20px"><i class="ti ti-heart-rate-monitor" style="color:var(--accent2)"></i> Team health</div>
     <div class="hgrid">
-      ${card("Sprint velocity",velo,veloSub,"var(--green)")}
-      ${card("WIP (in progress)",wip,wip>6?'high — cân nhắc giảm':'ok',wip>6?'var(--amber)':'var(--text)')}
-      ${card("Open bugs",openBugs,"chưa fix",openBugs>4?'var(--red)':'var(--text)')}
-      ${card("PR reject rate",reviewTotal?rejectRate+'%':'—',`${appr}✓ / ${chg}✗`,rejectRate>50?'var(--amber)':'var(--text)')}
-      ${card("Refactor debt",refactors,"ticket refactor mở",refactors>0?'var(--amber)':'var(--text)')}
-      ${card("Team memory",mem,"decisions + lessons","var(--accent2)")}
+      ${card("Sprint velocity",velo,veloSub,"var(--green)","nav('board');setWorkTab('sprint')")}
+      ${card("WIP (in progress)",wip,wip>6?'high — consider reducing':'ok',wip>6?'var(--amber)':'var(--text)',"nav('board')")}
+      ${card("Open bugs",openBugs,"unfixed",openBugs>4?'var(--red)':'var(--text)',"nav('board')")}
+      ${card("PR reject rate",reviewTotal?rejectRate+'%':'—',`${appr}✓ / ${chg}✗`,rejectRate>50?'var(--amber)':'var(--text)',"nav('review')")}
+      ${card("Refactor debt",refactors,"open refactor tickets",refactors>0?'var(--amber)':'var(--text)',"nav('board')")}
+      ${card("Team memory",mem,"decisions + lessons","var(--accent2)","nav('discuss')")}
     </div>`;
 }
 function render(s){STATE=s;renderSidebar(s);renderActive();ingestChatSnapshot(s.chat);renderEngineAlert(s);}
@@ -1805,13 +1833,137 @@ function renderEngineAlert(s){
     </div>`;
   }).join("");
 }
-function depChips(ids){
+// Manually file a subtask under a parent ticket (CXA-F381d): two quick
+// prompts, then the shared create endpoint with parent_id — the backend
+// binds the lineage and inherits the parent's priority.
+async function addSubtask(parentId){
+  const title=await coxModal({title:"New subtask of "+parentId,message:"Short, buildable title:",input:{placeholder:"e.g. Extract the port trait"},confirmText:"Next"});
+  if(!title||!String(title).trim())return;
+  const desc=await coxModal({title:"Describe the subtask",message:"What to build and how to verify it (self-contained):",input:{placeholder:"description"},confirmText:"Create"});
+  if(desc===false||desc===null)return;
+  const parent=(STATE.tickets||[]).find(x=>x.id===parentId)||{};
+  try{
+    const r=await fetch(api("/tickets"),{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({title:String(title).trim(),description:String(desc||"").trim(),ticket_type:parent.type==="bug"?"chore":(parent.type||"chore"),parent_id:parentId})});
+    if(!r.ok){toast("subtask create failed");return;}
+  }catch(e){toast("subtask create failed");return;}
+  toast("subtask filed");
+  // The 1 Hz snapshot brings the new child; reopen the parent on the next beat.
+  setTimeout(()=>showTicket(parentId),900);
+}
+function depChips(ids,live){
   if(!ids||!ids.length)return '<span style="color:var(--dim)">—</span>';
   return ids.map(id=>{const dt=(STATE.tickets||[]).find(x=>x.id===id);
-    const done=dt&&(dt.status==="done"||dt.status==="documented");
-    const col=done?"var(--green)":(dt?"var(--amber)":"var(--dim)");
-    return `<span onclick="showTicket('${id}')" title="${dt?esc(dt.title)+' · '+esc(dt.status):'unknown'}" style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:3px 8px;border-radius:7px;background:${col}22;color:${col};margin-right:5px">
-      <i class="ti ti-${done?'check':'circle'}" style="font-size:11px"></i>${esc(id)}</span>`;}).join("");}
+    // `live` carries the radar's authoritative statuses from the detail
+    // payload (CXA-F237 AC1); the 1 Hz snapshot is only the fallback.
+    const st=(live&&live[id])||(dt&&dt.status)||"";
+    const done=st==="done"||st==="documented"||st==="verified";
+    const col=done?"var(--green)":(st?"var(--amber)":"var(--dim)");
+    const liveTag=st&&!done?` <span style="opacity:.85">· ${esc(st)}</span>`:"";
+    return `<span onclick="showTicket('${id}')" title="${dt?esc(dt.title)+' · '+esc(dt.status):'unknown dependency — no such ticket in this project'}" style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:3px 8px;border-radius:7px;background:${col}22;color:${col};margin-right:5px">
+      <i class="ti ti-${done?'check':'circle'}" style="font-size:11px"></i>${esc(id)}${liveTag}</span>`;}).join("");}
+// Live statuses of this ticket's blockers, from the detail payload's radar
+// field — the server derived them against the state the detail was served
+// from, so they are the statuses the surface must show.
+function blockedStatuses(t){const m={};(t.blocked_by||[]).forEach(b=>{m[b.ticket]=b.status;});return m;}
+// Mermaid source for the ticket's dependency closure (CXA-F237): prerequisites
+// point left, cycle members carry a textual marker (never color alone), and a
+// depends_on id absent from the project state renders as an unknown node.
+function dependencyMermaid(t,g){
+  const meta={};(g.nodes||[]).forEach(n=>{meta[n.id]=n;});
+  const out={};(g.edges||[]).forEach(e=>{(out[e.dependent]=out[e.dependent]||[]).push(e.prerequisite);});
+  // Closure walk over the ticket's dependency edges, visited-set guarded so a
+  // declared cycle terminates instead of looping forever (AC2).
+  const want=new Set([t.id]),q=[t.id];
+  while(q.length){const id=q.shift();for(const d of(out[id]||[])){if(!want.has(d)){want.add(d);if(meta[d])q.push(d);}}}
+  // Sequential node keys: punctuation-heavy ids must never collide into one
+  // mermaid node, and labels drop quote characters so a hand-edited id cannot
+  // corrupt the diagram source (it degrades to a plain label instead).
+  const keys={},keyFor=id=>keys[id]||(keys[id]="n"+Object.keys(keys).length);
+  const safe=id=>String(id).replace(/["\\]/g,"");
+  const label=id=>{const n=meta[id];if(!n)return safe(id)+" · unknown";
+    return (n.cycle?"⟳ ":"")+safe(id)+" · "+n.status+(n.cycle?" (cycle)":"");};
+  const lines=["graph RL"];let any=false;
+  (g.edges||[]).forEach(e=>{if(!want.has(e.dependent))return;any=true;
+    lines.push(`  ${keyFor(e.dependent)}["${label(e.dependent)}"] --> ${keyFor(e.prerequisite)}["${label(e.prerequisite)}"]`);});
+  if(!any)lines.push(`  ${keyFor(t.id)}["${label(t.id)}"]`);
+  return lines.join("\n");
+}
+async function holdTicket(id,hold){
+  let reason="";
+  if(hold){
+    reason=await coxModal({title:"Hold "+id,message:"Why is it parked? Shown on the ticket so future-you knows what unblocks it.",input:{placeholder:"e.g. waiting on GitHub billing"},confirmText:"Hold"});
+    if(reason===undefined||reason===null||reason===false)return;
+  }
+  try{
+    const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/status/"+(hold?"hold":"resume")),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reason:String(reason||"")})});
+    if(!r.ok){toasty((await r.text())||"Status change failed","err");return;}
+    toasty(hold?`${id} on hold — sprints skip it until resumed`:`${id} resumed`);
+    close_('ov-ticket');await refreshDisc();
+  }catch(e){toasty("Network error","err");}
+}
+
+// ── Verdict-trajectory churn view (CXA-F251) ────────────────────────────────
+// Per-criterion history at the verify decision surface. The domain persists
+// an append-only `test_cases[].history` (crates/domain/src/test_case.rs);
+// here it renders as the criterion's ordered pass/fail trajectory across
+// send-back cycles. Cycle boundaries are the verify send-backs already in
+// the detail payload (`gates`, the CXA-F241 spine). Pure presentation over
+// that payload: a round the criterion was not re-judged in renders an
+// explicit GAP — never an implied pass — and evidence refreshes (a
+// screenshot arriving) are never read as verdict transitions.
+function tcVerdicts(tc){
+  return (tc.history||[]).filter(r=>r&&r.kind!=="evidence_refresh");
+}
+function tcTrajHtml(t,tc){
+  const bounds=(t.gates||[]).filter(g=>g&&g.gate_id==="verify"&&g.status_to==="open")
+    .map(g=>g.decided_at_ms).filter(Number.isFinite).sort((a,b)=>a-b);
+  // Strict verdicts: only known pass/fail statuses become chips. Anything
+  // else drops out — rendering an unknown state as FAIL would fabricate a
+  // verdict, and its round then reads as the gap it honestly is.
+  const vs=tcVerdicts(tc)
+    .map(r=>({ok:r.status==="passed"?true:r.status==="failed"?false:null,at:r.at,ms:Date.parse(r.at)}))
+    .filter(v=>v.ok!==null);
+  // No verdict records: a first-cycle ticket labels the round honestly
+  // instead of fabricating an empty history; a sent-back ticket with no
+  // tracked history (pre-CXA-F251 data) renders nothing rather than
+  // inventing gaps for rounds nobody recorded.
+  if(!vs.length)return bounds.length?""
+    :`<div class="tctraj"><span class="tctraj-cy" title="No send-back yet — this criterion's first verify round">first cycle</span></div>`;
+  // Round windows: [-∞,b0) [b0,b1) … [bₙ₋₁,∞). An unreadable stamp stays in
+  // the current round — placed at no made-up earlier time.
+  const round=v=>!Number.isFinite(v.ms)?bounds.length
+    :bounds.reduce((c,b)=>c+(b<=v.ms?1:0),0);
+  const n=bounds.length+1;
+  // Gaps render only from the first tracked verdict onward: rounds before
+  // the criterion was ever recorded are an unknown era, not known-empty.
+  const r0=Math.min(...vs.map(round));
+  const parts=[];const seq=[];
+  for(let i=0;i<n;i++){
+    const inRound=vs.filter(v=>round(v)===i);
+    if(i<r0)continue;
+    if(!inRound.length){
+      parts.push(`<span class="tctraj-gap" title="No verdict was recorded for this criterion in round ${i+1} — a gap, not a pass">no verdict</span>`);
+      continue;
+    }
+    parts.push(`<span class="tctraj-cy" title="${i===0?"Before the first send-back":`After send-back #${i}`}">R${i+1}</span>`);
+    for(const v of inRound){
+      seq.push(v.ok);
+      parts.push(`<span class="tctraj-v ${v.ok?"pass":"fail"}" title="${esc(v.at)}">${v.ok?"PASS":"FAIL"}</span>`);
+    }
+  }
+  // Oscillation (AC2): any FAIL after a PASS. Amber warning with the flip
+  // count — a single fail among passes reads here too, and none of this
+  // blocks the human decision; the verdict stays the reviewer's.
+  const firstPass=seq.indexOf(true);
+  const churn=firstPass>=0&&seq.slice(firstPass+1).includes(false);
+  let flips=0;
+  for(let i=1;i<seq.length;i++){if(seq[i]!==seq[i-1])flips++;}
+  const traj=seq.map(s=>s?"PASS":"FAIL").join("->");
+  if(churn)parts.push(`<span class="tctraj-churn" title="Verdict trajectory ${esc(traj)} — ${flips} verdict flip${flips===1?"":"s"}; the criterion is oscillating across verify rounds"><i class="ti ti-repeat"></i>${flips} flip${flips===1?"":"s"}</span>`);
+  return `<div class="tctraj" title="Verdict trajectory ${esc(traj)}">${parts.join("")}</div>`;
+}
+
 async function showTicket(id){
   // Full detail (incl. design specs stripped from list payloads) loads on demand.
   const body=document.getElementById("ticket-body");
@@ -1819,46 +1971,312 @@ async function showTicket(id){
   document.getElementById("ov-ticket").classList.add("open");
   let t=null;try{t=await(await fetch(api("/ticket/"+encodeURIComponent(id)))).json();}catch(e){}
   if(!t||!t.id){t=(STATE.tickets||[]).find(x=>x.id===id);}
-  if(!t){body.innerHTML='<span class="x" onclick="close_(\'ov-ticket\')"><i class="ti ti-x"></i></span><div class="empty">ticket not found</div>';return;}
+  if(!t){
+    // Hub chat mentions tickets from EVERY project; the viewer may be sitting
+    // in another one. Find the ticket's home, switch there, and reopen.
+    try{
+      const ov=await(await fetch("/api/workspace/overview")).json();
+      for(const p of (ov.projects||[])){
+        if(p.id===PID)continue;
+        const rr=await fetch("/api/projects/"+encodeURIComponent(p.id)+"/ticket/"+encodeURIComponent(id));
+        if(rr.ok){switchProject(p.id);setTimeout(()=>showTicket(id),900);return;}
+      }
+    }catch(e){}
+    body.innerHTML='<span class="x" onclick="close_(\'ov-ticket\')"><i class="ti ti-x"></i></span><div class="empty">ticket not found in any project</div>';return;}
   const d=t.design||{},tech=d.technical,ux=d.ux,ac=t.acceptance_criteria||[];
+  // Served from the archive cold store (CXA-F274): the record is complete but
+  // immutable — every mutation affordance below is suppressed behind this flag.
+  const ARCH=t.archived===true;
+  // Dependency graph (CXA-F237): the ticket's transitive closure rendered from
+  // the project's derived graph. Only fetched when the ticket DECLARES deps,
+  // and only rendered when the ticket belongs to THIS project's graph — the
+  // graph is enrichment, so a failed fetch degrades to no section while the
+  // detail itself stays usable.
+  let depGraphSection="";
+  if((t.depends_on||[]).length){
+    try{
+      const g=await(await fetch(api("/dependencies"))).json();
+      const src=(g.nodes||[]).some(n=>n.id===t.id)?dependencyMermaid(t,g):"";
+      if(src)depGraphSection=`<div class="mrow" style="display:block"><span class="lbl">Dependency graph</span><pre class="mermaid" style="margin-top:7px">${esc(src)}</pre></div>`;
+    }catch(e){}
+  }
   let h=`<span class="x" onclick="close_('ov-ticket')"><i class="ti ti-x"></i></span><h3>${esc(t.title)}</h3>
-    <div class="msub">${esc(t.id)} · ${esc(t.type)}</div>
-    <div class="mrow"><span class="lbl">Status</span><b>${esc(t.status)}</b></div>
+    <div class="msub">${esc(t.id)} · ${esc(t.type)}${ARCH?` <span class="b" style="background:color-mix(in srgb,var(--purple) 16%,transparent);color:var(--purple)" title="Evicted to the archive cold store — read-only"><i class="ti ti-archive" style="font-size:10px"></i> ARCHIVED</span> <span style="color:var(--dim)">· served from the cold store</span>`:""}</div>
+    <div class="tk-tabs" role="tablist">
+      <button class="tk-tab on" data-tk-tab="details" onclick="tkTab('details')"><i class="ti ti-list-details"></i> Details</button>
+      <button class="tk-tab" data-tk-tab="coverage" onclick="tkTab('coverage')"><i class="ti ti-shield-check"></i> Test Coverage</button>
+      <button class="tk-tab" data-tk-tab="forensics" onclick="tkTab('forensics')"><i class="ti ti-history"></i> Forensics</button>
+    </div>
+    <div class="tk-pane" id="tk-pane-details">
+    <div class="mrow"><span class="lbl">Status</span><b>${t.status==="on_hold"?'<span style="color:var(--amber)">on hold</span>':esc(t.status)}</b>${t.status==="on_hold"&&(STATE.hold_reasons||{})[t.id]?`<span style="font-size:11.5px;color:var(--dim);margin-left:8px">· ${esc(STATE.hold_reasons[t.id])}</span>`:""}${(!ARCH&&typeof canManage==="function"&&canManage())?(["pending","ready","open"].includes(t.status)?` <button class="tk-btn" style="margin-left:10px" onclick="holdTicket('${t.id}',true)" title="Park it — sprints and agents skip it until resumed"><i class="ti ti-player-pause"></i> Hold</button>`:(t.status==="on_hold"?` <button class="tk-btn go" style="margin-left:10px" onclick="holdTicket('${t.id}',false)"><i class="ti ti-player-play"></i> Resume</button>`:"")):""}${ARCH?' <span style="font-size:11px;color:var(--dim);margin-left:8px">terminal — no further transitions</span>':""}</div>
     <div class="mrow"><span class="lbl">Priority</span>
       <div style="display:flex;gap:6px;align-items:center">
-        ${["high","medium","low"].map(p=>`<span onclick="setPriority('${t.id}','${p}')" style="cursor:pointer;font-size:11px;padding:3px 10px;border-radius:7px;font-weight:600;${t.priority===p?`background:var(--accentbg);color:var(--accent2)`:'background:var(--card2);color:var(--muted)'}">${p}</span>`).join("")}
+        ${ARCH?`<span style="font-size:11px;padding:3px 10px;border-radius:7px;font-weight:600;background:var(--accentbg);color:var(--accent2)">${esc(t.priority)}</span>`:["high","medium","low"].map(p=>`<span onclick="setPriority('${t.id}','${p}')" style="cursor:pointer;font-size:11px;padding:3px 10px;border-radius:7px;font-weight:600;${t.priority===p?`background:var(--accentbg);color:var(--accent2)`:'background:var(--card2);color:var(--muted)'}">${p}</span>`).join("")}
         <span style="color:var(--dim);font-size:12px;margin-left:6px">· ${esc(t.complexity)}${t.has_ui?' · UI':''}</span></div></div>
     <div class="mrow"><span class="lbl">Assignee</span>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        ${t.assignee?`<span class="tk" style="background:var(--accentbg);color:var(--accent2)"><i class="ti ti-user"></i> @${esc(t.assignee)}</span>
-          <button class="tk-btn" style="padding:4px 10px;font-size:11px" onclick="assignTicket('${t.id}','')"><i class="ti ti-robot"></i> Return to agents</button>`
-        :`<span style="color:var(--dim);font-size:12px">agents (pool)</span>
+        ${t.assignee?`<span class="tk" style="background:var(--accentbg);color:var(--accent2)"><i class="ti ti-user"></i> @${esc(t.assignee)}</span>${ARCH?"":`
+          <button class="tk-btn" style="padding:4px 10px;font-size:11px" onclick="assignTicket('${t.id}','')"><i class="ti ti-robot"></i> Return to agents</button>`}`
+        :`<span style="color:var(--dim);font-size:12px">agents (pool)</span>${ARCH?"":`
           <select id="tk-assign-sel" style="background:var(--card2);color:var(--text);border:1px solid var(--border);border-radius:7px;padding:4px 8px;font-size:12px"><option value="">choose person…</option></select>
-          <button class="tk-btn" style="padding:4px 10px;font-size:11px" onclick="assignTicket('${t.id}',document.getElementById('tk-assign-sel').value)"><i class="ti ti-user-plus"></i> Assign</button>`}
+          <button class="tk-btn" style="padding:4px 10px;font-size:11px" onclick="assignTicket('${t.id}',document.getElementById('tk-assign-sel').value)"><i class="ti ti-user-plus"></i> Assign</button>`}`}
       </div></div>
-    <div class="mrow"><span class="lbl">Blocked by</span>${depChips(t.depends_on)}</div>
+    <div class="mrow"><span class="lbl">Blocked by</span>${depChips(t.depends_on,blockedStatuses(t))}</div>
     <div class="mrow"><span class="lbl">Blocks</span>${depChips((STATE.tickets||[]).filter(x=>(x.depends_on||[]).includes(t.id)).map(x=>x.id))}</div>
+    ${t.parent_id?`<div class="mrow"><span class="lbl">Split from</span>${depChips([t.parent_id])}</div>`:''}
+    ${(function(){const kids=(STATE.tickets||[]).filter(x=>x.parent_id===t.id).map(x=>x.id);
+      const addBtn=(!ARCH&&typeof canManage==="function"&&canManage())?` <button class="tk-btn" style="padding:3px 9px;font-size:11px" onclick="addSubtask('${t.id}')"><i class="ti ti-plus"></i> subtask</button>`:'';
+      return (kids.length||addBtn)?`<div class="mrow"><span class="lbl">Subtasks</span>${kids.length?depChips(kids):''}${addBtn}</div>`:'';})()}
+    ${(t.unknown_dependencies||[]).length?`<div class="mrow"><span class="lbl">Unknown dependencies</span>${t.unknown_dependencies.map(id=>`<span title="no such ticket in this project — the scheduler treats it as NOT satisfied" style="display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:3px 8px;border-radius:7px;background:color-mix(in srgb,var(--red) 14%,transparent);color:var(--red);margin-right:5px"><i class="ti ti-alert-triangle" style="font-size:11px"></i>${esc(id)} · unknown</span>`).join("")}</div>`:''}
+    ${depGraphSection}
     <div class="mrow" style="display:block"><span class="lbl">Description</span><div class="doc-body md" style="margin-top:7px;color:var(--muted);line-height:1.6;font-size:13px">${t.description?mdRender(t.description):'—'}</div></div>
-    <div class="mrow" style="display:block"><span class="lbl">Acceptance criteria</span>${ac.length?`<div class="aclist">${ac.map(c=>`<div class="acitem"><i class="ti ti-square-check"></i> ${esc(c)}</div>`).join("")}</div>`:'<div style="margin-top:6px;color:var(--dim);font-size:12px">— none defined yet</div>'}</div>`;
+    <div class="mrow" style="display:block"><span class="lbl">Acceptance criteria</span>${ac.length?`<div class="aclist">${ac.map(c=>`<div class="acitem"><i class="ti ti-square-check"></i> ${esc(c)}</div>`).join("")}</div>`:'<div style="margin-top:6px;color:var(--dim);font-size:12px">— none defined yet</div>'}</div>`
+    +(function(){const tcs=t.test_cases||[];if(!tcs.length)return '';
+      return `<div class="mrow" style="display:block;border:none"><span class="lbl">Test cases</span><div class="tclist">${tcs.map(tc=>{
+        const st=tc.status||'pending';
+        const badge={passed:['var(--green)','ti-circle-check','Passed'],failed:['var(--red)','ti-circle-x','Failed'],pending:['var(--dim)','ti-clock','Pending']}[st]||['var(--dim)','ti-clock','Pending'];
+        const img=tc.evidence&&tc.evidence.image?`<div class="tcimg"><img src="${esc(tc.evidence.image)}" alt="case screenshot" onclick="window.open('${esc(tc.evidence.image)}','_blank')" loading="lazy"></div>`:'';
+        const note=tc.evidence&&tc.evidence.note?`<div class="tcnote">${esc(tc.evidence.note)}</div>`:'';
+        // CXA-F251: the criterion's verdict trajectory across send-back
+        // cycles — churn the raw per-cycle badge above cannot show.
+        const traj=tcTrajHtml(t,tc);
+        // CXA-F248: the criterion's resolved live-reproduction URL (recorded by
+        // the TEST verdict flow). Rendered ONLY when present — a case with no
+        // resolved route gets no link, never a guessed href.
+        const rep=tc.evidence&&tc.evidence.repro?`<a class="tcrepro" href="${esc(tc.evidence.repro)}" target="_blank" rel="noopener" title="Open the live page that demonstrates this criterion"><i class="ti ti-external-link"></i> Live repro</a>`:'';
+        return `<div class="tcitem"><div class="tcrow"><i class="ti ${badge[1]}" style="color:${badge[0]}"></i><span style="color:${badge[0]};font-weight:700;font-size:11px;text-transform:uppercase">${badge[2]}</span><div class="tcdesc">${esc(tc.description)}</div></div>${traj}${img}${note}${rep}</div>`;
+      }).join("")}</div></div>`;})()
   if(tech)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">Technical spec</span><pre>${esc(tech.approach)}\nfiles: ${esc((tech.files||[]).join(", "))}\napi: ${esc(tech.api_contract)}\ntest: ${esc(tech.test_plan)}</pre></div>`;
   if(ux)h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">UI/UX spec</span><pre>${esc(ux.user_flow)}\nscreens: ${esc((ux.screens||[]).join(", "))}</pre></div>`;
+  // Design attachments: PD mockups + user uploads. Bytes come from blob
+  // storage via the attachment endpoint; records live on the state.
+  {const atts=(t.attachments)||((window.STATE&&STATE.ticket_attachments)||{})[t.id]||[];
+   // Gallery list for the lightbox: prev/next walks every attachment of the
+   // ticket in grid order. In-app only, never target=_blank: from the desktop
+   // shell a new tab opens an EXTERNAL browser with no session cookie — 401.
+   ATT_GALLERY=atts.map(a=>({url:api("/attachment?key="+encodeURIComponent(a.key)),
+     name:a.name,img:(a.content_type||"").startsWith("image/")}));
+   const grid=ATT_GALLERY.map((g,i)=>{
+     const del=ARCH?"":`<button class="att-del" title="Remove attachment" onclick="event.stopPropagation();deleteAttachment('${t.id}','${esc(atts[i].key)}')">&times;</button>`;
+     return g.img
+       ?`<div class="att-card" onclick="event.stopPropagation();showAttachment(${i})" title="${esc(g.name)} · ${esc(atts[i].by)}">${del}<img src="${esc(g.url)}" alt="${esc(g.name)}" loading="lazy"><span>${esc(g.name)}</span></div>`
+       :`<div class="att-card att-file" onclick="event.stopPropagation();showAttachment(${i})" title="${esc(g.name)} · ${esc(atts[i].by)}">${del}<i class="ti ti-file"></i><span>${esc(g.name)}</span></div>`;
+   }).join("");
+   h+=`<div class="mrow" style="display:block;border:none"><span class="lbl">Design & attachments</span>
+     <div class="att-grid" id="att-grid">${grid||'<div style="color:var(--dim);font-size:12px;margin-top:6px">— none yet (PD attaches mockups here)</div>'}</div>
+     ${ARCH?"":`<input type="file" id="att-file" style="display:none" onchange="uploadAttachment('${t.id}',this)">
+     <button class="tk-btn" style="margin-top:8px" onclick="document.getElementById('att-file').click()"><i class="ti ti-paperclip"></i> Attach file</button>`}</div>`;}
+  h+=`</div>`+covPane(t)+fgPane(t);
   const canWork=["pending","ready","open"].includes(t.status);
-  if(t.cost_hold!=null&&!t.cost_approved)h+=`<div class="mrow" style="display:block;border:1px solid var(--amber);border-radius:9px;padding:10px 12px;background:color-mix(in srgb,var(--amber) 9%,transparent)"><span style="color:var(--amber);font-weight:700"><i class="ti ti-currency-dollar"></i> Held for cost approval</span><div style="font-size:12.5px;color:var(--muted);margin-top:4px">Estimated ~$${(+t.cost_hold).toFixed(2)}/run exceeds the approval gate. Agents will skip this ticket until you approve it.</div><button class="pri" style="margin-top:8px" onclick="approveCost('${t.id}')"><i class="ti ti-check"></i> Approve run</button></div>`;
-  h+=`<div class="tk-actions">
+  if(t.cost_hold!=null&&!t.cost_approved&&!ARCH)h+=`<div class="mrow" style="display:block;border:1px solid var(--amber);border-radius:9px;padding:10px 12px;background:color-mix(in srgb,var(--amber) 9%,transparent)"><span style="color:var(--amber);font-weight:700"><i class="ti ti-currency-dollar"></i> Held for cost approval</span><div style="font-size:12.5px;color:var(--muted);margin-top:4px">Estimated ~$${(+t.cost_hold).toFixed(2)}/run exceeds the approval gate. Agents will skip this ticket until you approve it.</div><button class="pri" style="margin-top:8px" onclick="approveCost('${t.id}')"><i class="ti ti-check"></i> Approve run</button></div>`;
+  // Same live link as the inbox verify card (CXA-F242-C): the server injects
+  // the field only while the ticket awaits a human verdict, so its presence
+  // is the whole show/hide axis — no resolved deploy, no dead button.
+  // Archived records are immutable: the whole action bar is suppressed.
+  if(!ARCH)h+=`<div class="tk-actions">
     <button class="tk-btn" onclick="editTicket('${t.id}')"><i class="ti ti-edit"></i> Edit</button>
     ${canWork?`<button class="tk-btn go" onclick="workNext('${t.id}')"><i class="ti ti-player-play-filled"></i> Work on this next</button>`:''}
     ${(t.status==="pending"&&tech)?`<button class="tk-btn go" onclick="humanGate('${t.id}','ready')"><i class="ti ti-checks"></i> Approve → Ready</button>`:''}
-    ${t.status==="fixed"?`<button class="tk-btn" onclick="inboxSendBack('${t.id}')"><i class="ti ti-arrow-back-up"></i> Send back</button>`:''}
+    ${t.status==="fixed"?`<button class="tk-btn" onclick="inboxSendBack('${t.id}','${escAttr(t.reproduce_url||"")}')"><i class="ti ti-arrow-back-up"></i> Send back</button>`:''}
+    ${t.reproduce_url?`<button class="tk-btn" title="Open live instance" onclick="window.open('${esc(t.reproduce_url)}','_blank')"><i class="ti ti-external-link"></i> Open live instance</button>`:''}
     ${t.status==="fixed"?`<button class="tk-btn go" onclick="humanGate('${t.id}','verify')"><i class="ti ti-shield-check"></i> Mark Verified</button>`:''}
     ${(t.status==="pending"||t.status==="open")?`<button class="tk-btn danger" onclick="rejectTicket('${t.id}')"><i class="ti ti-ban"></i> Reject</button>`:''}
   </div>`;
   h+=`<div class="mrow" style="display:block;border:none;margin-top:6px"><span class="lbl">Comments</span><div id="tk-comments" style="margin-top:8px">${'<div class="empty" style="padding:8px">loading…</div>'}</div>
-    <div class="tkc-wrap">${mdToolbar('tkc-input')}<div class="tkc-compose"><input id="tkc-input" placeholder="Add a comment…  (**markdown** · Enter to post · @ to mention)" onkeydown="if(!imeEnter(event)&&event.key==='Enter')postTicketComment('${t.id}')"><button class="pri" onclick="postTicketComment('${t.id}')"><i class="ti ti-send"></i></button></div></div></div>`;
+    ${ARCH?'<div class="tkc-wrap" style="border:1px dashed var(--border2);border-radius:8px;padding:8px 12px;text-align:center;color:var(--dim);font-size:12.5px">This ticket is archived — history is read-only.</div>':`<div class="tkc-wrap">${mdToolbar('tkc-input')}<div class="tkc-compose"><input id="tkc-input" placeholder="Add a comment…  (**markdown** · Enter to post · @ to mention)" onkeydown="if(!imeEnter(event)&&event.key==='Enter')postTicketComment('${t.id}')"><button class="pri" onclick="postTicketComment('${t.id}')"><i class="ti ti-send"></i></button></div></div>`}</div>`;
   body.innerHTML=h;
-  fillAssignSelect();
-  renderTicketComments(t.id);
+  if(!ARCH)fillAssignSelect();
+  renderTicketComments(t.id,ARCH);
   // Ticket descriptions can carry ```mermaid fences too (SA designs often do).
   if(typeof renderMermaidIn==="function")renderMermaidIn(body);}
+// Ticket-detail tabs (CXA-F024): Details vs Test Coverage. Pure visibility
+// toggle — both panes render once, switching never refetches.
+function tkTab(name){
+  document.querySelectorAll("#ov-ticket .tk-tab").forEach(b=>b.classList.toggle("on",b.dataset.tkTab===name));
+  for(const p of["details","coverage","forensics"]){const el=document.getElementById("tk-pane-"+p);if(el)el.hidden=p!==name;}
+}
+// The Test Coverage pane (CXA-F024): one row per acceptance criterion with its
+// coverage status and the evidence addressing it — test files, or an API
+// request/response for non-UI tickets. Status text is always shown next to its
+// color, so no state rides on color alone.
+function covPane(t){
+  // Absent field (stale snapshot payload, detail fetch failed) renders an
+  // empty pane — same degradation as the Test cases section. Only a PRESENT
+  // empty matrix may claim "no criteria to cover".
+  if(!Array.isArray(t.coverage_matrix))return `<div class="tk-pane" id="tk-pane-coverage" hidden></div>`;
+  const cm=t.coverage_matrix;
+  if(!cm.length)return `<div class="tk-pane" id="tk-pane-coverage" hidden><div class="cov-empty"><i class="ti ti-shield-check"></i><div class="cov-empty-t">No acceptance criteria to cover</div><div class="cov-empty-s">Nothing is gated for verification on this ticket.</div></div></div>`;
+  const meta={covered:["var(--green)","ti-circle-check","COVERED"],partially_covered:["var(--amber)","ti-alert-triangle","PARTIALLY COVERED"],not_tested:["var(--red)","ti-circle-dashed","NOT TESTED"]};
+  const rows=cm.map(e=>{
+    const m=meta[e.status]||meta.not_tested;
+    const srcs=(e.sources||[]).filter(Boolean).map(s=>`<span class="cov-src" title="${esc(s)}">${esc(s)}</span>`).join("");
+    return `<div class="cov-row"><div class="cov-badge" style="color:${m[0]}"><i class="ti ${m[1]}"></i>${m[2]}</div><div class="cov-body"><div class="cov-ac">${esc(e.criterion)}</div>${srcs?`<div class="cov-srcs">${srcs}</div>`:""}</div></div>`;
+  }).join("");
+  return `<div class="tk-pane" id="tk-pane-coverage" hidden><div class="covlist">${rows}</div></div>`;
+}
+// ── Evidence forensics pane (CXA-F241) ─────────────────────────────────────
+// Per-gate proof inspection for the verification reviewer: which DoD gate
+// decision each piece of evidence supported, who attached it, and the full
+// captured payload behind a green check. Grouping mirrors the server-side
+// forensics::group_by_gate rule (crates/application/src/forensics.rs): an
+// item belongs to the LATEST decision of its linked gate at or before its
+// capture time — or that gate's first decision when it predates all of them.
+// Items with no recorded link stay unlinked ("provenance unknown"), never
+// assigned a gate by guess. Same gate visited more than once (a send-back
+// cycle) renders its visits side by side, before and after.
+function fgAttribution(gates,item){
+  const at=Date.parse(item.at),links=item.source_gates||[];
+  if(!Number.isFinite(at)||!links.length)return -1;
+  const cands=gates.filter(g=>links.includes(g.gate_id));
+  if(!cands.length)return -1;
+  let pick=cands[0];
+  for(const g of cands){if(g.decided_at_ms<=at)pick=g;}
+  return gates.indexOf(pick);
+}
+function fgKind(e){
+  return {screenshot:["var(--blue)","ti-photo","SCREENSHOT"],
+          api:["var(--accent2)","ti-api","API"],
+          test:["var(--green)","ti-test-pipe","TEST"],
+          waived:["var(--amber)","ti-gavel","WAIVER"]}[e.kind]
+         ||["var(--dim)","ti-file",(e.kind||"?").toUpperCase()];
+}
+function fgWhen(at){const ms=Date.parse(at);return Number.isFinite(ms)?new Date(ms).toLocaleString():at;}
+function fgMs(ms){const d=new Date(ms);return Number.isFinite(d.getTime())?d.toLocaleString():"?";}
+function fgItem(e){
+  const[kc,ic,klabel]=fgKind(e);
+  const who=e.actor?`by @${esc(e.actor)}`:"by an unattributed actor";
+  const prov=`${who} · ${(e.source_gates||[]).length?`gate ${esc(e.source_gates.join(", "))} · `:""}provenance unknown`;
+  const inline=(e.kind==="api"||e.kind==="test")&&e.detail;
+  let body="";
+  if(e.kind==="screenshot"){
+    // The hidden twin handles the rare race where the server saw the
+    // artifact but storage lost it before the image rendered: the <img>
+    // error reveals the explicit 'missing artifact' state, never a
+    // silently broken image.
+    const miss=`<div class="fg-missing"><i class="ti ti-alert-triangle"></i> missing artifact — the recorded screenshot is no longer on disk <span class="fg-path">${esc(e.detail)}</span></div>`;
+    body=e.artifact==="ok"
+      ?`<img class="fg-shot" src="${esc(e.detail)}" alt="${esc(e.label)}" loading="lazy" onerror="this.nextElementSibling.hidden=false;this.remove()">`
+         +miss.replace('<div class="fg-missing">','<div class="fg-missing" hidden>')
+      :miss;
+  }else if(e.kind==="waived"){
+    body=`<div class="fg-waiver"><i class="ti ti-gavel"></i> <b>Waiver</b> — granted ${who}: ${esc(e.detail)}</div>`;
+  }
+  return `<div class="fg-item${inline?" expandable":""}"${inline?` onclick="this.classList.toggle('open')"`:""} title="${inline?"click to inspect the full captured text":""}">`
+    +`<div class="fg-row"><i class="ti ${ic}" style="color:${kc}"></i>`
+    +`<span class="fg-kind" style="color:${kc}">${klabel}</span>`
+    +`<span class="fg-label">${esc(e.label)}</span>`
+    +`<span class="fg-when" title="${esc(e.at)}">${esc(fgWhen(e.at))}</span>`
+    +(inline?`<i class="ti ti-chevron-right fg-chev"></i>`:"")
+    +`</div>`
+    +`<div class="fg-prov">${prov}</div>`
+    +(inline?`<pre class="fg-pre">${esc(e.detail)}</pre>`:body)
+    +`</div>`;
+}
+function fgGateSection(g,visit,of){
+  const pair=of>1?` · <span class="fg-visit">visit ${visit}/${of}</span>`:"";
+  return `<div class="fg-gate"><div class="fg-gate-h"><span class="fg-gate-id">${esc((g.gate.gate_id||"?").toUpperCase())}</span>`
+    +`<span class="fg-gate-sub">${esc(g.gate.status_from)} → ${esc(g.gate.status_to)} · decided ${esc(fgMs(g.gate.decided_at_ms))} · by ${esc(g.gate.actor_role||"?")} role${pair}</span></div>`
+    +(g.items.length?g.items.map(fgItem).join("")
+      :`<div class="fg-none">no evidence attached to this decision</div>`)
+    +`</div>`;
+}
+function fgPane(t){
+  const gates=t.gates||[],evs=t.evidence||[];
+  const hidden=`<div class="tk-pane" id="tk-pane-forensics" hidden>`;
+  if(!gates.length&&!evs.length){
+    // Absence is explicit: no evidence AND no gate decision ever recorded —
+    // distinguishable from an omission on a gated ticket.
+    return hidden+`<div class="cov-empty"><i class="ti ti-history"></i><div class="cov-empty-t">No DoD evidence captured for this ticket</div><div class="cov-empty-s">Evidence appears here when a gate decision captures proof; nothing is guessed.</div></div></div>`;
+  }
+  const groups=gates.map(g=>({gate:g,items:[]}));
+  const unlinked=[];
+  for(const e of evs){
+    const i=fgAttribution(gates,e);
+    if(i>=0)groups[i].items.push(e);else unlinked.push(e);
+  }
+  let h=hidden+`<div class="fglist">`;
+  let i=0;
+  while(i<groups.length){
+    let j=i;
+    while(j<groups.length&&groups[j].gate.gate_id===groups[i].gate.gate_id)j++;
+    const run=groups.slice(i,j);
+    // The same gate decided more than once = send-back cycles: the runs'
+    // visits sit side by side so the reviewer compares before/after.
+    h+=run.length>=2
+      ?`<div class="fg-pair">${run.map((g,n)=>fgGateSection(g,n+1,run.length)).join("")}</div>`
+      :run.map(g=>fgGateSection(g,1,1)).join("");
+    i=j;
+  }
+  if(unlinked.length){
+    h+=`<div class="fg-gate"><div class="fg-gate-h"><span class="fg-gate-id">UNLINKED</span>`
+      +`<span class="fg-gate-sub">no matching gate decision on this ticket — no link is guessed</span></div>`
+      +unlinked.map(fgItem).join("")+`</div>`;
+  }
+  // Engine & model provenance (CXA-F257): which engine/model actually executed
+  // each agent step, chronological — the verifier sees what produced the work,
+  // including mid-run failover (every attempt in order) and send-back cycles.
+  const prov=t.provenance||[];
+  if(prov.length){
+    h+=`<div class="fg-gate"><div class="fg-gate-h"><span class="fg-gate-id">ENGINE PROVENANCE</span>`
+      +`<span class="fg-gate-sub">engine &amp; model that executed each agent step — what ran, not what config asked for</span></div>`
+      +prov.map(s=>`<div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;padding:6px 0;border-bottom:1px solid var(--border)">`
+        +`<span style="font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--dim)">${esc(s.role)}</span>`
+        +`<span style="font-size:12.5px;color:var(--text)">${esc(s.action)}</span>`
+        +`<span style="display:flex;gap:6px;flex-wrap:wrap">${(s.attempts||[]).map(provChip).join("")}</span>`
+        +`<span style="font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:var(--dim);margin-left:auto">${esc(s.at)}</span></div>`).join("")
+      +`</div>`;
+  }
+  return h+`</div></div>`;
+}
+// In-app attachment viewer: full-screen overlay, same session. Gallery-aware:
+// ‹ › buttons and ←/→ keys walk ATT_GALLERY; Esc or backdrop click closes.
+// Non-image types render through an <iframe> (PDF etc.).
+let ATT_GALLERY=[],ATT_IDX=0;
+function showAttachment(i){
+  if(!ATT_GALLERY.length)return;
+  ATT_IDX=((i%ATT_GALLERY.length)+ATT_GALLERY.length)%ATT_GALLERY.length;
+  const g=ATT_GALLERY[ATT_IDX];
+  let ov=document.getElementById("att-light");
+  if(!ov){ov=document.createElement("div");ov.id="att-light";ov.className="attlight";
+    ov.onclick=e=>{if(e.target===ov)ov.classList.remove("open");};
+    document.body.appendChild(ov);
+    document.addEventListener("keydown",e=>{
+      if(!ov.classList.contains("open"))return;
+      if(e.key==="Escape")ov.classList.remove("open");
+      else if(e.key==="ArrowLeft")showAttachment(ATT_IDX-1);
+      else if(e.key==="ArrowRight")showAttachment(ATT_IDX+1);});}
+  const many=ATT_GALLERY.length>1;
+  ov.innerHTML=`<div class="attlight-name">${esc(g.name)}${many?` · ${ATT_IDX+1}/${ATT_GALLERY.length}`:''}</div>`
+    +(g.img?`<img src="${esc(g.url)}" alt="${esc(g.name)}">`
+           :`<iframe src="${esc(g.url)}" title="${esc(g.name)}"></iframe>`)
+    +(many?`<button class="attlight-nav prev" onclick="event.stopPropagation();showAttachment(ATT_IDX-1)">‹</button>
+            <button class="attlight-nav next" onclick="event.stopPropagation();showAttachment(ATT_IDX+1)">›</button>`:'');
+  ov.classList.add("open");
+}
+// Remove one attachment record (confirm first), then refresh the modal.
+async function deleteAttachment(id,key){
+  if(!confirm("Remove this attachment?"))return;
+  const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/attachments?key="+encodeURIComponent(key)),
+    {method:"DELETE"});
+  if(!r.ok){toasty("Delete failed","err");return;}
+  toasty("Attachment removed");
+  showTicket(id);
+}
+// Upload one attachment: raw bytes body, MIME in Content-Type, name in query.
+async function uploadAttachment(id,input){
+  const f=input.files&&input.files[0];if(!f)return;
+  if(f.size>25*1024*1024){toasty("Max 25MB","err");return;}
+  try{
+    const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/attachments?name="+encodeURIComponent(f.name)),
+      {method:"POST",headers:{"Content-Type":f.type||"application/octet-stream"},body:f});
+    if(!r.ok){toasty(await r.text()||"Upload failed","err");return;}
+    toasty("Attached "+f.name,"ok");
+    // The state snapshot refreshes on its own tick; reflect immediately.
+    const rec=(await r.json()).attachment;
+    if(window.STATE){(STATE.ticket_attachments=STATE.ticket_attachments||{});(STATE.ticket_attachments[id]=STATE.ticket_attachments[id]||[]).push(rec);}
+    showTicket(id);
+  }catch(e){toasty("Network error","err");}
+}
 async function fillAssignSelect(){
   const sel=document.getElementById("tk-assign-sel");if(!sel)return;
   try{const members=await(await fetch(api("/members"))).json();
@@ -1899,7 +2317,9 @@ async function workNext(id){
   try{await ctl('resume');}catch(e){}
   showTicket(id);}
 const TKC_QUICK=["👍","❤️","🎉","🚀","👀","✅"];
-async function renderTicketComments(tid){
+// `arch` renders the thread read-only: no reaction affordances (an archived
+// ticket's history is immutable — the composer is already suppressed).
+async function renderTicketComments(tid,arch){
   const box=document.getElementById("tk-comments");if(!box)return;
   let list=[];try{list=await(await fetch(api("/comments?ticket="+encodeURIComponent(tid)))).json();}catch(e){}
   if(!Array.isArray(list)||!list.length){box.innerHTML='<div class="empty" style="padding:8px;font-size:12px">No comments yet — start the thread.</div>';return;}
@@ -1907,14 +2327,14 @@ async function renderTicketComments(tid){
   box.innerHTML=list.map(c=>{
     const mine=c.author==="USER"||c.author===me;
     const av=(c.author||"?").slice(0,2).toUpperCase();
-    const chips=(c.reactions||[]).map(r=>{const on=(r.users||[]).includes(me);
+    const chips=arch?"":(c.reactions||[]).map(r=>{const on=(r.users||[]).includes(me);
       return `<button class="react${on?' on':''}" title="${esc((r.users||[]).join(', '))}" onclick="reactComment('${tid}','${esc(c.id)}','${esc(r.emoji)}')">${r.emoji} <span>${(r.users||[]).length}</span></button>`;}).join("");
     return `<div class="tkc">
       <div class="tkc-av${mine?' me':''}">${esc(av)}</div>
       <div class="tkc-main"><div class="tkc-h"><b>${esc(c.author==='USER'?'You':c.author)}</b> <span class="tkc-t">${esc((c.at||'').slice(0,16).replace('T',' '))}</span></div>
         <div class="tkc-b">${formatMsg(c.body)}</div>
         ${attHtml(c.attachments)}
-        <div class="tkc-react">${chips}<button class="tkc-addr" onclick="tkcReactMenu(event,'${tid}','${esc(c.id)}')" title="React"><i class="ti ti-mood-plus"></i></button></div></div>
+        <div class="tkc-react">${chips}${arch?"":`<button class="tkc-addr" onclick="tkcReactMenu(event,'${tid}','${esc(c.id)}')" title="React"><i class="ti ti-mood-plus"></i></button>`}</div></div>
     </div>`;}).join("");
 }
 function tkcReactMenu(ev,tid,cid){ev.stopPropagation();
@@ -1957,6 +2377,10 @@ async function loadSettings(){
   try{const r=await fetch(api("/config"));const b=await r.json();if(r.ok)cfg=b;else cfgErr=b;}
   catch(e){cfgErr={error:"the hub could not be reached"};}
   window._cfg=cfg;
+  // The opencode catalog drifts (providers add/remove models); re-ask on every
+  // Settings open instead of once per page session, so the dropdowns and the
+  // stale-model warning below reflect what the CLI offers right now.
+  try{await loadOpencodeModels();}catch(e){}
   if(cfgErr){
     document.getElementById("settings-body").innerHTML=`
       <div class="panel" style="border-color:var(--red)">
@@ -2004,7 +2428,7 @@ async function loadSettings(){
   const hu=wf.human||{},ad=hu.adaptive||{};
   // Real agent CLIs only. `scripted`/`mock` are offline test engines (no real
   // LLM) — only shown if a project is already pinned to one, never offered new.
-  const realEng=["claude","opencode","copilot","hermes","gemini","codex"];
+  const realEng=["claude","opencode","copilot","hermes","gemini","codex","harxes"];
   const eng=[...realEng]; ["scripted","mock"].forEach(t=>{if([def.engine,...Object.values(per).map(p=>p.engine)].includes(t))eng.push(t);});
   const label=e=>e+(detNames.has(e)?" ✓":(e==="scripted"||e==="mock")?" (test)":" (not installed)");
   const opt=(s)=>eng.map(e=>`<option value="${e}" ${e===s?'selected':''}>${label(e)}</option>`).join("");
@@ -2035,13 +2459,19 @@ async function loadSettings(){
     <div class="settab" data-p="engines">
       ${detBanner}
       <div style="margin:-2px 0 12px"><button onclick="checkAgentSetup(true)" class="btn-ghost"><i class="ti ti-robot"></i> Agent setup guide</button></div>
+      ${(()=>{const d=(cfg.engine&&cfg.engine.default)||{};
+        if(d.engine!=="opencode"||!OC_MODELS.length)return"";
+        const stale=[];
+        const chk=(label,ch)=>{if(ch&&ch.engine==="opencode"&&ch.model&&!OC_MODELS.includes(ch.model))stale.push(`${label}: <code>${esc(ch.model)}</code>`);};
+        chk("default",d);Object.entries((cfg.engine&&cfg.engine.per_role)||{}).forEach(([r,ch])=>chk(r,ch));
+        return stale.length?`<div class="panel" style="border-color:var(--amber);margin-bottom:12px;font-size:12.5px"><i class="ti ti-alert-triangle" style="color:var(--amber)"></i> The provider no longer offers ${stale.join(", ")} — runs on it fail until you pick a model from the current list.</div>`:"";})()}
       <div class="panel frm">${defRow}
         <div class="fr"><span class="lbl">Auto failover</span>
           <select id="eng-autofb"><option value="true" ${(cfg.engine&&cfg.engine.auto_fallback!==false)?'selected':''}>on</option><option value="false" ${(cfg.engine&&cfg.engine.auto_fallback===false)?'selected':''}>off</option></select>
           <span class="hint">on (default): auto-use every installed CLI + a cheaper tier as fallback — no manual list needed</span></div>
         <div class="fr" style="align-items:flex-start"><span class="lbl">Extra fallbacks</span>
-          <textarea id="eng-fallbacks" rows="2" style="flex:1;min-width:0;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:8px 11px;font-size:12.5px;font-family:ui-monospace,Menlo,monospace" placeholder="one per line: &lt;engine&gt; &lt;model&gt;\ne.g.  opencode gpt-4o\n      gemini gemini-2.0-flash">${(cfg.engine&&cfg.engine.fallbacks||[]).map(f=>`${f.engine} ${f.model}`).join("\n")}</textarea>
-          <span class="hint">tried in order when the primary hits a quota/rate-limit wall or stalls (timeout). Same CLI, cheaper model works too, e.g. <code>claude haiku</code></span></div>
+          <textarea id="eng-fallbacks" rows="3" style="flex:2 1 280px;min-width:220px;resize:vertical;background:var(--card);color:var(--text);border:1px solid var(--border2);border-radius:8px;padding:8px 11px;font-size:12.5px;font-family:ui-monospace,Menlo,monospace" placeholder="one per line: &lt;engine&gt; &lt;model&gt;\ne.g.  opencode gpt-4o\n      gemini gemini-2.0-flash">${(cfg.engine&&cfg.engine.fallbacks||[]).map(f=>`${f.engine} ${f.model}`).join("\n")}</textarea>
+          <span class="hint" style="flex:1 1 160px;min-width:0">tried in order when the primary hits a quota/rate-limit wall or stalls (timeout). Same CLI, cheaper model works too, e.g. <code>claude haiku</code></span></div>
         <button type="button" class="set-expand ${anyOverride?'open':''}" onclick="toggleRoleOverrides(this)"><i class="ti ti-chevron-right"></i> Per-agent model overrides <span style="color:var(--dim);font-weight:400">· optional — give any agent a different model</span></button>
         <div class="role-overrides" ${anyOverride?'':'hidden'}>${roleRows}</div>
       </div>
@@ -2058,10 +2488,11 @@ async function loadSettings(){
           <input id="wf-sp" type="number" min="1" value="${wf.sprint_length_cycles??10}" style="width:90px;${wf.sprint_unit==='cycles'?'':'display:none'}"/>
           <span class="hint">days = wall-clock sprints (recommended — cycles speed up and slow down); cycles = roll on the loop counter</span></div>
         <div class="fr"><span class="lbl">BA every N cycles</span><input id="wf-ba" type="number" min="0" value="${wf.ba_every_n_cycles??4}" style="width:90px"/><span class="hint">0 disables BA</span></div>
+        <div class="fr"><span class="lbl">DEV scope floor</span><input id="wf-floor" type="number" min="0" value="${wf.dev_scope_floor??4}" style="width:90px"/><span class="hint">keep at least this many actionable tickets committed — the mid-sprint top-up pulls more from the backlog; 0 disables</span></div>
         <div class="fr"><span class="lbl">Feature dev</span><select id="wf-fd"><option value="true" ${wf.feature_dev_enabled!==false?'selected':''}>enabled</option><option value="false" ${wf.feature_dev_enabled===false?'selected':''}>disabled</option></select></div>
         <div class="fr"><span class="lbl">Ops monitor</span><select id="wf-ops"><option value="true" ${wf.ops_monitor!==false?'selected':''}>on</option><option value="false" ${wf.ops_monitor===false?'selected':''}>off</option></select><span class="hint">pings the deployed app; files a bug + alerts on an outage</span></div>
         <div class="fr"><span class="lbl">Token saver</span><select id="wf-ts"><option value="true" ${wf.token_saver!==false?'selected':''}>on — compress diffs/logs &amp; terse agent output</option><option value="false" ${wf.token_saver===false?'selected':''}>off — full verbosity</option></select><span class="hint">cuts engine spend on big reviews with no loss of the actual change</span></div>
-        <div class="fr"><span class="lbl">Agent sandbox</span><select id="wf-sbx"><option value="false" ${wf.sandbox!==true?'selected':''}>off — agents write anywhere your user can</option><option value="true" ${wf.sandbox===true?'selected':''}>on — file writes confined to this workspace (macOS)</option></select><span class="hint">a confused agent can't damage files outside the project; toolchain caches stay writable</span></div>
+        <div class="fr"><span class="lbl">Agent sandbox</span><select id="wf-sbx"><option value="false" ${wf.sandbox!==true?'selected':''}>off — agents write anywhere your user can</option><option value="true" ${wf.sandbox===true?'selected':''}>on — file writes confined to this workspace (macOS Seatbelt / Linux Bubblewrap)</option></select><span class="hint">a confused agent can't damage files outside the project; toolchain caches stay writable</span></div>
         <div class="fr"><span class="lbl">TDD gate</span><select id="wf-tdd"><option value="true" ${wf.tdd!==false?'selected':''}>on — TEST writes failing tests from acceptance criteria before DEV codes</option><option value="false" ${wf.tdd===false?'selected':''}>off</option></select><span class="hint">"done" becomes machine-checkable before implementation starts</span></div>
         <div class="fr"><span class="lbl">Cost approval gate</span><input id="wf-gate" type="number" step="0.5" min="0" placeholder="off" value="${wf.approve_over_usd??''}" style="width:110px"><span class="hint">USD — tickets estimated above this wait for your approval; empty = off</span></div>
         <div class="fr"><span class="lbl">Escalation ladder</span><input id="en-esc" placeholder="engine defaults (claude → opus; opencode → custom providers first)" value="${esc(((cfg.engine||{}).escalation||[]).join(', '))}" style="min-width:280px"><span class="hint">comma-separated models tried on RETRIES of a failed ticket, strongest last</span></div>
@@ -2091,6 +2522,8 @@ async function loadSettings(){
         <div class="fr"><span class="lbl">Question SLA</span><input id="hu-sla" type="number" min="0" value="${hu.question_sla_minutes??60}" style="width:90px"/><span class="hint">minutes before an unanswered agent question escalates</span></div>
       </div>
       <div class="set-note">The three dials, weakest to strongest autonomy: <b>Ready gate off</b> (no approval at all) → <b>Auto-approve on</b> (routine auto, exceptions asked) → <b>Auto-approve off</b> (every ticket asked). Applies on the next restart.</div>
+      <div class="sec" style="margin-top:18px">What the gate learned</div>
+      <div class="panel" style="padding:0"><div id="approval-policy-panel"></div></div>
     </div>
     <div class="settab" data-p="git" hidden>
       ${toolingHtml}
@@ -2151,6 +2584,7 @@ async function loadSettings(){
       </div>
     </div>
     <div class="set-footer"><button class="save" onclick="saveSettings()"><i class="ti ti-device-floppy"></i> Save changes</button><span id="save-note"></span><span class="set-foothint">Engine &amp; model changes apply on the next cycle — no restart</span></div>`;
+  renderApprovalPolicy(); // CXA-F303: fill the "what the gate learned" panel
   setSetTab(window._setTab==="workspace"?"engines":(window._setTab||"engines"));}
 function copyText(btn,text){navigator.clipboard&&navigator.clipboard.writeText(text);
   const old=btn.innerHTML;btn.innerHTML='<i class="ti ti-check"></i>';setTimeout(()=>{btn.innerHTML=old;},1200);}

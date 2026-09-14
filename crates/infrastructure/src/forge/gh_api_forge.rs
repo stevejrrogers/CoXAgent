@@ -8,7 +8,7 @@
 //! it is independent of the working directory.
 
 use async_trait::async_trait;
-use coxagent_application::ports::outbound::{ForgePort, PrFeedback, PullRequest};
+use coxagent_application::ports::outbound::{ForgePort, IssueDraft, PrFeedback, PullRequest};
 use coxagent_application::PortError;
 
 /// GitHub REST forge for one repository, authenticated by a token.
@@ -90,11 +90,26 @@ impl GhApiForge {
         json_or_err(resp, path).await
     }
 
+    /// Issues in `state` (`open`/`closed`) as import drafts (CXA-F258).
+    /// The REST issues endpoint also lists pull requests — every PR is an
+    /// issue upstream — so those are filtered out: the backlog import takes
+    /// issues only. REST caps `per_page` at 100 — a larger `limit` silently
+    /// returns 100.
+    async fn issues(&self, state: &str, limit: usize) -> Result<Vec<IssueDraft>, PortError> {
+        let v = self
+            .get_json(&format!("issues?state={state}&per_page={limit}"))
+            .await?;
+        Ok(issue_drafts_from_rest(&v))
+    }
+
     /// One open PR enriched with `mergeable` + CI rollup — the list endpoint
     /// omits both, so each is fetched once (open PR counts are WIP-bounded, so
     /// this stays a handful of calls).
     async fn enrich(&self, raw: &serde_json::Value) -> PullRequest {
-        let number = raw.get("number").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let number = raw
+            .get("number")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
         let head_ref = raw
             .pointer("/head/ref")
             .and_then(serde_json::Value::as_str)
@@ -118,14 +133,22 @@ impl GhApiForge {
         let ci = self.ci_rollup(&head_sha).await;
         PullRequest {
             number,
-            title: raw.get("title").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+            title: raw
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
             head: head_ref,
             base: raw
                 .pointer("/base/ref")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_owned(),
-            url: raw.get("html_url").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+            url: raw
+                .get("html_url")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
             author: raw
                 .pointer("/user/login")
                 .and_then(serde_json::Value::as_str)
@@ -133,7 +156,11 @@ impl GhApiForge {
                 .to_owned(),
             ci,
             mergeable,
-            created: raw.get("created_at").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+            created: raw
+                .get("created_at")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
         }
     }
 
@@ -147,7 +174,9 @@ impl GhApiForge {
             return "none".to_owned();
         };
         let runs = v.get("check_runs").and_then(serde_json::Value::as_array);
-        let Some(runs) = runs else { return "none".to_owned() };
+        let Some(runs) = runs else {
+            return "none".to_owned();
+        };
         if runs.is_empty() {
             return "none".to_owned();
         }
@@ -187,7 +216,9 @@ async fn json_or_err(resp: reqwest::Response, what: &str) -> Result<serde_json::
             .map_err(|e| PortError::Backend(format!("github {what}: parse {e}")))
     } else {
         let snip: String = text.chars().take(200).collect();
-        Err(PortError::Backend(format!("github {what}: {status} {snip}")))
+        Err(PortError::Backend(format!(
+            "github {what}: {status} {snip}"
+        )))
     }
 }
 
@@ -207,6 +238,46 @@ fn number_and_head(list: &serde_json::Value, want_merged: Option<bool>) -> Vec<(
                         p.get("number")?.as_u64()?,
                         p.pointer("/head/ref")?.as_str()?.to_owned(),
                     ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Issue drafts from a REST `/repos/{owner}/{repo}/issues` listing — the pure
+/// parse half of [`GhApiForge::issues`], so the row mapping (label objects,
+/// nullable body, PR filtering) is testable with no network.
+#[must_use]
+pub fn issue_drafts_from_rest(list: &serde_json::Value) -> Vec<IssueDraft> {
+    list.as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter(|i| i.get("pull_request").is_none())
+                .map(|i| IssueDraft {
+                    number: i
+                        .get("number")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0),
+                    title: i
+                        .get("title")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    body: i
+                        .get("body")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    labels: super::label_names(
+                        i.get("labels")
+                            .and_then(serde_json::Value::as_array)
+                            .map_or(&[], Vec::as_slice),
+                    ),
+                    url: i
+                        .get("html_url")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
                 })
                 .collect()
         })
@@ -308,32 +379,60 @@ impl ForgePort for GhApiForge {
         // Formal reviews (approve / request-changes with a body) plus issue
         // comments — the same "what to change" a DEV agent reads back.
         let mut out = Vec::new();
-        if let Ok(v) = self.get_json(&format!("pulls/{number}/reviews?per_page=100")).await {
+        if let Ok(v) = self
+            .get_json(&format!("pulls/{number}/reviews?per_page=100"))
+            .await
+        {
             if let Some(arr) = v.as_array() {
                 for r in arr {
-                    let body = r.get("body").and_then(serde_json::Value::as_str).unwrap_or_default();
+                    let body = r
+                        .get("body")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
                     if body.trim().is_empty() {
                         continue;
                     }
                     out.push(PrFeedback {
-                        author: r.pointer("/user/login").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+                        author: r
+                            .pointer("/user/login")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
                         body: body.to_owned(),
-                        at: r.get("submitted_at").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+                        at: r
+                            .get("submitted_at")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
                     });
                 }
             }
         }
-        if let Ok(v) = self.get_json(&format!("issues/{number}/comments?per_page=100")).await {
+        if let Ok(v) = self
+            .get_json(&format!("issues/{number}/comments?per_page=100"))
+            .await
+        {
             if let Some(arr) = v.as_array() {
                 for c in arr {
-                    let body = c.get("body").and_then(serde_json::Value::as_str).unwrap_or_default();
+                    let body = c
+                        .get("body")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
                     if body.trim().is_empty() {
                         continue;
                     }
                     out.push(PrFeedback {
-                        author: c.pointer("/user/login").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+                        author: c
+                            .pointer("/user/login")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
                         body: body.to_owned(),
-                        at: c.get("created_at").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+                        at: c
+                            .get("created_at")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
                     });
                 }
             }
@@ -349,6 +448,14 @@ impl ForgePort for GhApiForge {
             .await
             .map_err(|e| PortError::Backend(format!("github comment_pr: {e}")))?;
         json_or_err(resp, "comment_pr").await.map(|_| ())
+    }
+
+    async fn list_open_issues(&self, limit: usize) -> Result<Vec<IssueDraft>, PortError> {
+        self.issues("open", limit).await
+    }
+
+    async fn list_closed_issues(&self, limit: usize) -> Result<Vec<IssueDraft>, PortError> {
+        self.issues("closed", limit).await
     }
 }
 
@@ -377,8 +484,43 @@ mod tests {
             {"number":1,"merged_at":"2026-01-01T00:00:00Z","head":{"ref":"a"}},
             {"number":2,"merged_at":null,"head":{"ref":"b"}},
         ]);
-        assert_eq!(number_and_head(&list, Some(true)), vec![(1, "a".to_owned())]);
-        assert_eq!(number_and_head(&list, Some(false)), vec![(2, "b".to_owned())]);
+        assert_eq!(
+            number_and_head(&list, Some(true)),
+            vec![(1, "a".to_owned())]
+        );
+        assert_eq!(
+            number_and_head(&list, Some(false)),
+            vec![(2, "b".to_owned())]
+        );
         assert_eq!(number_and_head(&list, None).len(), 2);
+    }
+
+    #[test]
+    fn issue_drafts_come_from_issues_not_pull_requests() {
+        // The REST issues endpoint also lists PRs (every PR is an issue
+        // upstream) — the backlog import must take issues only.
+        let list = serde_json::json!([
+            {
+                "number": 7,
+                "title": "CSV export fails on quoted commas",
+                "body": null,
+                "labels": [{"name": "bug"}, {"name": "priority:high"}],
+                "html_url": "https://github.com/o/r/issues/7"
+            },
+            {
+                "number": 8,
+                "title": "a PR, not an issue",
+                "pull_request": {"html_url": "https://github.com/o/r/pull/8"}
+            },
+            {"number": 9, "title": "plain-string label shape", "labels": ["chore"]}
+        ]);
+        let drafts = issue_drafts_from_rest(&list);
+        assert_eq!(drafts.len(), 2, "the PR row must be filtered out");
+        assert_eq!(drafts[0].number, 7);
+        assert_eq!(drafts[0].title, "CSV export fails on quoted commas");
+        assert_eq!(drafts[0].body, "", "a null REST body reads as empty");
+        assert_eq!(drafts[0].labels, vec!["bug", "priority:high"]);
+        assert_eq!(drafts[0].url, "https://github.com/o/r/issues/7");
+        assert_eq!(drafts[1].labels, vec!["chore"], "string labels parse too");
     }
 }

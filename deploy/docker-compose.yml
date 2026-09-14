@@ -90,6 +90,10 @@ services:
       COXAGENT_TURN_URL: turn:${PUBLIC_IP}:3478
       COXAGENT_TURN_SECRET: ${TURN_SECRET:?coturn shared-secret must be set}
       COXAGENT_REGISTRY: /data/registry.json
+    ports:
+      # Direct host publishing of the hub (container binds 4000, service.rs
+      # default): reserved host port for this project — Caddy fronts 80/443.
+      - "8101:4000"
     volumes:
       - appdata:/data
       - ./data/TL:/data/TL:rw

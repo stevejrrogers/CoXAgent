@@ -1,6 +1,6 @@
 // App shell: project switching, files browser, codemap, settings, boot.
 // Split from index.html — classic script, load order matters (one shared scope).
-function switchProject(id){PID=id;INIT_ACT=false;GOAL_LOADED_PID=null;localStorage.setItem("coxpid",id);closeProjMenu();renderProjBtn();loadBudget();loadComments();connect();if(CUR==="codemap"&&window._cmTab==="files"){window._wsPath="";loadWorkspace("");}
+function switchProject(id){PID=id;INIT_ACT=false;GOAL_LOADED_PID=null;ALERTS_AT=0;ALERTS_CACHE=[];localStorage.setItem("coxpid",id);closeProjMenu();renderProjBtn();loadBudget();loadComments();connect();if(CUR==="codemap"&&window._cmTab==="files"){window._wsPath="";loadWorkspace("");}
   termKill();if(CUR==="terminal")openTerminal();
   // Chat is system-wide; switching project only refreshes which project channels show.
   loadChannels();}
@@ -97,7 +97,7 @@ function renderProjMore(){
   const m=document.getElementById("proj-more-menu");if(!m||m.hidden)return;
   const q=(window._pmq||"").toLowerCase();
   const list=PROJECTS.filter(p=>!q||(p.alias||"").toLowerCase().includes(q)||p.name.toLowerCase().includes(q));
-  m.innerHTML=`<div class="pm-search"><i class="ti ti-search"></i><input placeholder="Tìm project…" value="${esc(window._pmq||"")}" oninput="window._pmq=this.value;renderProjMore()" onclick="event.stopPropagation()"></div>
+  m.innerHTML=`<div class="pm-search"><i class="ti ti-search"></i><input placeholder="Find project…" value="${esc(window._pmq||"")}" oninput="window._pmq=this.value;renderProjMore()" onclick="event.stopPropagation()"></div>
     <div class="pm-list">${list.map(p=>`<button class="pm-item${p.id===PID?' on':''}" onclick="closeProjMore();switchProject('${esc(p.id)}')">
       <span class="sdot" style="background:${projColor(p.id)}"></span><span>${esc(p.alias||p.name)}</span></button>`).join("")||'<span class="segproj-empty">no match</span>'}</div>`;
   const i=m.querySelector("input");if(i){const v=i.value;i.focus();i.setSelectionRange(v.length,v.length);}
@@ -212,7 +212,7 @@ function tkRich(){return document.getElementById("nt-desc");}
 function tkFmt(cmd){document.execCommand(cmd,false,null);tkRich().focus();}
 function tkCode(){const s=window.getSelection();const t=s&&s.toString();document.execCommand("insertHTML",false,t?'<code>'+esc(t)+'</code>&nbsp;':'<code>code</code>&nbsp;');tkRich().focus();}
 async function tkLink(){const s0=window.getSelection();const saved=(s0&&s0.rangeCount)?s0.getRangeAt(0).cloneRange():null;
-  const url=await coxModal({title:"Insert link",message:"URL để chèn vào ticket.",input:{placeholder:"https://…",value:"https://"},confirmText:"Insert"});if(!url)return;
+  const url=await coxModal({title:"Insert link",message:"URL to insert into the ticket.",input:{placeholder:"https://…",value:"https://"},confirmText:"Insert"});if(!url)return;
   if(saved){const s=window.getSelection();s.removeAllRanges();s.addRange(saved);}
   const s=window.getSelection();if(s&&s.toString())document.execCommand("createLink",false,url);else document.execCommand("insertHTML",false,'<a href="'+esc(url)+'" target="_blank" rel="noopener">'+esc(url)+'</a>&nbsp;');tkRich().focus();}
 function ntDescGet(){return htmlToMd(tkRich()).trim();}
@@ -235,6 +235,10 @@ async function teamAnalyze(){
       if(p.complexity)document.getElementById("nt-cx").value=p.complexity;
       document.getElementById("nt-ui").checked=!!p.has_ui;
       if(p.acceptance_criteria&&p.acceptance_criteria.length)document.getElementById("nt-ac").value=p.acceptance_criteria.join("\n");
+      // The refine replaced the idea — an earlier feasibility verdict no
+      // longer describes what is on screen; drop it rather than leave a
+      // stale estimate contradicting the rewritten fields.
+      const fp=document.getElementById("nt-feas");fp.style.display="none";fp.innerHTML="";
       const nb=document.getElementById("nt-notes");
       if(p.team_notes&&p.team_notes.length){
         nb.style.display="block";
@@ -247,7 +251,7 @@ async function teamAnalyze(){
   }catch(e){err.textContent="Network error.";}
   clearInterval(tick);btn.disabled=false;btn.querySelector("i").className="ti ti-sparkles";lbl.textContent="Re-analyze with the team";
 }
-function openNewTicket(){["nt-title","nt-ac"].forEach(i=>document.getElementById(i).value="");ntDescSet("");document.getElementById("nt-err").textContent="";document.getElementById("nt-ui").checked=false;const nb=document.getElementById("nt-notes");nb.style.display="none";nb.innerHTML="";document.getElementById("nt-analyze-label").textContent="Let the team analyze & refine";document.getElementById("ov-newticket").classList.add("open");setTimeout(()=>document.getElementById("nt-title").focus(),50);}
+function openNewTicket(){["nt-title","nt-ac"].forEach(i=>document.getElementById(i).value="");ntDescSet("");document.getElementById("nt-err").textContent="";document.getElementById("nt-ui").checked=false;const nb=document.getElementById("nt-notes");nb.style.display="none";nb.innerHTML="";const fb=document.getElementById("nt-feas");fb.style.display="none";fb.innerHTML="";document.getElementById("nt-feas-label").textContent="Check feasibility";document.getElementById("nt-analyze-label").textContent="Let the team analyze & refine";document.getElementById("ov-newticket").classList.add("open");setTimeout(()=>document.getElementById("nt-title").focus(),50);}
 async function saveTicket(startFlow){
   const title=document.getElementById("nt-title").value.trim();
   const err=document.getElementById("nt-err");
@@ -271,6 +275,45 @@ async function saveTicket(startFlow){
     if(startFlow){try{const rn=await(await fetch(api("/runner"))).json();renderRunner(rn);}catch(e){}}
   }catch(e){err.textContent="Network error.";}
 }
+// Filing-time feasibility preview (CXA-F250): a read-only estimate over the
+// refine endpoint's response — no ticket is created, nothing is saved, and
+// every typed value survives success and failure alike. The heavy "let the
+// team analyze" pass stays separate; this is triage before committing design
+// effort.
+async function checkFeasibility(){
+  const idea=(ntDescGet()||document.getElementById("nt-title").value).trim();
+  const err=document.getElementById("nt-err");const panel=document.getElementById("nt-feas");
+  const btn=document.getElementById("nt-feas-btn");const lbl=document.getElementById("nt-feas-label");
+  if(!idea){err.textContent="Write the idea first — feasibility needs something to assess.";return;}
+  err.textContent="";btn.disabled=true;lbl.textContent="Checking…";
+  panel.style.display="block";panel.innerHTML='<div class="tk-notes-h"><i class="ti ti-gauge att-spin"></i> Assessing feasibility…</div>';
+  try{
+    const r=await fetch(api("/ticket-refine"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({description:idea})});
+    if(!r.ok){
+      panel.style.display="none";
+      err.textContent="Feasibility check failed: "+(await r.text()||r.status)+" (needs a configured engine).";
+    }else{
+      const f=(await r.json()).feasibility;
+      if(!f){
+        panel.style.display="none";
+        err.textContent="No feasibility verdict came back (needs a configured engine).";
+      }else{
+        const v=f.score>=70?"Not feasible":(f.lane==="ask"?"Needs clarification":"Feasible");
+        const col=f.score>=70?"var(--red)":(f.lane==="ask"?"var(--amber)":"var(--green)");
+        const ic=f.score>=70?"ti-alert-triangle":(f.lane==="ask"?"ti-help":"ti-circle-check");
+        const prior=f.prior_art>0
+          ?`${f.prior_art} similar ticket${f.prior_art===1?" has":"s have"} already shipped here — the team knows this shape.`
+          :"Nothing of this shape has shipped here yet — filing it opens new ground for the team.";
+        const gaps=(f.gaps&&f.gaps.length)?` Gaps as filed: ${f.gaps.map(g=>esc(g)).join("; ")}.`:"";
+        // Force-show: the dialog may have been closed and reopened while the
+        // request was in flight, which resets the panel to hidden.
+        panel.style.display="block";
+        panel.innerHTML=`<div class="tk-notes-h"><i class="ti ${ic}" style="color:${col}"></i> ${v} <span style="color:var(--dim);font-weight:400">· filing risk ${f.score}/100</span></div><div style="font-size:12.5px;line-height:1.55">${prior}${gaps}</div>`;
+      }
+    }
+  }catch(e){panel.style.display="none";err.textContent="Network error.";}
+  btn.disabled=false;lbl.textContent="Check feasibility";
+}
 let PROJ_MODE="new";
 let IMPORT_SRC="folder";
 function setImportSrc(sc){IMPORT_SRC=sc;
@@ -286,7 +329,7 @@ function setProjMode(m){PROJ_MODE=m;
   // Goal (+ AI drafting) applies to both modes — an imported codebase needs a
   // brief just as much; it merges into the auto-detected comprehension context.
   document.getElementById("np-goal").placeholder=m==="import"
-    ?"Hướng đi tiếp cho codebase này — e.g. 'ổn định hoá, thêm thanh toán, mobile app'. Click Draft để BA/PO viết brief."
+    ?"Where this codebase should go next — e.g. 'stabilize, add payments, mobile app'. Click Draft to have BA/PO write the brief."
     :"Rough idea — e.g. 'a secure team chat, more private than WhatsApp'. Click Draft to have BA/PO turn it into a project brief you review.";
   document.getElementById("np-submit-label").textContent=m==="import"?"Import project":"Create project";}
 function openNewProject(){["np-name","np-alias","np-path","np-goal"].forEach(i=>document.getElementById(i).value="");document.getElementById("np-err").textContent="";setProjMode("new");document.getElementById("ov-newproj").classList.add("open");setTimeout(()=>document.getElementById("np-name").focus(),50);return loadNpSpaces();}
@@ -343,7 +386,7 @@ async function createProject(){
 async function deleteProject(id){
   id=id||PID;if(!id)return;
   const p=PROJECTS.find(x=>x.id===id);const nm=p?p.name:id;
-  if(!await coxModal({title:"Remove project",message:'Gỡ project "'+nm+'" khỏi CoXAgent? File workspace vẫn còn trên disk; chỉ gỡ đăng ký.',danger:true,confirmText:"Remove"}))return;
+  if(!await coxModal({title:"Remove project",message:'Remove project "'+nm+'" from CoXAgent? Workspace files stay on disk; only the registration is removed.',danger:true,confirmText:"Remove"}))return;
   try{
     const r=await fetch("/api/projects/"+encodeURIComponent(id),{method:"DELETE"});
     if(!r.ok){toasty("Delete failed: "+(await r.text()||r.status),"err");return;}
@@ -374,6 +417,10 @@ async function boot(){
   let r;try{r=await fetch("/api/auth/me");}catch(e){rememberDestination();showLogin();return;}
   if(r.status===401){rememberDestination();showLogin();return;}
   try{ME=await r.json();}catch(e){ME={auth:false};}
+  // Open mode (no accounts configured): the server resolves every caller as
+  // "user" — the client must carry the same identity, or own-message actions
+  // (edit/delete) and reaction "mine" states are unreachable (CXA-F367).
+  if(ME&&!ME.username)ME.username="user";
   try{updateSegments();}catch(e){}
   startApp();
 }
@@ -387,6 +434,8 @@ function startApp(){
   ensureNotifPermission();
   checkAppUpdate();setInterval(checkAppUpdate,5*60*1000);
   window.addEventListener("focus",()=>checkAppUpdate());
+  // Refresh live review data when the tab regains focus, only if that view is up.
+  window.addEventListener("focus",()=>{if(CUR==="review")renderReview();});
   // Health is one cheap JSON with the hub's version in it: poll it, keep the
   // brand chip honest, and reload the window when the hub upgrades under it.
   const pollHealth=()=>fetch("/api/health").then(r=>r.json()).then(h=>{
@@ -500,6 +549,7 @@ async function doLogin(){
     // them (see rememberDestination): navigate there once auth succeeds.
     const next=sessionStorage.getItem(NEXT_KEY);
     sessionStorage.removeItem(NEXT_KEY);
+    SESS_CACHE=null;SESS_AT=0;
     await boot();
     // A guest who asked for ?next=<hash> lands back on that view once signed
     // in; an invalid/nonexistent fragment safely falls through to overview.
@@ -525,11 +575,19 @@ function canManage(){return !ME||!ME.auth||roleCanManage(ME.role);}
 // AuthRole::can_review, which auth_mw enforces (COX-B038). Keep the two in step:
 // a role shown a Merge button the server refuses is a 403 the user can't act on.
 function roleCanReview(r){return r==="super"||r==="admin"||r==="reviewer"||LEAD_ROLES.includes(r);}
+// Admin-only surfaces (Audit, People, the Team view's people panel) are the
+// hub-admin tier: Super AND Admin — bootstrap_admin provisions the hub owner
+// as Super, and the server admits Super on these surfaces (AuthRole::can_manage),
+// so gating the UI on "admin" exactly locked the owner out of panels the API
+// already serves (CXA-B132). Open/local mode (no auth) sees them too, same
+// as canManage().
+function roleIsHubAdmin(r){return r==="super"||r==="admin";}
+function isHubAdmin(){return !ME||!ME.auth||roleIsHubAdmin(ME.role);}
 // Only the legacy read-only Viewer gets a locked-down UI; every real role writes.
 function applyRole(){
   const isViewer=ME&&ME.auth&&ME.role==="viewer";
-  // Admin surfaces (Audit, user mgmt) show for admins and in open/local mode.
-  const isAdmin=!ME||!ME.auth||ME.role==="admin";
+  // Admin surfaces (Audit, user mgmt) show for the hub-admin tier and in open/local mode.
+  const isAdmin=isHubAdmin();
   document.body.classList.toggle("viewer",!!isViewer);
   document.body.classList.toggle("admin",!!isAdmin);
   document.body.classList.toggle("manage",canManage());
@@ -662,8 +720,10 @@ function goalIsRefactor(){
   const g=(((STATE||{}).sprint||{}).goal||"")+" "+((STATE||{}).sprint_goal||"");
   return ((STATE||{}).refactor_mode===true)||/refactor|restructure|migrat|tái cấu trúc|cấu trúc lại/i.test(g);
 }
+let REVIEW_CONFIGURED=true;
 async function drainBanner(elId){
   const el=document.getElementById(elId);if(!el)return;
+  if(elId==="rv-drain"&&!REVIEW_CONFIGURED){el.innerHTML="";return;}
   const sweepBtn=`<button class="gc-btn pri" onclick="mergeSweep()" title="SA merges every green PR right now (oldest first) — no tokens"><i class="ti ti-git-merge"></i> SA merge sweep</button>`;
   // The Review tab always offers the sweep, drain or not.
   const toolbar=elId==="rv-drain"?`<div style="display:flex;justify-content:flex-end;margin-bottom:10px">${sweepBtn}</div>`:"";
@@ -672,36 +732,61 @@ async function drainBanner(elId){
     try{const prs=await(await fetch(api("/prs"))).json();DRAIN_CACHE={t:Date.now(),n:Array.isArray(prs)?prs.length:0};}catch(e){el.innerHTML=toolbar;return;}
   }
   el.innerHTML=(DRAIN_CACHE.n>0?`<div class="drainbar"><i class="ti ti-barrier-block"></i>
-    <div><b>CLEAN-BASE DRAIN</b> — refactor đang chờ merge sạch <b>${DRAIN_CACHE.n} PR</b>.
-    Mọi agent của mọi user tạm NGỪNG mở việc mới — chỉ fix conflict &amp; merge (cũ nhất trước).
-    <a onclick="nav('review')">Mở Review để merge PR xanh →</a> ${sweepBtn}</div></div>`:"")+toolbar;
+    <div><b>CLEAN-BASE DRAIN</b> — refactor waiting on a clean merge of <b>${DRAIN_CACHE.n} PR</b>.
+    All agents for all users PAUSE new work — only fix conflicts &amp; merge (oldest first).
+    <a onclick="nav('review')">Open Review to merge green PRs →</a> ${sweepBtn}</div></div>`:"")+toolbar;
 }
 // Ask the SA to merge every green open PR right now (oldest first). Token-free;
 // results are announced in #agents and summarised in a toast.
 async function mergeSweep(){
-  toasty("SA đang quét queue & merge PR xanh…","ok");
+  toasty("SA is sweeping the queue & merging green PRs…","ok");
   try{
     const r=await fetch(api("/merge-sweep"),{method:"POST"});
     if(!r.ok){toasty("Sweep failed: "+(await r.text()||r.status),"err");return;}
     const d=await r.json();
     const m=(d.merged||[]).length,s=(d.skipped||[]).length;
-    toasty(m?`Đã merge ${m} PR ✓${s?` · còn ${s} chưa đủ điều kiện`:""}`:`Chưa merge được PR nào${s?` — ${s} cái đang conflict/CI`:""}`,m?"ok":"warn");
+    toasty(m?`Merged ${m} PR ✓${s?` · ${s} not eligible yet`:""}`:`No PRs merged${s?` — ${s} stuck on conflict/CI`:""}`,m?"ok":"warn");
     DRAIN_CACHE.t=0;
     if(CUR==="review")renderReview(); if(CUR==="overview")drainBanner("ov-drain");
   }catch(e){toasty("Network error","err");}
 }
+let reviewPollStarted=false;
+function reviewPollTick(){
+  // Only re-render while the Review tab is active AND the page is visible; never
+  // while another review action modal may be open (the guard just skips).
+  if(CUR!=="review")return;
+  if(document.hidden)return;
+  renderReview();
+}
 async function renderReview(){
   drainBanner("rv-drain");
   const el=document.getElementById("review-body");if(!el)return;
+  if(!reviewPollStarted){reviewPollStarted=true;setInterval(reviewPollTick,20*1000);}
   el.innerHTML='<div class="empty">loading pull requests…</div>';
   let d={};try{d=await(await fetch(api("/prs"))).json();}catch(e){el.innerHTML='<div class="empty">unable to load</div>';return;}
-  if(!d.configured){el.innerHTML=`<div class="rev-empty"><i class="ti ti-git-pull-request"></i><div>Git review isn't set up</div><span>Configure a repository in <a onclick="nav('settings')">Settings → Git &amp; version control</a> to open and review pull requests here.</span></div>`;return;}
   const prs=d.prs||[];
-  const head=`<div class="sec">Pull requests <span style="font-size:11px;color:var(--dim);font-weight:400">· ${prs.length} open${d.error?' · <span style="color:var(--red)">'+esc(d.error)+'</span>':''}</span></div>`;
+  // Remembered for drainBanner: offering "SA merge sweep" over an
+  // unconfigured repo is a dead-end button next to a "not set up" notice.
+  REVIEW_CONFIGURED=!!d.configured||prs.length>0;
+  if(!d.configured&&!prs.length){drainBanner("rv-drain");el.innerHTML=`<div class="rev-empty"><i class="ti ti-git-pull-request"></i><div>Git review isn't set up</div><span>Configure a repository in <a onclick="nav('settings')">Settings → Git &amp; version control</a> to open and review pull requests here.</span></div>`;return;}
+  const roNote=!d.configured?' · <b class="rev-ro-note"><i class="ti ti-lock"></i> read-only — configure git in Settings for actions</b>':'';
+  // Review-latency pulse from the SA's recorded verdicts (rides the state
+  // snapshot): how long a PR waits for its review, over the last 20.
+  const lat=(typeof STATE!=="undefined"&&Array.isArray(STATE.reviews)?STATE.reviews:[])
+    .slice(-20).map(r=>r.latency_secs||0).filter(n=>n>0);
+  const fmtMin=s=>s>=5400?`${Math.round(s/3600*10)/10}h`:`${Math.round(s/60)}m`;
+  const latNote=lat.length
+    ?` · review latency avg ${fmtMin(lat.reduce((a,b)=>a+b,0)/lat.length)} · max ${fmtMin(Math.max(...lat))} (last ${lat.length})`
+    :"";
+  const head=`<div class="sec">Pull requests <span style="font-size:11px;color:var(--dim);font-weight:400">· ${prs.length} open${latNote}${roNote}${d.error?' · <span style=\"color:var(--red)\">'+esc(d.error)+'</span>':''}</span></div>`;
   if(!prs.length){el.innerHTML=head+`<div class="rev-empty"><i class="ti ti-check"></i><div>No open pull requests</div><span>Agent-shipped tickets will appear here for review.</span></div>`;return;}
   const ciBadge=c=>{const m={passing:["passing","var(--green)","circle-check"],failing:["failing","var(--red)","circle-x"],pending:["CI running","var(--amber)","loader"],none:["no CI","var(--dim)","minus"]}[c]||["",""];
     return `<span class="rev-ci" style="color:${m[1]}"><i class="ti ti-${m[2]}"></i> ${m[0]}</span>`;};
-  const rev=canReview();
+  const configured=!!d.configured;
+  const rev=canReview()&&configured;
+  // When git is not configured we run read-only: hide every action control
+  // (including Diff) for every card.
+  const actsEnabled=configured;
   // The SA's review verdict (a suggestion when auto-merge is off).
   const reviewBanner=r=>{if(!r)return"";const ok=r.decision==="approve";
     return `<div class="rev-verdict ${ok?'ok':'chg'}"><i class="ti ti-${ok?'circle-check':'arrow-back-up'}"></i>
@@ -712,17 +797,18 @@ async function renderReview(){
         <div class="revtitle"><a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.title)}</a> <span class="revnum">#${p.number}</span></div>
         <div class="revmeta"><span class="revbranch"><i class="ti ti-git-branch"></i> ${esc(p.head)} → ${esc(p.base)}</span>
           ${ciBadge(p.ci)}
+          ${(p.review&&p.review.decision)?'':'<span class="rev-pending" style="display:inline-flex;align-items:center;gap:4px;color:var(--dim)"><i class="ti ti-clock"></i> awaiting review</span>'}
           ${p.mergeable?'':'<span class="rev-conflict"><i class="ti ti-alert-triangle"></i> conflicts</span>'}
           <span class="revby">by ${esc(p.author||'—')}</span></div>
         ${reviewBanner(p.review)}
       </div>
       <div class="revacts">
-        <button class="gc-btn" onclick="viewDiff(${p.number},'${esc(p.head)}')"><i class="ti ti-file-diff"></i> Diff</button>
+        ${actsEnabled?`<button class="gc-btn" onclick="viewDiff(${p.number},'${esc(p.head)}')"><i class="ti ti-file-diff"></i> Diff</button>`:''}
         ${rev?`<button class="gc-btn" title="Run THIS branch on the app port so you can see it before approving" onclick="prAction(${p.number},'preview')"><i class="ti ti-eye"></i> Preview</button>
         <button class="gc-btn" title="Stop the preview and restore the main build" onclick="prAction(${p.number},'preview-stop')"><i class="ti ti-eye-off"></i></button>
         <button class="gc-btn" onclick="prAction(${p.number},'request-changes')"><i class="ti ti-arrow-back-up"></i> Changes</button>
         <button class="gc-btn pri" ${p.mergeable?'':'disabled'} onclick="prAction(${p.number},'merge')"><i class="ti ti-git-merge"></i> Merge</button>
-        <button class="gc-btn forcemg" title="SA gỡ conflict NGAY (nếu có) rồi merge PR này — theo dõi tiến trình trong #agents" onclick="prAction(${p.number},'force-merge')"><i class="ti ti-bolt"></i> Force</button>`:''}
+        <button class="gc-btn forcemg" title="SA resolves conflicts NOW (if any) then merges this PR — follow progress in #agents" onclick="prAction(${p.number},'force-merge')"><i class="ti ti-bolt"></i> Force</button>`:''}
       </div>
     </div>`).join("")+`</div>`;
 }
@@ -754,16 +840,16 @@ function renderDiff(t){
 async function prAction(num,action){
   let comment="";
   if(action==="request-changes"){
-    comment=await coxModal({title:"Request changes on PR #"+num,message:"Mô tả rõ cần sửa gì — DEV agent sẽ đọc và tự xử lý ở cycle tới.",input:{placeholder:"e.g. thêm test cho case token hết hạn; đừng đổi API public",multiline:true},confirmText:"Request changes"});
+    comment=await coxModal({title:"Request changes on PR #"+num,message:"Describe exactly what needs fixing — the DEV agent reads it and handles it next cycle.",input:{placeholder:"e.g. add a test for the expired-token case; don't change the public API",multiline:true},confirmText:"Request changes"});
     if(comment===null||comment==="")return;}
-  if(action==="merge"&&!(await coxModal({title:"Merge PR #"+num+"?",message:"Squash-merge vào main và xoá branch — chính thức ship code này.",confirmText:"Merge"})))return;
-  if(action==="force-merge"&&!(await coxModal({title:"⚡ Force-merge PR #"+num+"?",message:"SA sẽ gỡ conflict ngay (nếu có) rồi merge thẳng vào main — kể cả khi chưa có CI check. Theo dõi tiến trình trong #agents.",danger:true,confirmText:"Force merge"})))return;
+  if(action==="merge"&&!(await coxModal({title:"Merge PR #"+num+"?",message:"Squash-merge into main and delete the branch — officially ship this code.",confirmText:"Merge"})))return;
+  if(action==="force-merge"&&!(await coxModal({title:"⚡ Force-merge PR #"+num+"?",message:"SA resolves conflicts now (if any) then merges straight into main — even without CI checks. Follow progress in #agents.",danger:true,confirmText:"Force merge"})))return;
   if(action==="preview")toasty("Building preview of PR #"+num+"… (docker build, may take a minute)","ok");
   try{const r=await fetch(api("/prs/"+num+"/"+action),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({comment})});
     if(r.ok){
       if(action==="preview"){const d=await r.json().catch(()=>({}));
         toasty("Preview live"+(d.url?" — "+d.url:""),"ok");if(d.url)window.open(d.url,"_blank");}
-      else if(action==="force-merge"){toasty("⚡ SA đang force-merge #"+num+" — xem tiến trình trong #agents","ok");}
+      else if(action==="force-merge"){toasty("⚡ SA is force-merging #"+num+" — follow progress in #agents","ok");}
       else toasty(action==="merge"?"Merged ✓":action==="request-changes"?"Changes requested — a DEV agent will address it next cycle":action==="preview-stop"?"Preview stopped — main restored":"Done","ok");
       renderReview();}
     else{toasty("Failed: "+(await r.text()||r.status),"err");}
@@ -797,8 +883,8 @@ function termTabsRender(){
   if(lbl)lbl.textContent=a?`${a.pid} · ${a.term.cols}×${a.term.rows}`:"";
 }
 async function termNew(){
-  if(!PID){toasty("Chọn project trước","warn");return;}
-  try{await termLib();}catch(e){toasty("Không tải được xterm.js (cần mạng)","err");return;}
+  if(!PID){toasty("Pick a project first","warn");return;}
+  try{await termLib();}catch(e){toasty("Couldn't load xterm.js (network needed)","err");return;}
   const id=++TERM_SEQ;
   const host=document.getElementById("term-host");
   const pane=document.createElement("div");pane.className="term-pane";pane.id="term-pane-"+id;
@@ -815,7 +901,7 @@ async function termNew(){
   ws.onopen=()=>{t.live=true;fit.fit();ws.send(JSON.stringify({resize:{cols:term.cols,rows:term.rows}}));termTabsRender();term.focus();};
   ws.onmessage=e=>{term.write(typeof e.data==="string"?e.data:new Uint8Array(e.data));};
   ws.onclose=e=>{t.live=false;
-    term.write("\r\n\x1b[2m["+(e.code===1008?"read-only role":"session closed")+" — bấm + để mở terminal mới]\x1b[0m\r\n");
+    term.write("\r\n\x1b[2m["+(e.code===1008?"read-only role":"session closed")+" — press + to open a new terminal]\x1b[0m\r\n");
     termTabsRender();};
   ws.onerror=()=>{t.live=false;termTabsRender();};
   term.onData(d=>{if(ws.readyState===1)ws.send(JSON.stringify({input:d}));});
@@ -1123,7 +1209,7 @@ async function resetUserPassword(){if(!EU_USER)return;
     else{msg.style.color="var(--red)";msg.textContent=await r.text()||"Failed.";}
   }catch(e){msg.style.color="var(--red)";msg.textContent="Network error.";}
 }
-async function deleteUser(username){if(!await coxModal({title:"Remove account",message:"Xoá tài khoản \""+username+"\"? Không hoàn tác được.",danger:true,confirmText:"Remove"}))return;try{const r=await fetch("/api/auth/users/"+username,{method:"DELETE"});if(!r.ok)document.getElementById("usr-err").textContent=await r.text();renderUsers();}catch(e){}}
+async function deleteUser(username){if(!await coxModal({title:"Remove account",message:"Delete account \""+username+"\"? This cannot be undone.",danger:true,confirmText:"Remove"}))return;try{const r=await fetch("/api/auth/users/"+username,{method:"DELETE"});if(!r.ok)document.getElementById("usr-err").textContent=await r.text();renderUsers();}catch(e){}}
 async function assignUser(pid,username){try{await fetch("/api/projects/"+pid+"/members",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:decodeURIComponent(username)})});renderUsers();}catch(e){}}
 async function unassignUser(pid,username){try{await fetch("/api/projects/"+pid+"/members/"+username,{method:"DELETE"});renderUsers();}catch(e){}}
 function fmtBytes(n){return n<1024?n+" B":n<1048576?(n/1024).toFixed(1)+" KB":(n/1048576).toFixed(1)+" MB";}
@@ -1143,9 +1229,21 @@ function deviceIcon(label){const l=(label||"").toLowerCase();
   if(l.includes("chrome"))return "brand-chrome";if(l.includes("firefox"))return "brand-firefox";
   if(l.includes("safari"))return "brand-safari";if(l.includes("edge"))return "brand-edge";
   return "device-desktop";}
+// /api/auth/* is rate-limited (20 req/min per IP); renderSessions fires on every
+// state snapshot, so an uncached fetch here turns agent churn into a 429 storm.
+let SESS_CACHE=null,SESS_AT=0;
+const SESS_TTL_MS=60*1000;
 async function renderSessions(){
   const el=document.getElementById("team-sessions");if(!el)return;
-  let ss=[];try{ss=await(await fetch("/api/auth/sessions")).json();}catch(e){}
+  let ss=SESS_CACHE;
+  if(!ss||Date.now()-SESS_AT>SESS_TTL_MS){
+    // Claim the TTL window BEFORE awaiting: a render burst (SSE reconnect
+    // flood) used to fan out one fetch per render while the first was still
+    // in flight — 56 requests in 2 seconds straight into the auth limiter.
+    SESS_AT=Date.now();
+    ss=[];try{ss=await(await fetch("/api/auth/sessions")).json();}catch(e){}
+    SESS_CACHE=ss;
+  }
   if(!Array.isArray(ss)||!ss.length){el.innerHTML="";return;}
   // Only show current device — not history.
   var cur=ss.find(function(s){return s.current;});
@@ -1230,15 +1328,36 @@ async function renderTeamsOnline(){
       const acct=(w.worker||'').split('@')[0].toLowerCase();
       const mine=!ME||(ME.role==="admin")||((ME.username||'').toLowerCase()===acct);
       const stopBtn=mine?`<button class="tso-stop" title="Stop this operator (idles it — saves its tokens)" onclick="stopOperator('${esc(w.worker)}')"><i class="ti ti-player-stop"></i></button>`:'';
+      // Version skew: the hub self-upgrades but remote workers don't — a
+      // worker on an older build runs OLD orchestration rules. Flag it.
+      const hubV=(window.STATE&&STATE.current_version)?String(STATE.current_version):"";
+      const skew=w.version&&hubV&&w.version!==hubV
+        ?`<span class="tso-skew" title="worker runs v${esc(w.version)}, hub is v${esc(hubV)} — update this machine's coxagent">⚠ v${esc(w.version)}</span>`:'';
       return `<div class="tso"><span class="tso-dot"></span><span class="tso-id">${esc(w.worker)}</span>`
         +`<span class="tso-role ${busy?'lead':''}">${esc(role.replace(/_/g,'-').toUpperCase())}</span>`
         +(w.ticket?`<span class="tso-tk">${esc(w.ticket)}</span>`:'')
+        +skew
         +stopBtn
         +`</div>`;
     }).join("")+`</div></div>`;
 }
+// Loop-liveness watchdog chip (CXA-F259): STATE.liveness carries the hub
+// watchdog's OPEN stall episode — its presence IS the stalled state, and
+// absence is the healthy one (the episode self-clears when activity lands).
+// Renders nothing when quiet, so a healthy team panel looks untouched.
+function renderLiveness(s){
+  const el=document.getElementById("team-liveness");if(!el)return;
+  const lv=s&&s.liveness;
+  if(!lv){el.innerHTML="";return;}
+  const since=lv.since?new Date(lv.since).toLocaleString():'';
+  const escSuffix=lv.escalations?` · ${lv.escalations} escalation${lv.escalations===1?'':'s'}`:'';
+  el.innerHTML=`<div class="lv-chip" title="Loop-liveness watchdog: no new activity since ${escAttr(lv.last_activity_at||lv.since||'')} — the hub watchdog will re-alert on escalation and clear this when work resumes.">
+    <i class="ti ti-alert-octagon"></i>
+    <span><b>loop stalled</b> — worker ${esc(lv.worker||'unknown')} silent</span>
+    <span class="lv-since">since ${esc(since)}${escSuffix}</span></div>`;
+}
 async function stopOperator(op){
-  if(!await coxModal({title:"Stop operator",message:"Dừng operator "+op+"? Nó sẽ idle (không đốt token) cho tới khi được start lại.",confirmText:"Stop"}))return;
+  if(!await coxModal({title:"Stop operator",message:"Stop operator "+op+"? It will idle (no token burn) until started again.",confirmText:"Stop"}))return;
   try{await fetch(api("/operators/"+encodeURIComponent(op)+"/stop"),{method:"POST"});}catch(e){}
   setTimeout(renderTeamsOnline,600);
 }
@@ -1265,15 +1384,17 @@ async function openAgent(role,worker){
     `<div class="act"><div class="atx"><span>${esc(a.action)}</span> ${a.ticket?`<span class="tk">${esc(a.ticket)}</span>`:''}</div><span class="tm">${esc((a.at||'').slice(11,16))}</span></div>`).join("")
     :'<div class="empty">no recorded actions yet</div>';
   const body=document.getElementById("agent-transcript");
-  body.innerHTML='<div class="wl-empty"><i class="ti ti-loader-2"></i> loading…</div>';
-  AGENT_LOG_LAST=null;   // force a fresh render for this role/operator
+  // CXA-B128: no indefinite placeholder — open on the terminal empty state.
+  // The stream's init kick-off / first lines replace it within a tick; if the
+  // stream never delivers, showAgentLogError paints the error state instead.
+  body.innerHTML='<div class="wl-empty"><i class="ti ti-moon-stars"></i> this agent hasn\'t run yet</div>';
+  AGENT_LOG_SIGS=[];   // force a fresh render for this role/operator
   document.getElementById("ov-agent").classList.add("open");
   AGENT_LOG_ROLE=role.toLowerCase().replace(/-/g,"_");  // serde key: DEV-FEATURE→dev_feature
-  await pollAgentLog();               // first fetch now
-  clearInterval(AGENT_LOG_TIMER);
-  AGENT_LOG_TIMER=setInterval(pollAgentLog,1500);  // then live every 1.5s
+  restartAgentLog();
 }
-let AGENT_LOG_TIMER=null, AGENT_LOG_ROLE=null, AGENT_LOG_WORKER="", AGENT_LOG_LAST=null;
+let AGENT_LOG_ES=null, AGENT_LOG_ROLE=null, AGENT_LOG_WORKER="", AGENT_LOG_BUF="", AGENT_LOG_LIVE=false, AGENT_LOG_DONE=false, AGENT_LOG_INIT=false, AGENT_LOG_SIGS=[];
+let AGENT_LOG_RETRIES=0, AGENT_LOG_RETRY_TIMER=null;
 // Icon + colour for a tool name, so every engine's tool calls read at a glance.
 // A tool call, said in words: "Read run_chat_reply.rs:400-500" instead of a
 // truncated JSON blob. Long absolute paths collapse to the part a reader
@@ -1286,14 +1407,22 @@ function wlShortPath(p){
 function wlSay(name,args){
   const n=String(name||"").toLowerCase().replace(/^mcp__[^_]*__/,"");
   const raw=String(args||"");
+  // harxes emits human summaries, not JSON args — show them verbatim under
+  // the tool's own verb/icon instead of trying to salvage JSON keys.
+  if(raw && !raw.trim().startsWith("{")){
+    const verbs={read:"Read",edit:"Edit",write:"Write",bash:"Run",grep:"Search",glob:"Find files",list:"List",skill:"Skill",webfetch:"Fetch"};
+    return {verb:verbs[n]||name,detail:raw.length>110?raw.slice(0,110)+"…":raw};
+  }
   let a={};
   try{a=JSON.parse(raw||"{}");}catch(e){
     // The log line is often TRUNCATED mid-JSON, which used to leave a bare
     // "Run" with no command. Salvage the value we care about by hand.
     const grab=k=>{const m=raw.match(new RegExp('"'+k+'"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)'));return m?m[1].replace(/\\"/g,'"').replace(/\\n/g," "):"";};
-    a={command:grab("command"),file_path:grab("file_path"),pattern:grab("pattern"),path:grab("path"),url:grab("url"),description:grab("description")};
+    a={command:grab("command"),file_path:grab("file_path")||grab("filePath"),pattern:grab("pattern"),path:grab("path"),url:grab("url"),description:grab("description")};
   }
-  const f=a.file_path||a.path||a.notebook_path;
+  // opencode uses camelCase arg keys (filePath) where the CLI engines use
+  // snake_case — accept both, or its Read/Edit chips render with no path.
+  const f=a.file_path||a.filePath||a.path||a.notebook_path||a.notebookPath;
   const where=f?wlShortPath(f):"";
   const span=(a.offset!=null)?`:${a.offset}${a.limit?"-"+(a.offset+a.limit):""}`:"";
   if(n==="read")return {verb:"Read",detail:where?where+span:""};
@@ -1373,6 +1502,27 @@ function parseWorklog(raw){
     if(/^#\s/.test(s)){ flush(); items.push({k:"meta",text:s.replace(/^#\s*/,"")}); continue; }
     if(/^\s*—\s*run finished/.test(s)){ flush(); items.push({k:"end"}); continue; }
     if(s.startsWith("💬")){ flush(); cur={k:"msg",text:s.slice(2).replace(/^\s+/,"")}; continue; }
+    // 🧠 thinking (harxes reasoning stream) — consecutive lines fold into ONE
+    // collapsible block so a long deliberation reads as a chapter, not a wall.
+    const th=s.startsWith("🧠")?s.slice(2).replace(/^\s+/,""):(s.match(/^\[thinking\]\s?(.*)$/)||[])[1];
+    if(th!=null){ const last=cur===null?items[items.length-1]:null;
+      if(last&&last.k==="think"){ last.text+="\n"+th; } else { flush(); items.push({k:"think",text:th}); }
+      continue; }
+    // ⏱ loop progress beat (iteration N · cumulative tokens) — the newest
+    // beat supersedes the previous one, so only the latest is kept and the
+    // log doesn't grow a ruler of stale counters.
+    if(/^⏱\s/.test(s)){ flush(); const t=s.replace(/^⏱\s*/,"");
+      const last=items[items.length-1];
+      if(last&&last.k==="iter") last.text=t; else items.push({k:"iter",text:t});
+      continue; }
+    // ↻ provider retry (transient backoff — a status beat, not an error).
+    if(/^↻\s/.test(s)){ flush(); items.push({k:"retry",text:s.replace(/^↻\s*/,"")}); continue; }
+    // Legacy harxes markers (pre-protocol logs): ▶ tool start / ✓ tool end.
+    const lg=s.match(/^([▶✓])\s+(\w+):\s*(.*)$/);
+    if(lg){ flush();
+      if(lg[1]==="▶") items.push({k:"tool",name:lg[2],args:lg[3]});
+      else items.push({k:"result",info:lg[3],body:[]});
+      continue; }
     if(s.startsWith("🔧")){ flush(); const m=s.slice(2).trim(); const i=m.indexOf("(");
       items.push({k:"tool",name:i>=0?m.slice(0,i):m,args:i>=0?m.slice(i+1).replace(/\)$/,""):""}); continue; }
     // Result line: the backend now emits a human summary ("↳ ✓ 220 passed");
@@ -1389,13 +1539,50 @@ function parseWorklog(raw){
   flush();
   return items;
 }
+// Tool output, readable: ANSI escape codes stripped, each line classified so
+// diffs/test results/errors read at a glance instead of as a grey slab.
+function wlPre(body){
+  const lines=body.join("\n").replace(/\[[0-9;]*[A-Za-z]/g,"").split("\n")
+    // opencode wraps file reads in pseudo-XML (<path>..., <type>file</type>,
+    // <content>) — transport framing, not output. The chip already names the
+    // file, so these lines are pure noise in a human-facing preview.
+    .filter(l=>!/^\s*<\/?(path|type|content|file)>/.test(l));
+  const cls=l=>{
+    if(/^\+(?!\+\+)/.test(l))return "add";
+    if(/^-(?!--)/.test(l))return "del";
+    if(/^(error|thread '.*' panicked|FAILED|✗)|error\[E\d+\]/.test(l.trim()))return "err";
+    if(/^(warning)\b/.test(l.trim()))return "warn";
+    if(/\b(test result: ok|passed|Finished|✓)\b/.test(l))return "ok";
+    return "";
+  };
+  const rows=lines.map(l=>`<div class="wl-pl ${cls(l)}">${esc(l)||" "}</div>`).join("");
+  return `<div class="wl-pre">${rows}</div>`;
+}
 // A review/structured-output line is often the model's final answer dumped as
 // raw JSON — `{"decision":"approve","summary":"…"}`. Rendered verbatim it is a
 // wall of braces; parse it into a verdict badge + the summary as prose.
 function wlVerdictCard(text){
   const t=String(text||"").trim();
-  if(!t.startsWith("{")||!/"(decision|verdict)"/.test(t))return null;
+  if(!t.startsWith("{"))return null;
   let o;try{o=JSON.parse(t);}catch(e){return null;}
+  if(!o||typeof o!=="object")return null;
+  // A solution-architect plan object: {"approach":…,"files":[…],"api_contract":…,…}.
+  // Rendered verbatim it is a wall of braces — show the approach as prose and
+  // tuck the rest behind a toggle so the live log reads like a plan, not JSON.
+  if(typeof o.approach==="string" && o.approach.trim()){
+    const files=Array.isArray(o.files)?o.files.filter(Boolean):[];
+    const rows=[];
+    for(const key of ["api_contract","data_changes","test_plan"]){
+      const v=o[key];
+      if(typeof v==="string"&&v.trim()) rows.push([key.replace(/_/g," "),v.trim()]);
+    }
+    const chips=files.length?`<div class="wl-verdict-files">${files.map(f=>`<span class="wl-file">${esc(f)}</span>`).join("")}</div>`:"";
+    const details=rows.length?`<details class="wl-verdict-detail"><summary>plan details</summary>${rows.map(([k,v])=>`<div class="wl-verdict-row"><b>${esc(k)}</b> ${wlFmt(v)}</div>`).join("")}</details>`:"";
+    return `<div class="wl-item wl-msg"><span class="wl-ic"><i class="ti ti-gavel"></i></span>
+      <div class="wl-body"><span class="wl-verdict" style="background:color-mix(in srgb,var(--accent2) 14%,transparent);color:var(--accent2)">Approach</span>
+      <div class="wl-verdict-sum">${wlFmt(o.approach)}</div>${chips}${details}</div></div>`;
+  }
+  if(!/"(decision|verdict)"/.test(t))return null;
   const d=String(o.decision||o.verdict||"").toLowerCase();
   if(!d)return null;
   const summary=o.summary||o.reason||o.rationale||"";
@@ -1407,55 +1594,201 @@ function wlVerdictCard(text){
     <div class="wl-body"><span class="wl-verdict" style="background:color-mix(in srgb,var(${col}) 15%,transparent);color:var(${col})">${esc(label)}</span>
     ${summary?`<div class="wl-verdict-sum">${wlFmt(String(summary))}</div>`:""}</div></div>`;
 }
-function renderWorklog(items,live){
-  const parts=items.map(it=>{
-    if(it.k==="meta") return `<div class="wl-item wl-meta"><i class="ti ti-player-play"></i> ${esc(it.text)}</div>`;
-    if(it.k==="end")  return `<div class="wl-item wl-end"><span><i class="ti ti-circle-check"></i> run finished</span></div>`;
-    if(it.k==="tool"){ const m=wlToolMeta(it.name);
-      // Harness-control calls read like errors to a person ("ScheduleWakeup
-      // {stop:true}"?!) — annotate them in plain language instead.
-      const note=wlHarnessNote(it.name,it.args);
-      if(note) return `<div class="wl-item wl-tool"><span class="wl-chip"><i class="ti ti-clock-pause wl-tic" style="color:var(--muted)"></i><span class="wl-tname">${esc(note)}</span></span></div>`;
-      const said=wlSay(it.name,it.args);
-      return `<div class="wl-item wl-tool"><span class="wl-chip"><i class="ti ${m.ic} wl-tic" style="color:var(${m.col})"></i><span class="wl-tname">${esc(said.verb)}</span>${said.detail?`<span class="wl-targs">${esc(said.detail)}</span>`:""}</span></div>`; }
-    if(it.k==="result"){
-      const body=(it.body||[]).filter(x=>x!=null);
-      const head=`<i class="ti ti-corner-down-right"></i> ${esc(it.info)}`;
-      if(!body.length) return `<div class="wl-item wl-result"><span class="wl-rin">${head}</span></div>`;
-      // The real output, revealed on click — a summary you can open, not a
-      // dead-end count.
-      return `<div class="wl-item wl-result"><details class="wl-out"><summary class="wl-rin">${head} <span class="wl-more">show output</span></summary><pre class="wl-pre">${esc(body.join("\n"))}</pre></details></div>`;
-    }
-    const card=wlVerdictCard(it.text);
-    if(card) return card;
-    return `<div class="wl-item wl-msg"><span class="wl-ic"><i class="ti ti-sparkles"></i></span><div class="wl-body">${wlFmt(it.text)}</div></div>`;
-  });
-  if(live) parts.push(`<div class="wl-typing"><span class="wl-ic"><i class="ti ti-sparkles"></i></span><span class="dots"><i></i><i></i><i></i></span></div>`);
-  return parts.join("");
+// One worklog item → its HTML. Extracted from renderWorklog so the live-log
+// renderer can re-render a single changing item without touching its stable
+// siblings (which keeps the user's scroll position and stops the full-render
+// "refresh" flicker on every SSE push).
+function wlItemHtml(it){
+  if(it.k==="meta") return `<i class="ti ti-player-play"></i> ${esc(it.text)}`;
+  if(it.k==="think"){
+    // Collapsed by default: the first line as a teaser, the full chain of
+    // thought one click away. Keeps the log scannable while losing nothing.
+    const lines=String(it.text||"").split("\n").filter(l=>l.trim());
+    const teaser=lines[0].length>110?lines[0].slice(0,110)+"…":lines[0];
+    const n=lines.length;
+    // Expanded: each thought is its own numbered step, not a wall of italics.
+    const steps=lines.map((l,i)=>`<div class="wl-think-step"><span class="wl-think-n">${i+1}</span><span>${wlFmt(l)}</span></div>`).join("");
+    return `<details class="wl-think-d" open><summary><i class="ti ti-bulb"></i><span class="wl-think-lbl">thinking${n>1?` · ${n} steps`:""}</span><span class="wl-think-tz">${wlFmt(teaser)}</span></summary><div class="wl-think-body">${steps}</div></details>`;
+  }
+  if(it.k==="iter") return `<span class="wl-iter-in"><i class="ti ti-activity-heartbeat"></i> ${esc(it.text)}</span>`;
+  if(it.k==="retry") return `<span class="wl-chip wl-retry-chip"><i class="ti ti-refresh wl-tic" style="color:var(--amber)"></i><span class="wl-tname">${esc(it.text)}</span></span>`;
+  if(it.k==="end")  return `<span><i class="ti ti-circle-check"></i> run finished</span>`;
+  if(it.k==="tool"){ const m=wlToolMeta(it.name);
+    // Harness-control calls read like errors to a person ("ScheduleWakeup
+    // {stop:true}"?!) — annotate them in plain language instead.
+    const note=wlHarnessNote(it.name,it.args);
+    if(note) return `<span class="wl-chip"><i class="ti ti-clock-pause wl-tic" style="color:var(--muted)"></i><span class="wl-tname">${esc(note)}</span></span>`;
+    const said=wlSay(it.name,it.args);
+    return `<span class="wl-chip"><i class="ti ${m.ic} wl-tic" style="color:var(${m.col})"></i><span class="wl-tname">${esc(said.verb)}</span>${said.detail?`<span class="wl-targs">${esc(said.detail)}</span>`:""}</span>`; }
+  if(it.k==="result"){
+    const body=(it.body||[]).filter(x=>x!=null);
+    // A failed tool result (harxes marks it ✗) reads red, not the default green.
+    const bad=/^✗/.test(it.info||"");
+    const head=`<i class="ti ti-corner-down-right"${bad?' style="color:var(--red)"':''}></i> ${esc(it.info)}`;
+    if(!body.length) return `<span class="wl-rin">${head}</span>`;
+    // The real output, revealed on click — a summary you can open, not a
+    // dead-end count.
+    return `<details class="wl-out"><summary class="wl-rin">${head} <span class="wl-more">show output</span></summary>${wlPre(body)}</details>`;
+  }
+  const card=wlVerdictCard(it.text);
+  if(card) return card;
+  return `<span class="wl-ic"><i class="ti ti-sparkles"></i></span><div class="wl-body">${wlFmt(it.text)}</div>`;
 }
-async function pollAgentLog(){
-  if(!AGENT_LOG_ROLE)return;
+// A content signature for one parsed item — two renders with the same signature
+// produce identical DOM, so the live renderer can leave them untouched.
+function wlItemSig(it){
+  if(!it) return "";
+  return it.k+"|"+it.name+"|"+it.info+"|"+it.args+"|"+(it.text||"")+"|"+(it.body||[]).join("\n");
+}
+// Real-time live log over SSE: the hub tails the engine's local live file and
+// pushes new bytes down as `init` + `line` events (one global api() scope).
+// isRetry=true on an auto-reconnect attempt: keeps the backoff counter and
+// buffered text instead of wiping the view back to "loading…" on every retry.
+function restartAgentLog(isRetry){
+  if(AGENT_LOG_RETRY_TIMER){ clearTimeout(AGENT_LOG_RETRY_TIMER); AGENT_LOG_RETRY_TIMER=null; }
+  closeAgentLog();
+  if(isRetry){
+    // Attempt is in flight — leave "RECONNECTING…" showing instead of
+    // hiding it here, or a slow/hanging connect would read as recovered
+    // for however long it takes to actually fail or succeed.
+    showAgentLogError(true);
+  } else {
+    AGENT_LOG_BUF=""; AGENT_LOG_LIVE=false; AGENT_LOG_DONE=false; AGENT_LOG_INIT=false; AGENT_LOG_SIGS=[];
+    AGENT_LOG_RETRIES=0;
+    showAgentLogError(false);
+  }
+  const url=api("/agent-log/stream?role="+encodeURIComponent(AGENT_LOG_ROLE)+(AGENT_LOG_WORKER?"&worker="+encodeURIComponent(AGENT_LOG_WORKER):""));
+  const es=new EventSource(url);
+  AGENT_LOG_ES=es;
+  es.addEventListener("init",e=>{
+    AGENT_LOG_RETRIES=0;
+    showAgentLogError(false);
+    try{const d=JSON.parse(e.data); if(d)AGENT_LOG_LIVE=!!d.live; AGENT_LOG_BUF="";}catch(_){}
+    renderAgentLog(true);
+  });
+  es.addEventListener("line",e=>{
+    try{const d=JSON.parse(e.data);
+      if(d&&d.text){
+        AGENT_LOG_BUF+=d.text;
+        // A complete run pings "end" — stop the typing dots.
+        if(/\b—\s*run finished/.test(d.text))AGENT_LOG_DONE=true;
+      }}catch(_){}
+    scheduleAgentLog();
+  });
+  // Endpoint gone (404 on an old server) or the connection dropped mid-stream —
+  // show it immediately, then retry with capped exponential backoff. A native
+  // EventSource auto-retries too, but silently and on a fixed interval; closing
+  // it ourselves and driving the retry lets the UI actually say what's wrong.
+  es.onerror=()=>{
+    try{es.close()}catch(_){}
+    AGENT_LOG_ES=null;
+    showAgentLogError(true);
+    const delay=Math.min(30000, 1000*(2**AGENT_LOG_RETRIES));
+    AGENT_LOG_RETRIES++;
+    AGENT_LOG_RETRY_TIMER=setTimeout(()=>{ if(AGENT_LOG_ROLE) restartAgentLog(true); }, delay);
+  };
+}
+function showAgentLogError(on){
+  const b=document.getElementById("agent-err-badge");
+  if(b){
+    if(on){ b.textContent=AGENT_LOG_RETRIES>0?"● RECONNECTING…":"● STREAM LOST"; b.style.display="inline-block"; }
+    else { b.style.display="none"; }
+  }
+  // CXA-B128: the work-log BODY must carry the state too — a dead stream with
+  // nothing buffered used to leave the panel on its indefinite 'loading…'
+  // placeholder with only a tiny header badge explaining why. Buffered history
+  // stays untouched (renderAgentLog reconciles children by index, so this node
+  // is replaced the moment lines flow again).
+  const body=document.getElementById("agent-transcript");
+  if(body&&on&&!AGENT_LOG_BUF.trim()){
+    body.innerHTML='<div class="wl-empty"><i class="ti ti-wifi-off"></i> live log connection lost — retrying</div>';
+  }
+}
+// CXA-B131: the Work log panel lives in the page DOM on every view, but only
+// openAgent() ever painted a terminal state into it — a visit to Transcripts
+// & alerts left the panel on its bare 'loading…' placeholder forever, with no
+// stream engaged and no error to show. Normalise it to the honest empty state.
+// Guards keep this from fighting the drawer: an open drawer (AGENT_LOG_ROLE
+// set, stream or retry in flight) or buffered history is left exactly as-is.
+function paintAgentLogIdle(){
+  const body=document.getElementById("agent-transcript");
+  if(!body||AGENT_LOG_ROLE||AGENT_LOG_ES||AGENT_LOG_BUF.trim())return;
+  body.innerHTML='<div class="wl-empty"><i class="ti ti-moon-stars"></i> this agent hasn\'t run yet</div>';
+}
+function renderAgentLog(force){
   const body=document.getElementById("agent-transcript");
   const badge=document.getElementById("agent-live-badge");
-  try{
-    const url="/agent-log?role="+encodeURIComponent(AGENT_LOG_ROLE)+(AGENT_LOG_WORKER?"&worker="+encodeURIComponent(AGENT_LOG_WORKER):"");
-    const d=await(await fetch(api(url))).json();
-    if(badge)badge.style.display=d.live?"inline-block":"none";
-    const raw=(d.log||"").trim();
-    // Skip the DOM churn (and preserve the user's scroll) when nothing changed.
-    const sig=raw+"|"+(d.live?1:0);
-    if(sig===AGENT_LOG_LAST)return;
-    AGENT_LOG_LAST=sig;
-    const atBottom=body.scrollHeight-body.scrollTop-body.clientHeight<60;
-    if(!raw){
-      body.innerHTML='<div class="wl-empty"><i class="ti ti-moon-stars"></i> this agent hasn\'t run yet</div>';
-      return;
+  if(badge)badge.style.display=AGENT_LOG_LIVE?"inline-block":"none";
+  const items=parseWorklog(AGENT_LOG_BUF);
+  const atBottom=body.scrollHeight-body.scrollTop-body.clientHeight<40;
+  if(items.length===0){
+    // Repaint the empty state on a fresh open (init kick-off) — it must also
+    // overwrite a "connection lost" error state left by a dead stream, or a
+    // recovered panel would stay stuck on the error (CXA-B128).
+    if(!AGENT_LOG_INIT||force){ body.innerHTML='<div class="wl-empty"><i class="ti ti-moon-stars"></i> this agent hasn\'t run yet</div>'; }
+    AGENT_LOG_INIT=AGENT_LOG_INIT||true; AGENT_LOG_SIGS=[]; updateTyping(body);
+    return;
+  }
+  AGENT_LOG_INIT=true;
+  // Reconcile the parsed items against the existing children: only the item
+  // whose signature changed (the still-being-written tail) gets rebuilt, so
+  // stable items above keep their DOM nodes and the user's scroll is preserved.
+  let touched=false;
+  for(let i=0;i<items.length;i++){
+    const sig=wlItemSig(items[i]);
+    if(AGENT_LOG_SIGS[i]===sig) continue;
+    const nd=document.createElement("div");
+    nd.className="wl-item wl-"+items[i].k;
+    nd.innerHTML=wlItemHtml(items[i]);
+    if(body.children[i]){
+      // Replacing the still-being-written tail: NO entry animation — the
+      // fade re-triggering on every SSE push read as constant flicker.
+      body.replaceChild(nd, body.children[i]);
+    } else {
+      nd.classList.add("wl-in");
+      body.appendChild(nd);
     }
-    body.innerHTML=renderWorklog(parseWorklog(raw),d.live);
-    if(atBottom)body.scrollTop=body.scrollHeight;   // follow the tail
-  }catch(e){}
+    AGENT_LOG_SIGS[i]=sig;
+    touched=true;
+  }
+  // File rotated/truncated → drop children that no longer parse.
+  while(body.children.length>items.length) body.removeChild(body.lastChild);
+  AGENT_LOG_SIGS.length=items.length;
+  updateTyping(body);
+  // Only auto-scroll when the user is already pinned to the bottom.
+  if(touched && (force||atBottom)) body.scrollTop=body.scrollHeight;
 }
-function closeAgent(){clearInterval(AGENT_LOG_TIMER);AGENT_LOG_TIMER=null;AGENT_LOG_ROLE=null;AGENT_LOG_WORKER="";close_('ov-agent');}
+function updateTyping(body){
+  const typing=body.querySelector(":scope > .wl-typing");
+  const want=AGENT_LOG_LIVE&&!AGENT_LOG_DONE;
+  if(want&&!typing){
+    const n=document.createElement("div");
+    n.className="wl-typing";
+    n.innerHTML='<span class="wl-ic"><i class="ti ti-sparkles"></i></span><span class="dots"><i></i><i></i><i></i></span><span class="wl-typing-lbl">working — waiting for the next step</span>';
+    body.appendChild(n);
+  } else if(!want&&typing){ typing.remove(); }
+}
+// Coalesce many rapid SSE pushes (the tailer can fire several per second) into
+// at most one DOM render per animation frame — that's what kills the "struggles,
+// keeps refreshing" feeling instead of re-rendering on every tiny chunk.
+let AGENT_LOG_RAF=0;
+function scheduleAgentLog(){
+  if(AGENT_LOG_RAF) return;
+  AGENT_LOG_RAF=requestAnimationFrame(()=>{ AGENT_LOG_RAF=0; renderAgentLog(false); });
+}
+function closeAgentLog(){
+  if(AGENT_LOG_RAF){ cancelAnimationFrame(AGENT_LOG_RAF); AGENT_LOG_RAF=0; }
+  if(AGENT_LOG_ES){try{AGENT_LOG_ES.close()}catch(_){} AGENT_LOG_ES=null;}
+}
+// Fully stop the stream (modal close): unlike restartAgentLog's internal
+// closeAgentLog call, this also cancels any pending reconnect so a closed
+// modal doesn't keep retrying in the background.
+function stopAgentLog(){
+  if(AGENT_LOG_RETRY_TIMER){ clearTimeout(AGENT_LOG_RETRY_TIMER); AGENT_LOG_RETRY_TIMER=null; }
+  closeAgentLog();
+  showAgentLogError(false);
+}
+function closeAgent(){stopAgentLog();AGENT_LOG_ROLE=null;AGENT_LOG_WORKER="";close_('ov-agent');}
 async function openTranscript(enc,name){
   document.getElementById("tr-title").textContent=name;
   document.getElementById("tr-body").textContent="loading…";
@@ -1537,17 +1870,58 @@ async function mintToken(){
   }catch(e){box.innerHTML='<div style="color:var(--red);font-size:12px">Network error.</div>';}
 }
 async function revokeToken(label){try{await fetch("/api/auth/tokens/"+label,{method:"DELETE"});renderAccess();}catch(e){}}
+// Security-audit view (deepened per operator's no-shallow-features directive):
+// the endpoint returns the whole log; filtering, paging and CSV export are
+// client-side over that snapshot, so the server stays a dumb export.
+let AUDIT_ROWS=[],AUDIT_PAGE=0;
+const AUDIT_PER=50;
 function renderAudit(){
   fetch("/api/audit-log").then(r=>r.ok?r.json():[]).then(rows=>{
-    const el=document.getElementById("audit-body");
-    if(!Array.isArray(rows)||!rows.length){el.innerHTML='<div class="empty">no audited actions yet</div>';return;}
-    el.innerHTML=rows.map(e=>{
-      const bad=e.status>=400;const col=bad?"var(--red)":"var(--green)";
-      const ic=e.action.includes("login")?(bad?"lock-x":"login"):"pencil";
-      return `<div class="act"><div class="ad" style="background:${col}22;color:${col}"><i class="ti ti-${ic}" style="font-size:13px"></i></div>
-        <div class="atx"><span class="who">${esc(e.user)}</span> ${esc(e.action)} <span class="tk" style="background:${col}22;color:${col}">${e.status}</span></div>
-        <span class="tm">${esc((e.at||"").slice(5,16).replace("T"," "))}</span></div>`;}).join("");
+    AUDIT_ROWS=Array.isArray(rows)?rows:[];AUDIT_PAGE=0;renderAuditRows();
   }).catch(()=>{document.getElementById("audit-body").innerHTML='<div class="empty">unable to load audit log</div>';});
+}
+function auditFiltered(){
+  const q=(document.getElementById("audit-q")?.value||"").toLowerCase();
+  const kind=document.getElementById("audit-kind")?.value||"";
+  const days=document.getElementById("audit-range")?.value||"";
+  const cutoff=days?Date.now()-Number(days)*86400000:0;
+  return AUDIT_ROWS.filter(e=>{
+    if(q&&!(String(e.user||"").toLowerCase().includes(q)||String(e.action||"").toLowerCase().includes(q)))return false;
+    if(kind==="login"&&!String(e.action||"").includes("login"))return false;
+    if(kind==="mutation"&&String(e.action||"").includes("login"))return false;
+    if(kind==="fail"&&!(e.status>=400))return false;
+    if(cutoff&&new Date(e.at||0).getTime()<cutoff)return false;
+    return true;
+  });
+}
+function renderAuditRows(){
+  const el=document.getElementById("audit-body");if(!el)return;
+  const rows=auditFiltered();
+  const cnt=document.getElementById("audit-count");
+  if(cnt)cnt.textContent=rows.length+" / "+AUDIT_ROWS.length+" events";
+  if(!rows.length){el.innerHTML='<div class="empty">'+(AUDIT_ROWS.length?"nothing matches the filter":"no audited actions yet")+'</div>';const pg=document.getElementById("audit-pager");if(pg)pg.innerHTML="";return;}
+  const pages=Math.max(1,Math.ceil(rows.length/AUDIT_PER));
+  if(AUDIT_PAGE>=pages)AUDIT_PAGE=pages-1;
+  const page=rows.slice(AUDIT_PAGE*AUDIT_PER,(AUDIT_PAGE+1)*AUDIT_PER);
+  el.innerHTML=page.map(e=>{
+    const bad=e.status>=400;const col=bad?"var(--red)":"var(--green)";
+    const ic=String(e.action||"").includes("login")?(bad?"lock-x":"login"):"pencil";
+    return `<div class="act"><div class="ad" style="background:${col}22;color:${col}"><i class="ti ti-${ic}" style="font-size:13px"></i></div>
+      <div class="atx"><span class="who">${esc(e.user)}</span> ${esc(e.action)} <span class="tk" style="background:${col}22;color:${col}">${e.status}</span></div>
+      <span class="tm" title="${esc(e.at||"")}">${esc((e.at||"").slice(5,16).replace("T"," "))}</span></div>`;}).join("");
+  const pg=document.getElementById("audit-pager");
+  if(pg)pg.innerHTML=pages<=1?"":`
+    <button class="fchip" ${AUDIT_PAGE<=0?"disabled style='opacity:.4'":""} onclick="AUDIT_PAGE--;renderAuditRows()">‹ newer</button>
+    <span style="font-size:11.5px;color:var(--dim);align-self:center">page ${AUDIT_PAGE+1} / ${pages}</span>
+    <button class="fchip" ${AUDIT_PAGE>=pages-1?"disabled style='opacity:.4'":""} onclick="AUDIT_PAGE++;renderAuditRows()">older ›</button>`;
+}
+function exportAuditCsv(){
+  const rows=auditFiltered();
+  const q=v=>'"'+String(v??"").replace(/"/g,'""')+'"';
+  const csv="at,user,action,status\n"+rows.map(e=>[q(e.at),q(e.user),q(e.action),q(e.status)].join(",")).join("\n");
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
+  a.download="audit-log.csv";a.click();URL.revokeObjectURL(a.href);
 }
 function relTime(iso){if(!iso)return "never";const t=Date.parse(iso.replace(" ","T"));if(isNaN(t))return esc(iso.slice(5,16));
   const s=(Date.now()-t)/1000;if(s<90)return "just now";if(s<3600)return Math.round(s/60)+"m ago";if(s<86400)return Math.round(s/3600)+"h ago";return Math.round(s/86400)+"d ago";}
@@ -1596,15 +1970,21 @@ function renderPeople(){
   }).catch(()=>{body.innerHTML='<div class="empty">unable to load analytics</div>';});
 }
 /* ---- Toasts ---- */
-function toast(msg,type){const c=document.getElementById("toasts");if(!c)return;
+// opts (all optional): { ms: <lifetime>, action: { label, fn } } — an action
+// renders an inline button (the dupes radar's 10s undo, CXA-F362) and its
+// lifetime overrides the 3s default.
+function toast(msg,type,opts){const c=document.getElementById("toasts");if(!c)return;
+  const o=opts||{};
   const ic=type==="ok"?"circle-check":(type==="err"?"alert-triangle":"info-circle");
   const el=document.createElement("div");el.className="toast "+(type||"");el.innerHTML=`<i class="ti ti-${ic}"></i><span>${esc(msg)}</span>`;
-  c.appendChild(el);setTimeout(()=>{el.classList.add("hide");setTimeout(()=>el.remove(),220);},3000);}
+  const done=()=>{el.classList.add("hide");setTimeout(()=>el.remove(),220);};
+  if(o.action){const b=document.createElement("button");b.className="toast-act";b.textContent=o.action.label;b.onclick=()=>{done();o.action.fn();};el.appendChild(b);}
+  c.appendChild(el);setTimeout(done,o.ms||3000);}
 /* ---- Command palette (⌘K) ---- */
 const NAV_IC={overview:"layout-dashboard",team:"robot",board:"columns",roadmap:"timeline",activity:"activity",discuss:"messages",insights:"coin",people:"user-star",audit:"shield-lock",access:"user-cog",settings:"settings"};
 let CMDK_ITEMS=[],CMDK_SEL=0;
 function cmdkBuild(){
-  const items=[];const isAdmin=ME&&ME.role==="admin";
+  const items=[];const isAdmin=!!ME&&roleIsHubAdmin(ME.role);
   Object.keys(TITLES).forEach(v=>{const a=document.querySelector(`.nav a[data-v="${v}"]`);if(!a)return;
     if(a.classList.contains("admin-only")&&!isAdmin)return;
     if(a.classList.contains("manage-only")&&!canManage())return;
@@ -1639,7 +2019,12 @@ function cmdkKey(e){const m=window._cmdkMatches||[];
   else if(e.key==="ArrowUp"){e.preventDefault();cmdkSel(Math.max(CMDK_SEL-1,0));scrollSel();}
   else if(e.key==="Enter"){e.preventDefault();cmdkRun(CMDK_SEL);}}
 function scrollSel(){const s=document.querySelector("#cmdk-list .cmdk-item.sel");if(s)s.scrollIntoView({block:"nearest"});}
-document.addEventListener("keydown",e=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==="k"){e.preventDefault();
+// Command palette keybinding. CXA-F275 moved ⌘K to the GLOBAL SEARCH palette:
+// both handlers used to fire, stacking the shell palette (z-index 200) over
+// the search overlay (z-index 20) where it intercepted every click on search
+// results. The palette stays keyboard-reachable on ⌘/ and via its topbar
+// button; ⌘K opens the one box that searches tickets, wiki and chat.
+document.addEventListener("keydown",e=>{if((e.metaKey||e.ctrlKey)&&e.key==="/"){e.preventDefault();
   document.getElementById("cmdk").classList.contains("open")?closeCmdk():openCmdk();}});
 // ── Chat enhancements: threads, edit, delete, pin, search, typing ────────
 let THREAD_MSG=null, THREAD_LOADING=false;
@@ -1726,7 +2111,7 @@ function renderSlackMsg(m){
   const gutter=m.grouped?`<span class="sgt">${time}</span>`:avat(m.user,"sav");
   // Hybrid gate announcements become ACTION CARDS: the decision is one click
   // away from the message that asked for it (see docs/HYBRID_TEAM.md).
-  const gate=(!deleted&&m.user==="SYSTEM")?gateActions(m.body):"";
+  const gate=(!deleted&&(m.user==="SYSTEM"||m.user==="SM"))?gateActions(m.body):"";
   return `<div class="smsg${m.grouped?' grouped':''}" id="msg-${esc(m.id)}">
     <div class="sgut">${gutter}</div>
     <div class="smain">
@@ -1746,12 +2131,26 @@ function gateActions(body){
     return `<div style="display:flex;gap:8px;margin-top:7px">${btn("Approve → Ready","ti-checks",`chatGate('${id}','ready')`,1)}${btn("Open ticket","ti-external-link",`showTicket('${id}')`)}</div>`;
   if(b.includes("awaiting HUMAN verification")||b.includes("gate_verify"))
     return `<div style="display:flex;gap:8px;margin-top:7px">${btn("Mark Verified","ti-shield-check",`chatGate('${id}','verify')`,1)}${btn("Open ticket","ti-external-link",`showTicket('${id}')`)}</div>`;
+  // SM's cost-hold chase ("… sits behind a cost hold — approve or reject it")
+  // gets the same one-click treatment as the Inbox card: chat and Inbox stay
+  // two doors to one decision.
+  if(b.includes("cost hold")||b.includes("cost_approve"))
+    return `<div style="display:flex;gap:8px;margin-top:7px">${btn("Approve spend","ti-coin",`chatGate('${id}','approve-cost')`,1)}${btn("Reject","ti-x",`chatCostReject('${id}')`)}${btn("Open ticket","ti-external-link",`showTicket('${id}')`)}</div>`;
   return "";
 }
 async function chatGate(id,action){
   try{const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/"+action),{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
     if(!r.ok)toasty(await r.text(),"err");
-    else toasty(action==="ready"?(id+" → Ready"):(id+" verified"),"ok");
+    else toasty(action==="ready"?(id+" → Ready"):action==="approve-cost"?(id+" spend approved"):(id+" verified"),"ok");
+  }catch(e){}
+}
+// Rejecting a cost hold from chat still requires a reason — the reason is
+// what the agents learn from (same contract as the Inbox reject).
+async function chatCostReject(id){
+  const reason=await coxModal({title:"Reject "+id,message:"Why? (agents learn from this)",input:{placeholder:"e.g. not worth the spend"},confirmText:"Reject"});
+  if(reason===null||reason===undefined)return;
+  try{const r=await fetch(api("/ticket/"+encodeURIComponent(id)+"/reject"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reason:String(reason||"")})});
+    if(!r.ok)toasty(await r.text(),"err");else toasty(id+" rejected","ok");
   }catch(e){}
 }
 // Wrap the selection of any input/textarea in a markdown marker (**,*,`).
@@ -1809,7 +2208,11 @@ async function deleteMsg(id){
   try{const r=await fetch("/api/chat/messages/"+id,{method:"DELETE"});if(!r.ok)toasty("Cannot delete","err");}
   catch(e){toasty("Network error","err");}}
 async function togglePin(id){
-  try{const r=await fetch("/api/chat/messages/"+id+"/pin",{method:"POST"});const d=await r.json();
+  try{const r=await fetch("/api/chat/messages/"+id+"/pin",{method:"POST"});
+    // A refused pin (not owner/admin, or the 5-pin cap) carries the reason —
+    // show it instead of a generic network failure.
+    if(!r.ok){toasty((await r.text())||"Cannot pin","err");return;}
+    const d=await r.json();
     toasty(d.pinned?"Pinned":"Unpinned","ok");loadPins();
   }catch(e){toasty("Network error","err");}}
 function copyMsgLink(id){
@@ -2063,3 +2466,149 @@ function applyFontSize(s){
 })();
 
 boot();
+
+// Cross-project duplicate radar (CXA-F253): pairs of active tickets in
+// DIFFERENT projects that match under the same similarity rule the BA insert
+// loop uses. Each project's BA dedupes only against its own board, so the
+// same generic feature gets independently invented everywhere — this view is
+// where a human redirects, rejects, or explicitly allows a pair. Nothing is
+// auto-suppressed except the one carve-out (CXA-F254 AC4): pairs whose
+// tickets share the same bounded-context service tag are presumed
+// legitimately-shared infrastructure and stay silent while their similarity
+// is within the stricter same-tag bound.
+async function renderDupes(){
+  const el=document.getElementById("dupes-body");if(!el)return;
+  el.innerHTML='<div class="empty"><i class="ti ti-loader-2 att-spin"></i> scanning the fleet…</div>';
+  let data=null;
+  try{
+    const r=await fetch("/api/workspace/duplicates");
+    if(!r.ok){el.innerHTML='<div class="empty">unable to load the duplicate radar ('+r.status+')</div>';return;}
+    data=await r.json();
+  }catch(_){el.innerHTML='<div class="empty">unable to load the duplicate radar</div>';return;}
+  const all=(data&&data.crossProjectDuplicates)||[];
+  const pairs=all.filter(e=>!DUPES_DISMISSED.includes(dupeKey(e)));
+  const hidden=all.length-pairs.length;
+  const head=dupesHeader(data,pairs.length,hidden);
+  if(!pairs.length){
+    el.innerHTML=head+`<div class="panel"><div class="dupe-empty"><i class="ti ti-copy"></i>
+      <div class="dupe-empty-t">No cross-project duplicates</div>
+      <div class="dupe-empty-s">${hidden?hidden+" dismissed this session · <a href='#' onclick='dupeUndoAll();return false'>undo</a>":"Every project is building its own thing. Pairs of tickets across projects with matching titles show up here for a human decision."}</div></div></div>`;
+    return;
+  }
+  el.innerHTML=head+pairs.map(dupesCard).join("");
+}
+// CXA-F362 depth: the header carries the radar's own provenance — when the
+// comparison last ran (the persisted `scannedAt` the server stamps on every
+// run, so it survives a restart) and the refresh cadence — plus the admin's
+// explicit re-run. Session-level dismissals hide reported pairs without
+// touching the boards; each shows a 10s undo toast (the rejection verdicts
+// are the destructive path and stay behind their confirm modal).
+let DUPES_DISMISSED=[];
+// One rendered card IS one reported pair (or collapsed group): the key covers
+// the home AND every dup side, because the paraphrase pass emits one entry per
+// pair — two cards can share a home ticket, and a home-only key would dismiss
+// (and undo) its siblings with it.
+function dupeKey(e){return e.homeProjectId+"/"+e.homeTicketId+"/"+(e.duplicates||[]).map(d=>d.projectId+"/"+d.ticketId).sort().join("|");}
+function dupesHeader(data,count,hidden){
+  return `<div class="panel" style="display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+      <i class="ti ti-copy" style="color:var(--amber)"></i>
+      <b style="font-size:13px">${count} duplicated ask${count===1?"":"s"} across projects</b>
+      <span style="font-size:11px;color:var(--dim)">last scanned ${relTime((data&&data.scannedAt)||"")} · <span title="scan cadence — the radar recomputes on every view open; Scan now forces a re-run">scans every view open</span></span>
+      ${hidden?`<span style="font-size:11px;color:var(--dim)">${hidden} dismissed</span>`:""}
+      <span style="flex:1"></span>
+      ${isHubAdmin()?`<button id="dupes-scan" class="tk-btn go" onclick="dupesScanNow(this)"><i class="ti ti-refresh"></i> Scan now</button>`:""}
+      <span style="font-size:11px;color:var(--dim)">redirect or reject the copy · allow a legitimately-shared ticket</span>
+    </div>`;
+}
+async function dupesScanNow(btn){
+  const old=btn.innerHTML;
+  btn.disabled=true;btn.innerHTML='<i class="ti ti-loader-2 att-spin"></i> Scanning…';
+  try{
+    const r=await fetch("/api/workspace/duplicates/scan",{method:"POST"});
+    if(!r.ok){const t=await r.text().catch(()=>(""));toast(t||("scan failed ("+r.status+")"),"err");btn.disabled=false;btn.innerHTML=old;return;}
+    renderDupes();
+  }catch(_){toast("scan failed","err");btn.disabled=false;btn.innerHTML=old;}
+}
+function dupesCard(e){
+  const rows=(e.duplicates||[]).map(d=>`
+    <div class="dupe-row">
+      <div class="dupe-main">
+        <div class="dupe-title">${esc(d.title)} <span class="dupe-proj">${esc(d.projectName||d.projectId)}</span></div>
+        <div class="dupe-scope">${esc(d.scope||"—")}</div>
+        <div class="dupe-meta"><span class="dupe-tid">${esc(d.ticketId)}</span><span class="dupe-proj">${esc(d.projectId)}</span><span class="dupe-score">similarity ${(Number(d.score)||0).toFixed(2)}</span></div>
+      </div>
+      <div class="dupe-actions">
+        <button class="tk-btn go" onclick="dupeAction('redirect','${esc(e.homeProjectId)}','${esc(e.homeTicketId)}','${esc(d.projectId)}','${esc(d.ticketId)}')"><i class="ti ti-arrow-right"></i> Redirect</button>
+        <button class="tk-btn danger" onclick="dupeAction('reject','${esc(e.homeProjectId)}','${esc(e.homeTicketId)}','${esc(d.projectId)}','${esc(d.ticketId)}')"><i class="ti ti-x"></i> Reject</button>
+        <button class="tk-btn" onclick="dupeAction('allow','${esc(e.homeProjectId)}','${esc(e.homeTicketId)}','${esc(d.projectId)}','${esc(d.ticketId)}')"><i class="ti ti-check"></i> Allow both</button>
+      </div>
+    </div>`).join("");
+  return `<div class="panel dupe-card">
+    <div class="dupe-head">
+      <span class="dupe-badge">duplicate</span>
+      <div class="dupe-main">
+        <div class="dupe-title">${esc(e.homeTicketTitle)} <span class="dupe-proj">${esc(e.homeProjectName||e.homeProjectId)}</span></div>
+        <div class="dupe-scope">${esc(e.homeTicketScope||"—")}</div>
+        <div class="dupe-meta"><span class="dupe-tid">${esc(e.homeTicketId)}</span><span class="dupe-proj">${esc(e.homeProjectId)}</span><span style="color:var(--dim);font-size:11px">home — the keeper</span></div>
+      </div>
+      <div class="dupe-actions"><button class="tk-btn" title="Hide this reported pair for this session" onclick="dupeDismiss('${esc(dupeKey(e))}')"><i class="ti ti-eye-off"></i> Dismiss</button></div>
+    </div>
+    ${rows}
+  </div>`;
+}
+async function dupeAction(action,homeProjectId,homeTicketId,dupProjectId,dupTicketId){
+  if(action!=="allow"){
+    const verb=action==="redirect"?"redirect":"reject";
+    const ok=await coxModal({title:verb[0].toUpperCase()+verb.slice(1)+" the duplicate",
+      message:`${verb[0].toUpperCase()+verb.slice(1)} ${dupProjectId}/${dupTicketId} — the ask stays tracked by ${homeProjectId}/${homeTicketId}.`,
+      confirmText:"Confirm",cancelText:"Cancel",danger:action==="reject"});
+    if(!ok)return;
+  }
+  try{
+    const r=await fetch("/api/workspace/duplicates/action",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({action,home_project_id:homeProjectId,home_ticket_id:homeTicketId,dup_project_id:dupProjectId,dup_ticket_id:dupTicketId})});
+    if(!r.ok){const t=await r.text().catch(()=>(""));toast(t||("action failed ("+r.status+")"),"err");return;}
+    toast(action==="allow"?"Pair allowed — it will not surface again":(action==="redirect"?"Duplicate redirected to the home ticket":"Duplicate rejected"),"ok");
+    renderDupes();
+  }catch(_){toast("action failed","err");}
+}
+// Session-level dismissal: the pair hides from THIS browser until the tab is
+// reloaded — no board mutation, no persisted suppression (that is what
+// "Allow both" is for). The 10s undo toast is the inverse; after it lapses
+// the dismissal stands for the session.
+function dupeDismiss(key){
+  if(!DUPES_DISMISSED.includes(key))DUPES_DISMISSED.push(key);
+  toast("Duplicate pair dismissed — hidden for this session","ok",
+    {ms:10000,action:{label:"Undo",fn:()=>{DUPES_DISMISSED=DUPES_DISMISSED.filter(k=>k!==key);renderDupes();}}});
+  renderDupes();
+}
+function dupeUndoAll(){DUPES_DISMISSED=[];renderDupes();}
+
+// ── Engine health card (depth pass round 3) ─────────────────────────────────
+// The wedge/failure picture the operator was reconstructing by hand from
+// hub.log, drawn from state the SSE snapshot already carries: open
+// engine_incidents (engine · role · reason · repeat count) and the tickets
+// with the most failed attempts. Pure client-side, refreshed on Team nav.
+function renderEngineHealth(){
+  const el=document.getElementById("team-enginehealth");if(!el)return;
+  const s=window.STATE||{};
+  const inc=Array.isArray(s.engine_incidents)?s.engine_incidents:[];
+  const fails=Object.entries(s.ticket_failures||{}).map(([id,v])=>[id,Array.isArray(v)?v.length:0])
+    .filter(x=>x[1]>0).sort((a,b)=>b[1]-a[1]).slice(0,5);
+  if(!inc.length&&!fails.length){el.innerHTML="";return;}
+  const incRows=inc.map(i=>`<div style="display:flex;gap:9px;align-items:baseline;padding:5px 0;border-bottom:1px solid var(--border)">
+    <span class="tk" style="background:color-mix(in srgb,var(--red) 14%,transparent);color:var(--red);flex:none">${esc(i.engine)}</span>
+    <span style="font-size:12px;font-weight:600;flex:none">${esc(i.role||"")}</span>
+    <span style="font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1" title="${esc(i.reason||"")}">${esc(i.reason||"")}</span>
+    <span style="font-size:11px;color:var(--dim);flex:none">×${i.count||1} since ${esc((i.since||"").slice(5,16).replace("T"," "))}</span></div>`).join("");
+  const failRows=fails.map(([id,n])=>`<div style="display:flex;gap:9px;align-items:center;padding:4px 0">
+    <span class="tk" style="cursor:pointer" onclick="showTicket('${esc(id)}')">${esc(id)}</span>
+    <div style="flex:1;background:var(--card2);border-radius:5px;height:7px;overflow:hidden"><div style="width:${Math.min(100,n*20)}%;height:100%;background:var(--amber)"></div></div>
+    <span style="font-size:11.5px;color:var(--muted);flex:none">${n} failed attempt${n>1?"s":""}</span></div>`).join("");
+  el.innerHTML=`<div class="panel" style="margin:10px 0 14px">
+    <h4><i class="ti ti-heart-rate-monitor" style="color:${inc.length?"var(--red)":"var(--green)"}"></i> Engine health
+      <span style="margin-left:auto;font-weight:400;font-size:12px;color:${inc.length?"var(--red)":"var(--green)"}">${inc.length?inc.length+" open incident"+(inc.length>1?"s":""):"no open incidents"}</span></h4>
+    ${incRows}
+    ${fails.length?`<div style="font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--dim);margin:10px 0 4px">Struggling tickets</div>${failRows}`:""}
+  </div>`;
+}
