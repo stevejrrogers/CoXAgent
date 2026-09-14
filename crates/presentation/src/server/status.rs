@@ -22,8 +22,10 @@ pub(super) async fn build_state(
     let workspace = Ws::load(&hub_dir, kv).await;
     let spaces = Sp::load(&hub_dir, kv2).await;
     let kv4 = kv3_pf.clone();
+    let kv5 = kv3_pf.clone();
     let meetings = Mt::load(&hub_dir, kv3).await;
     let profiles = Pf::load(&hub_dir, kv4).await;
+    let user_keys = Uk::load(&hub_dir, kv5).await;
     AppState {
         projects: Arc::new(RwLock::new(map)),
         chat_bus: Arc::new(RwLock::new(HashMap::new())),
@@ -44,6 +46,7 @@ pub(super) async fn build_state(
         spaces,
         meetings,
         profiles,
+        user_keys,
         storage: extras.storage.unwrap_or_else(|| {
             Arc::new(DiskStorage {
                 root: hub_dir.join("blobs"),
