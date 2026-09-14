@@ -46,6 +46,51 @@ pub struct Design {
     pub ux: Option<UxDesign>,
 }
 
+/// The status of a single test case as verified by the TEST agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TestCaseStatus {
+    /// Not yet verified.
+    Pending,
+    /// The TEST agent marked this case as passing its acceptance criterion.
+    Passed,
+    /// The TEST agent found the case failing (this is usually a bug in the
+    /// ticket's own DoD, distinct from a separately-filed bug ticket).
+    Failed,
+}
+
+fn default_pending() -> TestCaseStatus {
+    TestCaseStatus::Pending
+}
+
+/// Optional per-test-case proof attached when the TEST agent verifies a case.
+/// A real captured image (project media URL) and/or a short reproducible note.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaseEvidence {
+    /// Project media URL of a captured screenshot (e.g. `/api/projects/../media/...`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// Who/what verified it, or how to reproduce.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// RFC3339 timestamp the evidence was captured.
+    #[serde(default)]
+    pub at: String,
+}
+
+/// One test case on a ticket — the executable form of an acceptance
+/// criterion — carrying its own verdict and optional evidence. Kept aligned
+/// with `acceptance_criteria` by the agents; each case is marked pass/fail by
+/// the TEST agent when it verifies the ticket.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestCase {
+    pub description: String,
+    #[serde(default = "default_pending")]
+    pub status: TestCaseStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<CaseEvidence>,
+}
+
 /// The ticket aggregate root. Fields are private; all access is via methods so
 /// no code path can produce an inconsistent ticket.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,6 +311,7 @@ impl Ticket {
     ) -> &mut Vec<crate::wip_checkpoint::WipCheckpoint> {
         &mut self.wip_checkpoints
     }
+
 
     // --- Accessors ---
 
@@ -971,4 +1017,5 @@ mod tests {
             .expect("super-PO may clear");
         assert_eq!(t.service_tag(), None, "a blank tag clears the field");
     }
+
 }

@@ -104,6 +104,7 @@ fn resolve_deploy_secrets_in(
     // otherwise sit world-readable on disk forever. Repairing here remediates it.
     repair_store_permissions(secret_root, work_dir);
 
+
     let dot_env = read_dot_env(&work_dir.join(".env"));
     let missing = missing_required_secrets(
         |key| std::env::var(key).is_ok_and(|v| !v.trim().is_empty()),
@@ -147,6 +148,65 @@ fn resolve_deploy_secrets_in(
     {
         expire_converged_legacy_store(&cxb031_store_file(secret_root, work_dir));
     }
+    resolved
+}
+
+/// Durable/stabilizing resolution used ONLY by real deploys ([`DockerComposeDeploy::deploy`]).
+///
+/// Precedence (never clobber anyone):
+/// 1. An operator-configured value wins if present EITHER as process env OR as an already
+///    assigned non-blank KEY=VALUE in `<workdir>/.env`. Such keys are left entirely alone.
+/// 2. Otherwise consult a persistent hub-private store keyed by `compose_project_name`
+///    (`$COXAGENT_DEPLOY_SECRET_DIR/<proj>.secrets`, else `$HOME/.coxagent-deploy/<proj>.secrets`)
+///    OUTSIDE any source tree / repo checkout / workdir subtree; reuse a value we generated and
+///    persisted on an earlier cycle unchanged so it stays stable across cycles (CXA-B030).
+/// 3. Only when neither exists generate a fresh random via [`random_secret()`] AND persist it so
+///    future cycles reuse it instead of rotating it.
+///
+/// Values are recomputed each invocation strictly from what's missing after filters, so an
+/// operator configuring a key externally AFTER an earlier pinned cycle wins precedence on later
+/// passes — stale pins never leak back once externally configured. Persistence is best-effort:
+/// if writing fails we log a tracing warning about lost cross-cycle stability but still return the
+/// resolved values so deploys don't fail outright.
+fn resolve_deploy_secrets(work_dir: &std::path::Path) -> Vec<(String, String)> {
+    let proj = compose_project_name(work_dir);
+    let store_path = deploy_secret_store_path(&proj);
+
+    // Recompute each invocation strictly from what's missing after filters, so an
+    // operator configuring a key externally AFTER an earlier pinned cycle wins
+    // precedence on later passes — stale pins never leak back once configured.
+    let dot_env = read_dot_env(&work_dir.join(".env"));
+    let missing = missing_required_secrets(
+        |key| std::env::var(key).is_ok_and(|v| !v.trim().is_empty()),
+        &dot_env,
+    );
+
+    if missing.is_empty() {
+        return Vec::new();
+    }
+
+    // Precedence 2: reuse pinned values we persisted on an earlier cycle unchanged.
+    let prior = read_dot_env_values(&store_path);
+    let mut resolved: Vec<(String, String)> = Vec::with_capacity(missing.len());
+    for key in missing {
+        if let Some(existing) = prior.get(key).filter(|v| !v.trim().is_empty()) {
+            resolved.push((key.to_owned(), existing.clone()));
+        } else {
+            // Precedence 3: generate fresh AND persist for future cycles.
+            resolved.push((key.to_owned(), random_secret()));
+        }
+    }
+
+    // Best-effort persistence off-repo so cross-cycle stability survives; a write
+    // failure must not fail the deploy itself (matches B027's behavior).
+    if let Err(e) = persist_generated_deploy_secrets(&store_path, &resolved) {
+        tracing::warn!(
+            "could not persist generated deploy secrets to {} — cross-cycle stability lost \
+             (this deploy still proceeds): {e}",
+            store_path.display()
+        );
+    }
+
     resolved
 }
 
@@ -564,6 +624,7 @@ fn repair_store_permissions(secret_root: &std::path::Path, work_dir: &std::path:
     set_secret_perms(&store_file(secret_root, work_dir));
     set_secret_perms(&cxb031_store_file(secret_root, work_dir));
 }
+
 
 /// Pull the host port out of a compose bind error like
 /// `Bind for 0.0.0.0:8100 failed: port is already allocated`.
@@ -1785,12 +1846,11 @@ async fn compose_build_check(
     // boot with a known default). A `build` still interpolates those env sections,
     // so without values this cross-target check dies at interpolation before it can
     // verify anything on every secret-bearing compose file. Seed them via the SAME
-    // honour-generate rule as a real deploy ([`resolve_deploy_secrets`]): an
-    // operator's own value wins, otherwise a fresh random one — never a public
-    // constant baked into source (CXA-B017). These are ephemeral verification-only
-    // values passed to one throwaway build command — never written to config or used
-    // to start services.
-    let secrets = resolve_deploy_secrets(work_dir);
+    // honour-generate rule as a real deploy ([`ephemeral_resolve`]): an operator's
+    // own value wins, otherwise a fresh random one — never a public constant baked
+    // into source (CXA-B017). These are ephemeral verification-only values passed to
+    // one throwaway build command — deliberately NOT persisted to the off-repo store.
+    let secrets = ephemeral_resolve(work_dir);
     let mut build = Command::new("docker");
     // `--ssh default` forwards the host agent so the builder stage can fetch
     // the private harxes-core git dependency (see Dockerfile).
@@ -1985,6 +2045,7 @@ mod deploy_secret_tests {
     };
     use std::collections::{HashMap, HashSet};
 
+
     fn set(keys: &[&str]) -> HashSet<String> {
         keys.iter().map(|k| (*k).to_owned()).collect()
     }
@@ -2007,6 +2068,7 @@ mod deploy_secret_tests {
     /// The core decision rule (CXA-B017): a key configured by the operator —
     /// via process env OR a project-dir `.env` — is left alone (never overridden
     /// with ours); only a key missing from BOTH sources gets a fallback seed.
+
     #[test]
     fn precedence_honours_process_env_then_dot_env_then_fallback() {
         // No config anywhere -> both keys need a fallback.
@@ -2709,6 +2771,7 @@ mod deploy_secret_tests {
         let _ = std::fs::remove_dir_all(&proj);
         let _ = std::fs::remove_dir_all(&secret_root);
     }
+
 }
 
 impl DockerComposeDeploy {

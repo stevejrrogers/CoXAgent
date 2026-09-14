@@ -376,6 +376,7 @@ pub(super) async fn agent_log_stream_ep(
         .into_response()
 }
 
+
 /// List transcript files (name + size + modified), newest first.
 pub(super) async fn list_transcripts(
     State(app): State<AppState>,

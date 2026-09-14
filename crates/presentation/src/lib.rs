@@ -7,6 +7,7 @@
 
 pub mod cli;
 pub mod middleware;
+pub mod overview_panels;
 pub mod server;
 
 pub use cli::{parse, Cli, CodegraphQuery, Command};

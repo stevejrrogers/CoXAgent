@@ -360,6 +360,7 @@ response, or what blocked verification.\n\
 (e.g. \"crates/domain/tests/gate.rs\"), or [] when the evidence is an API \
 request/response instead of a file-based test.";
 
+
 /// Tech Writer — documents ONE verified feature in full for the team Wiki.
 pub const DOCS: &str = "\
 You are a world-class Tech Writer with TWO readers: a new teammate who must \
