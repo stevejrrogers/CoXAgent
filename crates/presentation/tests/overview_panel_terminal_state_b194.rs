@@ -38,7 +38,7 @@ fn run_node(script: &str) -> String {
 fn eval_js(expr: &str) -> String {
     let wiring = include_str!("../src/web/js/overview_states.js");
     let shell = include_str!("../src/web/js/terminal_state.js");
-    let script = format!("const window=globalThis;\n{shell}\n{wiring}\n;({expr})");
+    let script = format!("const window=globalThis;\n{shell}\n{wiring}\n;console.log(({expr}));");
     run_node(&script)
 }
 
@@ -206,8 +206,8 @@ const host={{querySelectorAll:(sel)=>sel==='[data-ts-slot="primaryAction"]'?[btn
 const btn={{disabled:false,listeners:{{}},addEventListener(t,f){{this.listeners[t]=f;}},style:{{}}}};
 const painted=[];
 window.TerminalState={{paint:(hostEl,spec)=>painted.push(spec)}};
-OvPanelStates.renderPhase('kpis','error',{{error:{{message:'first fetch failed'}}}});
-OvPanelStates.wireRetry(host,'kpis',()=>{{calls.n++;return Promise.resolve({{ok:true,hasData:true,paint:()=>painted.push('CALLER_PAINT')}});}});
+window.OvPanelStates.renderPhase('kpis','error',{{error:{{message:'first fetch failed'}}}});
+window.OvPanelStates.wireRetry(host,'kpis',()=>{{calls.n++;return Promise.resolve({{ok:true,hasData:true,paint:()=>painted.push('CALLER_PAINT')}});}});
 btn.listeners.click();
 setTimeout(()=>{{
   if(calls.n!==1) throw new Error('retry did not re-dispatch the fetch: '+calls.n);
@@ -232,8 +232,8 @@ const btn={{disabled:false,listeners:{{}},addEventListener(t,f){{this.listeners[
 const host={{querySelectorAll:(sel)=>sel==='[data-ts-slot="primaryAction"]'?[btn]:[]}};
 const painted=[];
 window.TerminalState={{paint:(hostEl,spec)=>painted.push(spec)}};
-OvPanelStates.renderPhase('alerts','error',{{error:{{message:'first failure'}}}});
-OvPanelStates.wireRetry(host,'alerts',()=>Promise.reject({{message:'second failure: engine down'}}));
+window.OvPanelStates.renderPhase('alerts','error',{{error:{{message:'first failure'}}}});
+window.OvPanelStates.wireRetry(host,'alerts',()=>Promise.reject({{message:'second failure: engine down'}}));
 btn.listeners.click();
 setTimeout(()=>{{
   const last=painted[painted.length-1];
@@ -255,10 +255,11 @@ setTimeout(()=>{{
 /// the Overview scripts — the shell is the single owner of those states.
 #[test]
 fn no_bare_loading_markup_left_in_overview_files() {
+    // terminal_state.js is deliberately absent: the shared shell is the ONE
+    // owner of the loading state, so its spinner markup is the point.
     for file in [
         "src/web/js/overview_states.js",
         "src/web/js/kpis.js",
-        "src/web/js/terminal_state.js",
         "src/overview_panels.rs",
     ] {
         let body = std::fs::read_to_string(
