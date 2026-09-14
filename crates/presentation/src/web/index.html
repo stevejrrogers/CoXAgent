@@ -624,6 +624,7 @@
       <div class="pfnav">
         <button id="pt-status" class="on" onclick="profileTab('status')"><i class="ti ti-mood-smile"></i> Status</button>
         <button id="pt-profile" onclick="profileTab('profile')"><i class="ti ti-user"></i> Profile</button>
+        <button id="pt-keys" onclick="profileTab('keys')"><i class="ti ti-key"></i> API keys</button>
         <button id="pt-prefs" onclick="profileTab('prefs')"><i class="ti ti-adjustments"></i> Preferences</button>
       </div>
       <div class="pfpane">
@@ -651,6 +652,17 @@
           <div class="fr"><span class="lbl">New password</span><input id="pp-pw" type="password" placeholder="leave empty to keep" style="flex:1"></div>
           <div id="pp-note" style="font-size:12px;margin:6px 0"></div>
           <div style="display:flex;justify-content:flex-end"><button class="save pf-btn" onclick="savePopupProfile()"><i class="ti ti-device-floppy"></i> Save profile</button></div>
+        </div>
+        <div id="pp-keys" hidden>
+          <div class="msub" style="margin:0 0 10px">Your own LLM provider key (BYOK). Your requests stop competing for the project pool's rate limits. Keys are verified live before saving and are never shown again — only the last 4 characters.</div>
+          <div id="pk-list" style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px"></div>
+          <div style="font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--dim);margin-bottom:7px">Add a key</div>
+          <div class="fr"><span class="lbl">Base URL</span><input id="pk-url" placeholder="https://api.example.com/v1" style="flex:1"></div>
+          <div class="fr"><span class="lbl">API key</span><input id="pk-key" type="password" placeholder="sk-…" style="flex:1" autocomplete="off"></div>
+          <div class="fr"><span class="lbl">Model</span><input id="pk-model" placeholder="e.g. GLM-5.3" style="flex:1"></div>
+          <div class="fr"><span class="lbl">Label</span><input id="pk-label" placeholder="optional — defaults to the host" style="flex:1"></div>
+          <div id="pk-note" style="font-size:12px;margin:6px 0"></div>
+          <div style="display:flex;justify-content:flex-end"><button id="pk-add" class="save pf-btn" onclick="addMyKey()"><i class="ti ti-plug-connected"></i> Test &amp; save</button></div>
         </div>
         <div id="pp-prefs" hidden>
           <div class="fr"><span class="lbl">Desktop notifications</span><select id="ppf-desktop" onchange="savePopupPrefs()"><option value="on">on</option><option value="off">off</option></select></div>
