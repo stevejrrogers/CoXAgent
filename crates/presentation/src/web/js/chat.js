@@ -1568,12 +1568,61 @@ const STATUS_PRESETS=[["🎯","Focusing"],["🍜","Lunch"],["🏠","WFH"],["📅
 setInterval(()=>{loadProfiles();loadMembers();},60000); // teammates' avatar/status/name refresh
 function profileTab(t){
   // Never leave every pane hidden: an unknown tab falls back to Status.
-  const tabs=["status","profile","prefs"];
+  const tabs=["status","profile","keys","prefs"];
   if(!tabs.includes(t))t="status";
   for(const k of tabs){
     document.getElementById("pt-"+k).classList.toggle("on",k===t);
     document.getElementById("pp-"+k).hidden=k!==t;
   }
+  if(t==="keys")loadMyKeys();
+}
+// ── BYOK: per-user LLM keys (CXA-F410) ─────────────────────────────────────
+async function loadMyKeys(){
+  const el=document.getElementById("pk-list");if(!el)return;
+  try{const r=await fetch("/api/me/llm-keys");
+    if(!r.ok){el.innerHTML='<div class="msub">Could not load keys.</div>';return;}
+    const d=await r.json();const keys=(d&&d.keys)||[];
+    if(!keys.length){el.innerHTML='<div class="msub">No personal keys yet — the project pool key is used for your work.</div>';return;}
+    el.innerHTML=keys.map(k=>{
+      const ok=k.probe==="ok";
+      const dot=`<span style="color:${ok?"var(--green)":"var(--red)"}" title="${esc(k.probe)}">●</span>`;
+      return `<div style="display:flex;gap:8px;align-items:center;border:1px solid var(--border2);border-radius:8px;padding:8px 10px">
+        ${dot}<div style="flex:1;min-width:0">
+          <div style="font-weight:700;font-size:13px">${esc(k.label)} <span class="msub" style="font-weight:400">· ${esc(k.model)} · ····${esc(k.key_last4)}</span></div>
+          <div class="msub" style="margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(k.base_url)}${ok?"":" — "+esc(k.probe)}</div>
+        </div>
+        <button class="btn-ghost" title="Re-test" onclick="retestMyKey('${esc(k.id)}')"><i class="ti ti-refresh"></i></button>
+        <button class="btn-ghost" title="Delete" onclick="delMyKey('${esc(k.id)}')"><i class="ti ti-trash"></i></button>
+      </div>`;}).join("");
+  }catch(e){el.innerHTML='<div class="msub">Network error.</div>';}
+}
+async function addMyKey(){
+  const n=document.getElementById("pk-note"),btn=document.getElementById("pk-add");
+  const body={base_url:document.getElementById("pk-url").value.trim(),
+    api_key:document.getElementById("pk-key").value.trim(),
+    model:document.getElementById("pk-model").value.trim(),
+    label:document.getElementById("pk-label").value.trim()};
+  n.innerHTML='<span class="msub">Testing the key against the provider…</span>';btn.disabled=true;
+  try{const r=await fetch("/api/me/llm-keys",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    const d=await r.json().catch(()=>({}));
+    if(r.ok){n.innerHTML='<span style="color:var(--green)">Key verified and saved.</span>';
+      for(const id of["pk-url","pk-key","pk-model","pk-label"])document.getElementById(id).value="";
+      loadMyKeys();}
+    else n.innerHTML=`<span style="color:var(--red)">${esc((d&&d.error)||"Could not save the key")}</span>`;
+  }catch(e){n.innerHTML='<span style="color:var(--red)">Network error</span>';}
+  btn.disabled=false;
+}
+async function retestMyKey(id){
+  try{const r=await fetch(`/api/me/llm-keys/${id}/retest`,{method:"POST"});
+    toasty(r.ok?"Key still works":"Key check failed — see the reason on the entry",r.ok?"ok":"err");
+  }catch(e){toasty("Network error","err");}
+  loadMyKeys();
+}
+async function delMyKey(id){
+  try{const r=await fetch(`/api/me/llm-keys/${id}`,{method:"DELETE"});
+    toasty(r.ok?"Key deleted":"Could not delete","ok");
+  }catch(e){toasty("Network error","err");}
+  loadMyKeys();
 }
 function openProfile(tab){const me=(ME&&ME.username)||"";const p=PROFILES[me]||{};
   document.getElementById("pf-av").innerHTML=avat(me,"pf-avbig");
