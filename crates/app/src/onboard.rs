@@ -5,6 +5,7 @@
 
 use coxagent_application::config::Config;
 use coxagent_application::ports::outbound::StateStorePort;
+use coxagent_application::state::ProjectState;
 use coxagent_application::use_cases::{AddTicketInput, AddTicketUseCase};
 use coxagent_domain::{Complexity, Priority, SemVer, TicketType};
 use std::collections::{HashMap, HashSet};
@@ -344,6 +345,8 @@ async fn seed_smart_tickets<S: StateStorePort + 'static>(
                 complexity: Complexity::Medium,
                 has_ui: false,
                 acceptance_criteria: Vec::new(),
+                goal: None,
+                service_tag: None,
             })
             .await?;
         seeded.push(format!("{id} (dockerize)"));
@@ -388,6 +391,8 @@ async fn seed_smart_tickets<S: StateStorePort + 'static>(
                     "Compose file no longer declares duplicate services".to_owned(),
                     "App connects to existing running infrastructure".to_owned(),
                 ],
+                goal: None,
+                service_tag: None,
             })
             .await?;
         seeded.push(format!("{id} (fix-compose)"));
@@ -407,6 +412,8 @@ async fn seed_smart_tickets<S: StateStorePort + 'static>(
                 complexity: Complexity::Small,
                 has_ui: false,
                 acceptance_criteria: Vec::new(),
+                goal: None,
+                service_tag: None,
             })
             .await?;
         seeded.push(format!("{id} (dockerfile)"));
@@ -418,16 +425,92 @@ async fn seed_smart_tickets<S: StateStorePort + 'static>(
 /// Scaffold `coxagent.json`, a `project_context.md` template, and seed the
 /// FEAT-000 walking skeleton. Returns the message shown to the operator. Works
 /// with any [`StateStorePort`] (JSON file or Postgres).
+/// Refuse project scaffolding from inside an agent worktree. A TEST/DEV agent
+/// "testing project creation" from its sandbox ran the real CLI against the
+/// operator's global registry and minted six live `qab-N` cleanroom projects
+/// in one afternoon — cleanroom experiments belong in a temp dir, not the hub.
+fn refuse_agent_scaffold() -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if cwd.components().any(|c| {
+        c.as_os_str()
+            .to_string_lossy()
+            .starts_with(".coxagent-worktrees")
+    }) {
+        return Err(
+            "refusing to scaffold a project from inside an agent worktree — \
+                    this would register a live project in the operator's hub. Use a \
+                    plain temp directory (outside .coxagent-worktrees) for cleanroom \
+                    tests."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// An expected onboarding conflict: the target store already holds tickets, so
+/// re-onboarding is refused. The caller asked to scaffold a workspace that is
+/// already alive — a client-side conflict, not a server fault. Typed so the
+/// HTTP layer can map it to 409 instead of 500 (CXA-B129).
+#[derive(Debug)]
+pub struct OnboardConflict(pub String);
+
+impl std::fmt::Display for OnboardConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for OnboardConflict {}
+
+/// Classify an onboarding failure (CXA-B129): `Some(message)` when it is the
+/// expected client conflict, `None` for a genuine fault. Pure.
+pub fn conflict_message(err: &(dyn std::error::Error + 'static)) -> Option<String> {
+    err.downcast_ref::<OnboardConflict>().map(|c| c.0.clone())
+}
+
+/// An expected onboarding input error: the user-supplied codebase path does
+/// not exist, so the request can never succeed as issued — a client-side bad
+/// input, not a server fault. Typed so the HTTP layer can map it to 400
+/// instead of 500 (CXA-B157, same class as the B139/B142 refusals).
+#[derive(Debug)]
+pub struct OnboardMissingPath(pub String);
+
+impl std::fmt::Display for OnboardMissingPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for OnboardMissingPath {}
+
+/// Classify an onboarding input failure (CXA-B157): `Some(message)` when it is
+/// the missing-codebase-path bad input, `None` otherwise. Pure.
+pub fn missing_path_message(err: &(dyn std::error::Error + 'static)) -> Option<String> {
+    err.downcast_ref::<OnboardMissingPath>()
+        .map(|c| c.0.clone())
+}
+
+/// Refuse re-onboarding over an active backlog (CXA-F003): scaffolding again
+/// on top of existing tickets would silently double-seed or lose state. Typed
+/// as [`OnboardConflict`] so the API layer returns 409, never 500 (CXA-B129).
+fn refuse_existing_tickets(state: &ProjectState) -> Result<(), Box<dyn std::error::Error>> {
+    if !state.tickets.is_empty() {
+        return Err(Box::new(OnboardConflict(
+            "workspace already has tickets; refusing to re-onboard".into(),
+        )));
+    }
+    Ok(())
+}
+
 pub async fn greenfield<S: StateStorePort + 'static>(
     store: &Arc<S>,
     state_dir: &Path,
     name: &str,
     alias: Option<String>,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    refuse_agent_scaffold()?;
     let mut existing = store.load().await?;
-    if !existing.tickets.is_empty() {
-        return Err("workspace already has tickets; refusing to re-onboard".into());
-    }
+    refuse_existing_tickets(&existing)?;
 
     // Establish the ticket-id alias (user-provided or derived) before minting.
     let alias = alias.map_or_else(
@@ -462,6 +545,8 @@ pub async fn greenfield<S: StateStorePort + 'static>(
             complexity: Complexity::Small,
             has_ui: false,
             acceptance_criteria: Vec::new(),
+            goal: None,
+            service_tag: None,
         })
         .await?;
 
@@ -489,13 +574,19 @@ pub async fn brownfield<S: StateStorePort + 'static>(
     alias: Option<String>,
     codebase: &Path,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    // Input validation first (CXA-B157): a missing codebase path is the
+    // CLIENT's bad input and must be refused — typed — regardless of where
+    // the process runs, so it can never be shadowed by the environment guard
+    // below into an unclassified 500.
     if !codebase.exists() {
-        return Err(format!("codebase path does not exist: {}", codebase.display()).into());
+        return Err(Box::new(OnboardMissingPath(format!(
+            "codebase path does not exist: {}",
+            codebase.display()
+        ))));
     }
+    refuse_agent_scaffold()?;
     let mut state = store.load().await?;
-    if !state.tickets.is_empty() {
-        return Err("workspace already has tickets; refusing to re-onboard".into());
-    }
+    refuse_existing_tickets(&state)?;
 
     let alias = alias.map_or_else(
         || coxagent_application::state::derive_alias(name),
@@ -553,7 +644,9 @@ pub async fn brownfield<S: StateStorePort + 'static>(
         };
         cfg.engine.default.engine = engine;
         if has_opencode {
-            "bizbrain/DeepSeek-V4-Pro".clone_into(&mut cfg.engine.default.model);
+            // V4-Pro was removed from the provider catalog; every project
+            // onboarded with it warned at boot and failed its default runs.
+            "bizbrain/DeepSeek-V4-Flash".clone_into(&mut cfg.engine.default.model);
         }
         cfg.engine.auto_fallback = false;
         // Save consumed ports so assign_host_port skips them
@@ -585,6 +678,11 @@ pub async fn brownfield<S: StateStorePort + 'static>(
 
     // Seed tickets based on docker analysis (replaces simple has_compose check)
     let seeded = seed_smart_tickets(store, &docker).await?;
+
+    // CXA-F258: pull the connected repo's issue backlog in as Pending tickets
+    // so the team starts on the real backlog, not a hand-typed stand-in.
+    // Best-effort: a forge failure surfaces as a note, never fails adoption.
+    let backlog_note = import_backlog(store, &config_path, codebase).await?;
 
     let seeded_line = if seeded.is_empty() {
         "Seeded: none (compose present, no clashes)".to_owned()
@@ -619,7 +717,8 @@ pub async fn brownfield<S: StateStorePort + 'static>(
          {arch_line}\n\
          {docker_note}\n\
          Wrote: {}\n       {}\n\
-         {seeded_line}\n\n\
+         {seeded_line}\n\
+         {backlog_note}\n\n\
          REVIEW: skim {} (auto-drafted from the code) and the seeded backlog, then \
          run the team on `{}`.\n",
         codebase.display(),
@@ -627,6 +726,75 @@ pub async fn brownfield<S: StateStorePort + 'static>(
         context_path.display(),
         context_path.display(),
         codebase.display(),
+    ))
+}
+
+/// CXA-F258 — brownfield backlog import: when the adopted repo is connected
+/// on GitHub, fetch its OPEN issues (capped at `backlog_import::IMPORT_CAP`)
+/// and merge them in as Pending tickets through
+/// [`coxagent_application::backlog_import::merge_pending`]; ONE load → merge
+/// → save. Closed issues are never fetched here (AC4: excluded by default;
+/// an opt-in surface is pending the SA's answer on where the preview lives).
+/// The returned note reports imported vs skipped (AC3). Forge failures are
+/// surfaced in the note, never fail the adoption — the import is repeatable
+/// once the forge is reachable.
+async fn import_backlog<S: StateStorePort + 'static>(
+    store: &Arc<S>,
+    config_path: &Path,
+    codebase: &Path,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let cfg: Config = match std::fs::read_to_string(config_path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+    {
+        Some(cfg) => cfg,
+        None => return Ok("Backlog import: skipped (no readable project config)".to_owned()),
+    };
+    if !cfg.git.enabled || cfg.git.provider != "github" || cfg.git.repo.trim().is_empty() {
+        return Ok("Backlog import: skipped (no connected GitHub repo)".to_owned());
+    }
+    let forge = coxagent_infrastructure::github_forge(
+        cfg.git.repo.clone(),
+        cfg.git.base_url.clone(),
+        codebase.to_path_buf(),
+        String::new(),
+    );
+    let drafts = match forge
+        .list_open_issues(coxagent_application::backlog_import::IMPORT_CAP)
+        .await
+    {
+        Ok(drafts) => drafts,
+        Err(e) => {
+            return Ok(format!(
+                "Backlog import: FAILED — {e} (re-run once the forge is reachable)"
+            ))
+        }
+    };
+    if drafts.is_empty() {
+        return Ok(format!(
+            "Backlog import: no open issues on {}",
+            cfg.git.repo
+        ));
+    }
+    let mut state = store.load().await?;
+    let report = coxagent_application::backlog_import::merge_pending(
+        &mut state,
+        &drafts,
+        coxagent_application::backlog_import::IMPORT_CAP,
+    );
+    if report.imported == 0 {
+        return Ok(format!(
+            "Backlog import: 0 new from {} ({} already tracked)",
+            cfg.git.repo, report.skipped
+        ));
+    }
+    state
+        .validate()
+        .map_err(|e| format!("backlog import refused: {e}"))?;
+    store.save(&state).await?;
+    Ok(format!(
+        "Backlog import: {} ticket(s) from {} ({} skipped)",
+        report.imported, cfg.git.repo, report.skipped
     ))
 }
 
@@ -1082,5 +1250,86 @@ mod version_adoption_tests {
         for bad in ["release-summer", "2026-08-04", "", "v"] {
             assert!(parse_semver(bad).is_none(), "{bad:?} must not parse");
         }
+    }
+}
+
+/// CXA-B129: the re-onboard refusal is a TYPED client conflict, classified so
+/// the API layer maps it to 409 instead of 500.
+#[cfg(test)]
+mod re_onboard_conflict_tests {
+    use super::{conflict_message, refuse_existing_tickets};
+    use coxagent_application::state::ProjectState;
+
+    fn state_with_one_ticket() -> ProjectState {
+        let mut state = ProjectState::default();
+        state.tickets.push(
+            coxagent_domain::Ticket::new(
+                coxagent_domain::TicketId::new("CXC-F001").expect("valid ticket id"),
+                coxagent_domain::TicketType::Feature,
+                "Walking skeleton",
+                "Hello-world service with a /health endpoint that builds and runs.",
+                coxagent_domain::Priority::High,
+                coxagent_domain::Complexity::Small,
+                false,
+            )
+            .expect("valid ticket"),
+        );
+        state
+    }
+
+    #[test]
+    fn re_onboarding_over_tickets_is_a_typed_conflict_with_the_operational_message() {
+        let err = refuse_existing_tickets(&state_with_one_ticket()).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "workspace already has tickets; refusing to re-onboard",
+            "CLI operators read this text; it must not change"
+        );
+        assert_eq!(
+            conflict_message(err.as_ref()).as_deref(),
+            Some("workspace already has tickets; refusing to re-onboard"),
+            "the API layer classifies by type, so the marker must survive the Box"
+        );
+    }
+
+    #[test]
+    fn a_clean_workspace_onboards_without_conflict() {
+        assert!(refuse_existing_tickets(&ProjectState::default()).is_ok());
+    }
+
+    #[test]
+    fn an_ordinary_onboarding_fault_is_not_classified_as_a_conflict() {
+        let err: Box<dyn std::error::Error> = "store unreachable".into();
+        assert!(conflict_message(err.as_ref()).is_none());
+    }
+}
+
+/// CXA-B157: the missing-codebase-path refusal is a TYPED client input error,
+/// classified so the API layer maps it to 400 instead of 500 — and never
+/// crosses into the 409 conflict class.
+#[cfg(test)]
+mod missing_path_input_tests {
+    use super::{conflict_message, missing_path_message, OnboardMissingPath};
+
+    #[test]
+    fn the_missing_path_refusal_is_typed_as_a_bad_input() {
+        let err: Box<dyn std::error::Error> = Box::new(OnboardMissingPath(
+            "codebase path does not exist: /tmp/definitely-not-there-qa".into(),
+        ));
+        assert_eq!(
+            missing_path_message(err.as_ref()).as_deref(),
+            Some("codebase path does not exist: /tmp/definitely-not-there-qa"),
+            "the API layer classifies by type, so the marker must survive the Box"
+        );
+        assert!(
+            conflict_message(err.as_ref()).is_none(),
+            "a bad input must never masquerade as a 409 conflict"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_onboarding_fault_is_not_classified_as_a_missing_path() {
+        let err: Box<dyn std::error::Error> = "store unreachable".into();
+        assert!(missing_path_message(err.as_ref()).is_none());
     }
 }

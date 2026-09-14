@@ -9,7 +9,16 @@ use crate::kinds::{Role, Status, TicketType};
 /// Is `from -> to` a legal edge for this ticket type?
 #[must_use]
 pub fn transition_allowed(ticket_type: TicketType, from: Status, to: Status) -> bool {
-    use Status::{Documented, Done, Fixed, InProgress, Open, Pending, Ready, Rejected, Verified};
+    use Status::{
+        Documented, Done, Fixed, InProgress, OnHold, Open, Pending, Ready, Rejected, Verified,
+    };
+    // A no-op "transition" grants nothing and must be idempotent: DOCS
+    // re-marking a ticket Documented after a retried run is bookkeeping, not
+    // corruption, and rejecting it wedged the ticket (Documented -> Documented
+    // refused as "state is corrupt").
+    if from == to {
+        return true;
+    }
     match ticket_type {
         TicketType::Feature | TicketType::Chore => matches!(
             (from, to),
@@ -24,6 +33,13 @@ pub fn transition_allowed(ticket_type: TicketType, from: Status, to: Status) -> 
                 | (Ready, InProgress | Pending | Rejected)
                 | (InProgress, Done)
                 | (Done, Documented)
+                // On hold: parked before work starts; resumes to Pending so it
+                // re-passes the ready gate, or is rejected outright.
+                | (Pending | Ready, OnHold)
+                | (OnHold, Pending | Rejected)
+                // Ship-truth demotion: a ticket marked shipped whose diff never
+                // landed on main goes back to Pending to be re-done honestly.
+                | (Done | Documented, Pending)
         ),
         TicketType::Bug => matches!(
             (from, to),
@@ -36,9 +52,15 @@ pub fn transition_allowed(ticket_type: TicketType, from: Status, to: Status) -> 
             // failed, the ticket bounced back into the queue, and a
             // not-reproducible bug burned a fresh full investigation every
             // sprint (the CXA-B002/B003/B004 loop).
-            (Open, InProgress | Rejected)
+            (Open, InProgress | Rejected | OnHold)
                 | (InProgress, Fixed | Rejected)
                 | (Fixed, Verified | Open) // Fixed -> Open = reopen after failed regression
+                // On hold: parked while blocked on the outside world; resume
+                // (or reject) once the outside blocker is gone.
+                | (OnHold, Open | Rejected)
+                // Ship-truth demotion: a claimed-fixed bug absent from main reopens.
+                | (Verified, Open)
+
         ),
     }
 }
@@ -49,8 +71,14 @@ pub fn transition_allowed(ticket_type: TicketType, from: Status, to: Status) -> 
 /// and is always allowed for legal edges. `User` acts as a super-PO.
 #[must_use]
 pub fn can_transition(actor: Role, from: Status, to: Status) -> bool {
-    use Status::{Documented, Done, Fixed, InProgress, Open, Pending, Ready, Rejected, Verified};
+    use Status::{
+        Documented, Done, Fixed, InProgress, OnHold, Open, Pending, Ready, Rejected, Verified,
+    };
 
+    // Same-state writes are no-ops; any role may repeat what is already true.
+    if from == to {
+        return true;
+    }
     if actor == Role::System {
         return true;
     }
@@ -62,7 +90,13 @@ pub fn can_transition(actor: Role, from: Status, to: Status) -> bool {
         (Pending, Ready) => matches!(actor, Role::Sa | Role::Pd | Role::User),
         // PO (or a user acting as super-PO) rejects. From `Ready` too: work has
         // not started there, and a duplicate is worth catching late.
-        (Pending | Open | Ready, Rejected) => matches!(actor, Role::Po | Role::User),
+        (Pending | Open | Ready | OnHold, Rejected) => matches!(actor, Role::Po | Role::User),
+        // Holding and resuming are people's process calls: PO, SM, or a user.
+        (Pending | Ready | Open, OnHold) => matches!(actor, Role::Po | Role::Sm | Role::User),
+        (OnHold, Pending | Open) => matches!(actor, Role::Po | Role::Sm | Role::User),
+        // Ship-truth demotion is a machine/process correction (System always
+        // passes); a person doing it by hand is a PO/super-PO call.
+        (Done | Documented, Pending) | (Verified, Open) => matches!(actor, Role::Po | Role::User),
         // Taking an approval back — the undo window, and only before work starts.
         (Ready, Pending) => matches!(actor, Role::Po | Role::User),
         // Claiming work is a dev action.
@@ -88,8 +122,19 @@ pub fn field_permitted(actor: Role, field: &str) -> bool {
     match field {
         // Priority is PO's alone (User = super-PO).
         "priority" => matches!(actor, Role::Po | Role::User),
-        // SA owns technical design and dependency graph.
-        "design.technical" | "depends_on" => actor == Role::Sa,
+        // Goal associations are scope decisions: which product line work
+        // advances. The PO's goal gate owns them (User = super-PO). Agents
+        // never re-point an association — the shared creation path binds the
+        // declared goal under System's bookkeeping authority.
+        "goal_id" => matches!(actor, Role::Po | Role::User),
+        // The bounded-context service tag is requirements scope (CXA-F253):
+        // the BA stamps it when filing shared-infrastructure work, the PO may
+        // amend — the same authority that owns `clarify`. Agents never
+        // relabel work, or the duplicate radar's carve-out becomes a dodge.
+        "service_tag" => matches!(actor, Role::Ba | Role::Po | Role::User),
+        // SA owns technical design and dependency graph — parent links are
+        // part of that graph (an oversize ticket split into subtasks).
+        "design.technical" | "depends_on" | "parent_id" => actor == Role::Sa,
         // PD owns UX; SA may cover it when PD is disabled.
         "design.ux" => matches!(actor, Role::Pd | Role::Sa),
         _ => false,
@@ -99,6 +144,73 @@ pub fn field_permitted(actor: Role, field: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_state_transitions_are_idempotent_no_ops() {
+        // A retried DOCS run re-marking Documented (or any repeated write of
+        // the current status) is bookkeeping, not corruption.
+        for t in [TicketType::Feature, TicketType::Bug, TicketType::Chore] {
+            assert!(transition_allowed(
+                t,
+                Status::Documented,
+                Status::Documented
+            ));
+            assert!(transition_allowed(t, Status::Open, Status::Open));
+        }
+        assert!(can_transition(
+            Role::Docs,
+            Status::Documented,
+            Status::Documented
+        ));
+    }
+
+    #[test]
+    fn ship_truth_demotion_edges_reopen_ghost_ships() {
+        let f = TicketType::Feature;
+        assert!(transition_allowed(f, Status::Done, Status::Pending));
+        assert!(transition_allowed(f, Status::Documented, Status::Pending));
+        assert!(transition_allowed(
+            TicketType::Bug,
+            Status::Verified,
+            Status::Open
+        ));
+        // Not a free-for-all: only PO/User (and System) may demote.
+        assert!(can_transition(
+            Role::System,
+            Status::Documented,
+            Status::Pending
+        ));
+        assert!(can_transition(Role::Po, Status::Done, Status::Pending));
+        assert!(!can_transition(
+            Role::DevFeature,
+            Status::Done,
+            Status::Pending
+        ));
+        assert!(!can_transition(
+            Role::Docs,
+            Status::Documented,
+            Status::Pending
+        ));
+    }
+
+    #[test]
+    fn on_hold_parks_and_resumes_without_terminating() {
+        let f = TicketType::Feature;
+        assert!(transition_allowed(f, Status::Pending, Status::OnHold));
+        assert!(transition_allowed(f, Status::Ready, Status::OnHold));
+        assert!(transition_allowed(f, Status::OnHold, Status::Pending));
+        assert!(transition_allowed(f, Status::OnHold, Status::Rejected));
+        assert!(!transition_allowed(f, Status::OnHold, Status::InProgress));
+        let b = TicketType::Bug;
+        assert!(transition_allowed(b, Status::Open, Status::OnHold));
+        assert!(transition_allowed(b, Status::OnHold, Status::Open));
+        assert!(!transition_allowed(b, Status::OnHold, Status::Fixed));
+        // People park work; devs do not.
+        assert!(can_transition(Role::Po, Status::Open, Status::OnHold));
+        assert!(can_transition(Role::Sm, Status::Ready, Status::OnHold));
+        assert!(can_transition(Role::User, Status::OnHold, Status::Open));
+        assert!(!can_transition(Role::DevBug, Status::Open, Status::OnHold));
+    }
 
     #[test]
     fn feature_happy_path_edges_are_legal() {
@@ -173,6 +285,16 @@ mod tests {
         assert!(!field_permitted(Role::DevFeature, "priority"));
         assert!(field_permitted(Role::Po, "priority"));
         assert!(field_permitted(Role::User, "priority"));
+    }
+
+    #[test]
+    fn service_tag_is_ba_po_scope_not_dev() {
+        assert!(field_permitted(Role::Ba, "service_tag"));
+        assert!(field_permitted(Role::Po, "service_tag"));
+        assert!(field_permitted(Role::User, "service_tag"));
+        assert!(!field_permitted(Role::DevFeature, "service_tag"));
+        assert!(!field_permitted(Role::DevBug, "service_tag"));
+        assert!(field_permitted(Role::System, "service_tag"));
     }
 
     #[test]

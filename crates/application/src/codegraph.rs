@@ -66,6 +66,13 @@ pub struct CodeGraph {
     pub calls: Vec<Call>,
     /// Language → file count.
     pub languages: BTreeMap<String, usize>,
+    /// Best-effort HEAD commit sha at index time, read through the files port,
+    /// so the repo map header can say how fresh the orientation artifact is
+    /// (CXA-F316). Absent for graphs built outside a git checkout or before
+    /// this field existed — `serde(default)` keeps old `codegraph.json` files
+    /// loading unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
 }
 
 /// Walk source files under `root` through the files port, yielding
@@ -113,6 +120,45 @@ async fn walk_sources(
     out
 }
 
+/// A git object sha: 7–64 hex chars (abbreviation through sha-256). `.git`
+/// metadata is external input — junk must never reach the map header.
+fn looks_like_sha(s: &str) -> bool {
+    (7..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Best-effort HEAD commit sha, read through the files port — never a git
+/// process. `.git/HEAD` holds a raw sha (detached) or `ref: <path>`; loose
+/// refs are tried before `packed-refs`. Worktree checkouts (`.git` is a
+/// pointer file) and anything unusual or non-sha-shaped yield `None`, and the
+/// map header then simply omits the sha.
+async fn head_sha(
+    files: &dyn crate::ports::outbound::WorkspaceFilesPort,
+    root: &Path,
+) -> Option<String> {
+    let git = root.join(".git");
+    let head = files.read(&git.join("HEAD")).await?;
+    let head = head.trim();
+    if let Some(git_ref) = head.strip_prefix("ref:") {
+        let git_ref = git_ref.trim();
+        if let Some(sha) = files.read(&git.join(git_ref)).await {
+            let sha = sha.trim();
+            if looks_like_sha(sha) {
+                return Some(sha.to_owned());
+            }
+        }
+        let packed = files.read(&git.join("packed-refs")).await?;
+        return packed
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .find_map(|l| {
+                let (sha, name) = l.split_once(' ')?;
+                (name.trim() == git_ref && looks_like_sha(sha.trim()))
+                    .then(|| sha.trim().to_owned())
+            });
+    }
+    looks_like_sha(head).then(|| head.to_owned())
+}
+
 impl CodeGraph {
     /// Build the graph by walking `root` through the files port.
     pub async fn index(
@@ -128,6 +174,7 @@ impl CodeGraph {
         }
         g.files.sort_by(|a, b| a.path.cmp(&b.path));
         g.symbols.sort_by_key(|s| s.name.to_lowercase());
+        g.head_sha = head_sha(files, root).await;
         g
     }
 
@@ -337,46 +384,13 @@ impl CodeGraph {
         out
     }
 
-    /// A compact, token-bounded overview for agents: languages, then each file
-    /// with its symbols. Truncated to `max_chars`.
+    /// A compact, token-bounded overview for agents: tier-0 header + area
+    /// rollup always, per-file detail by budget, explicit elision footer.
+    /// Rendering lives in [`crate::repo_map`] (tiered, coverage-guaranteed);
+    /// this wrapper keeps the historical signature.
     #[must_use]
     pub fn repo_map(&self, max_chars: usize) -> String {
-        use std::fmt::Write as _;
-        let mut s = String::new();
-        let _ = writeln!(
-            s,
-            "# Repo map — {} files, {} symbols\n\
-             Query it (if `coxagent` is on PATH): `coxagent codegraph search|impact|callers <name>`.",
-            self.files.len(),
-            self.symbols.len()
-        );
-        let langs: Vec<String> = self
-            .languages
-            .iter()
-            .map(|(l, n)| format!("{l} {n}"))
-            .collect();
-        let _ = writeln!(s, "Languages: {}\n", langs.join(", "));
-        for f in &self.files {
-            let syms: Vec<String> = self
-                .symbols
-                .iter()
-                .filter(|sy| sy.file == f.path)
-                .take(12)
-                .map(|sy| match &sy.scope {
-                    Some(sc) => format!("{} {sc}::{}", sy.kind, sy.name),
-                    None => format!("{} {}", sy.kind, sy.name),
-                })
-                .collect();
-            let _ = writeln!(s, "## {} ({})", f.path, f.lang);
-            if !syms.is_empty() {
-                let _ = writeln!(s, "  {}", syms.join(", "));
-            }
-            if s.len() > max_chars {
-                s.push_str("\n… [truncated] …\n");
-                break;
-            }
-        }
-        s
+        crate::repo_map::render(self, max_chars)
     }
 
     /// Persist to `<root>/.coxagent/codegraph.json`.

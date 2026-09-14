@@ -30,7 +30,7 @@ pub(super) async fn build_state(
         docs_bus: Arc::new(RwLock::new(HashMap::new())),
         docs_editors: Arc::new(std::sync::Mutex::new(HashMap::new())),
         order: Arc::new(RwLock::new(order)),
-        broken: Arc::new(extras.broken),
+        broken: Arc::new(RwLock::new(extras.broken)),
         factory: extras.factory,
         auth: extras.auth,
         audit,
@@ -50,6 +50,7 @@ pub(super) async fn build_state(
             })
         }),
         doc_store: extras.doc_store,
+        archive_store: extras.archive_store,
     }
 }
 
@@ -78,10 +79,93 @@ pub(super) fn lite_state_value(state: &coxagent_application::ProjectState) -> se
     // reach members exclusively via the WebSocket / REST list, both of which
     // enforce membership.
     if let Some(chat) = v.get_mut("chat").and_then(serde_json::Value::as_array_mut) {
+        // All four BUILT-IN channels are public by construction (`#general`
+        // for people, `#agents`/`#approvals`/`#incidents` for the machine's
+        // announcements). Filtering the snapshot down to `#general` alone made
+        // the SM's coordination invisible — the dashboard looked like a team
+        // that never talks. Only user-created channels (which carry member
+        // lists) stay off the broadcast.
+        const PUBLIC: [&str; 4] = [
+            coxagent_application::GENERAL_CHANNEL,
+            coxagent_application::state::AGENTS_CHANNEL,
+            coxagent_application::state::APPROVALS_CHANNEL,
+            coxagent_application::state::INCIDENTS_CHANNEL,
+        ];
         chat.retain(|m| {
-            m.get("channel").and_then(serde_json::Value::as_str)
-                == Some(coxagent_application::GENERAL_CHANNEL)
+            m.get("channel")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|c| PUBLIC.contains(&c))
         });
+        // The snapshot broadcasts EVERY second: ship only each channel's tail
+        // (newest 50) — history beyond that comes from the paginated REST
+        // list. Bounded-500 chat serialized 4 channels per tick was a real
+        // drag on the chat pane.
+        let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let keep: Vec<bool> = chat
+            .iter()
+            .rev()
+            .map(|m| {
+                let c = m
+                    .get("channel")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                let n = seen.entry(c).or_default();
+                *n += 1;
+                *n <= 50
+            })
+            .collect();
+        let mut keep_fwd = keep;
+        keep_fwd.reverse();
+        let mut it = keep_fwd.into_iter();
+        chat.retain(|_| it.next().unwrap_or(false));
+    }
+    // Dependency radar (CXA-F237): read-only derived summary on top of the
+    // SAME snapshot served today — why each Ready ticket is not running (the
+    // full blocking chain, powering the backlog BLOCKED badge) and the
+    // critical path to the next release. Pure derivation, no persisted
+    // change. A project with nothing to report emits no `derived` key at all,
+    // so clients treat absence as an empty radar rather than an error.
+    let radar = coxagent_application::dependency_radar::radar(state);
+    let mut derived = serde_json::to_value(&radar).unwrap_or_default();
+    // Slot collision radar (CXA-F329): read-only derived summary on the SAME
+    // snapshot — which InProgress tickets in parallel slots declare the same
+    // files (pairs) and which running tickets declare none at all
+    // (unknown_files, radar-blind). Additive `collisions` key inside the same
+    // `derived` object, present ONLY when there is something to report:
+    // absence stays an empty radar for every existing client.
+    let collisions = serde_json::to_value(
+        coxagent_application::slot_collision_radar::collision_radar(state),
+    )
+    .unwrap_or_default();
+    if collisions.as_object().is_some_and(|o| !o.is_empty()) {
+        if !derived.is_object() {
+            derived = serde_json::json!({});
+        }
+        if let Some(obj) = derived.as_object_mut() {
+            obj.insert("collisions".into(), collisions);
+        }
+    }
+    // Milestone strip (CXA-F361): the roadmap's per-milestone progress bars and
+    // drill-in render from the SAME pure read model the projection endpoint
+    // serves, riding the snapshot the way the radars do — zero new requests on
+    // the 1 Hz stream. Present only when a roadmap exists; absence stays an
+    // empty read model for every existing client.
+    let milestones =
+        serde_json::to_value(coxagent_application::milestone_projection::project_milestones(state))
+            .unwrap_or_default();
+    if milestones.as_array().is_some_and(|a| !a.is_empty()) {
+        if !derived.is_object() {
+            derived = serde_json::json!({});
+        }
+        if let Some(obj) = derived.as_object_mut() {
+            obj.insert("milestones".into(), milestones);
+        }
+    }
+    if derived.as_object().is_some_and(|o| !o.is_empty()) {
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("derived".into(), derived);
+        }
     }
     v
 }
@@ -99,6 +183,47 @@ pub(super) async fn state_ep(
     }
 }
 
+/// The project's dependency graph (CXA-F237 AC5), derived ONLY from
+/// `ProjectState`: nodes are exactly the tickets in state with their live
+/// status, edges exactly the declared `depends_on` pairs — nothing fabricated
+/// (an edge to an id the state does not know is still served; the absent id
+/// simply has no node and surfaces as unknown). `cycle` flags members of a
+/// `depends_on` cycle so the render can mark them instead of hanging on them.
+pub(super) async fn dependencies_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    match p.store.load().await {
+        Ok(state) => {
+            use coxagent_application::dependency_radar::{cycle_members, dependency_graph};
+            let (nodes, edges) = dependency_graph(&state);
+            let cycles = cycle_members(&state);
+            Json(serde_json::json!({
+                "nodes": nodes
+                    .iter()
+                    .map(|n| serde_json::json!({
+                        "id": n.id.as_str(),
+                        "status": n.status,
+                        "cycle": cycles.contains(&n.id),
+                    }))
+                    .collect::<Vec<_>>(),
+                "edges": edges
+                    .iter()
+                    .map(|e| serde_json::json!({
+                        "dependent": e.dependent.as_str(),
+                        "prerequisite": e.prerequisite.as_str(),
+                    }))
+                    .collect::<Vec<_>>(),
+            }))
+            .into_response()
+        }
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
 pub(super) async fn metrics_ep(
     State(app): State<AppState>,
     Path(pid): Path<String>,
@@ -108,6 +233,80 @@ pub(super) async fn metrics_ep(
     };
     match p.store.load().await {
         Ok(state) => Json(metrics::compute(&state)).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Cycle-performance health overlay for the dashboard Overview panel (CXA-F018).
+/// Same auth surface as `/metrics`: project membership via `auth_mw`.
+pub(super) async fn metrics_summary_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    match p.store.load().await {
+        Ok(state) => {
+            let today = now_rfc3339();
+            let day = today.get(..10).unwrap_or("").to_owned();
+            Json(coxagent_application::metrics_health::compute_cycle_perf(
+                &state, &day,
+            ))
+            .into_response()
+        }
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Day-by-day time-series for line charts (AC3). `?days=N` bounds the window;
+/// defaults to 14 when absent or unparsable.
+pub(super) async fn metrics_trends_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let days = q
+        .get("days")
+        .and_then(|d| d.parse::<usize>().ok())
+        .unwrap_or(14);
+    match p.store.load().await {
+        Ok(state) => {
+            let today = now_rfc3339();
+            let day = today.get(..10).unwrap_or("").to_owned();
+            Json(coxagent_application::metrics_health::compute_trends(
+                &state, days, &day,
+            ))
+            .into_response()
+        }
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Bug burn-down history (CXA-F032): per-day open/fixed/verified counts over
+/// the dashboard window plus the net open-bug change across the last two
+/// known days (`delta_24h`, positive = backlog burned down). Same auth surface
+/// as the other `/metrics` reads: project membership via `auth_mw`.
+pub(super) async fn metrics_burndown_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    match p.store.load().await {
+        Ok(state) => {
+            let day = now_rfc3339().get(..10).unwrap_or("").to_owned();
+            Json(coxagent_application::metrics::compute_burndown(
+                &state,
+                &day,
+                coxagent_application::metrics::BURNDOWN_WINDOW_DAYS,
+            ))
+            .into_response()
+        }
         Err(e) => internal_error(&e.to_string()),
     }
 }
@@ -329,5 +528,210 @@ mod settings_config_tests {
             err.field,
             coxagent_application::config_parse::WHOLE_DOCUMENT
         );
+    }
+}
+
+#[cfg(test)]
+mod radar_state_tests {
+    use super::lite_state_value;
+    use coxagent_application::state::ProjectState;
+    use coxagent_domain::{
+        Complexity, Priority, Role, Status, TechnicalDesign, Ticket, TicketId, TicketType,
+    };
+
+    fn tid(s: &str) -> TicketId {
+        TicketId::new(s).expect("valid ticket id")
+    }
+
+    /// A Ready feature declaring `deps` — same legal-edge walk the radar
+    /// suite's fixtures use.
+    fn ready_feature(id: &str, deps: &[&str]) -> Ticket {
+        let mut t = Ticket::new(
+            tid(id),
+            TicketType::Feature,
+            format!("feature {id}"),
+            "fixture",
+            Priority::Medium,
+            Complexity::Medium,
+            false,
+        )
+        .expect("ticket");
+        for dep in deps {
+            t.add_dependency(Role::Sa, tid(dep))
+                .expect("SA declares the dependency");
+        }
+        t.set_technical_design(Role::Sa, TechnicalDesign::default())
+            .expect("attach design");
+        t.transition_to(Role::Sa, Status::Ready).expect("ready");
+        t
+    }
+
+    fn state_with(tickets: Vec<Ticket>) -> ProjectState {
+        ProjectState {
+            tickets,
+            ..ProjectState::default()
+        }
+    }
+
+    /// An InProgress feature declaring `files` — the slot-collision radar's
+    /// subject (CXA-F329): the SA-declared touch surface.
+    fn running_feature(id: &str, files: &[&str]) -> Ticket {
+        let mut t = Ticket::new(
+            tid(id),
+            TicketType::Feature,
+            format!("feature {id}"),
+            "fixture",
+            Priority::Medium,
+            Complexity::Medium,
+            false,
+        )
+        .expect("ticket");
+        t.set_technical_design(
+            Role::Sa,
+            TechnicalDesign {
+                files: files.iter().map(|f| (*f).to_owned()).collect(),
+                ..TechnicalDesign::default()
+            },
+        )
+        .expect("attach design");
+        t.transition_to(Role::Sa, Status::Ready).expect("ready");
+        t.transition_to(Role::DevFeature, Status::InProgress)
+            .expect("in progress");
+        t
+    }
+
+    /// The wire contract the backlog badge depends on (CXA-F237): a blocked
+    /// Ready ticket surfaces `derived.blocked` with its full blocking chain.
+    #[test]
+    fn a_blocked_ready_ticket_rides_the_state_snapshot_with_its_chain() {
+        let state = state_with(vec![
+            ready_feature("FEAT-A", &[]),
+            ready_feature("FEAT-B", &["FEAT-A"]),
+        ]);
+        let v = lite_state_value(&state);
+        let derived = v.get("derived").expect("the radar must be on the snapshot");
+        let blocked = derived
+            .get("blocked")
+            .and_then(|b| b.as_array())
+            .expect("blocked list");
+        assert_eq!(blocked.len(), 1, "only FEAT-B qualifies");
+        assert_eq!(
+            blocked[0].get("id").and_then(|i| i.as_str()),
+            Some("FEAT-B")
+        );
+        assert_eq!(
+            blocked[0]
+                .get("blockers")
+                .and_then(|b| b.as_array())
+                .map(std::vec::Vec::len),
+            Some(1)
+        );
+    }
+
+    /// Nothing to report → NO `derived` key at all: clients treat absence as
+    /// an empty radar rather than an error (the SA design's omission rule).
+    #[test]
+    fn a_project_with_nothing_to_report_emits_no_derived_key() {
+        let v = lite_state_value(&ProjectState::default());
+        assert!(v.get("derived").is_none());
+        let v = lite_state_value(&state_with(vec![
+            ready_feature("FEAT-A", &[]),
+            ready_feature("FEAT-B", &[]),
+        ]));
+        assert!(v.get("derived").is_none(), "unblocked work is no finding");
+        // The collision radar obeys the same omission rule: running tickets
+        // on disjoint files are two silent slots, no `derived` key either.
+        let v = lite_state_value(&state_with(vec![
+            running_feature("FEAT-A", &["crates/app/src/main.rs"]),
+            running_feature("FEAT-B", &["web/app.css"]),
+        ]));
+        assert!(v.get("derived").is_none(), "disjoint slots stay silent");
+    }
+
+    /// The wire contract the roadmap's milestone strip depends on (CXA-F361):
+    /// the projection's rows ride the snapshot as `derived.milestones` with
+    /// the progress figure the bars render, and a roadmap-less project still
+    /// emits no `derived` key at all.
+    #[test]
+    fn the_milestone_projection_rides_the_snapshot_for_the_roadmap_strip() {
+        use coxagent_application::state::Milestone;
+
+        let mut state = state_with(vec![ready_feature("FEAT-A", &[])]);
+        state.current_version = coxagent_domain::SemVer::parse("0.5.2").expect("version");
+        state.milestones = vec![Milestone {
+            name: "Beta".into(),
+            goal: "the Beta goal".into(),
+            target_version: "0.9.0".into(),
+            goal_complete: false,
+            fulfilled: false,
+        }];
+        let v = lite_state_value(&state);
+        let rows = v
+            .get("derived")
+            .and_then(|d| d.get("milestones"))
+            .and_then(serde_json::Value::as_array)
+            .expect("the milestone projection must ride the snapshot");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("name").and_then(|n| n.as_str()), Some("Beta"));
+        assert_eq!(
+            rows[0].get("progress").and_then(serde_json::Value::as_u64),
+            Some(0),
+            "no attributed scope reads 0, never NaN"
+        );
+
+        // No roadmap → no projection rows → the omission rule still holds.
+        let v = lite_state_value(&state_with(vec![ready_feature("FEAT-A", &[])]));
+        let no_rows = v.get("derived").and_then(|d| d.get("milestones")).is_none();
+        assert!(
+            no_rows,
+            "a roadmap-less project must not emit derived.milestones"
+        );
+    }
+
+    /// The wire contract the board badge depends on (CXA-F329): two running
+    /// slots declaring the same file surface `derived.collisions.pairs` with
+    /// both ticket ids and the shared files.
+    #[test]
+    fn a_collision_between_running_slots_rides_the_snapshot_as_derived_collisions() {
+        let v = lite_state_value(&state_with(vec![
+            running_feature("FEAT-A", &["crates/app/src/main.rs"]),
+            running_feature("FEAT-B", &["crates/app/src/main.rs"]),
+        ]));
+        let collisions = v
+            .get("derived")
+            .and_then(|d| d.get("collisions"))
+            .expect("the collision radar must ride the snapshot");
+        let pairs = collisions
+            .get("pairs")
+            .and_then(serde_json::Value::as_array)
+            .expect("pairs list");
+        assert_eq!(pairs.len(), 1, "one overlapping pair");
+        assert_eq!(pairs[0].get("a").and_then(|i| i.as_str()), Some("FEAT-A"));
+        assert_eq!(pairs[0].get("b").and_then(|i| i.as_str()), Some("FEAT-B"));
+        assert_eq!(
+            pairs[0]
+                .get("files")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
+    }
+
+    /// A running ticket whose design declares no files is radar-blind — it
+    /// must surface in `unknown_files`, never silently read as safe.
+    #[test]
+    fn a_running_ticket_with_no_declared_files_is_radar_blind_on_the_snapshot() {
+        let v = lite_state_value(&state_with(vec![
+            running_feature("FEAT-A", &[]),
+            running_feature("FEAT-B", &["web/app.css"]),
+        ]));
+        let unknown = v
+            .get("derived")
+            .and_then(|d| d.get("collisions"))
+            .and_then(|c| c.get("unknown_files"))
+            .and_then(serde_json::Value::as_array)
+            .expect("unknown_files list");
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].as_str(), Some("FEAT-A"));
     }
 }

@@ -88,7 +88,7 @@ async function checkAppUpdate(){
   const btn=document.getElementById("getapp-btn"),ic=document.getElementById("getapp-ic");
   if(btn){
     btn.classList.toggle("has-update",newer);
-    btn.title=newer?("CoXAgent "+d.latest_version+" đã có — bấm để cập nhật"):"Get the app";
+    btn.title=newer?("CoXAgent "+d.latest_version+" is out — click to update"):"Get the app";
     const dot=btn.querySelector(".upd-dot");if(dot)dot.hidden=!newer;
     if(ic)ic.className=newer?"ti ti-rocket":"ti ti-download";
     const ver=document.getElementById("getapp-ver");
@@ -114,7 +114,7 @@ function hubUpgradeReload(version){
 function coxSelfUpdate(url){
   try{
     window.webkit.messageHandlers.coxupdate.postMessage(url);
-    toasty("Đang tải bản cập nhật — app sẽ tự khởi động lại khi xong","ok");
+    toasty("Downloading update — the app will restart itself when done","ok");
     const ic=document.getElementById("getapp-ic");
     if(ic)ic.className="ti ti-loader-2 att-spin";
     close_("ov-getapp");
@@ -129,9 +129,9 @@ async function openGetApp(){
   const dl=d.downloads||{};
   const upToDate=d.latest_version&&d.hub_version&&!verGt(d.latest_version,d.hub_version);
   document.getElementById("ga-ver").textContent=
-    !d.latest_version?"chưa cấu hình release — Settings → Workspace"
-    :upToDate?("bạn đang chạy v"+d.hub_version+" — mới nhất ✓")
-    :("bạn đang chạy v"+d.hub_version+" → mới nhất v"+d.latest_version);
+    !d.latest_version?"no release configured — Settings → Workspace"
+    :upToDate?("you're running v"+d.hub_version+" — latest ✓")
+    :("you're running v"+d.hub_version+" → latest v"+d.latest_version);
   const plats=[["macos","macOS","brand-apple",".dmg"],["windows","Windows","brand-windows",".exe"],["linux","Linux","brand-ubuntu",".tar.gz"],["ios","iOS","device-mobile","App Store / TestFlight"]];
   const mine=/Mac/i.test(navigator.platform)?"macos":/Win/i.test(navigator.platform)?"windows":/Linux/i.test(navigator.platform)?"linux":"";
   // Inside the macOS shell we can self-update in place — one click, app
@@ -139,10 +139,10 @@ async function openGetApp(){
   const canSelf=!!(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.coxupdate);
   document.getElementById("ga-list").innerHTML=plats.map(([k,label,icon,hint])=>{
     const url=dl[k];const on=k===mine;
-    if(!url)return `<div class="gc-btn" style="display:flex;align-items:center;gap:10px;padding:12px 14px;opacity:.45;cursor:default"><i class="ti ti-${icon}" style="font-size:19px"></i><b style="flex:1">${label}</b><span style="font-size:11px">chưa có bản build</span></div>`;
+    if(!url)return `<div class="gc-btn" style="display:flex;align-items:center;gap:10px;padding:12px 14px;opacity:.45;cursor:default"><i class="ti ti-${icon}" style="font-size:19px"></i><b style="flex:1">${label}</b><span style="font-size:11px">no build yet</span></div>`;
     if(k==="macos"&&canSelf)
-      return `<button onclick="coxSelfUpdate(location.origin+'/api/app/download/macos.dmg')" class="gc-btn" style="display:flex;align-items:center;gap:10px;padding:12px 14px;border-color:var(--accent);cursor:pointer;width:100%;text-align:left"><i class="ti ti-${icon}" style="font-size:19px"></i><b style="flex:1">${label}</b><span style="font-size:11px;color:var(--accent2)">cập nhật & tự khởi động lại</span><i class="ti ti-refresh"></i></button>`;
-    return `<a href="${esc(url)}" target="_blank" rel="noopener" class="gc-btn" style="display:flex;align-items:center;gap:10px;padding:12px 14px;text-decoration:none;${on?"border-color:var(--accent)":""}"><i class="ti ti-${icon}" style="font-size:19px"></i><b style="flex:1">${label}</b><span style="font-size:11px;color:var(--dim)">${hint}${on?" · máy này":""}</span><i class="ti ti-download"></i></a>`;
+      return `<button onclick="coxSelfUpdate(location.origin+'/api/app/download/macos.dmg')" class="gc-btn" style="display:flex;align-items:center;gap:10px;padding:12px 14px;border-color:var(--accent);cursor:pointer;width:100%;text-align:left"><i class="ti ti-${icon}" style="font-size:19px"></i><b style="flex:1">${label}</b><span style="font-size:11px;color:var(--accent2)">update & restart automatically</span><i class="ti ti-refresh"></i></button>`;
+    return `<a href="${esc(url)}" target="_blank" rel="noopener" class="gc-btn" style="display:flex;align-items:center;gap:10px;padding:12px 14px;text-decoration:none;${on?"border-color:var(--accent)":""}"><i class="ti ti-${icon}" style="font-size:19px"></i><b style="flex:1">${label}</b><span style="font-size:11px;color:var(--dim)">${hint}${on?" · this machine":""}</span><i class="ti ti-download"></i></a>`;
   }).join("");
   const nw=document.getElementById("ga-notes");
   if(nw){const has=!!(d.notes&&d.notes.trim())&&!upToDate;nw.hidden=!has;
@@ -212,7 +212,7 @@ function renderSprintPanel(s){
   const card=t=>{const col=pc[t.priority]||"var(--border2)";
     return `<div class="sp-card" style="border-left-color:${col}" onclick="showTicket('${t.id}')">
       <div class="t">${esc(t.title||'(removed)')}</div>
-      <div class="m"><span class="id">${esc(t.id)}</span><i class="ti ti-${t.type==='bug'?'bug':'bulb'}" style="font-size:11px"></i><span style="margin-left:auto;color:${col}">${esc(t.priority||'—')}</span></div></div>`;};
+      <div class="m"><span class="id">${esc(t.id)}</span><i class="ti ti-${t.type==='bug'?'bug':'bulb'}" style="font-size:11px"></i><span style="margin-left:auto;color:${col}">${esc(t.priority||'—')}</span>${collisionBadge(s,t)}</div></div>`;};
   const colHtml=(label,dot,items)=>`<div class="sp-col"><div class="sp-colh"><span class="dot2" style="background:${dot}"></span>${label}<span class="n">${items.length}</span></div>${items.map(card).join("")||'<div class="empty">—</div>'}</div>`;
   const stat=(v,k,c)=>`<div class="sp-stat"><div class="v"${c?` style="color:${c}"`:""}>${v}</div><div class="k">${k}</div></div>`;
   el.innerHTML=`
@@ -265,21 +265,226 @@ function spBurndown(total,doneN,elapsed,len){
     </svg>
     <div style="display:flex;gap:16px;font-size:10.5px;color:var(--dim);margin-top:2px"><span><b style="color:var(--accent2)">━</b> remaining (${remaining})</span><span><b style="color:var(--muted)">┄</b> ideal</span></div></div>`;
 }
+// BLOCKED badge (CXA-F237): the backlog row answers "why is this Ready ticket
+// not running?" straight from the server's derived radar — the full blocking
+// chain, rendered as text beside the badge so meaning never rides on color
+// alone. Only Ready tickets appear in the radar; anything else needs no badge.
+function blockedBadge(s,t){
+  if(t.status!=="ready")return"";
+  const b=((s.derived||{}).blocked||[]).find(x=>x.id===t.id);
+  if(!b||!(b.blockers||[]).length)return"";
+  const chain=b.blockers.map(esc).join(" ← ");
+  return ` <span title="waiting on: ${chain}" style="display:inline-flex;align-items:center;gap:3px;padding:1px 8px;border-radius:20px;font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;background:color-mix(in srgb,var(--red) 16%,transparent);color:var(--red)"><i class="ti ti-lock" style="font-size:10px"></i>BLOCKED</span> <span title="waiting on: ${chain}" style="font-size:10.5px;color:var(--muted)">${chain}</span>`;
+}
+// COLLISION badge (CXA-F329): the board answers "will two running slots edit
+// the same files?" straight from the server's derived collision radar — the
+// partner id and the shared files ride the tooltip so meaning never rides on
+// color alone. Advisory only (the claim already succeeded); a running ticket
+// that declares NO files is radar-blind and gets the UNMAPPED marker instead
+// — visible, never silently treated as safe.
+function collisionBadge(s,t){
+  if(t.status!=="in_progress")return"";
+  const c=(s.derived||{}).collisions||{};
+  // A slot can collide with SEVERAL others (three slots on one file produce
+  // three pairs): name every partner and the union of shared files, not just
+  // the first pair found.
+  const hits=(c.pairs||[]).filter(p=>p.a===t.id||p.b===t.id);
+  if(hits.length){
+    const others=hits.map(p=>p.a===t.id?p.b:p.a);
+    const files=[...new Set(hits.flatMap(p=>p.files||[]))].join(", ");
+    return ` <span title="${escAttr("slot collision: "+others.join(", ")+" (other slot"+(others.length===1?"":"s")+") declares the same files: "+files)}" style="display:inline-flex;align-items:center;gap:3px;padding:1px 8px;border-radius:20px;font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;background:color-mix(in srgb,var(--amber) 16%,transparent);color:var(--amber)"><i class="ti ti-arrows-exchange" style="font-size:10px"></i>COLLISION ${esc(others.join(", "))}</span>`;
+  }
+  if((c.unknown_files||[]).includes(t.id))return ` <span title="${escAttr("declares no files — the collision radar cannot check it (low confidence)")}" style="display:inline-flex;align-items:center;gap:3px;padding:1px 8px;border-radius:20px;font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;background:color-mix(in srgb,var(--muted) 14%,transparent);color:var(--muted)"><i class="ti ti-eye-off" style="font-size:10px"></i>UNMAPPED</span>`;
+  return"";
+}
+// Collapsed-section memory for the Jira-style backlog (keys: "active", "q<id>").
+function spqCollapsed(){
+  try{return new Set(JSON.parse(localStorage.getItem("coxsprintcollapse")||"[]"));}catch(e){return new Set();}
+}
+function spqToggle(key){
+  const c=spqCollapsed();
+  if(c.has(key))c.delete(key);else c.add(key);
+  try{localStorage.setItem("coxsprintcollapse",JSON.stringify([...c]));}catch(e){}
+  renderActive();
+}
+// Per-status mini-summary for a sprint section header: "3 ready · 1 in progress".
+function spqSummary(ts){
+  const order=["pending","ready","open","in_progress","review","done","documented","verified","on_hold"];
+  const n={};for(const t of ts)n[t.status]=(n[t.status]||0)+1;
+  return order.filter(k=>n[k]).map(k=>`${n[k]} ${k.replace(/_/g," ")}`).join(" · ");
+}
+// One full ticket row inside a sprint section — Jira-style: icon, id, title,
+// priority + status chips, and a remove control. `src` tags the drag source so
+// dropping on another section moves rather than copies.
+function spqTicketRow(t,id,src,removeHtml){
+  const pc={high:"var(--red)",medium:"var(--amber)",low:"var(--muted)"};
+  if(!t)return `<div class="spq-row spq-gone"><span class="spq-id">${esc(id)}</span><span class="spq-title" style="color:var(--dim)">(not in this project)</span>${removeHtml}</div>`;
+  const col=pc[t.priority]||"var(--muted)";
+  const done=["done","documented","verified"].includes(t.status);
+  return `<div class="spq-row${done?' spq-done':''}" draggable="true" ondragstart="spqDrag(event,'${esc(t.id)}','${src}')" onclick="showTicket('${esc(t.id)}')">
+    <span class="spq-type" style="color:${col}"><i class="ti ti-${t.type==='bug'?'bug':'bulb'}"></i></span>
+    <span class="spq-id">${esc(t.id)}</span>
+    <span class="spq-title">${esc(t.title||'(removed)')}</span>
+    <span class="spq-pchip" style="background:color-mix(in srgb,${col} 14%,transparent);color:${col}">${esc(t.priority||'—')}</span>
+    <span class="spq-schip${done?' ok':''}">${esc(String(t.status).replace(/_/g," "))}</span>
+    ${removeHtml}</div>`;
+}
 function renderBacklogPanel(s){
   const el=document.getElementById("backlog-body");
-  // Backlog = not yet in flight and not shipped: pending/ready/open, newest-priority first.
   const rank={high:0,medium:1,low:2};
-  const items=(s.tickets||[]).filter(t=>["pending","ready","open"].includes(t.status))
-    .sort((a,b)=>(rank[a.priority]??3)-(rank[b.priority]??3));
+  const items=(s.tickets||[]).filter(t=>["pending","ready","open","on_hold"].includes(t.status))
+    .sort((a,b)=>(a.status==="on_hold")-(b.status==="on_hold")||(rank[a.priority]??3)-(rank[b.priority]??3));
   const committed=new Set((s.sprint&&s.sprint.committed)||[]);
   const pc={high:"var(--red)",medium:"var(--amber)",low:"var(--muted)"};
+  const byId=id=>(s.tickets||[]).find(x=>x.id===id);
+  const collapsed=spqCollapsed();
+  const chev=key=>`<button class="spq-chev" onclick="event.stopPropagation();spqToggle('${key}')" title="${collapsed.has(key)?'Expand':'Collapse'}"><i class="ti ti-chevron-${collapsed.has(key)?'right':'down'}"></i></button>`;
+  // 1) The running sprint, always on top.
+  const sp=s.sprint;
+  let activeHtml="";
+  if(sp){
+    const cm=(sp.committed||[]).map(byId).filter(Boolean);
+    const sum=spqSummary(cm);
+    const rows=(sp.committed||[]).map(id=>spqTicketRow(byId(id),id,'active',
+      `<button class="sp-scope" onclick="event.stopPropagation();sprintScope('${esc(id)}',false)" title="Drop from the running sprint">− sprint</button>`)).join("");
+    activeHtml=`<div class="panel spq-card spq-sec spq-active" ondragover="spqOver(event,this)" ondragleave="spqLeave(this)" ondrop="spqDrop(event,null)">
+      <div class="spq-head">${chev('active')}<span class="pbadge on">● running</span><b>Sprint #${sp.number}</b>
+        <span class="spq-goal">${esc(sp.goal)}</span>
+        <span class="spq-n">${(sp.committed||[]).length} ticket${(sp.committed||[]).length===1?"":"s"}${sum?` · ${sum}`:""}</span>
+        <a onclick="setWorkTab('sprint')" style="cursor:pointer;color:var(--accent2);font-size:11.5px;margin-left:auto;white-space:nowrap">open board →</a></div>
+      ${collapsed.has('active')?'':`<div class="spq-rows">${rows||'<div class="empty" style="padding:8px 4px">empty — drag tickets here</div>'}</div>`}
+    </div>`;
+  }
+  // 2) Queued sprints, in run order.
+  const queue=s.sprint_queue||[];
+  const qHtml=queue.map((q,i)=>{
+    const key='q'+q.id;
+    const ts=(q.tickets||[]).map(byId).filter(Boolean);
+    const sum=spqSummary(ts);
+    const rows=(q.tickets||[]).map(id=>spqTicketRow(byId(id),id,String(q.id),
+      `<button class="sp-scope" onclick="event.stopPropagation();spqScope(${q.id},null,'${esc(id)}')" title="Remove from this plan">✕</button>`)).join("");
+    return `<div class="panel spq-card spq-sec" ondragover="spqOver(event,this)" ondragleave="spqLeave(this)" ondrop="spqDrop(event,${q.id})">
+    <div class="spq-head">${chev(key)}<span class="spq-ord">#${i+1} up next</span>
+      <span class="spq-goal" onclick="spqRename(${q.id},'${esc(q.goal).replace(/'/g,"\\'")}')" title="Rename the goal" style="cursor:text">${esc(q.goal)}</span>
+      <span class="spq-n">${(q.tickets||[]).length} ticket${(q.tickets||[]).length===1?"":"s"}${sum?` · ${sum}`:""}</span>
+      ${q.by?`<span class="spq-by" title="planned by">${esc(q.by)}</span>`:""}
+      <span style="margin-left:auto;display:flex;gap:4px">
+        <button class="sp-scope" onclick="spqMove(${q.id},'up')" title="Run earlier" ${i===0?'disabled style="opacity:.35"':''}>↑</button>
+        <button class="sp-scope" onclick="spqMove(${q.id},'down')" title="Run later" ${i===queue.length-1?'disabled style="opacity:.35"':''}>↓</button>
+        <button class="sp-scope" onclick="spqRename(${q.id},'${esc(q.goal).replace(/'/g,"\\'")}')" title="Rename the goal"><i class="ti ti-pencil"></i></button>
+        <button class="sp-scope" onclick="spqDelete(${q.id})" title="Drop this planned sprint">✕ plan</button></span></div>
+    ${collapsed.has(key)?'':`<div class="spq-rows">${rows||'<div class="empty" style="padding:8px 4px">no tickets yet — drag from the backlog below</div>'}</div>`}
+  </div>`;}).join("");
+  // 3) The prioritised backlog list, draggable into any sprint above.
+  window._blkSel=window._blkSel||new Set();
+  const sel=window._blkSel;
+  for(const id of [...sel])if(!items.some(t=>t.id===id))sel.delete(id);
   const rows=items.map(t=>{const col=pc[t.priority]||"var(--muted)";const inSp=committed.has(t.id);
-    return `<div class="act" onclick="showTicket('${t.id}')" style="cursor:pointer"><div class="ad" style="background:${col}22;color:${col}"><i class="ti ti-${t.type==='bug'?'bug':'bulb'}" style="font-size:13px"></i></div>
-      <div class="atx"><span class="tk">${esc(t.id)}</span> ${esc(t.title)} <span class="fchip" style="padding:1px 8px;font-size:10px;border:none;background:${col}22;color:${col}">${esc(t.priority||'—')}</span>${inSp?' <span class="fchip" style="padding:1px 8px;font-size:10px;border:none;background:var(--accentbg);color:var(--accent2)">in sprint</span>':''}</div>
-      <button class="sp-scope" onclick="event.stopPropagation();sprintScope('${t.id}',${inSp?"false":"true"})" title="${inSp?'Drop from the running sprint':'Pull into the running sprint'}">${inSp?'− sprint':'+ sprint'}</button>
-      <span class="tm">${esc(t.status)}</span></div>`;}).join("");
-  el.innerHTML=`<div class="filters"><span style="font-size:12px;color:var(--muted)">Prioritised backlog — the PO pulls from the top into each sprint.</span><div style="flex:1"></div><span class="fchip">${items.length} waiting</span></div>
+    return `<div class="act" draggable="true" ondragstart="spqDrag(event,'${esc(t.id)}')" onclick="showTicket('${t.id}')" style="cursor:pointer"><input type="checkbox" class="blk-chk" ${sel.has(t.id)?'checked':''} onclick="event.stopPropagation();blkToggle('${esc(t.id)}',this.checked)"/><div class="ad" style="background:${col}22;color:${col}"><i class="ti ti-${t.type==='bug'?'bug':'bulb'}" style="font-size:13px"></i></div>
+      <div class="atx"><span class="tk">${esc(t.id)}</span> ${esc(t.title)} <span class="fchip" style="padding:1px 8px;font-size:10px;border:none;background:${col}22;color:${col}">${esc(t.priority||'—')}</span>${inSp?' <span class="fchip" style="padding:1px 8px;font-size:10px;border:none;background:var(--accentbg);color:var(--accent2)">in sprint</span>':''}${blockedBadge(s,t)}</div>
+      ${t.status==="on_hold"?'':`<button class="sp-scope" onclick="event.stopPropagation();sprintScope('${t.id}',${inSp?"false":"true"})" title="${inSp?'Drop from the running sprint':'Pull into the running sprint'}">${inSp?'− sprint':'+ sprint'}</button>`}
+      <span class="tm"${t.status==="on_hold"?' style="color:var(--amber)"':''}>${t.status==="on_hold"?'on hold':esc(t.status)}</span></div>`;}).join("");
+  el.innerHTML=`${activeHtml}${qHtml}
+    <div style="display:flex;align-items:center;gap:10px;margin:14px 0 8px">
+      <span class="sec" style="margin:0">Backlog</span>
+      <span style="font-size:11.5px;color:var(--dim)">drag a ticket onto a sprint above, or use + sprint for the running one</span>
+      <div style="flex:1"></div>
+      <span class="fchip">${items.length} waiting</span>
+      <button class="tk-btn go" onclick="spqCreate()"><i class="ti ti-plus"></i> New sprint</button>
+    </div>
+    ${sel.size?`<div class="blk-bar"><b>${sel.size} selected</b>
+      <button class="tk-btn" onclick="blkAct('hold')"><i class="ti ti-player-pause"></i> Hold…</button>
+      <button class="tk-btn" onclick="blkAct('sprint')">+ running sprint</button>
+      ${queue.length?`<button class="tk-btn" onclick="blkAct('plan')">+ next plan</button>`:''}
+      <span style="color:var(--dim)">priority:</span>
+      ${["high","medium","low"].map(pr=>`<button class="tk-btn" onclick="blkAct('prio','${pr}')">${pr}</button>`).join("")}
+      <div style="flex:1"></div><button class="tk-btn" onclick="window._blkSel.clear();renderActive()">clear</button></div>`:''}
     <div class="panel">${rows||'<div class="empty">backlog is clear — every ticket is in flight or shipped</div>'}</div>`;
+}
+function blkToggle(id,on){const s=window._blkSel;if(on)s.add(id);else s.delete(id);renderActive();}
+// One decision applied to every selected ticket, sequentially (the endpoints
+// are cheap and per-ticket; a burst of 10 is fine).
+async function blkAct(kind,arg){
+  const ids=[...(window._blkSel||[])];if(!ids.length)return;
+  if(kind==="hold"){
+    const reason=await coxModal({title:`Hold ${ids.length} tickets`,message:"One reason, applied to all.",input:{placeholder:"e.g. waiting on vendor"},confirmText:"Hold all"});
+    if(reason===undefined||reason===null||reason===false)return;
+    for(const id of ids){await fetch(api("/ticket/"+encodeURIComponent(id)+"/status/hold"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reason:String(reason||"")})});}
+    toasty(`${ids.length} tickets on hold`);
+  }else if(kind==="sprint"){
+    await fetch(api("/sprint/commit"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tickets:ids})});
+    toasty(`${ids.length} pulled into the sprint`);
+  }else if(kind==="plan"){
+    const q=(STATE.sprint_queue||[])[0];if(!q)return;
+    await fetch(api("/sprint-queue/"+q.id+"/scope"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({add:ids,remove:[]})});
+    toasty(`${ids.length} added to "${q.goal}"`);
+  }else if(kind==="prio"){
+    for(const id of ids){await setPriority(id,arg);}
+    toasty(`priority ${arg} set on ${ids.length}`);
+  }
+  window._blkSel.clear();await refreshDisc();
+}
+// --- Sprint-queue interactions (drag a backlog row onto a sprint card) ---
+function spqDrag(ev,id,src){ev.dataTransfer.setData("text/ticket",id);ev.dataTransfer.setData("text/src",src||"");ev.dataTransfer.effectAllowed="copy";}
+function spqOver(ev,el){ev.preventDefault();ev.dataTransfer.dropEffect="copy";el.classList.add("spq-hot");}
+function spqLeave(el){el.classList.remove("spq-hot");}
+// Drop onto a sprint section. `qid` null = the running sprint. A row dragged
+// out of another section MOVES: add to the target, then remove from the source.
+async function spqDrop(ev,qid){
+  ev.preventDefault();ev.currentTarget.classList.remove("spq-hot");
+  const id=ev.dataTransfer.getData("text/ticket");if(!id)return;
+  const src=ev.dataTransfer.getData("text/src")||"";
+  const tgt=qid==null?"active":String(qid);
+  if(src===tgt)return; // dropped where it already lives
+  if(qid==null)await sprintScope(id,true);else await spqScope(qid,id,null);
+  if(src==="active")await sprintScope(id,false);
+  else if(src)await spqScope(Number(src),null,id);
+}
+async function spqScope(qid,add,remove){
+  try{
+    const body={add:add?[add]:[],remove:remove?[remove]:[]};
+    const r=await fetch(api("/sprint-queue/"+qid+"/scope"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!r.ok){toasty((await r.text())||"Plan update failed","err");return;}
+    toasty(add?`${add} added to the plan`:`${remove} removed from the plan`);
+    await refreshDisc();
+  }catch(e){toasty("Network error","err");}
+}
+async function spqCreate(){
+  const goal=await coxModal({title:"New sprint",message:"Goal for this planned sprint — it runs after the ones above it, and its tickets become the sprint scope.",input:{placeholder:"e.g. harden auth & session handling"},confirmText:"Queue sprint"});
+  if(!goal||!String(goal).trim())return;
+  try{
+    const r=await fetch(api("/sprint-queue"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({goal:String(goal).trim(),tickets:[]})});
+    if(!r.ok){toasty((await r.text())||"Could not queue the sprint","err");return;}
+    toasty("Sprint queued — drag tickets into it");
+    await refreshDisc();
+  }catch(e){toasty("Network error","err");}
+}
+async function spqMove(qid,dir){
+  try{
+    const r=await fetch(api("/sprint-queue/"+qid+"/move/"+dir),{method:"POST"});
+    if(!r.ok){toasty((await r.text())||"Move failed","err");return;}
+    await refreshDisc();
+  }catch(e){toasty("Network error","err");}
+}
+async function spqRename(qid,cur){
+  const goal=await coxModal({title:"Rename planned sprint",message:"New goal for this plan.",input:{placeholder:"goal",value:cur},confirmText:"Rename"});
+  if(!goal||!String(goal).trim())return;
+  try{
+    const r=await fetch(api("/sprint-queue/"+qid+"/rename"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({goal:String(goal).trim()})});
+    if(!r.ok){toasty((await r.text())||"Rename failed","err");return;}
+    toasty("Plan renamed");
+    await refreshDisc();
+  }catch(e){toasty("Network error","err");}
+}
+async function spqDelete(qid){
+  const ok=await coxModal({title:"Drop planned sprint",message:"Remove this planned sprint from the queue? Its tickets stay in the backlog.",danger:true,confirmText:"Drop plan"});
+  if(!ok)return;
+  try{
+    const r=await fetch(api("/sprint-queue/"+qid),{method:"DELETE"});
+    if(!r.ok){toasty((await r.text())||"Delete failed","err");return;}
+    toasty("Planned sprint dropped");
+    await refreshDisc();
+  }catch(e){toasty("Network error","err");}
 }
 // Pull a backlog ticket into the sprint that is already running, or drop it.
 // The automatic commit only happens at roll-over; this is how a person changes
@@ -398,18 +603,30 @@ function renderDiscuss(){
   document.getElementById("disc-title").textContent=want?want:"Team channel";
   document.getElementById("disc-sub").textContent=want?"thread for this ticket":"standups, decisions & threads";
   const msgs=(STATE.comments||[]).filter(c=>want?c.ticket===want:!c.ticket);
+  // Agent-to-agent Q&A (blocker → the right role → answer) happens in
+  // state.questions and was invisible here — the team looked mute while 40
+  // questions got asked AND answered. Surface them as timeline events.
+  const qs=(STATE.questions||[]).filter(q=>want?q.ticket===want:true).slice(-8).map(q=>({
+    at:q.asked_at||"",author:q.from||"?",
+    body:`❓ ${q.from} → ${q.to}: ${q.body}${q.answer?` — ✅ ${String(q.answer).slice(0,120)}`:' — ⏳ waiting'}`,
+    _qa:true,ticket:q.ticket||null}));
+  const merged=msgs.concat(qs).sort((a,b)=>String(a.at).localeCompare(String(b.at)));
   const box=document.getElementById("disc-thread");
   const me=(ME&&ME.username)||"";
   // Re-render only when the thread actually changed — otherwise every 1s SSE
   // tick would rebuild the DOM and yank the scroll position to the bottom.
-  const sig=want+":"+msgs.length+":"+(msgs.length?(msgs[msgs.length-1].at||""):"");
+  const sig=want+":"+merged.length+":"+(merged.length?(merged[merged.length-1].at||""):"");
   if(box.dataset.sig===sig)return;
   // Keep the reading position unless the user is already at the bottom.
   const atBottom=box.scrollHeight-box.scrollTop-box.clientHeight<80;
   box.dataset.sig=sig;
-  if(!msgs.length){box.innerHTML='<div class="chatempty"><i class="ti ti-messages"></i><div>No messages yet</div><span>Send a message, or spin up an agent discussion.</span></div>';return;}
+  if(!merged.length){box.innerHTML='<div class="chatempty"><i class="ti ti-messages"></i><div>No messages yet</div><span>Send a message, or spin up an agent discussion.</span></div>';return;}
   let lastDay="";
-  box.innerHTML=msgs.map(c=>{
+  box.innerHTML=merged.map(c=>{
+    if(c._qa){ // agent-to-agent Q&A → timeline pill
+      const t=c.at||"";const time=t.slice(11,16);
+      return `<div class="cevent"><span class="cev-pill" style="--ec:var(--amber)"><i class="ti ti-help-circle"></i> ${esc(c.body)}<span class="cev-t">${esc(time)}</span></span></div>`;
+    }
     const t=c.at||"";const day=t.slice(0,10);const time=t.slice(11,16);
     let sep="";
     if(day&&day!==lastDay){lastDay=day;sep=`<div class="chatday"><span>${esc(day)}</span></div>`;}
@@ -501,7 +718,7 @@ async function reviewRun(btn,path,who){
   btn.innerHTML=old;btn.disabled=false;
 }
 async function startDiscussion(){
-  const topic=await coxModal({title:"Agent discussion",message:"Chủ đề để team thảo luận — PO + SA cho ý kiến, SM chốt.",input:{placeholder:"e.g. có nên chuyển store sang Postgres ngay sprint này không?",multiline:true},confirmText:"Start discussion"});
+  const topic=await coxModal({title:"Agent discussion",message:"Topic for the team to discuss — PO + SA weigh in, SM decides.",input:{placeholder:"e.g. should we move the store to Postgres this sprint?",multiline:true},confirmText:"Start discussion"});
   if(!topic||!topic.trim())return;
   const lbl=document.getElementById("disc-run-label");lbl.textContent="Agents discussing…";
   document.getElementById("disc-filter").value="";

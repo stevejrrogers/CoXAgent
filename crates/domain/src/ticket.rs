@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 // Value objects live in `kinds`; re-exported here so existing paths like
 // `crate::ticket::{Status, TicketType}` keep resolving without a cycle.
 pub use crate::kinds::{Complexity, Priority, Role, Status, TicketType};
+// Test cases split into their own seam (test_case.rs); re-exported so
+// `crate::ticket::TestCase` keeps resolving.
+pub use crate::test_case::{CaseEvidence, TestCase, TestCaseStatus};
 
 /// Technical design authored by SA. Presence gates `Pending -> Ready`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +131,32 @@ pub struct Ticket {
     /// clearing the assignment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     assignee: Option<String>,
+    /// The declared product goal this ticket advances (the PO's goal gate).
+    /// Bound to a stable [`GoalId`], never to the goal's wording, so renaming
+    /// a goal never severs attribution of the work done for it. `None` for
+    /// tickets filed before goal-line tracking (or with no declared goal) —
+    /// those surface as "unattributed" in the outcome ledger until backfilled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    goal_id: Option<crate::ids::GoalId>,
+    /// RFC3339 time the ticket was filed. Stamped by the application at
+    /// creation (the domain owns no clock); `None` on tickets that predate
+    /// the field — age-based views must treat those as "age unknown", never
+    /// as brand new or ancient.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    created_at: Option<String>,
+    /// Where uncommitted slot work was parked when a run died or the slot was
+    /// reclaimed (CXA-F318). Guarded mutations live in `wip_checkpoint.rs`,
+    /// which keeps the list capped; serde-defaulted so old tickets load clean.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    wip_checkpoints: Vec<crate::wip_checkpoint::WipCheckpoint>,
+    /// Optional bounded-context service tag (CXA-F253): the BA stamps it when
+    /// filing shared-infrastructure work (e.g. `"infra"`, `"ci"`) that may
+    /// legitimately exist in several projects at once. `None` for ordinary
+    /// project-local work — the cross-project duplicate radar applies its
+    /// same-tag carve-out only when BOTH sides carry the same tag. Persisted
+    /// with `serde(default)` so pre-F253 tickets load clean.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    service_tag: Option<String>,
 }
 
 impl Ticket {
@@ -170,6 +199,10 @@ impl Ticket {
             claimed_by: None,
             claimed_at: None,
             assignee: None,
+            goal_id: None,
+            created_at: None,
+            wip_checkpoints: Vec::new(),
+            service_tag: None,
         })
     }
 
@@ -195,106 +228,90 @@ impl Ticket {
             .collect();
     }
 
-    /// The ticket's test cases — one per acceptance criterion, each carrying
-    /// its own verdict and optional per-case evidence.
+    /// The declared product goal this ticket advances, or `None` when no goal
+    /// was declared (pre-tracking tickets, or no resolvable association).
     #[must_use]
-    pub fn test_cases(&self) -> &[TestCase] {
+    pub fn goal_id(&self) -> Option<&crate::ids::GoalId> {
+        self.goal_id.as_ref()
+    }
+
+    /// Declare (or re-point) the product goal this ticket advances. The PO's
+    /// goal gate owns goal associations — the same scope authority as
+    /// priority — so agents cannot quietly attach themselves to a goal line.
+    ///
+    /// # Errors
+    /// [`DomainError::FieldNotPermitted`] if `actor` lacks goal authority.
+    pub fn set_goal_id(
+        &mut self,
+        actor: Role,
+        goal_id: crate::ids::GoalId,
+    ) -> Result<(), DomainError> {
+        if !field_permitted(actor, "goal_id") {
+            return Err(DomainError::FieldNotPermitted {
+                role: actor,
+                field: "goal_id",
+            });
+        }
+        self.goal_id = Some(goal_id);
+        Ok(())
+    }
+
+    /// The bounded-context service tag the BA stamped at filing, or `None`
+    /// for ordinary project-local work.
+    #[must_use]
+    pub fn service_tag(&self) -> Option<&str> {
+        self.service_tag.as_deref()
+    }
+
+    /// Declare (or clear, with a blank tag) the bounded-context service tag.
+    /// Requirements-scoped like [`Ticket::clarify`]: the BA authors the value
+    /// when filing, the PO (or a `User` acting as super-PO) may amend it —
+    /// agents and DEV roles cannot relabel work as shared infrastructure to
+    /// slip past the cross-project duplicate radar.
+    ///
+    /// # Errors
+    /// [`DomainError::FieldNotPermitted`] if `actor` lacks requirement scope.
+    pub fn set_service_tag(&mut self, actor: Role, tag: &str) -> Result<(), DomainError> {
+        if !field_permitted(actor, "service_tag") {
+            return Err(DomainError::FieldNotPermitted {
+                role: actor,
+                field: "service_tag",
+            });
+        }
+        let tag = tag.trim();
+        self.service_tag = if tag.is_empty() {
+            None
+        } else {
+            Some(tag.to_owned())
+        };
+        Ok(())
+    }
+
+    /// Crate-internal handles for the test-case seam (`test_case.rs`) to read
+    /// and reconcile the case list against the acceptance criteria.
+    /// Deliberately not `pub`: outside the domain crate the aggregate stays
+    /// opaque.
+    pub(crate) fn test_case_list(&self) -> &[TestCase] {
         &self.test_cases
     }
 
-    /// Reconcile `test_cases` against the current `acceptance_criteria`:
-    /// drop stale cases, add newly-appeared criteria as `Pending`, and keep
-    /// the verdict/evidence of cases that still exist. Call before persisting
-    /// after criteria change, or at load time.
-    pub fn sync_test_cases_from_acceptance(&mut self) {
-        let mut next: Vec<TestCase> = Vec::with_capacity(self.acceptance_criteria.len());
-        for ac in &self.acceptance_criteria {
-            match self.test_cases.iter().find(|t| t.description == *ac) {
-                Some(existing) => next.push(existing.clone()),
-                None => next.push(TestCase {
-                    description: ac.clone(),
-                    status: TestCaseStatus::Pending,
-                    evidence: None,
-                }),
-            }
-        }
-        self.test_cases = next;
+    pub(crate) fn test_case_list_mut(&mut self) -> &mut Vec<TestCase> {
+        &mut self.test_cases
     }
 
-    /// Seed `test_cases` from the acceptance criteria, preserving any existing
-    /// verdict/evidence for criteria that already have a case. No-op when the
-    /// ticket already has as many cases as criteria.
-    pub fn ensure_test_cases_from_acceptance(&mut self) {
-        // In sync only when every case matches its criterion in order. A length
-        // match alone is NOT enough — if criteria were edited to new text (same
-        // count) the old descriptions would otherwise shadow the new ones and
-        // `set_test_case_result` would silently fail to match.
-        let in_sync = self.test_cases.len() == self.acceptance_criteria.len()
-            && self
-                .test_cases
-                .iter()
-                .zip(&self.acceptance_criteria)
-                .all(|(tc, ac)| tc.description == *ac);
-        if in_sync {
-            return;
-        }
-        self.sync_test_cases_from_acceptance();
+    /// Crate-internal handles for the WIP-checkpoint seam (`wip_checkpoint.rs`)
+    /// to read and bound the parked-WIP history. Deliberately not `pub`:
+    /// outside the domain crate the aggregate stays opaque.
+    pub(crate) fn wip_checkpoint_list(&self) -> &[crate::wip_checkpoint::WipCheckpoint] {
+        &self.wip_checkpoints
     }
 
-    /// Mark one test case pass (or fail, `passed=false`) by its description,
-    /// attaching optional per-case evidence (an image URL + reproducible note)
-    /// and a capture timestamp. A `None` image keeps any image already attached
-    /// so a verdict-only pass never erases an existing screenshot. Returns
-    /// `false` when no case matched.
-    pub fn set_test_case_result(
+    pub(crate) fn wip_checkpoint_list_mut(
         &mut self,
-        description: &str,
-        passed: bool,
-        note: Option<String>,
-        image: Option<String>,
-        at: String,
-    ) -> bool {
-        let Some(tc) = self
-            .test_cases
-            .iter_mut()
-            .find(|t| t.description == description)
-        else {
-            return false;
-        };
-        tc.status = if passed {
-            TestCaseStatus::Passed
-        } else {
-            TestCaseStatus::Failed
-        };
-        let keep_image = image.or_else(|| tc.evidence.as_ref().and_then(|e| e.image.clone()));
-        tc.evidence = Some(CaseEvidence {
-            image: keep_image,
-            note,
-            at,
-        });
-        true
+    ) -> &mut Vec<crate::wip_checkpoint::WipCheckpoint> {
+        &mut self.wip_checkpoints
     }
 
-    /// Attach a captured screenshot URL to a test case's evidence without
-    /// changing its verdict (the TEST agent already marked pass/fail; this is
-    /// the cycle's deterministic screenshot pass filling in the image). Returns
-    /// `false` when no case matched.
-    pub fn set_test_case_image(&mut self, description: &str, image: String, at: String) -> bool {
-        let Some(tc) = self
-            .test_cases
-            .iter_mut()
-            .find(|t| t.description == description)
-        else {
-            return false;
-        };
-        let note = tc.evidence.as_ref().and_then(|e| e.note.clone());
-        tc.evidence = Some(CaseEvidence {
-            image: Some(image),
-            note,
-            at,
-        });
-        true
-    }
 
     // --- Accessors ---
 
@@ -369,6 +386,19 @@ impl Ticket {
     #[must_use]
     pub fn claimed_at(&self) -> Option<&str> {
         self.claimed_at.as_deref()
+    }
+
+    #[must_use]
+    pub fn created_at(&self) -> Option<&str> {
+        self.created_at.as_deref()
+    }
+
+    /// Stamp the filing time once; later calls are no-ops so a re-save can
+    /// never rewrite history.
+    pub fn stamp_created_at(&mut self, at: impl Into<String>) {
+        if self.created_at.is_none() {
+            self.created_at = Some(at.into());
+        }
     }
 
     // --- Guarded mutations ---
@@ -496,6 +526,45 @@ impl Ticket {
         Ok(())
     }
 
+    /// Who this ticket was split from. Set once by the SA when an oversize
+    /// ticket is decomposed into subtasks (CXA-F381).
+    #[must_use]
+    pub fn parent_id(&self) -> Option<&TicketId> {
+        self.parent_id.as_ref()
+    }
+
+    /// Bind this ticket to the oversize parent it was split from.
+    ///
+    /// # Errors
+    /// [`DomainError::FieldNotPermitted`] unless the actor owns the
+    /// dependency graph (SA; System for bookkeeping).
+    pub fn set_parent(&mut self, actor: Role, parent: TicketId) -> Result<(), DomainError> {
+        if !field_permitted(actor, "parent_id") {
+            return Err(DomainError::FieldNotPermitted {
+                role: actor,
+                field: "parent_id",
+            });
+        }
+        self.parent_id = Some(parent);
+        Ok(())
+    }
+
+    /// Drop a dependency edge by id (System bookkeeping: the target ticket
+    /// was archived, and an archived dependency is terminal — satisfied).
+    ///
+    /// # Errors
+    /// [`DomainError::FieldNotPermitted`] if `actor` may not edit dependencies.
+    pub fn remove_dependency(&mut self, actor: Role, on: &str) -> Result<(), DomainError> {
+        if !field_permitted(actor, "depends_on") {
+            return Err(DomainError::FieldNotPermitted {
+                role: actor,
+                field: "depends_on",
+            });
+        }
+        self.depends_on.retain(|d| d.as_str() != on);
+        Ok(())
+    }
+
     /// Declare a dependency on another ticket (SA during design/split).
     ///
     /// # Errors
@@ -523,6 +592,8 @@ impl Ticket {
     /// - [`DomainError::InvalidTransition`] — not a legal edge for this type.
     /// - [`DomainError::TransitionNotPermitted`] — role not allowed.
     /// - [`DomainError::NotReady`] — precondition for the target status unmet.
+    /// - [`DomainError::CoverageIncomplete`] — `Verified` with an acceptance
+    ///   criterion no passing test case demonstrates (CXA-F024).
     pub fn transition_to(&mut self, actor: Role, to: Status) -> Result<(), DomainError> {
         let from = self.status;
         if !transition_allowed(self.kind, from, to) {
@@ -542,11 +613,29 @@ impl Ticket {
         if to == Status::Ready {
             self.check_ready()?;
         }
+        if to == Status::Verified {
+            self.check_covered()?;
+        }
         self.status = to;
         // Leaving InProgress (completion or reject) frees the claim.
         if to != Status::InProgress {
             self.claimed_by = None;
             self.claimed_at = None;
+        }
+        Ok(())
+    }
+
+    /// Definition of Verified: every acceptance criterion is demonstrated by a
+    /// PASSING test case (CXA-F024). Deliberately emptied criteria (the BA
+    /// clarification path) leave nothing to cover and verify freely. The check
+    /// is a pure read — a blocked transition leaves the ticket untouched.
+    fn check_covered(&self) -> Result<(), DomainError> {
+        let missing = crate::coverage::uncovered(&self.acceptance_criteria, &self.test_cases);
+        if let Some(first) = missing.first() {
+            return Err(DomainError::CoverageIncomplete {
+                uncovered: missing.len(),
+                first: first.clone(),
+            });
         }
         Ok(())
     }
@@ -582,6 +671,46 @@ impl Ticket {
         self.claimed_by = None;
         self.claimed_at = None;
         Ok(())
+    }
+
+    /// Atomically swap the holder of an existing `InProgress` claim (CXA-F283):
+    /// a person taking over work a crashed run left behind. Like
+    /// [`Ticket::release_claim`] this is `System`-only bookkeeping — the API
+    /// layer decides WHO may take the decision (a manager, or the account whose
+    /// own run holds the claim), and the aggregate enforces only that the swap
+    /// happens in one guarded mutation with no steal window between checking
+    /// and stamping. Status is unchanged: the ticket stays `InProgress`, now
+    /// held by the new worker.
+    ///
+    /// Returns the holder that was displaced, so the caller can attribute the
+    /// takeover ("taken over by @alice (was `dev@mac`)").
+    ///
+    /// # Errors
+    /// - [`DomainError::FieldNotPermitted`] if `actor` is not `System`.
+    /// - [`DomainError::InvalidTransition`] if the ticket is not `InProgress`.
+    pub fn take_over(
+        &mut self,
+        actor: Role,
+        worker: impl Into<String>,
+        now: impl Into<String>,
+    ) -> Result<Option<String>, DomainError> {
+        if actor != Role::System {
+            return Err(DomainError::FieldNotPermitted {
+                role: actor,
+                field: "claim",
+            });
+        }
+        if self.status != Status::InProgress {
+            return Err(DomainError::InvalidTransition {
+                ticket_type: self.kind,
+                from: self.status,
+                to: self.status,
+            });
+        }
+        let previous = self.claimed_by.take();
+        self.claimed_by = Some(worker.into());
+        self.claimed_at = Some(now.into());
+        Ok(previous)
     }
 
     /// Definition of Ready: technical design present, and UX design present when
@@ -744,6 +873,67 @@ mod tests {
         assert_eq!(t.claimed_by(), None);
     }
 
+    /// A claimed `InProgress` ticket, the raw material of a takeover.
+    fn claimed(t: &mut Ticket, worker: &str, at: &str) {
+        t.set_technical_design(Role::Sa, tech_design())
+            .expect("set");
+        t.transition_to(Role::Sa, Status::Ready).expect("ready");
+        t.claim(Role::DevFeature, worker, at).expect("claim");
+    }
+
+    #[test]
+    fn take_over_stamps_the_new_holder_and_reports_the_steal() {
+        let mut t = feature(false);
+        claimed(&mut t, "alice@mac", "2026-07-15T00:00:00Z");
+        let previous = t
+            .take_over(Role::System, "bob@pc", "2026-07-15T09:30:00Z")
+            .expect("swap");
+        assert_eq!(previous.as_deref(), Some("alice@mac"));
+        assert_eq!(t.status(), Status::InProgress, "the work stays in flight");
+        assert_eq!(t.claimed_by(), Some("bob@pc"));
+        assert_eq!(t.claimed_at(), Some("2026-07-15T09:30:00Z"));
+    }
+
+    #[test]
+    fn non_system_cannot_take_over_claim() {
+        let mut t = feature(false);
+        claimed(&mut t, "alice@mac", "2026-07-15T00:00:00Z");
+        assert!(matches!(
+            t.take_over(Role::DevFeature, "bob@pc", "2026-07-15T09:30:00Z"),
+            Err(DomainError::FieldNotPermitted { .. })
+        ));
+        // A refused swap leaves the original claim untouched.
+        assert_eq!(t.claimed_by(), Some("alice@mac"));
+    }
+
+    #[test]
+    fn take_over_refused_off_in_progress() {
+        // Feature parked on Ready (claim released) — nothing in flight to take.
+        let mut f = feature(false);
+        f.set_technical_design(Role::Sa, tech_design())
+            .expect("set");
+        f.transition_to(Role::Sa, Status::Ready).expect("ready");
+        assert!(matches!(
+            f.take_over(Role::System, "bob@pc", "2026-07-15T09:30:00Z"),
+            Err(DomainError::InvalidTransition { .. })
+        ));
+        // A fresh bug sits on Open until claimed — same refusal.
+        let mut b = Ticket::new(
+            TicketId::new("BUG-T1").expect("id"),
+            TicketType::Bug,
+            "A bug",
+            "",
+            Priority::High,
+            Complexity::Small,
+            false,
+        )
+        .expect("bug");
+        assert!(matches!(
+            b.take_over(Role::System, "bob@pc", "2026-07-15T09:30:00Z"),
+            Err(DomainError::InvalidTransition { .. })
+        ));
+    }
+
     #[test]
     fn non_system_cannot_release_claim() {
         let mut t = feature(false);
@@ -774,88 +964,58 @@ mod tests {
     }
 
     #[test]
-    fn ensure_syncs_when_criteria_content_changes_same_count() {
+    fn goal_association_is_the_pos_scope_authority() {
+        use crate::ids::GoalId;
         let mut t = feature(false);
-        t.set_acceptance_criteria(vec!["old ac".to_owned()]);
-        t.ensure_test_cases_from_acceptance();
-        assert_eq!(t.test_cases().len(), 1);
-        assert_eq!(t.test_cases()[0].description, "old ac");
-        // Criteria edited to NEW text but still one entry: length alone is not
-        // enough — ensure must resync so the case tracks the new criterion.
-        t.set_acceptance_criteria(vec!["new ac".to_owned()]);
-        t.ensure_test_cases_from_acceptance();
-        assert_eq!(t.test_cases().len(), 1);
-        assert_eq!(t.test_cases()[0].description, "new ac");
-        assert_eq!(t.test_cases()[0].status, TestCaseStatus::Pending);
-    }
-
-    #[test]
-    fn set_result_keeps_attached_image_when_none_supplied() {
-        let mut t = feature(false);
-        t.set_acceptance_criteria(vec!["ac one".to_owned()]);
-        t.ensure_test_cases_from_acceptance();
-        assert!(
-            t.set_test_case_result(
-                "ac one",
-                true,
-                Some("verified".to_owned()),
-                None,
-                "t1".into(),
-            ),
-            "verdict without image still matches"
-        );
-        // Later the cycle attaches a screenshot, then a re-run's verdict
-        // (image=None) must NOT wipe it.
-        assert!(t.set_test_case_image("ac one", "/api/.../shot.png".into(), "t2".into()));
-        assert_eq!(
-            t.test_cases()[0]
-                .evidence
-                .as_ref()
-                .unwrap()
-                .image
-                .as_deref(),
-            Some("/api/.../shot.png")
-        );
-        assert!(t.set_test_case_result(
-            "ac one",
-            false,
-            Some("now failing".to_owned()),
-            None,
-            "t3".into()
+        // Agents declare work for goals at creation only (via the shared
+        // creation path); re-pointing an association is PO/super-PO scope.
+        assert!(matches!(
+            t.set_goal_id(Role::DevFeature, GoalId::new("G001").expect("gid")),
+            Err(DomainError::FieldNotPermitted {
+                field: "goal_id",
+                ..
+            })
         ));
-        let ev = t.test_cases()[0].evidence.as_ref().unwrap();
-        assert_eq!(
-            ev.image.as_deref(),
-            Some("/api/.../shot.png"),
-            "image survives a verdict-only re-run"
-        );
-        assert_eq!(ev.note.as_deref(), Some("now failing"));
-        assert_eq!(t.test_cases()[0].status, TestCaseStatus::Failed);
+        t.set_goal_id(Role::Po, GoalId::new("G001").expect("gid"))
+            .expect("po may bind");
+        assert_eq!(t.goal_id().map(GoalId::as_str), Some("G001"));
+        t.set_goal_id(Role::User, GoalId::new("G002").expect("gid"))
+            .expect("super-PO may re-point");
+        assert_eq!(t.goal_id().map(GoalId::as_str), Some("G002"));
     }
 
     #[test]
-    fn set_result_overwrites_image_when_one_supplied() {
-        let mut t = feature(false);
-        t.set_acceptance_criteria(vec!["ac".to_owned()]);
-        t.ensure_test_cases_from_acceptance();
-        assert!(t.set_test_case_result("ac", true, None, Some("/old.png".into()), "t1".into()));
-        assert!(t.set_test_case_result("ac", true, None, Some("/new.png".into()), "t2".into()));
-        assert_eq!(
-            t.test_cases()[0]
-                .evidence
-                .as_ref()
-                .unwrap()
-                .image
-                .as_deref(),
-            Some("/new.png")
-        );
+    fn new_tickets_start_without_a_goal_association() {
+        assert!(feature(false).goal_id().is_none());
     }
 
     #[test]
-    fn set_result_false_when_no_case_matches() {
+    fn service_tag_is_requirement_scope_ba_stamps_po_amends() {
         let mut t = feature(false);
-        t.set_acceptance_criteria(vec!["ac".to_owned()]);
-        t.ensure_test_cases_from_acceptance();
-        assert!(!t.set_test_case_result("does not exist", true, None, None, "t1".into()));
+        assert!(
+            t.service_tag().is_none(),
+            "no tag until the BA declares one"
+        );
+        // Agents and DEV roles must not be able to relabel work as shared
+        // infrastructure to slip past the duplicate radar.
+        assert!(matches!(
+            t.set_service_tag(Role::DevFeature, "infra"),
+            Err(DomainError::FieldNotPermitted {
+                field: "service_tag",
+                ..
+            })
+        ));
+        assert!(matches!(
+            t.set_service_tag(Role::Sa, "infra"),
+            Err(DomainError::FieldNotPermitted { .. })
+        ));
+        t.set_service_tag(Role::Ba, "  infra  ").expect("BA stamps");
+        assert_eq!(t.service_tag(), Some("infra"), "value is trimmed");
+        t.set_service_tag(Role::Po, "ci").expect("PO may amend");
+        assert_eq!(t.service_tag(), Some("ci"));
+        t.set_service_tag(Role::User, "")
+            .expect("super-PO may clear");
+        assert_eq!(t.service_tag(), None, "a blank tag clears the field");
     }
+
 }

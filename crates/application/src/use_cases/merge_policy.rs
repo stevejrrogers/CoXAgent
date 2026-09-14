@@ -54,8 +54,7 @@ pub fn ticket_id_in(title: &str) -> Option<String> {
 /// green suite says the code works, not that a 2,000-line change or a rewrite
 /// of the release pipeline should go in unwatched.
 #[must_use]
-pub fn needs_human_eyes(diff: &str) -> Option<String> {
-    const MAX_CHANGED_LINES: usize = 800;
+pub fn needs_human_eyes(diff: &str, max_changed_lines: usize) -> Option<String> {
     const SENSITIVE: &[&str] = &[
         ".github/workflows",
         "Dockerfile",
@@ -63,6 +62,12 @@ pub fn needs_human_eyes(diff: &str) -> Option<String> {
         "scripts/",
         "Cargo.toml",
         "coxagent.json",
+        // Governance: the rules the agents themselves run under. An agent once
+        // deleted the root-cause contract from CLAUDE.md inside an unrelated
+        // bug-fix PR (90eaf25); no machine may land edits to its own leash.
+        "CLAUDE.md",
+        "AGENTS.md",
+        ".claude/",
     ];
     let changed = diff
         .lines()
@@ -72,7 +77,7 @@ pub fn needs_human_eyes(diff: &str) -> Option<String> {
                 && !l.starts_with("---")
         })
         .count();
-    if changed > MAX_CHANGED_LINES {
+    if max_changed_lines > 0 && changed > max_changed_lines {
         return Some(format!(
             "{changed} changed lines is past what lands unreviewed"
         ));
@@ -86,6 +91,181 @@ pub fn needs_human_eyes(diff: &str) -> Option<String> {
     Some(format!(
         "it changes {hit}, which decides how everything else ships"
     ))
+}
+
+/// The substantive ADDED lines of a diff, grouped by target file — the
+/// evidence set for "did this change actually land on main?". Trivial lines
+/// (blank, braces, markers) prove nothing and are skipped.
+#[must_use]
+pub fn added_lines_by_file(diff: &str) -> Vec<(String, Vec<String>)> {
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    let mut current: Option<usize> = None;
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            let file = rest
+                .split_whitespace()
+                .last()
+                .and_then(|n| n.strip_prefix("b/"))
+                .unwrap_or_default()
+                .to_owned();
+            out.push((file, Vec::new()));
+            current = Some(out.len() - 1);
+            continue;
+        }
+        if let (Some(i), Some(added)) = (current, line.strip_prefix('+')) {
+            if line.starts_with("+++") {
+                continue;
+            }
+            let t = added.trim();
+            // Only lines distinctive enough to be evidence.
+            if t.len() >= 12 && !t.starts_with("//") && !t.starts_with('*') {
+                out[i].1.push(t.to_owned());
+            }
+        }
+    }
+    out.retain(|(f, lines)| !f.is_empty() && !lines.is_empty());
+    out
+}
+
+/// Whether a PR's substance is PRESENT on main, judged from its added lines
+/// vs the current file contents (`read` returns a file's text on main, `None`
+/// when it does not exist). Deleted-only diffs and unreadable diffs return
+/// `false` — no evidence means NOT landed; closing a PR is the irreversible
+/// side, so it carries the burden of proof.
+pub fn diff_landed_on_main(diff: &str, mut read: impl FnMut(&str) -> Option<String>) -> bool {
+    let files = added_lines_by_file(diff);
+    if files.is_empty() {
+        return false;
+    }
+    let (mut total, mut found) = (0usize, 0usize);
+    for (file, lines) in files {
+        let content = read(&file).unwrap_or_default();
+        // Sample up to 20 lines per file — enough signal, bounded work.
+        for l in lines.iter().take(20) {
+            total += 1;
+            if content.contains(l.as_str()) {
+                found += 1;
+            }
+        }
+    }
+    total > 0 && found * 10 >= total * 8 // ≥80% of the evidence is on main
+}
+
+/// The files a PR diff touches, taken from its `diff --git` headers. A best
+/// effort: a diff whose headers we cannot name is conservatively treated as
+/// unparseable (empty list), which the resolver turns into a human hold rather
+/// than an unsafe auto-close.
+#[must_use]
+pub fn changed_files(diff: &str) -> Vec<String> {
+    diff.lines()
+        .filter_map(|l| {
+            let rest = l.strip_prefix("diff --git ")?;
+            // `a/a.rs b/a.rs` — the new path is the last token; `b/` strips the
+            // conventional `a/` prefix pair (`a/` is the old path).
+            let new = rest.split_whitespace().last()?;
+            new.strip_prefix("b/").map(str::to_owned)
+        })
+        .collect()
+}
+
+/// One PR's signals the competing-PR resolver needs — forged from the diff and
+/// forge metadata, kept pure so the decision is a function of data, not IO.
+#[derive(Debug, Clone)]
+pub struct CompeteCandidate {
+    pub number: u64,
+    /// Files the diff touches. `None` when the diff could not be read.
+    pub files: Option<Vec<String>>,
+    /// True when the diff is oversized or touches build/ship-sensitive paths
+    /// (`needs_human_eyes`) or commits agent scratch — never auto-merged.
+    pub unsafe_change: bool,
+}
+
+/// The lossless decision for two competing PRs on the same ticket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompeteOutcome {
+    /// Merge `winner`, close `loser`. Only chosen when provably lossless: the
+    /// winner's diff covers every file the loser touches, neither is unsafe,
+    /// and the loser has nothing the winner lacks.
+    MergeClose { winner: u64, loser: u64 },
+    /// `winner` is a SAFE, small subset of `unsafe_other` — a load-bearing /
+    /// oversized same-ticket change. The safe PR is NOT blocked by the risky
+    /// competitor (land it through normal review); the unsafe one stays for a
+    /// person. Neither is auto-closed: closing the unsafe one would drop the
+    /// extra work it carries, and closing the safe one would discard a real fix.
+    Proceed { winner: u64, unsafe_other: u64 },
+    /// Cannot resolve without a human — closing would drop real work, a diff
+    /// could not be read, or a change is too load-bearing to auto-land.
+    Hold(&'static str),
+}
+
+/// Two open PRs for the SAME ticket race each other (see [`competing_pr`]);
+/// the older policy parked BOTH forever waiting on a human to choose. This
+/// self-resolves *only* when it costs nothing: if one PR's diff already covers
+/// every file the other touches, and the winner is safe to auto-merge, then
+/// closing the duplicate loses no work and the ticket can actually ship
+/// (`feature_done`/`bug_fixed`, which the scorecard needs). When either diff
+/// carries work the other lacks, or either is unsafe, it holds for a human
+/// rather than silently drop a change.
+///
+/// One further case keeps a clean fix from being held hostage by a risky twin:
+/// when the SAFE PR is a strict subset of the unsafe one, the safe PR is not
+/// blocked by it (it lands through normal review, where its own size/impact
+/// gates still apply) while the unsafe sibling stays for a person.
+#[must_use]
+#[allow(clippy::needless_pass_by_value)] // call sites hand over ownership; refs would just ripple clones
+pub fn resolve_competing(a: CompeteCandidate, b: CompeteCandidate) -> CompeteOutcome {
+    // Can't prove anything about a diff we couldn't read.
+    let (Some(a_files), Some(b_files)) = (a.files.as_deref(), b.files.as_deref()) else {
+        return CompeteOutcome::Hold("could not read a competing diff — keeping both");
+    };
+    // A winner must actually claim at least one file; an empty diff proves
+    // nothing and closing its twin would be guesswork.
+    if a_files.is_empty() || b_files.is_empty() {
+        return CompeteOutcome::Hold("diff has no parseable file headers — keeping both");
+    }
+    let a_covers_b = b_files.iter().all(|f| a_files.contains(f));
+    let b_covers_a = a_files.iter().all(|f| b_files.contains(f));
+
+    // The current PR (`a`) is itself load-bearing or oversized — never
+    // auto-land or auto-close it.
+    if a.unsafe_change {
+        return CompeteOutcome::Hold(
+            "touches a load-bearing or oversized change — a human should rule on it",
+        );
+    }
+    // `a` is safe, but its same-ticket competitor `b` is unsafe. `a` is only
+    // unblocked when it is a strict subset of `b`'s sprawl — then landing `a`
+    // loses nothing (its files are already inside `b`) and `b` still waits for
+    // a person. If they diverge, racing `a` past a risky sibling is unsafe.
+    if b.unsafe_change {
+        if b_covers_a && !a_covers_b {
+            return CompeteOutcome::Proceed {
+                winner: a.number,
+                unsafe_other: b.number,
+            };
+        }
+        return CompeteOutcome::Hold(
+            "the competing change is load-bearing or oversized — a human should rule on it",
+        );
+    }
+    // Both safe: a strict subset decides it — the wider diff is the more
+    // complete fix. Exact overlap (both cover each other) means they are the
+    // same change; keep the newer one arbitrarily deterministic by picking
+    // `a`'s twin.
+    match (a_covers_b, b_covers_a) {
+        // Exact overlap means the same change; `a` wins deterministically.
+        (true, _) => CompeteOutcome::MergeClose {
+            winner: a.number,
+            loser: b.number,
+        },
+        (false, true) => CompeteOutcome::MergeClose {
+            winner: b.number,
+            loser: a.number,
+        },
+        (false, false) => CompeteOutcome::Hold(
+            "each PR touches files the other does not — closing either would drop work",
+        ),
+    }
 }
 
 /// Paths that are the agents' own workings, never the product: worktrees the
@@ -124,6 +304,74 @@ pub fn commits_scratch(diff: &str) -> Option<String> {
         })
 }
 
+/// What this round should do with a kept-OPEN review hold (CXA-C026).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HoldExpiry {
+    /// Keep holding; the payload is the round count THIS round (1-based), for
+    /// the log line's attribution ("hold 2/3").
+    Keep(u32),
+    /// The identical hold reached `max_rounds` on an unchanged head and the PR
+    /// is landable — force the landing this same cycle.
+    Land(u32),
+    /// The identical hold reached `max_rounds` on an unchanged head and the PR
+    /// is NOT landable — close it this same cycle; a hold with no exit is how
+    /// a PR sits through eleven rounds of the identical re-log (#605).
+    Close(u32),
+}
+
+/// One-round expiry on a kept-OPEN review verdict (CXA-C026).
+///
+/// The SA's request-changes are deduped by head sha, but the two "kept OPEN"
+/// holds (merged-elsewhere, settled-ticket) run before that guard and never
+/// record a review — the only unbounded re-log path. This is the counting
+/// rule: a hold chain is `reason` + `head_sha`; an identical repeat advances
+/// it, and at `max_rounds` the SAME cycle forces a terminal decision instead
+/// of re-recording. `landable` decides which terminal — landing is preferred
+/// whenever the mechanical safeties hold, because the hold itself says the
+/// diff carries work main lacks; closing is for what cannot land.
+///
+/// `max_rounds == 0` disables the brake entirely (the pre-C026 behaviour,
+/// pinned so old configs keep working). An empty `head_sha` (git unavailable)
+/// never counts toward a terminal and never resets the chain: the round
+/// cannot be attributed to a head, and the irreversible side carries the
+/// burden of proof.
+#[must_use]
+pub fn open_hold_expiry(
+    prior: Option<&crate::state::PrOpenHold>,
+    reason: &str,
+    head_sha: &str,
+    landable: bool,
+    max_rounds: u32,
+) -> HoldExpiry {
+    if max_rounds == 0 {
+        return HoldExpiry::Keep(prior.map_or(1, |p| p.rounds));
+    }
+    let Some(prior) = prior else {
+        return HoldExpiry::Keep(1);
+    };
+    // A different reason is a different hold — new information, fresh chain.
+    if prior.reason != reason {
+        return HoldExpiry::Keep(1);
+    }
+    if head_sha.is_empty() {
+        // Git unavailable: the round can neither advance nor break the chain.
+        return HoldExpiry::Keep(prior.rounds.max(1));
+    }
+    if prior.head_sha != head_sha {
+        // The head moved — new code, fresh chain.
+        return HoldExpiry::Keep(1);
+    }
+    let rounds = prior.rounds.saturating_add(1);
+    if rounds < max_rounds {
+        return HoldExpiry::Keep(rounds);
+    }
+    if landable {
+        HoldExpiry::Land(rounds)
+    } else {
+        HoldExpiry::Close(rounds)
+    }
+}
+
 /// How many senior rescues one ticket may consume before the decision is a
 /// human's. Two, because the first rescue can misread the failure — a spec
 /// rewrite that turns out to hide a design dead end deserves the second look
@@ -143,6 +391,11 @@ pub enum EscalationRoute {
     Mechanical,
     /// A genuine technical dead end — the SA revises the approach.
     Design,
+    /// The work does not fit one run: repeated guardrail-cap deaths. The SA
+    /// decomposes it into subtasks instead of re-approaching the monolith
+    /// (CXA-F381) — C025/F375 each burned two full-cap runs before this
+    /// route existed.
+    Oversize,
 }
 
 /// Route from the structured failure log — the gates' own verdicts, so no
@@ -161,6 +414,16 @@ pub fn route_from_failures(
     if real.is_empty() {
         return EscalationRoute::Design;
     }
+    // Two or more attempts cut by the loop guardrail = the ticket exceeds a
+    // run, regardless of what else went wrong. Split beats re-approaching.
+    if real
+        .iter()
+        .filter(|f| f.detail.contains("iteration/token cap"))
+        .count()
+        >= 2
+    {
+        return EscalationRoute::Oversize;
+    }
     if real.iter().any(|f| f.layer == FailureLayer::Spec) || spec_gap {
         return EscalationRoute::Spec;
     }
@@ -175,6 +438,9 @@ pub fn route_from_failures(
 #[must_use]
 pub fn escalation_route(history: &str, spec_gap: bool) -> EscalationRoute {
     let low = history.to_lowercase();
+    if low.matches("iteration/token cap").count() >= 2 {
+        return EscalationRoute::Oversize;
+    }
     let unclear = [
         "unclear",
         "ambiguous",
@@ -210,7 +476,7 @@ pub fn escalation_route(history: &str, spec_gap: bool) -> EscalationRoute {
 
 #[cfg(test)]
 mod merge_guard_tests {
-    use super::{commits_scratch, competing_pr, needs_human_eyes};
+    use super::{commits_scratch, competing_pr, diff_landed_on_main, needs_human_eyes};
 
     #[test]
     fn a_branch_that_committed_agent_scratch_is_named_for_it() {
@@ -264,13 +530,19 @@ mod merge_guard_tests {
     #[test]
     fn a_huge_change_or_one_that_moves_the_pipeline_waits_for_a_person() {
         let small = "diff --git a/src/a.rs b/src/a.rs\n+++ b/src/a.rs\n+let x = 1;\n-let x = 0;\n";
-        assert!(needs_human_eyes(small).is_none());
+        // 3000 is the configurable default; a 900-line change is under it, so it
+        // is NOT held for size alone (but is still held for a sensitive path).
+        assert!(needs_human_eyes(small, 3000).is_none());
+        assert!(needs_human_eyes(small, 0).is_none());
 
         let huge = format!(
             "diff --git a/src/a.rs b/src/a.rs\n+++ b/src/a.rs\n{}",
             "+line\n".repeat(900)
         );
-        assert!(needs_human_eyes(&huge)
+        // Under the default 3000 limit a 900-line diff is eligible to land.
+        assert!(needs_human_eyes(&huge, 3000).is_none());
+        // A lower configured bound holds it for size.
+        assert!(needs_human_eyes(&huge, 800)
             .expect("held")
             .contains("changed lines"));
 
@@ -278,9 +550,314 @@ mod merge_guard_tests {
         // change itself unwatched.
         let ci = "diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\n\
                   +++ b/.github/workflows/ci.yml\n+  run: cargo test\n";
-        assert!(needs_human_eyes(ci)
+        assert!(needs_human_eyes(ci, 3000)
             .expect("held")
             .contains(".github/workflows"));
+    }
+
+    #[test]
+    fn closing_a_pr_requires_proof_its_diff_landed_on_main() {
+        let diff = "diff --git a/src/a.rs b/src/a.rs\n+++ b/src/a.rs\n\
+                    +fn very_distinctive_function_name() {\n\
+                    +    let answer = compute_the_thing(42);\n";
+        // Substance present on main → superseded, closable.
+        let main_has_it =
+            "fn very_distinctive_function_name() {\n    let answer = compute_the_thing(42);\n}";
+        assert!(diff_landed_on_main(diff, |_| Some(main_has_it.to_owned())));
+        // Substance absent → NOT landed; closing would throw away real work
+        // (the #185–#196 mass-close of 2026-08-16).
+        assert!(!diff_landed_on_main(diff, |_| Some(
+            "fn unrelated() {}".to_owned()
+        )));
+        // File missing on main entirely → not landed.
+        assert!(!diff_landed_on_main(diff, |_| None));
+        // No evidence lines at all (empty/deletion-only diff) → not landed:
+        // the irreversible side carries the burden of proof.
+        assert!(!diff_landed_on_main("diff --git a/x b/x\n-gone\n", |_| {
+            Some(String::new())
+        }));
+    }
+
+    #[test]
+    fn an_agent_never_lands_edits_to_its_own_governance_rules() {
+        // Regression: 90eaf25 deleted the root-cause contract from CLAUDE.md
+        // inside an unrelated bug-fix PR and auto-merged. Any diff touching the
+        // rules the agents run under now waits for a person.
+        for path in ["CLAUDE.md", "AGENTS.md", ".claude/skills/x/SKILL.md"] {
+            let diff = format!("diff --git a/{path} b/{path}\n+++ b/{path}\n-a rule\n");
+            assert!(needs_human_eyes(&diff, 3000).is_some(), "{path} must hold");
+        }
+        // A mention of the file INSIDE a hunk body is not a file change.
+        let body_only =
+            "diff --git a/src/a.rs b/src/a.rs\n+++ b/src/a.rs\n+// see CLAUDE.md for rules\n";
+        assert!(needs_human_eyes(body_only, 3000).is_none());
+    }
+
+    #[test]
+    fn consuming_pr_is_closed_when_the_winner_covers_it() {
+        // The live deadlock: #89 and #98 both fix the same ticket. #98's diff
+        // covers everything #89 touches, so keeping #98 and closing #89 loses
+        // no work — the ticket can finally ship.
+        let a = super::CompeteCandidate {
+            number: 89,
+            files: Some(vec!["crates/app/src/lib.rs".to_owned()]),
+            unsafe_change: false,
+        };
+        let b = super::CompeteCandidate {
+            number: 98,
+            files: Some(vec![
+                "crates/app/src/lib.rs".to_owned(),
+                "crates/app/src/main.rs".to_owned(),
+            ]),
+            unsafe_change: false,
+        };
+        assert_eq!(
+            super::resolve_competing(b.clone(), a.clone()),
+            super::CompeteOutcome::MergeClose {
+                winner: 98,
+                loser: 89
+            },
+            "the wider diff wins, the subset is the duplicate"
+        );
+        // Order-invariant: swap and the same winner is chosen.
+        assert_eq!(
+            super::resolve_competing(a, b),
+            super::CompeteOutcome::MergeClose {
+                winner: 98,
+                loser: 89
+            }
+        );
+    }
+
+    #[test]
+    fn competing_prs_with_disjoint_work_are_held_not_closed() {
+        // Each PR touches a file the other does not: closing either drops real
+        // work, so the machine must hold and let a person reconcile.
+        let a = super::CompeteCandidate {
+            number: 89,
+            files: Some(vec!["crates/app/src/lib.rs".to_owned()]),
+            unsafe_change: false,
+        };
+        let b = super::CompeteCandidate {
+            number: 98,
+            files: Some(vec!["crates/domain/src/models.rs".to_owned()]),
+            unsafe_change: false,
+        };
+        assert!(matches!(
+            super::resolve_competing(a, b),
+            super::CompeteOutcome::Hold(_)
+        ));
+    }
+
+    #[test]
+    fn a_load_bearing_or_unreadable_competing_diff_never_auto_closes() {
+        let safe = super::CompeteCandidate {
+            number: 1,
+            files: Some(vec!["crates/app/src/lib.rs".to_owned()]),
+            unsafe_change: false,
+        };
+        // Load-bearing change (pipeline) → the SAFE subset PR is unblocked
+        // (Proceed: it lands through normal review, its own gates apply) and
+        // the unsafe one is never auto-closed. When the UNSAFE PR is the one
+        // being considered it is always held for a person.
+        let pipeline = super::CompeteCandidate {
+            number: 2,
+            files: Some(vec![
+                ".github/workflows/ci.yml".to_owned(),
+                "crates/app/src/lib.rs".to_owned(),
+            ]),
+            unsafe_change: true,
+        };
+        assert!(matches!(
+            super::resolve_competing(safe.clone(), pipeline.clone()),
+            super::CompeteOutcome::Proceed {
+                winner: 1,
+                unsafe_other: 2
+            }
+        ));
+        assert!(matches!(
+            super::resolve_competing(pipeline, safe.clone()),
+            super::CompeteOutcome::Hold(_)
+        ));
+        // A diff that could not be read → hold, never a blind close.
+        let unreadable = super::CompeteCandidate {
+            number: 3,
+            files: None,
+            unsafe_change: false,
+        };
+        assert!(matches!(
+            super::resolve_competing(safe, unreadable),
+            super::CompeteOutcome::Hold(_)
+        ));
+    }
+
+    #[test]
+    fn changed_files_names_simple_and_renamed_paths() {
+        let diff = "diff --git a/src/a.rs b/src/a.rs\n+let x = 1;\n\
+                    diff --git a/src/b.rs b/src/c.rs\n+let y = 2;\n";
+        assert_eq!(
+            super::changed_files(diff),
+            vec!["src/a.rs".to_owned(), "src/c.rs".to_owned()]
+        );
+        assert!(super::changed_files("no headers here").is_empty());
+    }
+
+    #[test]
+    fn a_safe_subset_pr_is_unblocked_from_a_load_bearing_competitor() {
+        // The live case: #98 is a small, safe 1-file fix; #89 is a sprawling
+        // 40-file same-ticket change that is load-bearing/oversized (unsafe).
+        // #98 must NOT be held hostage by #89 — it proceeds to normal review
+        // (where its own size gates still apply), while #89 stays for a human.
+        let safe = super::CompeteCandidate {
+            number: 98,
+            files: Some(vec![
+                "crates/infrastructure/src/deploy/docker_compose.rs".to_owned()
+            ]),
+            unsafe_change: false,
+        };
+        let unsafe_sprawl = super::CompeteCandidate {
+            number: 89,
+            files: Some(vec![
+                "crates/infrastructure/src/deploy/docker_compose.rs".to_owned(),
+                "crates/app/src/builders.rs".to_owned(),
+                "crates/application/src/prompts.rs".to_owned(),
+            ]),
+            unsafe_change: true,
+        };
+        // Processing the SAFE pr as the current one: safe is a strict subset of
+        // unsafe → Proceed (unblock the safe fix, keep unsafe for a person).
+        assert_eq!(
+            super::resolve_competing(safe.clone(), unsafe_sprawl.clone()),
+            super::CompeteOutcome::Proceed {
+                winner: 98,
+                unsafe_other: 89
+            }
+        );
+        // Processing the UNSAFE pr as the current one: it stays held — the SA
+        // never auto-lands or auto-closes a load-bearing change.
+        assert!(matches!(
+            super::resolve_competing(unsafe_sprawl, safe),
+            super::CompeteOutcome::Hold(_)
+        ));
+    }
+
+    #[test]
+    fn a_safe_pr_is_not_unblocked_when_the_unsafe_competitor_diverges() {
+        // Safe PR touches a file the unsafe competitor does not, so it is NOT a
+        // strict subset — racing it past the risky sibling would double-fix a
+        // file in parallel. It stays held.
+        let safe = super::CompeteCandidate {
+            number: 7,
+            files: Some(vec!["crates/a.rs".to_owned()]),
+            unsafe_change: false,
+        };
+        let unsafe_other = super::CompeteCandidate {
+            number: 8,
+            files: Some(vec!["crates/b.rs".to_owned()]),
+            unsafe_change: true,
+        };
+        assert!(matches!(
+            super::resolve_competing(safe, unsafe_other),
+            super::CompeteOutcome::Hold(_)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod open_hold_expiry_tests {
+    use super::{open_hold_expiry, HoldExpiry};
+    use crate::state::PrOpenHold;
+
+    fn hold(reason: &str, rounds: u32, head: &str) -> PrOpenHold {
+        PrOpenHold {
+            reason: reason.to_owned(),
+            rounds,
+            head_sha: head.to_owned(),
+            first_at: "2026-09-06T00:00:00Z".to_owned(),
+            last_at: "2026-09-06T01:00:00Z".to_owned(),
+        }
+    }
+
+    const REASON: &str = "COX-B157 merged elsewhere but this diff is NOT on main";
+    const HEAD: &str = "abc123";
+
+    #[test]
+    fn a_fresh_hold_is_round_one_and_keeps_holding() {
+        assert_eq!(
+            open_hold_expiry(None, REASON, HEAD, false, 3),
+            HoldExpiry::Keep(1)
+        );
+    }
+
+    #[test]
+    fn the_same_hold_on_the_same_head_counts_up_until_the_cap() {
+        let prior = hold(REASON, 1, HEAD);
+        assert_eq!(
+            open_hold_expiry(Some(&prior), REASON, HEAD, false, 3),
+            HoldExpiry::Keep(2),
+            "under the cap: hold, but the count advances"
+        );
+    }
+
+    #[test]
+    fn at_the_cap_the_hold_forces_a_terminal_decision() {
+        let prior = hold(REASON, 2, HEAD);
+        // Landable: the diff is safe to land — landing beats closing, the
+        // hold itself says the work is not on main yet.
+        assert_eq!(
+            open_hold_expiry(Some(&prior), REASON, HEAD, true, 3),
+            HoldExpiry::Land(3)
+        );
+        // Not landable: close — a hold with no exit re-logs forever (#605).
+        assert_eq!(
+            open_hold_expiry(Some(&prior), REASON, HEAD, false, 3),
+            HoldExpiry::Close(3)
+        );
+    }
+
+    #[test]
+    fn a_moved_head_starts_a_fresh_chain() {
+        let prior = hold(REASON, 2, HEAD);
+        assert_eq!(
+            open_hold_expiry(Some(&prior), REASON, "def456", false, 3),
+            HoldExpiry::Keep(1),
+            "new code is new information for the reviewer"
+        );
+    }
+
+    #[test]
+    fn a_changed_reason_starts_a_fresh_chain() {
+        let prior = hold(REASON, 2, HEAD);
+        assert_eq!(
+            open_hold_expiry(Some(&prior), "a different hold entirely", HEAD, false, 3),
+            HoldExpiry::Keep(1)
+        );
+    }
+
+    #[test]
+    fn an_unattributable_head_neither_counts_nor_resets() {
+        // Git unavailable (empty sha): the round cannot be attributed to a
+        // head, so it must not push a PR toward a terminal — and it must not
+        // wipe an existing streak either.
+        let prior = hold(REASON, 2, HEAD);
+        assert_eq!(
+            open_hold_expiry(Some(&prior), REASON, "", false, 3),
+            HoldExpiry::Keep(2)
+        );
+    }
+
+    #[test]
+    fn max_rounds_zero_is_the_legacy_never_expire_behaviour() {
+        let prior = hold(REASON, 11, HEAD);
+        assert_eq!(
+            open_hold_expiry(Some(&prior), REASON, HEAD, false, 0),
+            HoldExpiry::Keep(11),
+            "0 = off, exactly like review_max_skips"
+        );
+        assert_eq!(
+            open_hold_expiry(Some(&prior), REASON, HEAD, true, 0),
+            HoldExpiry::Keep(11)
+        );
     }
 }
 
