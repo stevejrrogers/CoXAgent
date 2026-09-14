@@ -80,6 +80,7 @@ mod status;
 mod store_rpc;
 mod transcripts;
 mod tunecockpit;
+mod user_keys;
 mod work;
 
 use alerts::*;
@@ -121,6 +122,7 @@ use share_page::*;
 use status::*;
 use transcripts::*;
 use tunecockpit::*;
+use user_keys::*;
 use work::*;
 
 /// The embedded single-page dashboard.
@@ -307,6 +309,8 @@ struct AppState {
     meetings: Mt,
     /// User avatars + Slack-style statuses (self-service).
     profiles: Pf,
+    /// Per-user BYOK LLM keys (CXA-F410): probe-first, masked reads.
+    user_keys: Uk,
     /// Blob storage for uploaded files (local disk by default, or S3/MinIO).
     storage: Arc<dyn coxagent_application::ports::outbound::StoragePort>,
     /// Server-side documentation store (MongoDB) when configured; `None` falls
@@ -946,6 +950,9 @@ pub async fn serve_full(
         .route("/api/manage/overview", get(manage_overview_ep))
         .route("/api/manage/spaces/:sid", get(manage_space_detail_ep))
         .route("/api/me/agents", get(my_agents_ep))
+        .route("/api/me/llm-keys", get(my_keys_ep).post(add_key_ep))
+        .route("/api/me/llm-keys/:id", axum::routing::delete(delete_key_ep))
+        .route("/api/me/llm-keys/:id/retest", post(retest_key_ep))
         .route("/join/:token", get(join_page_ep))
         .route("/api/workspace/join", post(join_ep))
         // Public share-link status page (CXA-F069): the token IS the
