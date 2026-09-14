@@ -3,9 +3,17 @@
 //!
 //! Pure data; loading from `coxagent.json` is an adapter concern.
 
-use coxagent_domain::Role;
+use coxagent_domain::{Priority, Role};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+// The `artifacts` section type lives in [`crate::artifacts`] with the schema
+// anchor and build manifest it belongs to; it is re-exported here so every
+// Config section type is reachable as `config::<Section>Config`.
+pub use crate::artifacts::ArtifactsConfig;
+// Same convention: the per-operator working-hours declaration types live with
+// their decision logic in [`crate::working_hours`].
+pub use crate::working_hours::OperatorWorkingHours;
 
 /// Known agent engine CLIs. `as_binary` gives the executable name to look for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -20,6 +28,9 @@ pub enum EngineKind {
     Copilot,
     /// Deterministic offline engine for demos/tests (writes real code, no LLM).
     Scripted,
+    /// Harxes — in-process embedded engine (`harxes-core` crate, CXA-F372):
+    /// no child process, cancel-safe, typed infra-fault errors.
+    Harxes,
 }
 
 impl EngineKind {
@@ -34,6 +45,7 @@ impl EngineKind {
             EngineKind::Codex => "codex",
             EngineKind::Copilot => "copilot",
             EngineKind::Scripted => "scripted",
+            EngineKind::Harxes => "harxes",
         }
     }
 
@@ -47,6 +59,7 @@ impl EngineKind {
             EngineKind::Gemini,
             EngineKind::Codex,
             EngineKind::Copilot,
+            EngineKind::Harxes,
         ]
     }
 }
@@ -209,6 +222,12 @@ pub struct WorkflowConfig {
     /// Days per sprint when `sprint_unit` is `days`.
     #[serde(default = "default_sprint_days")]
     pub sprint_length_days: u64,
+    /// The floor under a running sprint's actionable scope: when fewer than
+    /// this many committed tickets are still workable, the mid-sprint top-up
+    /// commits more from the backlog. Raise it to keep more DEV work in
+    /// flight; 0 disables the top-up.
+    #[serde(default = "default_scope_floor")]
+    pub dev_scope_floor: usize,
     /// Ops/SRE monitor (default on): after a deploy, the leader pings the app on
     /// its published port each cycle and files a high-priority bug + alerts the
     /// chat if it went down — so the team also runs what it ships.
@@ -236,8 +255,9 @@ pub struct WorkflowConfig {
     #[serde(default = "default_true")]
     pub tdd: bool,
     /// Sandbox agent CLIs: confine their file WRITES to the project workspace
-    /// and tool caches (macOS Seatbelt today; other platforms run unsandboxed
-    /// with a warning). Off by default — turn on for untrusted codebases.
+    /// and tool caches (macOS via Seatbelt, Linux via Bubblewrap when `bwrap`
+    /// is on `PATH`; platforms without a backend run unsandboxed with a
+    /// warning). Off by default — turn on for untrusted codebases.
     #[serde(default)]
     pub sandbox: bool,
     /// Hybrid-team knobs: which lifecycle moves wait for a person, and where
@@ -253,6 +273,124 @@ pub struct WorkflowConfig {
     /// linked back so no work is lost). 0 = default (2).
     #[serde(default)]
     pub pr_stale_days: u64,
+    /// How many days back the reverted-work scan (CXA-F047) may link a
+    /// `Revert` commit to the deploy record it undid. Reverts older than this
+    /// are history, not feedback. 0 = default (30).
+    #[serde(default)]
+    pub revert_scan_days: u64,
+    /// Per-phase cadence knobs (docs budget, debt sweep, architecture audit).
+    #[serde(default)]
+    pub cadence: CadenceConfig,
+    /// Quiet window `"HH:MM-HH:MM"` in UTC during which NO new engine calls
+    /// start — overnight quota walls and sleeping laptops make those hours the
+    /// most failure-prone and least supervised. (UTC because the hub has no
+    /// reliable local-timezone source; VN 02:00–07:00 = `"19:00-00:00"`.)
+    /// Urgent work is the exception: an open high-priority bug still runs.
+    /// Empty = no window.
+    #[serde(default)]
+    pub quiet_hours_utc: String,
+    /// Bug-burn floor (CXA-F028): when set, a scrum sprint commits only open
+    /// bugs AT OR ABOVE this priority and the DEV bug queue ignores the rest —
+    /// the "one-week high-severity burn" knob that parks cosmetic bugs for the
+    /// burn's duration without losing them. Reuses the existing three-level
+    /// [`Priority`] as the severity axis. Absent/`None` = burn every open bug
+    /// (the historical behaviour), so existing configs deserialize unchanged.
+    #[serde(default)]
+    pub bug_burn_floor: Option<Priority>,
+    /// Loop-liveness stall watchdog (CXA-F259, default on): a hub-side
+    /// checker that alerts when a running loop goes silently stale — no new
+    /// activity-trail entry for `stall_timeout_secs` while desired-run is on
+    /// and no documented pause (budget cap, quota exhaustion, user pause,
+    /// empty backlog) is in effect. Covers the blind spot a hung cycle
+    /// leaves: the worker keeps beating its registry heartbeat, so every
+    /// dashboard says "online" while nothing progresses.
+    #[serde(default = "default_true")]
+    pub stall_watchdog: bool,
+    /// Seconds of activity-trail silence past which a running loop counts as
+    /// stalled (0 = default 3600). A single engine call longer than this also
+    /// reads as silence — raise it if your runs are longer.
+    #[serde(default)]
+    pub stall_timeout_secs: u64,
+    /// Seconds an already-alerted stall may stay silent before one escalation
+    /// re-alert (0 = default 14400). Within the window the episode is deduped:
+    /// a multi-hour stall is one alert, not one per sweep.
+    #[serde(default)]
+    pub stall_hub_timeout_secs: u64,
+    /// Brief screening (CXA-F305, default on): every block of the DEV brief is
+    /// provenance-tagged (`human | agent | external`) and untrusted text is
+    /// pattern-screened for prompt injection before it enters the task prompt;
+    /// journal/hub-lesson writes that trip the screen are withheld and flagged
+    /// as `injection_flagged` in the team chat. Set `false` to roll back to
+    /// untagged, unscreened briefs — existing configs deserialize unchanged.
+    #[serde(default = "default_true")]
+    pub brief_screening: bool,
+}
+
+/// How often the periodic phases run. Zeros mean "use the built-in default" so
+/// an absent config block changes nothing.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CadenceConfig {
+    /// Wiki refresh budget per UTC day (0 = default 5).
+    pub docs_refreshes_per_day: u32,
+    /// File a tech-debt sweep chore every N cycles (0 = default 10).
+    pub debt_sweep_every_cycles: u64,
+    /// SA architecture + docs audit every N sprints (0 = default 8).
+    pub arch_review_every_sprints: u32,
+}
+
+impl CadenceConfig {
+    #[must_use]
+    pub fn docs_refreshes_per_day(&self) -> u32 {
+        if self.docs_refreshes_per_day == 0 {
+            5
+        } else {
+            self.docs_refreshes_per_day
+        }
+    }
+    #[must_use]
+    pub fn debt_sweep_every_cycles(&self) -> u64 {
+        if self.debt_sweep_every_cycles == 0 {
+            10
+        } else {
+            self.debt_sweep_every_cycles
+        }
+    }
+    #[must_use]
+    pub fn arch_review_every_sprints(&self) -> u32 {
+        if self.arch_review_every_sprints == 0 {
+            8
+        } else {
+            self.arch_review_every_sprints
+        }
+    }
+}
+
+/// Whether local wall-clock `now` (minutes since midnight) falls inside the
+/// `"HH:MM-HH:MM"` window; supports windows that wrap midnight ("22:00-06:00").
+/// Malformed windows are treated as no window — quiet hours must never be able
+/// to halt a team by typo.
+#[must_use]
+pub fn in_quiet_window(window: &str, now_minutes: u32) -> bool {
+    let Some((a, b)) = window.trim().split_once('-') else {
+        return false;
+    };
+    let parse = |s: &str| -> Option<u32> {
+        let (h, m) = s.trim().split_once(':')?;
+        let (h, m): (u32, u32) = (h.parse().ok()?, m.parse().ok()?);
+        (h < 24 && m < 60).then_some(h * 60 + m)
+    };
+    let (Some(start), Some(end)) = (parse(a), parse(b)) else {
+        return false;
+    };
+    if start == end {
+        return false; // zero-length window means "off", not "always"
+    }
+    if start < end {
+        (start..end).contains(&now_minutes)
+    } else {
+        now_minutes >= start || now_minutes < end
+    }
 }
 
 /// Human-in-the-loop configuration (see docs/HYBRID_TEAM.md).
@@ -274,6 +412,40 @@ pub struct HumanConfig {
     /// Adaptive approval: routine work proceeds with an undo window instead of
     /// waiting for a rubber stamp (docs/ADAPTIVE_APPROVAL.md).
     pub adaptive: AdaptiveConfig,
+    /// Per-user focus windows (CXA-F176), keyed by bare username: while a
+    /// user's window is active, low-urgency questions addressed to them are
+    /// held and flush once as a digest at the window's end instead of
+    /// arriving one interrupt at a time. Absent = deliver immediately
+    /// (the behaviour this feature must not change).
+    #[serde(default)]
+    pub focus_windows: std::collections::BTreeMap<String, FocusWindow>,
+    /// Per-operator working hours (CXA-F234), keyed by bare username: the ONE
+    /// declaration ("Mon–Fri 09:00–17:30 at a fixed UTC offset", weekends off)
+    /// that decides whether a UTC instant is actionable for that operator —
+    /// the question every human-facing delivery decision consults. Absent
+    /// entry = the operator declared nothing and delivery behaves exactly as
+    /// before. Values are validated fail-closed at save
+    /// ([`crate::config_parse::parse_config`] names the offending field), so
+    /// an impossible tz or a malformed range can never load as "no hours".
+    /// Decisions live in [`crate::working_hours`].
+    #[serde(default)]
+    pub working_hours: std::collections::BTreeMap<String, OperatorWorkingHours>,
+}
+
+/// One person's focus-window ("quiet hours") settings (CXA-F176). Every
+/// field defaults, so a pre-existing `coxagent.json` loads unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FocusWindow {
+    /// Window `"HH:MM-HH:MM"` in UTC (same format and midnight-wrap rule as
+    /// [`WorkflowConfig::quiet_hours_utc`], reusing `in_quiet_window`). While
+    /// `now` is inside it, deferrable questions addressed to this user are
+    /// held; the first cycle after it ends flushes them as one digest.
+    /// Malformed = no window — a typo must never be able to hide questions.
+    pub window_utc: String,
+    /// Opt-in switch for defer-to-digest. Off = questions reach this user
+    /// immediately even with a window configured.
+    pub defer_to_digest: bool,
 }
 
 /// See docs/ADAPTIVE_APPROVAL.md. Off by default: a project starts with the
@@ -338,10 +510,24 @@ impl WorkflowConfig {
             self.pr_stale_days
         }
     }
+
+    /// See the `revert_scan_days` field; 0 = default (30 days).
+    #[must_use]
+    pub fn revert_scan_days(&self) -> u64 {
+        if self.revert_scan_days == 0 {
+            30
+        } else {
+            self.revert_scan_days
+        }
+    }
 }
 
 fn default_max_open_prs() -> u32 {
     4
+}
+
+fn default_max_changed_lines() -> usize {
+    3000
 }
 
 fn default_sprint_len() -> u64 {
@@ -350,6 +536,10 @@ fn default_sprint_len() -> u64 {
 
 fn default_sprint_days() -> u64 {
     1
+}
+
+fn default_scope_floor() -> usize {
+    4
 }
 
 fn default_concurrency() -> u32 {
@@ -374,6 +564,7 @@ impl Default for WorkflowConfig {
     fn default() -> Self {
         Self {
             ba_every_n_cycles: 4,
+            dev_scope_floor: default_scope_floor(),
             feature_dev_enabled: true,
             ops_monitor: true,
             sleep_seconds: 30,
@@ -392,6 +583,14 @@ impl Default for WorkflowConfig {
             human: HumanConfig::default(),
             backlog_cap: 0,
             pr_stale_days: 0,
+            revert_scan_days: 0,
+            cadence: CadenceConfig::default(),
+            quiet_hours_utc: String::new(),
+            bug_burn_floor: None,
+            stall_watchdog: true,
+            stall_timeout_secs: 0,
+            stall_hub_timeout_secs: 0,
+            brief_screening: true,
         }
     }
 }
@@ -439,6 +638,7 @@ impl Default for PolicyConfig {
 /// projects deploying with `docker compose` on one host do not fight over the
 /// same published port — agents are told which port to bind.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // config flags, not a state machine
 pub struct DeployConfig {
     /// The host port this project's app should publish (None = agent's choice).
     /// Must be a port a client can connect to: `0` is the kernel's "any free
@@ -454,6 +654,14 @@ pub struct DeployConfig {
     /// the live hub serves.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Self-upgrade (dogfood CD): the hub periodically runs
+    /// `deploy/self-upgrade.sh`, which builds origin/<default_branch> in a
+    /// detached worktree, swaps its OWN binary (backup kept), restarts, and
+    /// rolls back if the new hub fails its health check. The script is a
+    /// detached process so a dying hub cannot orphan its own rescue. Opt-in
+    /// (default off) — only meaningful when the hub manages its own repo.
+    #[serde(default)]
+    pub self_upgrade: bool,
     /// Auto-redeploy the last known-good version when `deploy()` or a
     /// post-deploy `run_tests()` fails, so the shared environment self-heals
     /// instead of staying broken until a DEV agent picks up the bug ticket.
@@ -461,6 +669,23 @@ pub struct DeployConfig {
     /// until an operator turns this on.
     #[serde(default)]
     pub auto_rollback: bool,
+    /// Auto-redeploy the last known-good version when the Ops monitor finds
+    /// the ALREADY-LIVE deployment unhealthy (CXA-F240) — the post-merge
+    /// counterpart of `auto_rollback`, which only covers a deploy/tests
+    /// failure detected in the same cycle that shipped it. This closes the
+    /// gap where CI smoke passed and the deploy looked green, but the stack
+    /// went dead afterwards and sat broken until a human reverted by hand.
+    /// Opt-in (default off) — an existing project's behavior never changes
+    /// until an operator turns this on.
+    #[serde(default)]
+    pub live_health_auto_rollback: bool,
+    /// How many consecutive unhealthy Ops-monitor probes (one per cycle) the
+    /// live app must serve before a `live_health_auto_rollback` fires —
+    /// N consecutive checks, not one flaky probe. The revert itself is still
+    /// bounded by `max_rollback_age_secs` (the allowed window) and the
+    /// migration safety check.
+    #[serde(default = "default_live_health_fail_checks")]
+    pub live_health_fail_checks: u32,
     /// A known-good deploy older than this is considered too stale to roll
     /// back to (the environment may have drifted too far) — rollback is
     /// skipped, not attempted, and the failure just files its bug as before.
@@ -482,6 +707,13 @@ fn default_max_rollback_age_secs() -> u64 {
     3600
 }
 
+/// Three consecutive unhealthy probes (three leader cycles) before a
+/// live-health revert — one dead probe is often a transient network blip,
+/// not a broken stack.
+fn default_live_health_fail_checks() -> u32 {
+    3
+}
+
 fn default_health_check_timeout_secs() -> u64 {
     60
 }
@@ -490,12 +722,30 @@ fn default_migration_detection_paths() -> Vec<String> {
     vec!["migrations".to_owned()]
 }
 
+impl DeployConfig {
+    /// The live reproduction base URL for this project's deployed app
+    /// (CXA-F246): the same `http://127.0.0.1:{host_port}/` base the
+    /// evidence-capture funnel shoots against, derived purely from this
+    /// config — no IO, so any verification surface can resolve it. `None`
+    /// when no `host_port` is configured: an unresolvable link is absent,
+    /// never fabricated. Delegates to
+    /// [`crate::repro_url::compute_live_repro_url`] so the URL format has
+    /// exactly one definition.
+    #[must_use]
+    pub fn live_repro_url(&self) -> Option<String> {
+        crate::repro_url::compute_live_repro_url(self.host_port)
+    }
+}
+
 impl Default for DeployConfig {
     fn default() -> Self {
         Self {
             host_port: None,
             enabled: true,
+            self_upgrade: false,
             auto_rollback: false,
+            live_health_auto_rollback: false,
+            live_health_fail_checks: default_live_health_fail_checks(),
             max_rollback_age_secs: default_max_rollback_age_secs(),
             migration_detection_paths: default_migration_detection_paths(),
             health_check_timeout_secs: default_health_check_timeout_secs(),
@@ -570,12 +820,50 @@ pub struct GitConfig {
     /// the brake that prevents cascade merge conflicts. 0 = unlimited.
     #[serde(default = "default_max_open_prs")]
     pub max_open_prs: u32,
+    /// Largest diff (changed lines) the SA will auto-merge without a human.
+    /// A change larger than this is approved but held for a human to land.
+    /// 0 = no size bound (never hold for size alone). Default 3000.
+    #[serde(default = "default_max_changed_lines")]
+    pub max_changed_lines: usize,
     /// Absolute URL of the hub the runner reports PR/review activity to, e.g.
     /// `http://localhost:4000`. Empty = the runner uses the loopback URL on
     /// `deploy.host_port` (the same hub it serves). The runner authenticates
     /// with an internally-minted token, so no forge secret lives in config.
     #[serde(default)]
     pub server_url: String,
+    /// How many consecutive times the SA reviewer may silently fail to render
+    /// a verdict on a PR (engine crash / unparseable JSON) before the runner
+    /// surfaces it to a human instead of letting the PR starve undistributed.
+    /// Default 4. 0 = never surface the skip (old behaviour).
+    #[serde(default = "default_review_max_skips")]
+    pub review_max_skips: u32,
+    /// How many consecutive review rounds a kept-OPEN hold may be re-logged
+    /// identically (same reason, unchanged head) before the SAME cycle forces
+    /// a terminal decision: land the PR when it is safe to land, otherwise
+    /// close it. The counter lives in `pr_open_holds` (CXA-C026) — without it
+    /// a PR like #605 re-recorded "kept OPEN" eleven cycles in a row.
+    /// Default 3. 0 = holds never expire (the old behaviour).
+    #[serde(default = "default_hold_max_rounds")]
+    pub hold_max_rounds: u32,
+    /// How long (hours) a mergeable CLEAN PR may sit open with NO review
+    /// verdict before the runner stops waiting for the SA and verifies +
+    /// merges it itself (an anti-starvation deadline, only when `auto_merge`
+    /// is on). It still passes `verify_merged_result` and the size/human-eyes
+    /// gates before landing. 0 = disabled (never auto-land a never-reviewed PR).
+    #[serde(default = "default_review_deadline_hours")]
+    pub review_deadline_hours: u32,
+}
+
+fn default_review_max_skips() -> u32 {
+    4
+}
+
+fn default_hold_max_rounds() -> u32 {
+    3
+}
+
+fn default_review_deadline_hours() -> u32 {
+    12
 }
 
 fn default_true() -> bool {
@@ -609,7 +897,11 @@ impl Default for GitConfig {
             auto_merge: false,
             require_ci: true,
             max_open_prs: default_max_open_prs(),
+            max_changed_lines: default_max_changed_lines(),
             server_url: String::new(),
+            review_max_skips: default_review_max_skips(),
+            hold_max_rounds: default_hold_max_rounds(),
+            review_deadline_hours: default_review_deadline_hours(),
         }
     }
 }
@@ -619,12 +911,108 @@ impl Default for GitConfig {
 /// chore. `enabled` is off by default: creating a git tag mutates the managed
 /// codebase's history, so an existing project's release history is never
 /// touched until an operator opts in — the same convention as `GitConfig`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleasesConfig {
     /// Master switch. When false, the cycle never tags or files releases,
     /// no matter how many milestones have been reached.
     #[serde(default)]
     pub enabled: bool,
+    /// Cadence of the automated release cut (days between cuts; 0 = off).
+    /// Every cut scans conventional commits since the last `v*` tag, decides
+    /// the bump (feat → minor, else patch; major is a human call), and opens
+    /// a release PR that a person lands from the Inbox. The merge tags it.
+    #[serde(default)]
+    pub cut_every_days: u64,
+    /// CXA-F231: a cut only carries commit subjects whose ticket refs are in
+    /// the verified-complete set (bugs at `Verified`, features/chores at
+    /// `Done`/`Documented`); unverified or unreferenced subjects are excluded
+    /// with an explicit reason on the SM manifest line. Off restores the
+    /// legacy all-subjects cut during migration.
+    #[serde(default = "default_cut_only_verified")]
+    pub cut_only_verified: bool,
+}
+
+fn default_cut_only_verified() -> bool {
+    true
+}
+
+impl Default for ReleasesConfig {
+    /// `enabled`/`cut_every_days` default OFF (tagging mutates git history, so
+    /// an existing project never releases until an operator opts in);
+    /// `cut_only_verified` defaults ON — an RC silently carrying unverified
+    /// work is the failure mode CXA-F231 removes. Defaults are EXPLICIT
+    /// (COX-B043), never derived zero-values.
+    fn default() -> Self {
+        ReleasesConfig {
+            enabled: false,
+            cut_every_days: 0,
+            cut_only_verified: default_cut_only_verified(),
+        }
+    }
+}
+
+/// Version of the persisted `coxagent.json` schema this build understands.
+///
+/// A document carrying a `schema_version` HIGHER than this is written by a
+/// future build: load refuses it rather than accepting a shape it cannot
+/// represent or defaulting it away (the same fail-closed posture state.json
+/// already has via `SCHEMA_VERSION` / `parse_checked`). Documents that omit
+/// `schema_version` predate the anchor and load as prior-version state.
+pub const CONFIG_SCHEMA_VERSION: u32 = 1;
+
+/// Gap-detection coverage policy. `enabled` switches the coverage gate on/off;
+/// `threshold` is the minimum gap-free depth (in cycles) a codebase must hold
+/// before the pass stops flagging it — the knob the dashboard edits.
+///
+/// COX-B043: defaults are set by an EXPLICIT container `Default`
+/// (`enabled = true, threshold = 3`), never Rust's derived zero-value, so an
+/// unset knob is *documented-and-true*, not silently `{false, 0}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CoverageConfig {
+    #[serde(default = "default_coverage_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_coverage_threshold")]
+    pub threshold: u32,
+}
+
+fn default_coverage_enabled() -> bool {
+    true
+}
+
+fn default_coverage_threshold() -> u32 {
+    3
+}
+
+impl Default for CoverageConfig {
+    fn default() -> Self {
+        CoverageConfig {
+            enabled: default_coverage_enabled(),
+            threshold: default_coverage_threshold(),
+        }
+    }
+}
+
+/// Dependency-health scan policy (CXA-F009).
+///
+/// Like [`CoverageConfig`], defaults come from an EXPLICIT container [`Default`]
+/// (`enabled = true`) so an unset knob is documented-and-on rather than Rust's
+/// derived zero-value silently turning the governance scan off.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DepsConfig {
+    #[serde(default = "default_deps_enabled")]
+    pub enabled: bool,
+}
+
+fn default_deps_enabled() -> bool {
+    true
+}
+
+impl Default for DepsConfig {
+    fn default() -> Self {
+        DepsConfig {
+            enabled: default_deps_enabled(),
+        }
+    }
 }
 
 /// Top-level configuration persisted as `coxagent.json`.
@@ -657,11 +1045,157 @@ pub struct Config {
     /// Release pipeline settings (automated tag + Release chore per milestone).
     #[serde(default)]
     pub releases: ReleasesConfig,
+    /// Gap-detection coverage policy (enabled state + threshold).
+    #[serde(default)]
+    pub coverage: CoverageConfig,
+    /// Per-project artifact-version registry (which build artifacts exist and
+    /// the semver each carries), anchored by
+    /// [`crate::artifacts::ARTIFACT_SCHEMA_VERSION`].
+    #[serde(default)]
+    pub artifacts: ArtifactsConfig,
+    /// Dependency-health scan policy (CXA-F009). When enabled, the periodic
+    /// self-tuning scan reads lock files, flags outdated/vulnerable packages,
+    /// and files remediation tickets against a master 'Dependency Audit' epic.
+    #[serde(default)]
+    pub deps: DepsConfig,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cut_only_verified_defaults_on_and_survives_old_documents() {
+        // CXA-F231: an existing coxagent.json without the knob keeps the
+        // honest-by-default gate ON (documents-old = gate-on, never off).
+        let old = r#"{"releases":{"enabled":true,"cut_every_days":7}}"#;
+        let cfg: serde_json::Value = serde_json::from_str(old).expect("old doc parses");
+        let releases: ReleasesConfig =
+            serde_json::from_value(cfg["releases"].clone()).expect("old releases load");
+        assert!(
+            releases.cut_only_verified,
+            "old documents default the gate on"
+        );
+        // And the explicit opt-out is honored verbatim.
+        let off = r#"{"releases":{"enabled":true,"cut_every_days":7,"cut_only_verified":false}}"#;
+        let cfg: serde_json::Value = serde_json::from_str(off).expect("new doc parses");
+        let releases: ReleasesConfig =
+            serde_json::from_value(cfg["releases"].clone()).expect("new releases load");
+        assert!(!releases.cut_only_verified);
+    }
+
+    #[test]
+    fn quiet_window_handles_wrap_zero_and_garbage() {
+        // Plain window.
+        assert!(in_quiet_window("02:00-07:00", 3 * 60));
+        assert!(!in_quiet_window("02:00-07:00", 8 * 60));
+        // Wraps midnight (VN overnight in UTC).
+        assert!(in_quiet_window("19:00-00:00", 20 * 60));
+        assert!(in_quiet_window("22:00-06:00", 60));
+        assert!(!in_quiet_window("22:00-06:00", 12 * 60));
+        // Zero-length = off; garbage = off (a typo must never halt the team).
+        assert!(!in_quiet_window("07:00-07:00", 7 * 60));
+        assert!(!in_quiet_window("bogus", 0));
+        assert!(!in_quiet_window("25:00-26:00", 0));
+        assert!(!in_quiet_window("", 0));
+    }
+
+    #[test]
+    fn focus_windows_are_additive_and_round_trip() {
+        // A pre-existing human section (CXA-F176 does not exist in it) must
+        // load unchanged: no focus windows, no defer — today's behaviour.
+        let old = r#"{"gate_ready":true,"question_sla_minutes":30}"#;
+        let human: HumanConfig = serde_json::from_str(old).expect("old human config loads");
+        assert!(human.focus_windows.is_empty());
+        assert!(human.gate_ready);
+        assert_eq!(human.question_sla_minutes, 30);
+
+        // A new document round-trips its per-user windows verbatim.
+        let with_window = r#"{"focus_windows":{
+            "luffy":{"window_utc":"09:00-12:00","defer_to_digest":true}
+        }}"#;
+        let human: HumanConfig = serde_json::from_str(with_window).expect("new human config loads");
+        let fw = human
+            .focus_windows
+            .get("luffy")
+            .expect("window keyed by bare username");
+        assert_eq!(fw.window_utc, "09:00-12:00");
+        assert!(fw.defer_to_digest);
+        let rewritten = serde_json::to_string(&human).expect("serialize");
+        let back: HumanConfig = serde_json::from_str(&rewritten).expect("deserialize");
+        assert_eq!(back, human);
+    }
+
+    #[test]
+    fn cut_only_verified_defaults_true_for_documents_without_the_knob() {
+        // CXA-F231: a pre-F231 document (no `cut_only_verified`) loads with
+        // the verification gate ON — an RC silently carrying unverified work
+        // is the failure mode being removed, not the default behaviour.
+        let old = r#"{"enabled":true,"cut_every_days":7}"#;
+        let releases: ReleasesConfig = serde_json::from_str(old).expect("pre-F231 doc loads");
+        assert!(releases.enabled);
+        assert_eq!(releases.cut_every_days, 7);
+        assert!(releases.cut_only_verified);
+
+        // The explicit container default stays documented-true (COX-B043):
+        // releases themselves stay opt-in, the verification gate does not.
+        assert!(!ReleasesConfig::default().enabled);
+        assert_eq!(ReleasesConfig::default().cut_every_days, 0);
+        assert!(ReleasesConfig::default().cut_only_verified);
+    }
+
+    #[test]
+    fn cadence_zeros_mean_defaults() {
+        let c = CadenceConfig::default();
+        assert_eq!(c.docs_refreshes_per_day(), 5);
+        assert_eq!(c.debt_sweep_every_cycles(), 10);
+        assert_eq!(c.arch_review_every_sprints(), 8);
+        let c = CadenceConfig {
+            docs_refreshes_per_day: 2,
+            debt_sweep_every_cycles: 50,
+            arch_review_every_sprints: 3,
+        };
+        assert_eq!(c.docs_refreshes_per_day(), 2);
+        assert_eq!(c.debt_sweep_every_cycles(), 50);
+        assert_eq!(c.arch_review_every_sprints(), 3);
+    }
+
+    /// CXA-F259: a legacy `coxagent.json` without the stall knobs loads with
+    /// the watchdog ON and zero thresholds — serde defaults keep old
+    /// documents parsing, and the zero-means-default resolution lives with
+    /// the predicate (`liveness::stall_threshold` / `stall_escalation`).
+    #[test]
+    fn legacy_document_loads_with_the_watchdog_enabled_and_zero_thresholds() {
+        // The pre-F259 workflow shape: only the then-existing keys, no stall
+        // knobs anywhere.
+        let legacy = r#"{
+            "ba_every_n_cycles": 4,
+            "feature_dev_enabled": true,
+            "sleep_seconds": 30
+        }"#;
+        let wf: WorkflowConfig = serde_json::from_str(legacy).expect("a pre-F259 document loads");
+        assert!(wf.stall_watchdog);
+        assert_eq!(wf.stall_timeout_secs, 0);
+        assert_eq!(wf.stall_hub_timeout_secs, 0);
+        assert_eq!(
+            crate::liveness::stall_threshold(&wf),
+            3600,
+            "zero resolves to the built-in default"
+        );
+        assert_eq!(crate::liveness::stall_escalation(&wf), 14_400);
+
+        // Explicit values win over the defaults, and zero means default.
+        let tuned: WorkflowConfig = serde_json::from_str(
+            r#"{"ba_every_n_cycles":4,"feature_dev_enabled":true,"sleep_seconds":30,"stall_timeout_secs":600}"#,
+        )
+        .expect("tuned");
+        assert_eq!(crate::liveness::stall_threshold(&tuned), 600);
+        let off: WorkflowConfig = serde_json::from_str(
+            r#"{"ba_every_n_cycles":4,"feature_dev_enabled":true,"sleep_seconds":30,"stall_watchdog":false}"#,
+        )
+        .expect("an explicit off is honoured");
+        assert!(!off.stall_watchdog);
+    }
 
     #[test]
     fn resolve_prefers_per_role_override() {
@@ -711,5 +1245,58 @@ mod tests {
 
         assert_eq!(cfg.policy.forbidden_paths, ["infra/"]);
         assert_eq!(cfg.engine.default.model, "sonnet");
+    }
+
+    /// CXA-F028: the bug-burn floor is optional and backward compatible — a
+    /// config document that never mentions it burns every open bug exactly as
+    /// before; naming it picks the minimum severity.
+    #[test]
+    fn bug_burn_floor_is_absent_by_default_and_parses_the_priority_names() {
+        let cfg: Config = serde_json::from_str("{}").expect("legacy config");
+        assert_eq!(
+            cfg.workflow.bug_burn_floor, None,
+            "absent = burn everything"
+        );
+
+        let cfg: Config = serde_json::from_str(
+            r#"{"workflow":{"ba_every_n_cycles":4,"feature_dev_enabled":true,
+                "sleep_seconds":30,"bug_burn_floor":"high"}}"#,
+        )
+        .expect("floor config");
+        assert_eq!(cfg.workflow.bug_burn_floor, Some(Priority::High));
+
+        let cfg: Config = serde_json::from_str(
+            r#"{"workflow":{"ba_every_n_cycles":4,"feature_dev_enabled":true,
+                "sleep_seconds":30,"bug_burn_floor":"low"}}"#,
+        )
+        .expect("floor config");
+        assert_eq!(cfg.workflow.bug_burn_floor, Some(Priority::Low));
+    }
+
+    /// CXA-F246 AC1: the live reproduction URL derives purely from the deploy
+    /// config — `Some(http://127.0.0.1:{host_port}/)` when the port is set
+    /// (the exact base qa_evidence captures against), `None` when absent.
+    #[test]
+    fn live_repro_url_resolves_the_capture_base_when_host_port_is_set() {
+        let deploy = DeployConfig {
+            host_port: Some(8101),
+            ..DeployConfig::default()
+        };
+        assert_eq!(
+            deploy.live_repro_url().as_deref(),
+            Some("http://127.0.0.1:8101/"),
+            "a set deploy.host_port resolves the capture-base URL"
+        );
+    }
+
+    /// CXA-F246 AC1: no configured `host_port` means nothing resolvable — the
+    /// gate is off, and the URL is absent rather than fabricated.
+    #[test]
+    fn live_repro_url_is_none_without_a_host_port() {
+        assert_eq!(
+            DeployConfig::default().live_repro_url(),
+            None,
+            "an absent deploy.host_port resolves nothing"
+        );
     }
 }

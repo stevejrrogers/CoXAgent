@@ -93,6 +93,57 @@ pub(super) fn transcripts_dir(p: &ProjectHandle) -> PathBuf {
         .join("transcripts")
 }
 
+/// GET `/api/projects/:pid/agent-liveness` — ground truth of who is working
+/// RIGHT NOW, read from the live-log files' mtimes (CXA-F386). The worker
+/// registry only updates at claim boundaries, so an in-process engine mid-run
+/// looked idle from outside while its live file grew every second. Returns
+/// entries whose file was written in the last 10 minutes.
+pub(super) async fn agent_liveness_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let base = p.config_path.parent().unwrap_or(&p.config_path);
+    let live_dir = base.join("logs").join("live");
+    let now = std::time::SystemTime::now();
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&live_dir) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            let Some(stem) = name.strip_suffix(".log") else {
+                continue;
+            };
+            let Ok(meta) = e.metadata() else { continue };
+            let age = meta
+                .modified()
+                .ok()
+                .and_then(|m| now.duration_since(m).ok())
+                .map_or(u64::MAX, |d| d.as_secs());
+            if age > 600 || meta.len() < 60 {
+                continue; // stale, or a bare header (a run that never streamed)
+            }
+            // `<role>__<label>__<account>` | `<role>__<account>` | `<role>` —
+            // fields join on DOUBLE underscore; role keys keep their single one.
+            let parts: Vec<&str> = stem.split("__").collect();
+            let (role, label) = match parts.as_slice() {
+                [r, l, _acct] => (*r, Some(*l)),
+                [r, _acct] => (*r, None),
+                [r] => (*r, None),
+                _ => continue,
+            };
+            out.push(serde_json::json!({
+                "role": role,
+                "ticket": label,
+                "age_secs": age,
+            }));
+        }
+    }
+    out.sort_by_key(|v| v["age_secs"].as_u64().unwrap_or(u64::MAX));
+    Json(out).into_response()
+}
+
 #[derive(serde::Deserialize)]
 pub(super) struct AgentLogQuery {
     role: String,
@@ -200,7 +251,9 @@ pub(super) struct AgentLogStreamQuery {
 /// the old 1.5 s polling with push.
 ///
 /// Events:
-///   * `init`   — `{ offset, role, live }` snapshot kick-off (whole current tail)
+///   * `init`   — `{ offset, role, live }` snapshot kick-off, sent on EVERY
+///     fresh open (live:false when the log file is absent/empty — the
+///     client's terminal empty state depends on it)
 ///   * `line`   — one or more new bytes, JSON `{ text }` batched per poll
 ///   * `done`   — file gone / ended, client should close
 ///   * comment  — `: ping` heartbeat every ~15 s to keep proxies alive
@@ -234,11 +287,17 @@ pub(super) async fn agent_log_stream_ep(
     let live_flag = snapshot.trim().len() >= 20 && live.exists();
 
     let mut after = q.after.min(offset);
-    let mut pending = if q.after == 0 {
+    // CXA-B128: a fresh open (after == 0) ALWAYS gets the `init` kick-off —
+    // even when the live log does not exist yet. Withholding init used to
+    // leave the client's work-log panel on its indefinite "loading…"
+    // placeholder forever: no init → no renderAgentLog → no empty state, and
+    // a healthy connection fires no error either. The empty-file init carries
+    // live:false so the client paints its terminal "hasn't run yet" state.
+    let fresh = q.after == 0;
+    let mut pending = if fresh {
         // Fresh open: send the snapshot immediately.
-        let text = snapshot;
         after = offset;
-        text
+        snapshot
     } else {
         // Resume: only send what we haven't delivered yet (fetch now).
         let (tail, _) = read_live_upto(&live, q.after);
@@ -248,25 +307,39 @@ pub(super) async fn agent_log_stream_ep(
     // Tail loop → channel → SSE stream. The engine writes locally so each poll
     // is a cheap `stat` + read; no engine-specific protocol involved.
     let offset_init = offset;
-    let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::response::sse::Event, std::convert::Infallible>>(64);
-    let send_init = !pending.is_empty();
+    let (tx, rx) = tokio::sync::mpsc::channel::<
+        Result<axum::response::sse::Event, std::convert::Infallible>,
+    >(64);
+    let send_init = fresh || !pending.is_empty();
+    let has_snapshot = !pending.is_empty();
     std::thread::spawn(move || {
         let send = |tx: &tokio::sync::mpsc::Sender<_>, e: axum::response::sse::Event| {
             tx.blocking_send(Ok(e)).is_err()
         };
         if send_init {
-            if send(&tx, axum::response::sse::Event::default()
-                .event("init")
-                .data(serde_json::json!({
-                    "offset": offset_init,
-                    "role": role,
-                    "live": live_flag,
-                }).to_string())) {
+            if send(
+                &tx,
+                axum::response::sse::Event::default().event("init").data(
+                    serde_json::json!({
+                        "offset": offset_init,
+                        "role": role,
+                        "live": live_flag,
+                    })
+                    .to_string(),
+                ),
+            ) {
                 return;
             }
-            if send(&tx, axum::response::sse::Event::default()
-                .event("line")
-                .data(serde_json::json!({ "text": std::mem::take(&mut pending) }).to_string())) {
+            // Only a non-empty snapshot becomes a `line`; the init event above
+            // already told the client there is nothing to show yet.
+            if has_snapshot
+                && send(
+                    &tx,
+                    axum::response::sse::Event::default().event("line").data(
+                        serde_json::json!({ "text": std::mem::take(&mut pending) }).to_string(),
+                    ),
+                )
+            {
                 return;
             }
         }
@@ -281,9 +354,12 @@ pub(super) async fn agent_log_stream_ep(
                 let (text, o) = read_live_upto(&live, after);
                 after = o;
                 if !text.is_empty()
-                    && send(&tx, axum::response::sse::Event::default()
-                        .event("line")
-                        .data(serde_json::json!({ "text": text }).to_string()))
+                    && send(
+                        &tx,
+                        axum::response::sse::Event::default()
+                            .event("line")
+                            .data(serde_json::json!({ "text": text }).to_string()),
+                    )
                 {
                     break;
                 }
@@ -366,7 +442,10 @@ mod live_log_tests {
     // would have: role `dev` picking up `dev_feature`'s live log.
     #[test]
     fn role_prefix_does_not_bleed_into_a_longer_role() {
-        assert_eq!(live_role_suffix("dev_feature__cox-f01__root.log", "dev"), None);
+        assert_eq!(
+            live_role_suffix("dev_feature__cox-f01__root.log", "dev"),
+            None
+        );
         assert_eq!(live_role_suffix("developer.log", "dev"), None);
     }
 
