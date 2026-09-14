@@ -154,9 +154,7 @@ pub enum Slot {
 pub fn required_slots(state: TerminalState) -> &'static [Slot] {
     match state {
         TerminalState::Loading => &[Slot::Title],
-        TerminalState::Empty | TerminalState::Zero => {
-            &[Slot::Icon, Slot::Title, Slot::Body]
-        }
+        TerminalState::Empty | TerminalState::Zero => &[Slot::Icon, Slot::Title, Slot::Body],
         TerminalState::Error => &[Slot::Icon, Slot::Title, Slot::Body, Slot::PrimaryAction],
         TerminalState::Ready => &[],
         TerminalState::Attention => &[
@@ -175,8 +173,7 @@ pub fn required_slots(state: TerminalState) -> &'static [Slot] {
 pub fn optional_slots(state: TerminalState) -> &'static [Slot] {
     match state {
         TerminalState::Loading => &[Slot::Body],
-        TerminalState::Empty => &[Slot::SecondaryAction],
-        TerminalState::Error => &[Slot::SecondaryAction],
+        TerminalState::Empty | TerminalState::Error => &[Slot::SecondaryAction],
         TerminalState::Ready => &[Slot::Title, Slot::PrimaryAction, Slot::SecondaryAction],
         TerminalState::Attention | TerminalState::Zero => &[],
     }
@@ -198,7 +195,11 @@ impl PanelDataDependency {
     /// Construct a dependency from the values every entry must state.
     #[must_use]
     pub const fn new(feeds: &'static str, endpoint: &'static str, owner: &'static str) -> Self {
-        Self { feeds, endpoint, owner }
+        Self {
+            feeds,
+            endpoint,
+            owner,
+        }
     }
 }
 
@@ -219,11 +220,28 @@ pub struct OverviewPanel {
 }
 
 /// Shorthand for the shared state sets, kept next to the manifest for review.
-const ALERT_STATES: &[TerminalState] = &[TerminalState::Loading, TerminalState::Ready, TerminalState::Attention];
-const FEED_STATES: &[TerminalState] = &[TerminalState::Loading, TerminalState::Empty, TerminalState::Ready];
+const ALERT_STATES: &[TerminalState] = &[
+    TerminalState::Loading,
+    TerminalState::Ready,
+    TerminalState::Attention,
+];
+const FEED_STATES: &[TerminalState] = &[
+    TerminalState::Loading,
+    TerminalState::Empty,
+    TerminalState::Ready,
+];
 const WORKING_STATES: &[TerminalState] = &[TerminalState::Empty, TerminalState::Ready];
-const KPI_STATES: &[TerminalState] = &[TerminalState::Loading, TerminalState::Zero, TerminalState::Ready];
-const DRAIN_STATES: &[TerminalState] = &[TerminalState::Empty, TerminalState::Ready, TerminalState::Attention, TerminalState::Error];
+const KPI_STATES: &[TerminalState] = &[
+    TerminalState::Loading,
+    TerminalState::Zero,
+    TerminalState::Ready,
+];
+const DRAIN_STATES: &[TerminalState] = &[
+    TerminalState::Empty,
+    TerminalState::Ready,
+    TerminalState::Attention,
+    TerminalState::Error,
+];
 
 /// The manifest: every above-the-fold Overview panel, in DOM order.
 ///
@@ -326,7 +344,11 @@ mod tests {
     fn manifest_ids_are_unique_and_dom_ordered() {
         let ids: Vec<_> = OVERVIEW_PANELS.iter().map(|p| p.id).collect();
         let unique = ids.iter().collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(unique.len(), ids.len(), "duplicate OverviewPanelId in the manifest");
+        assert_eq!(
+            unique.len(),
+            ids.len(),
+            "duplicate OverviewPanelId in the manifest"
+        );
         assert_eq!(
             ids,
             vec![
@@ -356,7 +378,8 @@ mod tests {
                 p.dom_id
             );
             assert!(
-                p.states.iter().all(|s| s.is_terminal()) || p.states.contains(&TerminalState::Loading),
+                p.states.iter().all(|s| s.is_terminal())
+                    || p.states.contains(&TerminalState::Loading),
                 "{}: state set mixes non-terminal states other than Loading",
                 p.dom_id
             );
@@ -379,16 +402,26 @@ mod tests {
             let req = required_slots(state);
             let opt = optional_slots(state);
             for slot in req {
-                assert!(!opt.contains(slot), "{state:?}: {slot:?} both required and optional");
+                assert!(
+                    !opt.contains(slot),
+                    "{state:?}: {slot:?} both required and optional"
+                );
             }
             assert_eq!(
                 req.contains(&Slot::Body),
-                state.requires_reason() || matches!(state, TerminalState::Empty | TerminalState::Zero),
+                state.requires_reason()
+                    || matches!(state, TerminalState::Empty | TerminalState::Zero),
                 "{state:?}: body-copy slot must track whether the state owes a reason or a hint"
             );
         }
-        assert!(required_slots(TerminalState::Ready).is_empty(), "Ready is caller-rendered");
-        assert!(required_slots(TerminalState::Error).contains(&Slot::PrimaryAction), "Error needs the retry action");
+        assert!(
+            required_slots(TerminalState::Ready).is_empty(),
+            "Ready is caller-rendered"
+        );
+        assert!(
+            required_slots(TerminalState::Error).contains(&Slot::PrimaryAction),
+            "Error needs the retry action"
+        );
         assert!(required_slots(TerminalState::Attention).contains(&Slot::SecondaryAction));
     }
 

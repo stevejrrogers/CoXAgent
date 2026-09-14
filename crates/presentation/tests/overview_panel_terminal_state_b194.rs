@@ -38,9 +38,7 @@ fn run_node(script: &str) -> String {
 fn eval_js(expr: &str) -> String {
     let wiring = include_str!("../src/web/js/overview_states.js");
     let shell = include_str!("../src/web/js/terminal_state.js");
-    let script = format!(
-        "const window=globalThis;\n{shell}\n{wiring}\n;({expr})"
-    );
+    let script = format!("const window=globalThis;\n{shell}\n{wiring}\n;({expr})");
     run_node(&script)
 }
 

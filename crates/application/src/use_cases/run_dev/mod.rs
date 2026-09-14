@@ -1027,9 +1027,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 }
                 return Ok(Some(id));
             }
-            if self.mode == DevMode::Bug
-                && gates::build_relevant(&tree.changed_paths).is_empty()
-            {
+            if self.mode == DevMode::Bug && gates::build_relevant(&tree.changed_paths).is_empty() {
                 let msg = format!(
                     "{id}: not reproducible — DEV ran against a green tree and produced no \
                      code change. The bug does not reproduce on main (likely already resolved \
