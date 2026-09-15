@@ -6,6 +6,7 @@
 pub mod artifact;
 pub mod coverage;
 pub mod debt;
+pub mod depth;
 pub mod error;
 pub mod events;
 pub mod goal;
