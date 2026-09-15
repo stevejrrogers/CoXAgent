@@ -110,8 +110,10 @@ fn unescape_json(s: &str) -> String {
 
 #[test]
 fn the_module_is_served_by_the_router_and_loaded_by_the_shell() {
+    // Format-agnostic: rustfmt may split the tuple across lines.
     assert!(
-        SERVER.contains(r#"("terminal_state.js", include_str!("../web/js/terminal_state.js"))"#),
+        SERVER.contains(r#""terminal_state.js""#)
+            && SERVER.contains(r#"include_str!("../web/js/terminal_state.js")"#),
         "server/mod.rs must embed terminal_state.js as a served asset"
     );
     let core = INDEX_HTML
