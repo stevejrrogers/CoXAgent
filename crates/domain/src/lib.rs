@@ -15,6 +15,8 @@ pub mod overview_panel;
 pub mod panel;
 /// Panel terminal-state contract (CXA-B192) — pure types + transition fn.
 pub mod panel_terminal_state;
+/// Per-panel terminal-state contract core (CXA-B252) — pure value types.
+pub mod terminal_state;
 pub mod test_case;
 pub mod ticket;
 pub mod transitions;
