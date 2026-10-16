@@ -674,13 +674,31 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
         tracing::info!("oversize split: briefing SA to split {id}");
         self.report("SA", &format!("splitting oversize {id}"));
+        // CXA-F420c: in a multi-service project the SA must split ALONG the
+        // service boundary — producer first, consumer second, one service per
+        // subtask (spec R5/§5). Single-service projects render nothing.
+        let services = self.config.effective_services("");
+        let services_note = {
+            let block = crate::prompts::services_block(&services);
+            if block.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "{block}CROSS-SERVICE RULE: a subtask may touch ONE service only \
+                     (set its \"service_tag\"). If the work spans services, order the \
+                     chain along the dependency edge: the producer change (plus its \
+                     release/tag) FIRST, the consumer's pin bump + adaptation SECOND.\n"
+                )
+            }
+        };
         let brief = format!(
             "Ticket {id} (\"{title}\") died TWICE at the agent loop's iteration/token \
              cap — it does not fit one run and must be SPLIT, not re-approached. \
-             Failure log:\n{failures}\n\nReply with STRICT JSON only — an array of 2 \
+             Failure log:\n{failures}\n{services_note}\nReply with STRICT JSON only — an array of 2 \
              or 3 subtasks, each an object {{\"title\": string, \"description\": string \
              (what to build AND how to verify, self-contained), \
-             \"acceptance_criteria\": [string, ...], \"complexity\": \"small\"|\"medium\"}}. \
+             \"acceptance_criteria\": [string, ...], \"complexity\": \"small\"|\"medium\", \
+             \"service_tag\": string (optional — the service the subtask's code lives in)}}. \
              Order them so each builds on the previous. Each subtask must be \
              completable in ~50 loop iterations. No prose outside the JSON. \
              Do NOT run tools or explore the repository — reply IMMEDIATELY \
@@ -741,11 +759,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let vi = self.config.workflow.language.is_vi();
         let id_owned = id.to_owned();
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
-            let (ptype, parent_tid, parent_priority) = {
+            let (ptype, parent_tid, parent_priority, parent_service) = {
                 let Some(parent) = s.tickets.iter().find(|t| t.id().to_string() == id_owned) else {
                     return Ok(());
                 };
-                (parent.ticket_type(), parent.id().clone(), parent.priority())
+                (
+                    parent.ticket_type(),
+                    parent.id().clone(),
+                    parent.priority(),
+                    parent.service_tag().map(ToOwned::to_owned),
+                )
             };
             let mut prev: Option<coxagent_domain::TicketId> = None;
             let mut child_ids: Vec<String> = Vec::new();
@@ -771,6 +794,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 };
                 child.stamp_created_at(crate::state::now_rfc3339());
                 child.set_acceptance_criteria(sub.acceptance_criteria.clone());
+                // CXA-F420c: the subtask's own service wins; otherwise the
+                // child inherits the parent's tag (untagged = default service).
+                let tag = if sub.service_tag.trim().is_empty() {
+                    parent_service.clone()
+                } else {
+                    Some(sub.service_tag.trim().to_owned())
+                };
+                if let Some(tag) = tag {
+                    let _ = child.set_service_tag(coxagent_domain::Role::Sa, &tag);
+                }
                 let _ = child.set_parent(coxagent_domain::Role::Sa, parent_tid.clone());
                 if let Some(prev_id) = &prev {
                     let _ = child.add_dependency(coxagent_domain::Role::Sa, prev_id.clone());
@@ -827,6 +860,10 @@ struct ProposedSubtask {
     acceptance_criteria: Vec<String>,
     #[serde(default)]
     complexity: String,
+    /// Service this subtask's code lives in (CXA-F420c); "" = inherit the
+    /// parent's tag (and ultimately the project's default service).
+    #[serde(default)]
+    service_tag: String,
 }
 
 /// Parse the SA's reply into subtasks: strict JSON preferred, salvaged from

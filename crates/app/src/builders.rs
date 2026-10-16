@@ -466,6 +466,17 @@ async fn build_project_inner(
         }
     };
 
+    // CXA-F420a.2: per-service slot pools. With one service (every legacy
+    // project), the filter stays None and nothing changes. With several, each
+    // runner is bound to exactly one service's tickets and repo.
+    let active_services: Vec<_> = config
+        .effective_services(work_dir.to_string_lossy().as_ref())
+        .into_iter()
+        .filter(|svc| svc.status == "active")
+        .collect();
+    let default_service_filter =
+        (active_services.len() > 1).then(|| active_services[0].name.clone());
+
     // Leader runner: singleton phases (BA, PO, standup, etc.)
     {
         // The leader's feedback-fix / SA-rescue git ops get their OWN worktree,
@@ -489,6 +500,7 @@ async fn build_project_inner(
             coxagent_infrastructure::screenshot::ChromeScreenshot,
         )))
         .with_probe(Some(Arc::new(coxagent_infrastructure::probe::HttpProbe)))
+        .with_service(default_service_filter.clone())
         // CXA-F273: the leader owns the eviction sweep; without a cold store
         // the sweep is a no-op and the hot state simply keeps growing.
         .with_archive(build_archive_store().await)
@@ -629,6 +641,7 @@ async fn build_project_inner(
             slot_dir,
             context.clone(),
         )
+        .with_service(default_service_filter.clone())
         // Co-located slots never compete for the machine's leader lease —
         // rotation across slots produced the scorecard-numbering and
         // version-ping-pong bugs. Machine-level election (slot 0) remains,
@@ -674,6 +687,81 @@ async fn build_project_inner(
         } else {
             // Same-process hub: reviews/holds/latency write straight to the
             // shared store — the Null fallback silently dropped them all.
+            worker.with_reporter(Arc::new(
+                coxagent_application::ports::outbound::StorePrReporter::new(Arc::clone(&store)
+                    as Arc<dyn coxagent_application::ports::outbound::StateStorePort>),
+            ))
+        };
+        let wh = Arc::clone(&handle);
+        tokio::spawn(async move { run_forever(wh, worker, Duration::from_secs(5)).await });
+    }
+
+    // CXA-F420a.2: one DEV worker per EXTRA active service, bound to that
+    // service's repo and ticket set. The default service keeps the classic
+    // slot pool above; a service whose clone is missing is skipped loudly
+    // (cloning is the F420b wizard's job, not boot's).
+    for svc in active_services.iter().skip(1) {
+        let svc_repo = std::path::PathBuf::from(&svc.work_dir);
+        if svc.work_dir.is_empty() || !svc_repo.exists() {
+            tracing::warn!(
+                "[{id}] service '{}' has no clone at '{}' — skipping its worker \
+                 (run the F420b onboarding probe, or clone it and restart)",
+                svc.name,
+                svc.work_dir
+            );
+            continue;
+        }
+        let slot_dir = worktree_at(svc_repo, &format!("{id}-{}-slot-1", svc.name));
+        tracing::info!(
+            "[{id}] service '{}' worker on {}",
+            svc.name,
+            slot_dir.display()
+        );
+        let worker = RunCycleUseCase::new(
+            Arc::clone(&store),
+            engine.clone(),
+            config.clone(),
+            slot_dir,
+            context.clone(),
+        )
+        .with_service(Some(svc.name.clone()))
+        .with_leader_election(false)
+        .with_meter(meter.clone())
+        .with_live_budget(Arc::clone(&live_budget))
+        .with_deploy(Arc::new(DockerComposeDeploy::new()))
+        .with_host_port_probe(host_port_probe)
+        .with_shot(Some(Arc::new(
+            coxagent_infrastructure::screenshot::ChromeScreenshot,
+        )))
+        .with_probe(Some(Arc::new(coxagent_infrastructure::probe::HttpProbe)))
+        .with_storage(Some(build_storage().await.unwrap_or_else(|| {
+            Arc::new(coxagent_infrastructure::storage::LocalStorage::new(
+                std::env::var_os("HOME")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_default()
+                    .join("CoXAgent")
+                    .join("blobs"),
+            ))
+        })))
+        .with_git(Arc::new(coxagent_infrastructure::SystemGit::new()))
+        .with_files(Some(Arc::new(
+            coxagent_infrastructure::FsWorkspaceFiles::new(),
+        )))
+        .with_janitor(Some(Arc::new(coxagent_infrastructure::OsProcessJanitor)))
+        .with_reloader(mk_reloader());
+        let worker = if let Some(ref f) = forge {
+            worker.with_forge(Arc::clone(f))
+        } else {
+            worker
+        };
+        let worker = worker.with_notifier(build_notifier(
+            Arc::clone(&store),
+            webhook.clone(),
+            Arc::clone(&outbox),
+        ));
+        let worker = if let Some(r) = build_pr_reporter(&config, auth, id, id).await {
+            worker.with_reporter(r)
+        } else {
             worker.with_reporter(Arc::new(
                 coxagent_application::ports::outbound::StorePrReporter::new(Arc::clone(&store)
                     as Arc<dyn coxagent_application::ports::outbound::StateStorePort>),
