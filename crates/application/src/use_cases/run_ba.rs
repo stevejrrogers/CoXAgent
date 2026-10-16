@@ -151,6 +151,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
         // Hoisted out of the task_prompt's format! args (clippy: format in
         // format args) — same single allocation the inner format! made.
         let backlog_and_surface = format!("{backlog_block}{surface_block}");
+        // CXA-F420b: a multi-service project tells the BA which services
+        // exist, so tickets mint with the right service_tag. Single-service
+        // projects render nothing — the prompt is unchanged.
+        let services_block = prompts::services_block(&self.config.effective_services(""));
         let request = AgentRequest {
             role: Role::Ba,
             system_prompt: prompts::system_prompt(prompts::BA),
@@ -159,10 +163,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
                  here (same or similar title/scope):\n{}\n\nPropose only genuinely NEW features \
                  that are not already covered above. When the project already has code (see the \
                  repo map below), propose features that fit the existing stack and structure — \
-                 concrete, grounded in what's there, not generic.{}{}{}",
+                 concrete, grounded in what's there, not generic.{}{}{}{}",
                 self.context,
                 sprint_goal_block(&existing.sprint_goal),
                 backlog_and_surface,
+                services_block,
                 prompts::repo_map_block(self.files.as_deref(), &self.work_dir, true).await,
                 knowledge,
                 prompts::team_memory_block(&existing.decisions, &existing.lessons)
