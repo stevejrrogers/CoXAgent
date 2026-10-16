@@ -184,10 +184,41 @@ Respond with ONLY a JSON array, no prose, each item exactly:\n\
 \"acceptance_criteria\": [string, ...], \"service_tag\": string}\n\
 acceptance_criteria: 2-5 concrete, testable statements (incl. key edge cases) that \
 define when the feature is done — user-visible behaviour, not implementation.\n\
-service_tag: OPTIONAL — omit the field unless the feature is shared infrastructure \
-or a shared service that EVERY project on this hub legitimately needs (e.g. \"infra\", \
-\"ci\", \"platform\"); a short lowercase tag, no spaces. Ordinary project-local \
-features must NOT carry one.";
+service_tag: the SERVICE this ticket's code lives in, chosen from the \
+'Services in this project' list in the task when one is given (CXA-F420). With \
+one service, or when unsure, omit the field — an untagged ticket belongs to the \
+default service.";
+
+/// The active services of a multi-service project, rendered for intake-stage
+/// prompts so tickets are minted with the right `service_tag` (CXA-F420b).
+/// Empty (single-service project) renders nothing — prompts stay byte-for-byte
+/// what they were before F420.
+#[must_use]
+pub fn services_block(services: &[crate::config::ServiceConfig]) -> String {
+    use std::fmt::Write as _;
+    let active: Vec<_> = services.iter().filter(|s| s.status == "active").collect();
+    if active.len() < 2 {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\n\nServices in this project — set service_tag to the one each ticket's \
+         code lives in (the FIRST is the default for untagged tickets):\n",
+    );
+    for s in active {
+        let scope = if s.scopes.is_empty() {
+            String::new()
+        } else {
+            format!(" (owns: {})", s.scopes.join(", "))
+        };
+        let repo = if s.repo.is_empty() {
+            "this repository".to_owned()
+        } else {
+            s.repo.clone()
+        };
+        let _ = writeln!(out, "- {} — {repo}{scope}", s.name);
+    }
+    out
+}
 
 /// Solution Architect — produces the technical design for one feature. UX is
 /// owned by the PD in a separate pass.
@@ -1353,6 +1384,31 @@ pub fn stack_constraints(rules: &[crate::conformance::StackRule]) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn services_block_renders_only_for_multi_service_projects() {
+        let svc = |name: &str, status: &str| crate::config::ServiceConfig {
+            name: name.into(),
+            repo: String::new(),
+            work_dir: String::new(),
+            scopes: Vec::new(),
+            build_cmd: String::new(),
+            test_cmd: String::new(),
+            status: status.into(),
+        };
+        // Single service (every legacy project): byte-for-byte nothing.
+        assert_eq!(super::services_block(&[svc("main", "active")]), "");
+        // Two active + one paused: both actives listed, paused omitted.
+        let out = super::services_block(&[
+            svc("hub", "active"),
+            svc("harxes", "active"),
+            svc("old", "paused"),
+        ]);
+        assert!(out.contains("- hub"));
+        assert!(out.contains("- harxes"));
+        assert!(!out.contains("- old"));
+        assert!(out.contains("FIRST is the default"));
+    }
     use super::{deploy_constraints, design_constraints, extract_brief_notes, repo_map_block};
     use crate::config::DeployConfig;
     use crate::state::DesignSystem;
