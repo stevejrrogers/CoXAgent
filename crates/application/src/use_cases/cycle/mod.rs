@@ -182,6 +182,9 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     /// Polled between phases: `true` = the user pressed Pause, stop starting
     /// new phases and end this cycle early. `None` (tests/headless) = never.
     pause_check: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// Service this runner's DEV legs are bound to (CXA-F420a.2); `None` =
+    /// single-service project, no filtering.
+    service: Option<String>,
     /// Whether this runner competes for the project leader lease (default
     /// true). Worker slots co-located with a primary runner set false — see
     /// the election comment in `run_cycle`.
@@ -249,6 +252,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             phase: None,
             reloader: None,
             pause_check: None,
+            service: None,
             leader_election: true,
             phase_track: Mutex::new((None, std::collections::BTreeMap::new())),
             worker: String::new(),

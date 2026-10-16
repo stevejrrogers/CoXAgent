@@ -1058,11 +1058,180 @@ pub struct Config {
     /// and files remediation tickets against a master 'Dependency Audit' epic.
     #[serde(default)]
     pub deps: DepsConfig,
+    /// Code services this project owns (CXA-F420). Empty = legacy single-repo
+    /// project; [`Config::effective_services`] applies the silent migration.
+    #[serde(default)]
+    pub services: Vec<ServiceConfig>,
+}
+
+/// One code service a project owns (CXA-F420): the unit of code ownership
+/// and gating. A legacy single-repo project is one implicit service — see
+/// [`Config::effective_services`] (rule R1 of the spec: migration is silent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceConfig {
+    /// Unique name within the project; the value tickets carry in
+    /// `service_tag` (R2).
+    pub name: String,
+    /// Git remote of the service's repository ("" = the project's own repo).
+    #[serde(default)]
+    pub repo: String,
+    /// Hub-managed clone this service's worktrees are cut from ("" = the
+    /// project's default `work_dir`).
+    #[serde(default)]
+    pub work_dir: String,
+    /// Monorepo folders this service owns (R4). Empty = the whole repo.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// Build command the probe/gate runs ("" = project default).
+    #[serde(default)]
+    pub build_cmd: String,
+    /// Test command the probe/gate runs ("" = project default).
+    #[serde(default)]
+    pub test_cmd: String,
+    /// Lifecycle: `onboarding | active | needs-setup | paused | archived`.
+    /// Only `active` services receive tickets and worktrees.
+    #[serde(default = "default_service_status")]
+    pub status: String,
+}
+
+fn default_service_status() -> String {
+    "active".to_owned()
+}
+
+impl Config {
+    /// The services this project runs, with the R1 silent migration applied:
+    /// a document without a `services` section IS a one-service project whose
+    /// implicit service ("main") inherits the legacy project-level settings.
+    /// `default_work_dir` is the project's managed clone, which the config
+    /// document itself does not know (it lives in the hub registry).
+    #[must_use]
+    pub fn effective_services(&self, default_work_dir: &str) -> Vec<ServiceConfig> {
+        if self.services.is_empty() {
+            return vec![ServiceConfig {
+                name: "main".to_owned(),
+                repo: String::new(),
+                work_dir: default_work_dir.to_owned(),
+                scopes: Vec::new(),
+                build_cmd: String::new(),
+                test_cmd: String::new(),
+                status: "active".to_owned(),
+            }];
+        }
+        self.services.clone()
+    }
+
+    /// Resolve a ticket's `service_tag` to its service (R2). An absent or
+    /// unknown tag belongs to the FIRST service — legacy tickets keep working
+    /// unchanged, and a typo'd tag degrades to the default repo instead of
+    /// stranding the ticket.
+    #[must_use]
+    pub fn resolve_service<'a>(
+        services: &'a [ServiceConfig],
+        tag: Option<&str>,
+    ) -> Option<&'a ServiceConfig> {
+        let active = |s: &&ServiceConfig| s.status == "active";
+        match tag {
+            Some(t) => services
+                .iter()
+                .find(|s| s.name == t && s.status == "active")
+                .or_else(|| services.iter().find(active)),
+            None => services.iter().find(active),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_document_is_one_implicit_active_service() {
+        // R1: a coxagent.json written before CXA-F420 has no `services`
+        // section; it must load as one active "main" service carrying the
+        // project's default work_dir — silently, with no migration step.
+        let cfg: Config = serde_json::from_str("{}").expect("empty doc loads");
+        assert!(cfg.services.is_empty());
+        let eff = cfg.effective_services("/hub/cxa/codebase");
+        assert_eq!(eff.len(), 1);
+        assert_eq!(eff[0].name, "main");
+        assert_eq!(eff[0].work_dir, "/hub/cxa/codebase");
+        assert_eq!(eff[0].status, "active");
+    }
+
+    #[test]
+    fn declared_services_round_trip_and_default_to_active() {
+        let doc = r#"{"services":[
+            {"name":"hub","work_dir":"/w/hub"},
+            {"name":"engine","repo":"git@x:org/engine.git","status":"needs-setup"}
+        ]}"#;
+        let cfg: Config = serde_json::from_str(doc).expect("doc loads");
+        let eff = cfg.effective_services("/ignored");
+        assert_eq!(eff.len(), 2);
+        assert_eq!(eff[0].status, "active", "status defaults to active");
+        assert_eq!(eff[1].status, "needs-setup");
+    }
+
+    #[test]
+    fn resolve_service_honors_tag_and_degrades_safely() {
+        let services = vec![
+            ServiceConfig {
+                name: "hub".into(),
+                status: "active".into(),
+                ..blank_service()
+            },
+            ServiceConfig {
+                name: "engine".into(),
+                status: "active".into(),
+                ..blank_service()
+            },
+            ServiceConfig {
+                name: "paused-one".into(),
+                status: "paused".into(),
+                ..blank_service()
+            },
+        ];
+        // Tagged → its service.
+        let hit = Config::resolve_service(&services, Some("engine")).expect("engine");
+        assert_eq!(hit.name, "engine");
+        // Untagged (legacy ticket) → first ACTIVE service.
+        assert_eq!(
+            Config::resolve_service(&services, None).unwrap().name,
+            "hub"
+        );
+        // Unknown tag degrades to the default service, never strands.
+        assert_eq!(
+            Config::resolve_service(&services, Some("typo"))
+                .unwrap()
+                .name,
+            "hub"
+        );
+        // A paused service is never resolved, even when tagged directly.
+        assert_eq!(
+            Config::resolve_service(&services, Some("paused-one"))
+                .unwrap()
+                .name,
+            "hub"
+        );
+        // No active services at all → None (caller decides what to do).
+        let all_paused = vec![ServiceConfig {
+            name: "x".into(),
+            status: "paused".into(),
+            ..blank_service()
+        }];
+        assert!(Config::resolve_service(&all_paused, None).is_none());
+    }
+
+    fn blank_service() -> ServiceConfig {
+        ServiceConfig {
+            name: String::new(),
+            repo: String::new(),
+            work_dir: String::new(),
+            scopes: Vec::new(),
+            build_cmd: String::new(),
+            test_cmd: String::new(),
+            status: String::new(),
+        }
+    }
 
     #[test]
     fn cut_only_verified_defaults_on_and_survives_old_documents() {
