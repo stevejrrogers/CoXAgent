@@ -145,6 +145,16 @@ fn non_blank(raw: impl Into<String>, field: &'static str) -> Result<String, Doma
     Ok(raw)
 }
 
+impl super::PanelTerminalState for DrainBannerTerminalState {
+    fn panel_id(&self) -> crate::overview_panel::OverviewPanelId {
+        crate::overview_panel::OverviewPanelId::OvDrain
+    }
+
+    fn terminal_state(&self) -> TerminalState {
+        TerminalState::from(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,8 +205,19 @@ mod tests {
                 source: "GET /api/prs".to_owned(),
             }
         );
+        // Core Succeeded carries no PR count: the inverse reconstructs at
+        // the documented zero point.
         let back = DrainBannerTerminalState::try_from(&core).expect("Succeeded round-trips");
-        assert_eq!(back, panel);
+        assert_eq!(
+            back,
+            DrainBannerTerminalState::succeeded(
+                "2026-02-24T10:00:00Z".to_owned(),
+                "GET /api/prs",
+                GreenPrCount::new(0),
+            )
+            .expect("source is non-blank")
+        );
+        assert_ne!(back, panel, "the count itself is panel-only payload");
     }
 
     #[test]

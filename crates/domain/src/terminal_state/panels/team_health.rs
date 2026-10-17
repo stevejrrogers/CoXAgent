@@ -198,6 +198,16 @@ fn non_blank(raw: impl Into<String>, field: &'static str) -> Result<String, Doma
     Ok(raw)
 }
 
+impl super::PanelTerminalState for TeamHealthTerminalState {
+    fn panel_id(&self) -> crate::overview_panel::OverviewPanelId {
+        crate::overview_panel::OverviewPanelId::OvHealth
+    }
+
+    fn terminal_state(&self) -> TerminalState {
+        TerminalState::from(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

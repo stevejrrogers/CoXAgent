@@ -49,10 +49,12 @@ mod conformance {
     /// the trait fails HERE (single conformance test, CXA-B253 AC2).
     macro_rules! assert_implements_contract {
         ($($ty:ty),+ $(,)?) => {
+            fn _conforms<S: PanelTerminalState>(
+                state: &S,
+            ) -> (OverviewPanelId, TerminalState) {
+                (state.panel_id(), state.terminal_state())
+            }
             $(
-                fn _conforms<S: PanelTerminalState>(state: &S) -> (OverviewPanelId, TerminalState) {
-                    (state.panel_id(), state.terminal_state())
-                }
                 let _ = _conforms::<$ty>;
             )+
         };

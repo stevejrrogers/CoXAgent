@@ -181,6 +181,16 @@ fn non_blank(raw: impl Into<String>, field: &'static str) -> Result<String, Doma
     Ok(raw)
 }
 
+impl super::PanelTerminalState for ReleasesFeedTerminalState {
+    fn panel_id(&self) -> crate::overview_panel::OverviewPanelId {
+        crate::overview_panel::OverviewPanelId::OvChangelog
+    }
+
+    fn terminal_state(&self) -> TerminalState {
+        TerminalState::from(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

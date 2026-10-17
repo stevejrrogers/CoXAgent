@@ -129,10 +129,7 @@ impl AlertStripTerminalState {
     ///
     /// # Errors
     /// Returns [`crate::DomainError::Empty`] when `cause` is blank.
-    pub fn failed(
-        cause: impl Into<String>,
-        retryable: bool,
-    ) -> Result<Self, crate::DomainError> {
+    pub fn failed(cause: impl Into<String>, retryable: bool) -> Result<Self, crate::DomainError> {
         Ok(Self::Failed {
             cause: non_blank(cause, "alert_strip_cause")?,
             retryable,
@@ -200,11 +197,22 @@ fn non_blank(raw: impl Into<String>, field: &'static str) -> Result<String, Doma
     Ok(raw)
 }
 
+impl super::PanelTerminalState for AlertStripTerminalState {
+    fn panel_id(&self) -> crate::overview_panel::OverviewPanelId {
+        crate::overview_panel::OverviewPanelId::OvAlerts
+    }
+
+    fn terminal_state(&self) -> TerminalState {
+        TerminalState::from(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn alert(n: u32) -> OperatorAlert {
+        let _ = n;
         OperatorAlert::new(
             "budget",
             "amber",
@@ -213,27 +221,42 @@ mod tests {
             "spend-scan",
             "2026-02-24T10:00:00Z",
         )
-        .unwrap_or_else(|_| alert_fallback(n))
-    }
-
-    fn alert_fallback(n: u32) -> OperatorAlert {
-        OperatorAlert {
-            kind: format!("budget-{n}"),
-            severity: "amber".to_owned(),
-            title: "Budget nearly reached".to_owned(),
-            detail: "80% of $50".to_owned(),
-            triggered_by: "spend-scan".to_owned(),
-            at: "2026-02-24T10:00:00Z".to_owned(),
-        }
+        .expect("all fields are non-blank")
     }
 
     #[test]
     fn an_empty_alert_list_is_not_a_success() {
         assert_eq!(
-            AlertStripTerminalState::succeeded("2026-02-24T10:00:00Z".to_owned(), "snapshot", vec![]),
+            AlertStripTerminalState::succeeded(
+                "2026-02-24T10:00:00Z".to_owned(),
+                "snapshot",
+                vec![],
+            ),
             Err(crate::DomainError::Empty {
                 field: "alert_strip_alerts"
             })
+        );
+    }
+
+    #[test]
+    fn a_succeeded_strip_round_trips_through_the_core_state() {
+        let state = AlertStripTerminalState::succeeded(
+            "2026-02-24T10:00:00Z".to_owned(),
+            "snapshot",
+            vec![alert(1)],
+        )
+        .expect("one alert is non-empty");
+        let core = TerminalState::from(state.clone());
+        assert!(matches!(core, TerminalState::Succeeded { .. }));
+        // The inverse reconstructs Skipped/Failed at their zero point;
+        // Succeeded payloads are panel-only, so the core state alone
+        // cannot rebuild them — exercise both round-tripping arms.
+        let failed = AlertStripTerminalState::failed("the snapshot poll threw", true)
+            .expect("cause is non-blank");
+        let core_failed = TerminalState::from(failed.clone());
+        assert_eq!(
+            AlertStripTerminalState::try_from(&core_failed),
+            Ok(failed.clone())
         );
     }
 
@@ -252,7 +275,7 @@ mod tests {
     #[test]
     fn a_blank_cause_is_refused() {
         assert_eq!(
-            AlertStripTerminalState::failed("  ", true, "2026-02-24T10:00:00Z".to_owned()),
+            AlertStripTerminalState::failed("  ", true),
             Err(crate::DomainError::Empty {
                 field: "alert_strip_cause"
             })
@@ -266,12 +289,8 @@ mod tests {
         assert!(matches!(core, TerminalState::Skipped { .. }));
         assert_eq!(AlertStripTerminalState::try_from(&core), Ok(skipped));
 
-        let failed = AlertStripTerminalState::failed(
-            "the snapshot poll threw",
-            true,
-            "2026-02-24T10:01:00Z".to_owned(),
-        )
-        .expect("cause is non-blank");
+        let failed = AlertStripTerminalState::failed("the snapshot poll threw", true)
+            .expect("cause is non-blank");
         let core = TerminalState::from(failed.clone());
         assert!(matches!(core, TerminalState::Failed { .. }));
         assert_eq!(AlertStripTerminalState::try_from(&core), Ok(failed));
