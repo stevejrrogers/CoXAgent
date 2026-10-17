@@ -80,6 +80,114 @@
     return "error";
   }
 
+  // ------------------------------------------------------------------
+  // Empty-state depth (CXA-B271). ALL empty-state copy lives in
+  // EMPTY_COPY — one reviewable file is the rule (this module), so the
+  // guidance, filtered-echo, pagination and denial strings stay auditable
+  // in a single place next to the per-panel hints above. Templates use
+  // LITERAL {token} placeholders filled by fillTpl(); an unfilled token
+  // stays visible so missing data is caught by eyes and tests, never
+  // silently blanked.
+  // ------------------------------------------------------------------
+  var EMPTY_COPY = {
+    noDataTitle: "Nothing here yet",
+    countsLine: " ({counts})",
+    filteredTitle: "Nothing matches the current filter",
+    filteredEcho: 'Active filter: "{filter}".',
+    filteredTotal: "{total} entries exist without the filter.",
+    sortKept: "Still sorted by {sort} — clearing the filter keeps the sort.",
+    clearFilter: "Clear filter",
+    pageTitle: "No results on page {page}",
+    pageBody: "{total} entries in total — page {page} is past the end ({pages} pages).",
+    backToPage: "Back to page {page}",
+    denyDefault: "you do not have permission for this action",
+  };
+
+  // Fill literal {token} placeholders; an unknown token survives visibly.
+  function fillTpl(tpl, params) {
+    return String(tpl).replace(/\{([a-z]+)\}/g, function (_, t) {
+      var v = params ? params[t] : undefined;
+      return v === undefined ? "{" + t + "}" : String(v);
+    });
+  }
+
+  // Which empty variant applies, decided PURELY from the detail the caller
+  // hands over — no DOM, no IO: a window past its end beats an active
+  // filter (both can be set at once); anything else is the plain no-data
+  // state whose hint already says what fills the panel.
+  function emptyVariantOf(d) {
+    if (!d || typeof d !== "object") return "no-data";
+    if (
+      typeof d.page === "number" &&
+      typeof d.pageSize === "number" &&
+      d.pageSize > 0 &&
+      typeof d.total === "number" &&
+      d.page > Math.max(1, Math.ceil(d.total / d.pageSize))
+    )
+      return "past-end-page";
+    if (d.filter) return "filtered";
+    return "no-data";
+  }
+
+  // Permission wrapper: a DENIED action KEEPS its affordance and carries
+  // the why (deniedWhy). Dimming happens at paint time (renderPhase →
+  // dimEmptyActions); the label is never dropped from the spec.
+  function authorizedAction(action, permission) {
+    if (!action || !permission || permission.allowed !== false) return action;
+    var out = {};
+    for (var k in action)
+      if (Object.prototype.hasOwnProperty.call(action, k)) out[k] = action[k];
+    out.unauthorizedReason = permission.deniedWhy || EMPTY_COPY.denyDefault;
+    return out;
+  }
+
+  // The empty spec, per variant. `detail` (optional) is the caller's
+  // view-model slice: { counts, filter, total, sort, page, pageSize,
+  // onClearFilter, onBack, permission }.
+  function emptySpec(panelKey, detail) {
+    var p = PANELS[panelKey];
+    var spec = {
+      state: "empty",
+      icon: { ti: "inbox" },
+      title: EMPTY_COPY.noDataTitle,
+      body: p.hint,
+      panelId: p.domId,
+    };
+    if (!detail || typeof detail !== "object") return spec;
+
+    var variant = emptyVariantOf(detail);
+    if (variant === "filtered") {
+      spec.title = EMPTY_COPY.filteredTitle;
+      spec.body =
+        fillTpl(EMPTY_COPY.filteredEcho, { filter: detail.filter }) +
+        (detail.total != null
+          ? " " + fillTpl(EMPTY_COPY.filteredTotal, { total: detail.total })
+          : "") +
+        (detail.sort ? " " + fillTpl(EMPTY_COPY.sortKept, { sort: detail.sort }) : "");
+      spec.secondary = authorizedAction(
+        { label: EMPTY_COPY.clearFilter, onClick: detail.onClearFilter || null },
+        detail.permission
+      );
+    } else if (variant === "past-end-page") {
+      var pages = Math.max(1, Math.ceil(detail.total / detail.pageSize));
+      spec.title = fillTpl(EMPTY_COPY.pageTitle, { page: detail.page });
+      spec.body = fillTpl(EMPTY_COPY.pageBody, {
+        total: detail.total,
+        page: detail.page,
+        pages: pages,
+      });
+      spec.secondary = authorizedAction(
+        { label: fillTpl(EMPTY_COPY.backToPage, { page: pages }), onClick: detail.onBack || null },
+        detail.permission
+      );
+    } else if (detail.counts) {
+      // Plain no-data with sibling data in scope: surface the total so the
+      // zero state is never a context-free blank.
+      spec.body += fillTpl(EMPTY_COPY.countsLine, { counts: detail.counts });
+    }
+    return spec;
+  }
+
   // Map any failure shape to { reason, retryable, kind }. Unknown shapes
   // degrade to a retryable network cause — a failure is never swallowed.
   function errorFrom(err) {
@@ -99,17 +207,6 @@
   // the title names the data dependency, never a bare load marker.
   function loadingSpec(panelKey) {
     return { state: "loading", title: "Loading " + PANELS[panelKey].dep + "…", panelId: PANELS[panelKey].domId };
-  }
-
-  // The empty spec: icon + title + the what-fills-this hint.
-  function emptySpec(panelKey) {
-    return {
-      state: "empty",
-      icon: { ti: "inbox" },
-      title: "Nothing here yet",
-      body: PANELS[panelKey].hint,
-      panelId: PANELS[panelKey].domId,
-    };
   }
 
   // The error spec: the body IS the real cause (attribution); the primary
@@ -153,9 +250,26 @@
     );
   }
 
+  // Dim every action of an already-painted EMPTY state whose permission
+  // says denied (CXA-B271): the affordance stays visible and labelled —
+  // never hidden — and carries the why as tooltip + data attribute.
+  function dimEmptyActions(host, permission) {
+    if (!permission || permission.allowed !== false) return;
+    var why = permission.deniedWhy || "you do not have permission for this action";
+    Array.prototype.forEach.call(
+      host.querySelectorAll(".ts-actions [data-ts-slot]"),
+      function (btn) {
+        if (btn.disabled !== undefined) btn.disabled = true;
+        btn.setAttribute("data-ts-dimmed", "1");
+        btn.setAttribute("title", why);
+        if (btn.style) btn.style.opacity = "0.45";
+      }
+    );
+  }
+
   // Render `phase` for `panelKey` into its host element. READY is the
   // caller's affair (returns "ready" without painting); the shell owns the
-  // other three. details: { error, when, retryable }.
+  // other three. details: { error, when, retryable, emptyDetail }.
   // `hostEl` (optional) lets a caller that already holds the host element —
   // the retry path, or a DOM-less guard test — paint without a document.
   function renderPhase(panelKey, phase, details, hostEl) {
@@ -169,7 +283,8 @@
       return phase;
     }
     if (phase === "empty") {
-      window.TerminalState.paint(host, emptySpec(panelKey));
+      window.TerminalState.paint(host, emptySpec(panelKey, d.emptyDetail));
+      dimEmptyActions(host, d.emptyDetail && d.emptyDetail.permission);
       return phase;
     }
     // error
@@ -225,6 +340,9 @@
     errorFrom: errorFrom,
     loadingSpec: loadingSpec,
     emptySpec: emptySpec,
+    emptyVariantOf: emptyVariantOf,
+    authorizedAction: authorizedAction,
+    EMPTY_COPY: EMPTY_COPY,
     errorSpec: errorSpec,
     attributionHtml: attributionHtml,
     renderPhase: renderPhase,
