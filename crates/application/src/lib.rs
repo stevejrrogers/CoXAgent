@@ -5,6 +5,7 @@
 
 pub mod archive_read;
 pub mod artifacts;
+pub mod attribution_invariants;
 pub mod auth;
 pub mod backlog_import;
 pub mod backlog_scoping;
@@ -52,6 +53,8 @@ pub mod verify_cache;
 pub mod wiki_views;
 pub mod working_hours;
 
+#[cfg(test)]
+mod attribution_tests;
 #[cfg(test)]
 mod release_candidates_tdd_tests;
 
