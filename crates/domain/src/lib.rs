@@ -11,6 +11,7 @@ pub mod events;
 pub mod goal;
 pub mod ids;
 pub mod kinds;
+pub mod overview_panel;
 pub mod panel;
 pub mod test_case;
 pub mod ticket;
@@ -25,6 +26,7 @@ pub use error::DomainError;
 pub use events::{DesignPart, DomainEvent, EventKind};
 pub use goal::{Goal, GoalStatus};
 pub use ids::{GoalId, TicketId, WorkerId};
+pub use overview_panel::OverviewPanelId;
 // Value objects (kind/priority/sizing/status/role) come from `kinds`; the
 // aggregate and its design structs come from `ticket`.
 pub use kinds::{Complexity, InterventionKind, Priority, Role, Status, TicketType};
