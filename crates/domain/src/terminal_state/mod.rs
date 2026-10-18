@@ -19,12 +19,12 @@
 //!   file per panel, each embedding the core enum plus that panel's payload,
 //!   under the shared [`panels::PanelTerminalState`] contract.
 //!
-//! Purity contract for the whole module: std-only, zero IO, zero external
-//! crates; constructors are pure functions returning `Result` on invariant
-//! violation; only std traits are derived (`Debug`, `Clone`, `PartialEq`,
-//! `Eq`, `Hash`) plus `Display`. Serialization is deliberately deferred to
-//! part 3. The guard tests in `tests/terminal_state_contract_b252.rs` keep
-//! the module that pure.
+//! Purity contract for the whole module: std-only at runtime, zero IO; the
+//! ONLY external-crate touchpoints are `serde` derive attributes applied to
+//! the value types following the codebase's existing serde-derive convention
+//! (serialization, CXA-B254 part 3/3). Constructors remain pure functions
+//! returning `Result` on invariant violation. The guard tests in
+//! `tests/terminal_state_contract_b252.rs` keep the module that pure.
 
 pub mod core;
 pub mod failure;

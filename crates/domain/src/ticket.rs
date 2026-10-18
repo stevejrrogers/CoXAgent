@@ -959,10 +959,11 @@ mod tests {
                 ..
             })
         ));
-        assert!(matches!(
-            t.set_service_tag(Role::Sa, "infra"),
-            Err(DomainError::FieldNotPermitted { .. })
-        ));
+        // The SA may tag since CXA-F420c: an oversize split along a service
+        // boundary stamps each subtask with the service its code lives in.
+        t.set_service_tag(Role::Sa, "engine")
+            .expect("SA tags split children");
+        assert_eq!(t.service_tag(), Some("engine"));
         t.set_service_tag(Role::Ba, "  infra  ").expect("BA stamps");
         assert_eq!(t.service_tag(), Some("infra"), "value is trimmed");
         t.set_service_tag(Role::Po, "ci").expect("PO may amend");
