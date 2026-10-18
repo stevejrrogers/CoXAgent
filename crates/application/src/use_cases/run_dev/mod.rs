@@ -54,6 +54,9 @@ pub struct RunDevUseCase<S: StateStorePort, E: AgentEnginePort> {
     config: Config,
     work_dir: PathBuf,
     mode: DevMode,
+    /// When set, only tickets resolving to this service are candidates
+    /// (CXA-F420a.2 — per-service slot pools, spec R2/R3).
+    service: Option<String>,
     /// Identity of this runner (`account@host`) recorded as the ticket's claim
     /// owner, so concurrent runners never work the same ticket.
     worker: String,
@@ -89,7 +92,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             git: None,
             files: None,
             context: None,
+            service: None,
         }
+    }
+
+    /// Bind this runner to one service (CXA-F420a.2): `Some(name)` makes
+    /// [`Self::candidates`] skip tickets that resolve to another service, so a
+    /// per-service slot pool only works its own repo. `None` = single-service
+    /// project, no filtering — exactly the pre-F420 behaviour.
+    #[must_use]
+    pub fn with_service(mut self, service: Option<String>) -> Self {
+        self.service = service;
+        self
     }
 
     /// Attach workspace file access, used to stat dirty paths for the green
@@ -1027,9 +1041,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 }
                 return Ok(Some(id));
             }
-            if self.mode == DevMode::Bug
-                && gates::build_relevant(&tree.changed_paths).is_empty()
-            {
+            if self.mode == DevMode::Bug && gates::build_relevant(&tree.changed_paths).is_empty() {
                 let msg = format!(
                     "{id}: not reproducible — DEV ran against a green tree and produced no \
                      code change. The bug does not reproduce on main (likely already resolved \
@@ -1361,6 +1373,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         // to an open sprint is out of scope — DEV must ask to have it added
         // before picking it up.
         ids.retain(|id| crate::selection::in_dev_scope(state, id));
+        // Per-service pool filter (CXA-F420a.2): a slot bound to a service
+        // only works tickets that RESOLVE to it — the resolver, not the raw
+        // tag, so untagged legacy tickets stay with the default service and a
+        // typo'd tag degrades instead of stranding (spec R2).
+        if let Some(mine) = &self.service {
+            let services = self.config.effective_services("");
+            ids.retain(|id| {
+                state.ticket(id).is_some_and(|t| {
+                    crate::config::Config::resolve_service(&services, t.service_tag())
+                        .is_some_and(|svc| svc.name == *mine)
+                })
+            });
+        }
         ids
     }
 }
@@ -1601,6 +1626,63 @@ mod tests {
         // The version does NOT move on ticket completion — releases own it.
         assert_eq!(state.current_version.to_string(), "0.0.0");
         assert!(next_ready_feature(&state).is_none());
+    }
+
+    #[tokio::test]
+    async fn service_bound_runner_skips_other_services_tickets() {
+        // CXA-F420a.2: two active services; a runner bound to "engine" must
+        // skip the untagged ticket (it resolves to the FIRST service, "hub")
+        // and work only the one tagged for it.
+        let mut cfg = Config::default();
+        cfg.services = vec![
+            crate::config::ServiceConfig {
+                name: "hub".into(),
+                repo: String::new(),
+                work_dir: String::new(),
+                scopes: Vec::new(),
+                build_cmd: String::new(),
+                test_cmd: String::new(),
+                status: "active".into(),
+            },
+            crate::config::ServiceConfig {
+                name: "engine".into(),
+                repo: String::new(),
+                work_dir: String::new(),
+                scopes: Vec::new(),
+                build_cmd: String::new(),
+                test_cmd: String::new(),
+                status: "active".into(),
+            },
+        ];
+        let untagged = ready_feature("FEAT-001");
+        let mut tagged = ready_feature("FEAT-002");
+        tagged.set_service_tag(Role::Ba, "engine").expect("tag");
+        let store = Arc::new(MemStore {
+            state: Mutex::new(ProjectState {
+                tickets: vec![untagged, tagged],
+                ..ProjectState::default()
+            }),
+        });
+        let uc = RunDevUseCase::new(
+            Arc::clone(&store),
+            Arc::new(OkEngine),
+            cfg.clone(),
+            PathBuf::from("/tmp"),
+            DevMode::Feature,
+        )
+        .with_service(Some("engine".to_owned()));
+        let done = Box::pin(uc.execute()).await.expect("run");
+        assert_eq!(done.expect("some").as_str(), "FEAT-002");
+        // And the unbound (legacy) runner still sees the untagged ticket.
+        let uc = RunDevUseCase::new(
+            Arc::clone(&store),
+            Arc::new(OkEngine),
+            cfg,
+            PathBuf::from("/tmp"),
+            DevMode::Feature,
+        );
+        let done = Box::pin(uc.execute()).await.expect("run");
+        assert_eq!(done.expect("some").as_str(), "FEAT-001");
     }
 
     #[tokio::test]

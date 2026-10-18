@@ -1206,6 +1206,7 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
             coverage: coxagent_application::config::CoverageConfig::default(),
             artifacts: coxagent_application::config::ArtifactsConfig::default(),
             deps: DepsConfig::default(),
+            services: Vec::new(),
         },
         logs_dir(&base),
         None,

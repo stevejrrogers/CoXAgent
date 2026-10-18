@@ -56,6 +56,7 @@ pub enum OverviewPanelId {
 
 impl OverviewPanelId {
     /// The panel's stable DOM id (the `id=` attribute it renders into).
+    #[must_use]
     pub const fn dom_id(self) -> &'static str {
         match self {
             Self::OvDrain => "ov-drain",
@@ -108,7 +109,10 @@ mod tests {
     /// distinct mounts, not two spellings of one panel.
     #[test]
     fn dom_ids_are_unique() {
-        let ids: Vec<_> = OverviewPanelId::RENDER_ORDER.iter().map(|p| p.dom_id()).collect();
+        let ids: Vec<_> = OverviewPanelId::RENDER_ORDER
+            .iter()
+            .map(|p| p.dom_id())
+            .collect();
         let mut sorted = ids.clone();
         sorted.sort_unstable();
         sorted.dedup();

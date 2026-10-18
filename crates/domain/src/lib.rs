@@ -13,6 +13,10 @@ pub mod ids;
 pub mod kinds;
 pub mod overview_panel;
 pub mod panel;
+/// Panel terminal-state contract (CXA-B192) — pure types + transition fn.
+pub mod panel_terminal_state;
+/// Per-panel terminal-state contract core (CXA-B252) — pure value types.
+pub mod terminal_state;
 pub mod test_case;
 pub mod ticket;
 pub mod transitions;
@@ -30,6 +34,7 @@ pub use overview_panel::OverviewPanelId;
 // Value objects (kind/priority/sizing/status/role) come from `kinds`; the
 // aggregate and its design structs come from `ticket`.
 pub use kinds::{Complexity, InterventionKind, Priority, Role, Status, TicketType};
+pub use overview_panel::OverviewPanelId;
 pub use panel::{
     Panel, PanelLayoutSlot, PanelListing, PanelRegistry, PanelRegistryError, PanelVisibility,
     UnknownSlot,
