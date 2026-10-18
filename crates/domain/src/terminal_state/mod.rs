@@ -14,10 +14,7 @@
 //! * [`core`] — the [`TerminalState`] enum (the five terminal states part 1
 //!   froze, payloads moved into the variants) and its pure semantics;
 //! * [`failure`] — the validated payload value objects ([`FailureReason`],
-//!   [`FillHint`]);
-//! * [`panels`] — the per-panel terminal states (CXA-B253, part 2/3): one
-//!   file per panel, each embedding the core enum plus that panel's payload,
-//!   under the shared [`panels::PanelTerminalState`] contract.
+//!   [`FillHint`]).
 //!
 //! Purity contract for the whole module: std-only at runtime, zero IO; the
 //! ONLY external-crate touchpoints are `serde` derive attributes applied to
@@ -28,7 +25,6 @@
 
 pub mod core;
 pub mod failure;
-pub mod panels;
 
 pub use core::TerminalState;
 pub use failure::{FailureReason, FillHint};

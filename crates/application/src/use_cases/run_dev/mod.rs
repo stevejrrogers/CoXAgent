@@ -1629,7 +1629,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_bound_runner_skips_other_services_tickets() {
+async fn service_bound_runner_skips_other_services_tickets() {
         // CXA-F420a.2: two active services; a runner bound to "engine" must
         // skip the untagged ticket (it resolves to the FIRST service, "hub")
         // and work only the one tagged for it.
@@ -1637,21 +1637,11 @@ mod tests {
         cfg.services = vec![
             crate::config::ServiceConfig {
                 name: "hub".into(),
-                repo: String::new(),
-                work_dir: String::new(),
-                scopes: Vec::new(),
-                build_cmd: String::new(),
-                test_cmd: String::new(),
-                status: "active".into(),
+                ..Default::default()
             },
             crate::config::ServiceConfig {
                 name: "engine".into(),
-                repo: String::new(),
-                work_dir: String::new(),
-                scopes: Vec::new(),
-                build_cmd: String::new(),
-                test_cmd: String::new(),
-                status: "active".into(),
+                ..Default::default()
             },
         ];
         let untagged = ready_feature("FEAT-001");

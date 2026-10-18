@@ -6,7 +6,6 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod cli;
-pub mod depth_registry;
 pub mod middleware;
 pub mod overview_panels;
 pub mod server;

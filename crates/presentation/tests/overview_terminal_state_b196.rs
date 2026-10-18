@@ -9,6 +9,18 @@
 //! ships for `e2e`; the tests never start a server and never touch a network
 //! port: they render strings and count slots in them.
 
+// Test scratch-parsing of shipped JS/HTML bytes: an `expect` here fails the
+// test loudly, which is exactly what a guardrail should do (repo convention).
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::explicit_into_iter_loop,
+    clippy::needless_borrows_for_generic_args,
+    clippy::too_many_arguments,
+    clippy::uninlined_format_args,
+    clippy::needless_raw_string_hashes
+)]
+
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -150,19 +162,19 @@ fn js_contract_mirrors_the_frozen_rust_manifest() {
         let name = state.name();
         for slot in required_slots(state) {
             assert!(
-                out.contains(&format!("\"{}\":[", slot_key(slot)))
-                    || out.contains(&format!("\",\"{}\"", slot_key(slot)))
-                    || out.contains(&format!("[\"{}", slot_key(slot))),
+                out.contains(&format!("\"{}\":[", slot_key(*slot)))
+                    || out.contains(&format!("\",\"{}\"", slot_key(*slot)))
+                    || out.contains(&format!("[\"{}", slot_key(*slot))),
                 "JS REQUIRED[{name}] missing Rust-required slot {}:\n{out}",
-                slot_key(slot)
+                slot_key(*slot)
             );
         }
         for slot in optional_slots(state) {
             assert!(
-                out.contains(&format!("\",\"{}\"", slot_key(slot)))
-                    || out.contains(&format!("[\"{}", slot_key(slot))),
+                out.contains(&format!("\",\"{}\"", slot_key(*slot)))
+                    || out.contains(&format!("[\"{}", slot_key(*slot))),
                 "JS OPTIONAL[{name}] missing Rust-optional slot {}:\n{out}",
-                slot_key(slot)
+                slot_key(*slot)
             );
         }
         let expect_role = if state.requires_reason() {
@@ -177,7 +189,7 @@ fn js_contract_mirrors_the_frozen_rust_manifest() {
     }
 }
 
-fn slot_key(slot: &Slot) -> &'static str {
+fn slot_key(slot: Slot) -> &'static str {
     match slot {
         Slot::Icon => "icon",
         Slot::Title => "title",
@@ -188,7 +200,7 @@ fn slot_key(slot: &Slot) -> &'static str {
 }
 
 /// Slot name → the `data-ts-slot` the renderer stamps on that element.
-fn dom_slot(slot: &Slot) -> &'static str {
+fn dom_slot(slot: Slot) -> &'static str {
     slot_key(slot)
 }
 
@@ -234,10 +246,10 @@ fn every_state_renders_its_required_slots_and_announces_correctly() {
         );
         for slot in required_slots(state) {
             assert!(
-                html.contains(&format!(r#"data-ts-slot="{}""#, dom_slot(slot))),
+                html.contains(&format!(r#"data-ts-slot="{}""#, dom_slot(*slot))),
                 "{:?}: required slot {} not rendered\n{html}",
                 state,
-                slot_key(slot)
+                slot_key(*slot)
             );
         }
         let want_role = if state.requires_reason() {
@@ -437,15 +449,19 @@ fn all_html_is_escaped_including_panel_id() {
 
 #[test]
 fn every_manifest_panel_state_combination_renders_with_its_dom_id() {
-    for p in panel(OverviewPanelId::Drain).into_iter().chain(
-        panel(OverviewPanelId::Alerts)
-            .into_iter()
-            .chain(panel(OverviewPanelId::Working).into_iter())
-            .chain(panel(OverviewPanelId::Kpis).into_iter())
-            .chain(panel(OverviewPanelId::Health).into_iter())
-            .chain(panel(OverviewPanelId::RecentActivity).into_iter())
-            .chain(panel(OverviewPanelId::Releases).into_iter()),
-    ) {
+    let all_panels = [
+        OverviewPanelId::Drain,
+        OverviewPanelId::Alerts,
+        OverviewPanelId::Working,
+        OverviewPanelId::Kpis,
+        OverviewPanelId::Health,
+        OverviewPanelId::RecentActivity,
+        OverviewPanelId::Releases,
+    ];
+    for p in all_panels
+        .into_iter()
+        .filter_map(|id| panel(id).into_iter().next())
+    {
         for state in p.states {
             let spec = match state {
                 TerminalState::Ready => format!(

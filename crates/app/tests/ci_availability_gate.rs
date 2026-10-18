@@ -77,13 +77,23 @@ const QUALITY_GATES: [(&str, &[&str]); 2] = [
 const GUARD_TESTS_JOB: &str = "guard-tests";
 
 /// The gate commands the guard job must run, as exact run-payload substrings.
-const GUARD_TESTS_STEPS: [&str; 3] = [
+const GUARD_TESTS_STEPS: [&str; 2] = [
     "cargo test -p coxagent-infrastructure --lib reclaimable",
     "cargo test -p coxagent-app --test deploy_smoke --test ci_availability_gate \
      --test test_env_guard_f326_gate",
-    // CXA-B250 (CXA-B188c): the depth gate joins the guard job — this pin
-    // makes its removal a red wiring guard, not a silent unhooking.
-    "cargo test -p coxagent-app --test depth_gate",
+];
+
+/// The Overview-panel guardrail gate steps (CXA-B199.3): the named
+/// presentation + application guardrail suites the `guard-tests` job must
+/// run so a violated panel invariant fails the build. The hexagonal gate's
+/// grandfather list does not apply here — these suites are additive-only.
+const GUARDRAIL_GATE_STEPS: [&str; 2] = [
+    "cargo test -p coxagent-presentation --test guardrail_scaffold_b201 \
+     --test overview_kpis_panel_b199 --test overview_activity_panel_b199 \
+     --test overview_alerts_panel_b199 --test overview_deploy_health_panel_b199 \
+     --test overview_drain_panel_b199 --test overview_working_strip_b199",
+    "cargo test -p coxagent-application --test overview_fold_guardrails_b181 \
+     --test overview_attention_panel_b181 --test overview_deploy_panel_b181",
 ];
 
 /// The job that runs the `#[ignore]`d DSN-gated integration tests (F326) —
@@ -238,6 +248,18 @@ fn why_guard_tests_not_wired(src: &str) -> Result<(), String> {
             "the guard tests are pure decisions over names and labels — \
              `{run}` needs a docker daemon a runner may not have"
         ));
+    }
+    // CXA-B199.3: the Overview-panel guardrail suites ride the same job —
+    // the named regression gate that fails the build on any violated panel
+    // invariant (terminal states, attribution, depth).
+    for step in GUARDRAIL_GATE_STEPS {
+        if !runs.iter().any(|r| r.contains(step)) {
+            return Err(format!(
+                "`{GUARD_TESTS_JOB}` no longer runs the CXA-B199.3 guardrail \
+                 gate step `{step}` — the Overview panel invariants are no \
+                 longer build-enforced"
+            ));
+        }
     }
     Ok(())
 }
@@ -593,7 +615,8 @@ jobs:
     steps:
       - run: cargo test -p coxagent-infrastructure --lib reclaimable
       - run: cargo test -p coxagent-app --test deploy_smoke --test ci_availability_gate --test test_env_guard_f326_gate
-      - run: cargo test -p coxagent-app --test depth_gate
+      - name: Overview panel guardrails (CXA-B199.3 regression gate)
+        run: cargo test -p coxagent-presentation --test guardrail_scaffold_b201 --test overview_kpis_panel_b199 --test overview_activity_panel_b199 --test overview_alerts_panel_b199 --test overview_deploy_health_panel_b199 --test overview_drain_panel_b199 --test overview_working_strip_b199 && cargo test -p coxagent-application --test overview_fold_guardrails_b181 --test overview_attention_panel_b181 --test overview_deploy_panel_b181
   integration:
     name: integration (ephemeral cxa_test postgres + redis)
     runs-on: ubuntu-latest
