@@ -13,14 +13,14 @@
 //! (attribution is shipped by [`AlertStripTerminalState::skipped`], not
 //! invented here).
 
-use crate::DomainError;
 use crate::terminal_state::{FailureReason, FillHint, TerminalState};
+use crate::DomainError;
 
 /// One operator alert, as the strip renders it (`core.js:173–179`: a
 /// severity color, a title, a detail line). Attribution travels WITH the
 /// alert — `triggered_by`/`at` — because an alert strip that can't say why
 /// it's red is a bare zero, not a terminal state.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct OperatorAlert {
     /// Which rule family raised it (`deploy-failed`, `budget`,
     /// `open-bugs`, `reverted-work`).
@@ -62,7 +62,7 @@ impl OperatorAlert {
 }
 
 /// The alert strip's terminal state.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum AlertStripTerminalState {
     /// ≥1 operator alert, each with its full attribution.
     Succeeded {
@@ -79,7 +79,8 @@ pub enum AlertStripTerminalState {
         /// Why the strip is empty (always [`FailureReason::NoData`]).
         reason: FailureReason,
         /// The mandatory "what fills this panel" hint.
-        hint: FillHint,    },
+        hint: FillHint,
+    },
     /// The strip could not be evaluated.
     Failed {
         /// Non-blank human cause (core invariant).
@@ -124,7 +125,6 @@ impl AlertStripTerminalState {
         }
     }
 
-
     /// Terminal failure.
     ///
     /// # Errors
@@ -141,9 +141,7 @@ impl From<&AlertStripTerminalState> for TerminalState {
     fn from(panel: &AlertStripTerminalState) -> Self {
         match panel {
             AlertStripTerminalState::Succeeded {
-                fetched_at,
-                source,
-                ..
+                fetched_at, source, ..
             } => Self::Succeeded {
                 fetched_at: fetched_at.clone(),
                 source: source.clone(),
@@ -152,10 +150,7 @@ impl From<&AlertStripTerminalState> for TerminalState {
                 reason: *reason,
                 hint: hint.clone(),
             },
-            AlertStripTerminalState::Failed {
-                cause,
-                retryable,
-            } => Self::Failed {
+            AlertStripTerminalState::Failed { cause, retryable } => Self::Failed {
                 cause: cause.clone(),
                 retryable: *retryable,
             },
@@ -174,8 +169,16 @@ impl TryFrom<&TerminalState> for AlertStripTerminalState {
 
     fn try_from(core: &TerminalState) -> Result<Self, Self::Error> {
         match core {
-            TerminalState::Skipped { reason, hint } if *reason == FailureReason::NoData => Ok(Self::Skipped { reason: *reason, hint: hint.clone() }),
-            TerminalState::Failed { cause, retryable } => Ok(Self::Failed { cause: cause.clone(), retryable: *retryable }),
+            TerminalState::Skipped { reason, hint } if *reason == FailureReason::NoData => {
+                Ok(Self::Skipped {
+                    reason: *reason,
+                    hint: hint.clone(),
+                })
+            }
+            TerminalState::Failed { cause, retryable } => Ok(Self::Failed {
+                cause: cause.clone(),
+                retryable: *retryable,
+            }),
             // Succeeded core cannot rebuild the payload (documented
             // projection: Skipped/Failed/Cancelled reconstruct at their zero
             // point; TimedOut and non-NoData Skipped are unrepresentable) —
@@ -266,7 +269,10 @@ mod tests {
         match &state {
             AlertStripTerminalState::Skipped { reason, hint, .. } => {
                 assert_eq!(*reason, FailureReason::NoData);
-                assert_eq!(hint.as_str(), FillHint::for_reason(FailureReason::NoData).as_str());
+                assert_eq!(
+                    hint.as_str(),
+                    FillHint::for_reason(FailureReason::NoData).as_str()
+                );
             }
             other => panic!("expected Skipped, got {other:?}"),
         }

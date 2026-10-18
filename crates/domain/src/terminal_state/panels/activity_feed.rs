@@ -11,13 +11,13 @@
 //! `Skipped` with [`FailureReason::NoData`] and the default fill hint;
 //! `Failed` is the snapshot read failing.
 
-use crate::DomainError;
 use crate::terminal_state::{FailureReason, FillHint, TerminalState};
+use crate::DomainError;
 
 /// One activity entry as the feed renders it (`core.js:589–596`): who did
 /// what, when, and where it landed — attribution IS the payload here, so
 /// every field is mandatory.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ActivityEntry {
     /// The actor (`ARCHITECT`, `SA`, `human:ana`…).
     pub actor: String,
@@ -56,7 +56,7 @@ impl ActivityEntry {
 }
 
 /// The activity feed's terminal state.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ActivityFeedTerminalState {
     /// ≥1 activity entry.
     Succeeded {
@@ -120,15 +120,11 @@ impl ActivityFeedTerminalState {
         }
     }
 
-
     /// Terminal failure.
     ///
     /// # Errors
     /// Returns [`crate::DomainError::Empty`] when `cause` is blank.
-    pub fn failed(
-        cause: impl Into<String>,
-        retryable: bool,
-    ) -> Result<Self, crate::DomainError> {
+    pub fn failed(cause: impl Into<String>, retryable: bool) -> Result<Self, crate::DomainError> {
         Ok(Self::Failed {
             cause: non_blank(cause, "activity_feed_cause")?,
             retryable,
@@ -140,9 +136,7 @@ impl From<&ActivityFeedTerminalState> for TerminalState {
     fn from(panel: &ActivityFeedTerminalState) -> Self {
         match panel {
             ActivityFeedTerminalState::Succeeded {
-                fetched_at,
-                source,
-                ..
+                fetched_at, source, ..
             } => Self::Succeeded {
                 fetched_at: fetched_at.clone(),
                 source: source.clone(),
@@ -151,10 +145,7 @@ impl From<&ActivityFeedTerminalState> for TerminalState {
                 reason: *reason,
                 hint: hint.clone(),
             },
-            ActivityFeedTerminalState::Failed {
-                cause,
-                retryable,
-            } => Self::Failed {
+            ActivityFeedTerminalState::Failed { cause, retryable } => Self::Failed {
                 cause: cause.clone(),
                 retryable: *retryable,
             },
@@ -173,8 +164,16 @@ impl TryFrom<&TerminalState> for ActivityFeedTerminalState {
 
     fn try_from(core: &TerminalState) -> Result<Self, Self::Error> {
         match core {
-            TerminalState::Skipped { reason, hint } if *reason == FailureReason::NoData => Ok(Self::Skipped { reason: *reason, hint: hint.clone() }),
-            TerminalState::Failed { cause, retryable } => Ok(Self::Failed { cause: cause.clone(), retryable: *retryable }),
+            TerminalState::Skipped { reason, hint } if *reason == FailureReason::NoData => {
+                Ok(Self::Skipped {
+                    reason: *reason,
+                    hint: hint.clone(),
+                })
+            }
+            TerminalState::Failed { cause, retryable } => Ok(Self::Failed {
+                cause: cause.clone(),
+                retryable: *retryable,
+            }),
             // Succeeded core cannot rebuild the payload (documented
             // projection: Skipped/Failed/Cancelled reconstruct at their zero
             // point; TimedOut and non-NoData Skipped are unrepresentable) —
@@ -223,14 +222,20 @@ mod tests {
 
     #[test]
     fn a_blank_summary_is_refused() {
-        assert!(ActivityEntry::new("DEV-FEATURE", "claimed", " ", None, "2026-02-24T10:00:00Z")
-            .is_err());
+        assert!(
+            ActivityEntry::new("DEV-FEATURE", "claimed", " ", None, "2026-02-24T10:00:00Z")
+                .is_err()
+        );
     }
 
     #[test]
     fn an_empty_entry_list_is_not_a_success() {
         assert_eq!(
-            ActivityFeedTerminalState::succeeded("2026-02-24T10:00:00Z".to_owned(), "snapshot", vec![]),
+            ActivityFeedTerminalState::succeeded(
+                "2026-02-24T10:00:00Z".to_owned(),
+                "snapshot",
+                vec![]
+            ),
             Err(crate::DomainError::Empty {
                 field: "activity_feed_entries"
             })
@@ -239,12 +244,14 @@ mod tests {
 
     #[test]
     fn skipped_is_no_data_with_the_default_hint() {
-        let state =
-            ActivityFeedTerminalState::skipped();
+        let state = ActivityFeedTerminalState::skipped();
         match &state {
             ActivityFeedTerminalState::Skipped { reason, hint, .. } => {
                 assert_eq!(*reason, FailureReason::NoData);
-                assert_eq!(hint.as_str(), FillHint::for_reason(FailureReason::NoData).as_str());
+                assert_eq!(
+                    hint.as_str(),
+                    FillHint::for_reason(FailureReason::NoData).as_str()
+                );
             }
             other => panic!("expected Skipped, got {other:?}"),
         }

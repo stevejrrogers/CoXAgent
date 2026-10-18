@@ -47,7 +47,7 @@ use super::failure::{FailureReason, FillHint};
 /// Deliberately NOT `#[non_exhaustive]`: consumers must handle every state —
 /// that is the point of the contract (the B192 [`crate::panel_terminal_state`]
 /// convention). Serialization is deliberately deferred to part 3.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TerminalState {
     /// Terminal success: the panel's data, when it was fetched, and who
     /// produced it — attribution is part of the state, never optional.

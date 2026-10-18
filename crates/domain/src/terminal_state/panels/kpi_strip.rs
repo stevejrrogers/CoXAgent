@@ -14,12 +14,12 @@
 //! domain's default fill hint (a dedicated `Cancelled` would lose the fill
 //! hint the depth bar requires); `Failed` is the snapshot fetch failing.
 
-use crate::DomainError;
 use crate::terminal_state::{FailureReason, FillHint, TerminalState};
+use crate::DomainError;
 
 /// One KPI tile: a label, its value, and the window the value was computed
 /// over — a number without its window is the "bare 0" the depth bar forbids.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct KpiTile {
     /// The tile label (`Open tickets`, `Merged today`…).
     pub label: String,
@@ -56,7 +56,7 @@ impl KpiTile {
 }
 
 /// The KPI tile strip's terminal state.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum KpiStripTerminalState {
     /// The four tiles are showing, each with its window and delta.
     Succeeded {
@@ -125,15 +125,11 @@ impl KpiStripTerminalState {
         }
     }
 
-
     /// Terminal failure.
     ///
     /// # Errors
     /// Returns [`crate::DomainError::Empty`] when `cause` is blank.
-    pub fn failed(
-        cause: impl Into<String>,
-        retryable: bool,
-    ) -> Result<Self, crate::DomainError> {
+    pub fn failed(cause: impl Into<String>, retryable: bool) -> Result<Self, crate::DomainError> {
         Ok(Self::Failed {
             cause: non_blank(cause, "kpi_strip_cause")?,
             retryable,
@@ -154,9 +150,7 @@ impl From<&KpiStripTerminalState> for TerminalState {
     fn from(panel: &KpiStripTerminalState) -> Self {
         match panel {
             KpiStripTerminalState::Succeeded {
-                fetched_at,
-                source,
-                ..
+                fetched_at, source, ..
             } => Self::Succeeded {
                 fetched_at: fetched_at.clone(),
                 source: source.clone(),
@@ -165,10 +159,7 @@ impl From<&KpiStripTerminalState> for TerminalState {
                 reason: *reason,
                 hint: hint.clone(),
             },
-            KpiStripTerminalState::Failed {
-                cause,
-                retryable,
-            } => Self::Failed {
+            KpiStripTerminalState::Failed { cause, retryable } => Self::Failed {
                 cause: cause.clone(),
                 retryable: *retryable,
             },
@@ -188,8 +179,16 @@ impl TryFrom<&TerminalState> for KpiStripTerminalState {
 
     fn try_from(core: &TerminalState) -> Result<Self, Self::Error> {
         match core {
-            TerminalState::Skipped { reason, hint } if *reason == FailureReason::NoData => Ok(Self::Skipped { reason: *reason, hint: hint.clone() }),
-            TerminalState::Failed { cause, retryable } => Ok(Self::Failed { cause: cause.clone(), retryable: *retryable }),
+            TerminalState::Skipped { reason, hint } if *reason == FailureReason::NoData => {
+                Ok(Self::Skipped {
+                    reason: *reason,
+                    hint: hint.clone(),
+                })
+            }
+            TerminalState::Failed { cause, retryable } => Ok(Self::Failed {
+                cause: cause.clone(),
+                retryable: *retryable,
+            }),
             TerminalState::Cancelled => Ok(Self::Cancelled),
             // Succeeded core cannot rebuild the payload (documented
             // projection: Skipped/Failed/Cancelled reconstruct at their zero
@@ -253,12 +252,14 @@ mod tests {
 
     #[test]
     fn skipped_is_no_data_with_the_default_hint() {
-        let state =
-            KpiStripTerminalState::skipped();
+        let state = KpiStripTerminalState::skipped();
         match &state {
             KpiStripTerminalState::Skipped { reason, hint, .. } => {
                 assert_eq!(*reason, FailureReason::NoData);
-                assert_eq!(hint.as_str(), FillHint::for_reason(FailureReason::NoData).as_str());
+                assert_eq!(
+                    hint.as_str(),
+                    FillHint::for_reason(FailureReason::NoData).as_str()
+                );
             }
             other => panic!("expected Skipped, got {other:?}"),
         }
@@ -281,7 +282,10 @@ mod tests {
             }
         );
         let back = KpiStripTerminalState::try_from(&core);
-        assert!(back.is_err(), "Succeeded core cannot rebuild the payload — documented projection");
+        assert!(
+            back.is_err(),
+            "Succeeded core cannot rebuild the payload — documented projection"
+        );
     }
 
     #[test]

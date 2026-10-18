@@ -11,14 +11,14 @@
 //! [`FailureReason::NoData`] and the default fill hint; `Failed` is the
 //! snapshot read failing.
 
-use crate::DomainError;
 use crate::terminal_state::{FailureReason, FillHint, TerminalState};
+use crate::DomainError;
 
 /// One agent's health card as the panel renders it (`chat.js:1761+`):
 /// the role, its lifecycle status, and the counts the card displays — plus
 /// who/when attribution, because a red card that can't say why is a bare
 /// state, not a terminal state.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct AgentHealthCard {
     /// The agent role the card is for (`ARCHITECT`, `DEV-FEATURE`…).
     pub role: String,
@@ -57,7 +57,7 @@ impl AgentHealthCard {
 }
 
 /// The team-health cards' terminal state.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TeamHealthTerminalState {
     /// ≥1 agent card, each with its attribution.
     Succeeded {
@@ -122,15 +122,11 @@ impl TeamHealthTerminalState {
         }
     }
 
-
     /// Terminal failure.
     ///
     /// # Errors
     /// Returns [`crate::DomainError::Empty`] when `cause` is blank.
-    pub fn failed(
-        cause: impl Into<String>,
-        retryable: bool,
-    ) -> Result<Self, crate::DomainError> {
+    pub fn failed(cause: impl Into<String>, retryable: bool) -> Result<Self, crate::DomainError> {
         Ok(Self::Failed {
             cause: non_blank(cause, "team_health_cause")?,
             retryable,
@@ -142,9 +138,7 @@ impl From<&TeamHealthTerminalState> for TerminalState {
     fn from(panel: &TeamHealthTerminalState) -> Self {
         match panel {
             TeamHealthTerminalState::Succeeded {
-                fetched_at,
-                source,
-                ..
+                fetched_at, source, ..
             } => Self::Succeeded {
                 fetched_at: fetched_at.clone(),
                 source: source.clone(),
@@ -153,10 +147,7 @@ impl From<&TeamHealthTerminalState> for TerminalState {
                 reason: *reason,
                 hint: hint.clone(),
             },
-            TeamHealthTerminalState::Failed {
-                cause,
-                retryable,
-            } => Self::Failed {
+            TeamHealthTerminalState::Failed { cause, retryable } => Self::Failed {
                 cause: cause.clone(),
                 retryable: *retryable,
             },
@@ -175,8 +166,16 @@ impl TryFrom<&TerminalState> for TeamHealthTerminalState {
 
     fn try_from(core: &TerminalState) -> Result<Self, Self::Error> {
         match core {
-            TerminalState::Skipped { reason, hint } if *reason == FailureReason::NoData => Ok(Self::Skipped { reason: *reason, hint: hint.clone() }),
-            TerminalState::Failed { cause, retryable } => Ok(Self::Failed { cause: cause.clone(), retryable: *retryable }),
+            TerminalState::Skipped { reason, hint } if *reason == FailureReason::NoData => {
+                Ok(Self::Skipped {
+                    reason: *reason,
+                    hint: hint.clone(),
+                })
+            }
+            TerminalState::Failed { cause, retryable } => Ok(Self::Failed {
+                cause: cause.clone(),
+                retryable: *retryable,
+            }),
             // Succeeded core cannot rebuild the payload (documented
             // projection: Skipped/Failed/Cancelled reconstruct at their zero
             // point; TimedOut and non-NoData Skipped are unrepresentable) —
@@ -225,14 +224,20 @@ mod tests {
 
     #[test]
     fn a_blank_status_is_refused() {
-        assert!(AgentHealthCard::new("DEV-FEATURE", " ", vec![], "gate", "2026-02-24T10:00:00Z")
-            .is_err());
+        assert!(
+            AgentHealthCard::new("DEV-FEATURE", " ", vec![], "gate", "2026-02-24T10:00:00Z")
+                .is_err()
+        );
     }
 
     #[test]
     fn an_empty_card_list_is_not_a_success() {
         assert_eq!(
-            TeamHealthTerminalState::succeeded("2026-02-24T10:00:00Z".to_owned(), "snapshot", vec![]),
+            TeamHealthTerminalState::succeeded(
+                "2026-02-24T10:00:00Z".to_owned(),
+                "snapshot",
+                vec![]
+            ),
             Err(crate::DomainError::Empty {
                 field: "team_health_cards"
             })
@@ -241,12 +246,14 @@ mod tests {
 
     #[test]
     fn skipped_is_no_data_with_the_default_hint() {
-        let state =
-            TeamHealthTerminalState::skipped();
+        let state = TeamHealthTerminalState::skipped();
         match &state {
             TeamHealthTerminalState::Skipped { reason, hint, .. } => {
                 assert_eq!(*reason, FailureReason::NoData);
-                assert_eq!(hint.as_str(), FillHint::for_reason(FailureReason::NoData).as_str());
+                assert_eq!(
+                    hint.as_str(),
+                    FillHint::for_reason(FailureReason::NoData).as_str()
+                );
             }
             other => panic!("expected Skipped, got {other:?}"),
         }
@@ -271,11 +278,9 @@ mod tests {
 
     #[test]
     fn failed_round_trips() {
-        let panel = TeamHealthTerminalState::failed(
-            "the role map was absent from the snapshot",
-            true,
-        )
-        .expect("cause is non-blank");
+        let panel =
+            TeamHealthTerminalState::failed("the role map was absent from the snapshot", true)
+                .expect("cause is non-blank");
         let core = TerminalState::from(panel.clone());
         assert!(matches!(core, TerminalState::Failed { .. }));
         assert_eq!(TeamHealthTerminalState::try_from(&core), Ok(panel));

@@ -22,7 +22,7 @@ use crate::terminal_state::TerminalState;
 /// A count cannot be negative, so the newtype refuses negatives at
 /// construction — the same parse-don't-validate pattern as
 /// [`crate::ids::TicketId`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GreenPrCount(u32);
 
 impl GreenPrCount {
@@ -46,7 +46,7 @@ impl std::fmt::Display for GreenPrCount {
 
 /// The drain banner's terminal state: the core state from CXA-B252 plus the
 /// panel's own payload.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum DrainBannerTerminalState {
     /// The banner is rendering, with the blocking PR count it shows.
     Succeeded {
@@ -91,9 +91,7 @@ impl From<&DrainBannerTerminalState> for TerminalState {
     fn from(panel: &DrainBannerTerminalState) -> Self {
         match panel {
             DrainBannerTerminalState::Succeeded {
-                fetched_at,
-                source,
-                ..
+                fetched_at, source, ..
             } => Self::Succeeded {
                 fetched_at: fetched_at.clone(),
                 source: source.clone(),
@@ -114,10 +112,7 @@ impl TryFrom<&TerminalState> for DrainBannerTerminalState {
 
     fn try_from(core: &TerminalState) -> Result<Self, Self::Error> {
         match core {
-            TerminalState::Succeeded {
-                fetched_at,
-                source,
-            } => Ok(Self::Succeeded {
+            TerminalState::Succeeded { fetched_at, source } => Ok(Self::Succeeded {
                 fetched_at: fetched_at.clone(),
                 source: source.clone(),
                 blocking_prs: GreenPrCount::new(0),

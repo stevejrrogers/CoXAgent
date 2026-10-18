@@ -11,12 +11,12 @@
 //! yet" is `Skipped` with [`FailureReason::NoData`] and the default fill
 //! hint; `Failed` is the snapshot read failing.
 
-use crate::DomainError;
 use crate::terminal_state::{FailureReason, FillHint, TerminalState};
+use crate::DomainError;
 
 /// One released version as the feed renders it (`core.js:816`): the tag and
 /// when it shipped — attribution for "when did this land" is the payload.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ReleaseEntry {
     /// The released version tag (`v1.2.3`).
     pub tag: String,
@@ -41,7 +41,7 @@ impl ReleaseEntry {
 }
 
 /// The releases feed's terminal state.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ReleasesFeedTerminalState {
     /// ≥1 released version.
     Succeeded {
@@ -105,15 +105,11 @@ impl ReleasesFeedTerminalState {
         }
     }
 
-
     /// Terminal failure.
     ///
     /// # Errors
     /// Returns [`crate::DomainError::Empty`] when `cause` is blank.
-    pub fn failed(
-        cause: impl Into<String>,
-        retryable: bool,
-    ) -> Result<Self, crate::DomainError> {
+    pub fn failed(cause: impl Into<String>, retryable: bool) -> Result<Self, crate::DomainError> {
         Ok(Self::Failed {
             cause: non_blank(cause, "releases_feed_cause")?,
             retryable,
@@ -125,9 +121,7 @@ impl From<&ReleasesFeedTerminalState> for TerminalState {
     fn from(panel: &ReleasesFeedTerminalState) -> Self {
         match panel {
             ReleasesFeedTerminalState::Succeeded {
-                fetched_at,
-                source,
-                ..
+                fetched_at, source, ..
             } => Self::Succeeded {
                 fetched_at: fetched_at.clone(),
                 source: source.clone(),
@@ -136,10 +130,7 @@ impl From<&ReleasesFeedTerminalState> for TerminalState {
                 reason: *reason,
                 hint: hint.clone(),
             },
-            ReleasesFeedTerminalState::Failed {
-                cause,
-                retryable,
-            } => Self::Failed {
+            ReleasesFeedTerminalState::Failed { cause, retryable } => Self::Failed {
                 cause: cause.clone(),
                 retryable: *retryable,
             },
@@ -158,8 +149,16 @@ impl TryFrom<&TerminalState> for ReleasesFeedTerminalState {
 
     fn try_from(core: &TerminalState) -> Result<Self, Self::Error> {
         match core {
-            TerminalState::Skipped { reason, hint } if *reason == FailureReason::NoData => Ok(Self::Skipped { reason: *reason, hint: hint.clone() }),
-            TerminalState::Failed { cause, retryable } => Ok(Self::Failed { cause: cause.clone(), retryable: *retryable }),
+            TerminalState::Skipped { reason, hint } if *reason == FailureReason::NoData => {
+                Ok(Self::Skipped {
+                    reason: *reason,
+                    hint: hint.clone(),
+                })
+            }
+            TerminalState::Failed { cause, retryable } => Ok(Self::Failed {
+                cause: cause.clone(),
+                retryable: *retryable,
+            }),
             // Succeeded core cannot rebuild the payload (documented
             // projection: Skipped/Failed/Cancelled reconstruct at their zero
             // point; TimedOut and non-NoData Skipped are unrepresentable) —
@@ -221,12 +220,14 @@ mod tests {
 
     #[test]
     fn skipped_is_no_data_with_the_default_hint() {
-        let state =
-            ReleasesFeedTerminalState::skipped();
+        let state = ReleasesFeedTerminalState::skipped();
         match &state {
             ReleasesFeedTerminalState::Skipped { reason, hint, .. } => {
                 assert_eq!(*reason, FailureReason::NoData);
-                assert_eq!(hint.as_str(), FillHint::for_reason(FailureReason::NoData).as_str());
+                assert_eq!(
+                    hint.as_str(),
+                    FillHint::for_reason(FailureReason::NoData).as_str()
+                );
             }
             other => panic!("expected Skipped, got {other:?}"),
         }

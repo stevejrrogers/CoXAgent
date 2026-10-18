@@ -13,14 +13,14 @@
 //! `Cancelled` is unrepresentable (the panel never self-cancels), so the
 //! reverse conversion refuses it.
 
-use crate::DomainError;
 use crate::terminal_state::{FailureReason, FillHint, TerminalState};
+use crate::DomainError;
 
 /// One busy-agent chip as the panel renders it (`core.js:1032–1039`):
 /// role, ticket alias, and the agent identity — with who/when attribution,
 /// because a chip that can't say who is working or since when is a bare
 /// label, not a terminal state.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BusyAgent {
     /// The agent's role as the chip renders it (`ARCHITECT`, `DEV-BUG`… —
     /// the raw role with `_` → `-` applied).
@@ -56,7 +56,7 @@ impl BusyAgent {
 }
 
 /// The busy-agent chips' terminal state.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum WorkingAgentsTerminalState {
     /// ≥1 busy agent, each chip with its attribution.
     Succeeded {
@@ -73,7 +73,8 @@ pub enum WorkingAgentsTerminalState {
         /// Why the strip is empty (always [`FailureReason::NoData`]).
         reason: FailureReason,
         /// The mandatory "what fills this panel" hint.
-        hint: FillHint,    },
+        hint: FillHint,
+    },
     /// The chip set could not be read.
     Failed {
         /// Non-blank human cause (core invariant).
@@ -119,15 +120,11 @@ impl WorkingAgentsTerminalState {
         }
     }
 
-
     /// Terminal failure.
     ///
     /// # Errors
     /// Returns [`crate::DomainError::Empty`] when `cause` is blank.
-    pub fn failed(
-        cause: impl Into<String>,
-        retryable: bool,
-    ) -> Result<Self, crate::DomainError> {
+    pub fn failed(cause: impl Into<String>, retryable: bool) -> Result<Self, crate::DomainError> {
         Ok(Self::Failed {
             cause: non_blank(cause, "working_agents_cause")?,
             retryable,
@@ -139,9 +136,7 @@ impl From<&WorkingAgentsTerminalState> for TerminalState {
     fn from(panel: &WorkingAgentsTerminalState) -> Self {
         match panel {
             WorkingAgentsTerminalState::Succeeded {
-                fetched_at,
-                source,
-                ..
+                fetched_at, source, ..
             } => Self::Succeeded {
                 fetched_at: fetched_at.clone(),
                 source: source.clone(),
@@ -150,10 +145,7 @@ impl From<&WorkingAgentsTerminalState> for TerminalState {
                 reason: *reason,
                 hint: hint.clone(),
             },
-            WorkingAgentsTerminalState::Failed {
-                cause,
-                retryable,
-            } => Self::Failed {
+            WorkingAgentsTerminalState::Failed { cause, retryable } => Self::Failed {
                 cause: cause.clone(),
                 retryable: *retryable,
             },
@@ -172,8 +164,16 @@ impl TryFrom<&TerminalState> for WorkingAgentsTerminalState {
 
     fn try_from(core: &TerminalState) -> Result<Self, Self::Error> {
         match core {
-            TerminalState::Skipped { reason, hint } if *reason == FailureReason::NoData => Ok(Self::Skipped { reason: *reason, hint: hint.clone() }),
-            TerminalState::Failed { cause, retryable } => Ok(Self::Failed { cause: cause.clone(), retryable: *retryable }),
+            TerminalState::Skipped { reason, hint } if *reason == FailureReason::NoData => {
+                Ok(Self::Skipped {
+                    reason: *reason,
+                    hint: hint.clone(),
+                })
+            }
+            TerminalState::Failed { cause, retryable } => Ok(Self::Failed {
+                cause: cause.clone(),
+                retryable: *retryable,
+            }),
             // Succeeded core cannot rebuild the payload (documented
             // projection: Skipped/Failed/Cancelled reconstruct at their zero
             // point; TimedOut and non-NoData Skipped are unrepresentable) —
@@ -222,7 +222,11 @@ mod tests {
     #[test]
     fn an_empty_agent_list_is_not_a_success() {
         assert_eq!(
-            WorkingAgentsTerminalState::succeeded("2026-02-24T10:00:00Z".to_owned(), "/workers", vec![]),
+            WorkingAgentsTerminalState::succeeded(
+                "2026-02-24T10:00:00Z".to_owned(),
+                "/workers",
+                vec![]
+            ),
             Err(crate::DomainError::Empty {
                 field: "working_agents_agents"
             })
@@ -236,12 +240,14 @@ mod tests {
 
     #[test]
     fn skipped_is_no_data_with_the_default_hint() {
-        let state =
-            WorkingAgentsTerminalState::skipped();
+        let state = WorkingAgentsTerminalState::skipped();
         match &state {
             WorkingAgentsTerminalState::Skipped { reason, hint, .. } => {
                 assert_eq!(*reason, FailureReason::NoData);
-                assert_eq!(hint.as_str(), FillHint::for_reason(FailureReason::NoData).as_str());
+                assert_eq!(
+                    hint.as_str(),
+                    FillHint::for_reason(FailureReason::NoData).as_str()
+                );
             }
             other => panic!("expected Skipped, got {other:?}"),
         }
@@ -258,13 +264,15 @@ mod tests {
         let core = TerminalState::from(&panel);
         assert!(matches!(core, TerminalState::Succeeded { .. }));
         let back = WorkingAgentsTerminalState::try_from(&core);
-        assert!(back.is_err(), "Succeeded core cannot rebuild the payload — documented projection");
+        assert!(
+            back.is_err(),
+            "Succeeded core cannot rebuild the payload — documented projection"
+        );
     }
 
     #[test]
     fn skipped_round_trips() {
-        let panel =
-            WorkingAgentsTerminalState::skipped();
+        let panel = WorkingAgentsTerminalState::skipped();
         let core = TerminalState::from(panel.clone());
         assert_eq!(WorkingAgentsTerminalState::try_from(&core), Ok(panel));
     }

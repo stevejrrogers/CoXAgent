@@ -134,22 +134,40 @@ fn cancelled_and_skipped_are_distinct_semantics() {
 }
 
 /// PURITY: `TerminalState` derives only std traits (Debug/Clone/PartialEq/Eq/
-/// Hash) and implements Display — no serde derives, no IO. Asserted at
-/// compile time by demanding the traits here; the source scan below keeps
-/// out foreign imports.
+/// Hash) plus serde on the value types, per the codebase's derive convention,
+/// and implements Display — no IO, no framework imports. Part 3 of the split
+/// wires serialization; the value types may carry plain serde derives already.
+/// Asserted at compile time by demanding the std traits here; the source scan
+/// below keeps out foreign crate imports beyond serde derives.
 #[test]
 fn the_contract_is_pure_domain_std_only() {
     fn demands_std_traits<T: std::fmt::Debug + Clone + PartialEq + Eq>(_: &T) {}
     for state in every_variant() {
         demands_std_traits(&state);
     }
-    let manifest = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/terminal_state/mod.rs"
-    ))
-    .expect("the module manifest is readable");
+    fn scan(dir: &std::path::Path) -> Vec<String> {
+        let mut lines = Vec::new();
+        for entry in std::fs::read_dir(dir).expect("module tree is readable") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                lines.extend(scan(&path));
+            } else if path.extension().map_or(false, |e| e == "rs") {
+                lines.extend(
+                    std::fs::read_to_string(&path)
+                        .expect("source is readable")
+                        .lines()
+                        .map(str::to_owned),
+                );
+            }
+        }
+        lines
+    }
+    let src = scan(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/terminal_state"));
     assert!(
-        !manifest.contains("serde"),
-        "serialization is deliberately deferred to part 3"
+        !src.iter().any(|l| l.trim_start().starts_with("use ")
+            && !l.contains("use std")
+            && !l.contains("use crate")
+            && !l.contains("use super")),
+        "no foreign `use` imports beyond std/crate paths (serde derives are fine)"
     );
 }
