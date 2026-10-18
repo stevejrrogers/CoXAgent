@@ -12,6 +12,7 @@ permissions:
 
 jobs:
   macos:
+    if: false
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,6 +43,7 @@ jobs:
             CoXAgentCompanion-macos.zip
 
   windows:
+    if: false
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -73,6 +75,7 @@ jobs:
           path: CoXAgent-windows-x64.zip
 
   linux:
+    if: false
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4

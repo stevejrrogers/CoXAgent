@@ -6,7 +6,9 @@
 //! recovered.
 
 use async_trait::async_trait;
-use coxagent_application::ports::outbound::{StateStorePort, WorkerCaps, WorkerEntry};
+use coxagent_application::ports::outbound::{
+    QuarantineEntry, StateStorePort, WorkerCaps, WorkerEntry,
+};
 use coxagent_application::state::{ProjectState, SCHEMA_VERSION};
 use coxagent_application::PortError;
 use coxagent_domain::{Role, TicketId};
@@ -14,6 +16,9 @@ use fs4::fs_std::FileExt;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use super::quarantine::{gate_save, QuarantineLedger};
 
 const STATE_FILE: &str = "state.json";
 const LOCK_FILE: &str = ".state.lock";
@@ -71,6 +76,10 @@ fn age_secs(at: &str, now: &str) -> i64 {
 /// A [`StateStorePort`] that stores the project aggregate as one JSON file.
 pub struct JsonStateStore {
     root: PathBuf,
+    /// Audit trail of write-backs the structural-integrity gate refused,
+    /// persisted beside the state file (CXA-F229). Shared across the
+    /// `spawn_blocking` clones so every writer feeds one ledger.
+    quarantine: Arc<QuarantineLedger>,
 }
 
 impl JsonStateStore {
@@ -82,7 +91,19 @@ impl JsonStateStore {
     pub fn new(dir: impl Into<PathBuf>) -> Result<Self, PortError> {
         let root = dir.into();
         std::fs::create_dir_all(&root).map_err(|e| PortError::Backend(e.to_string()))?;
-        Ok(Self { root })
+        Ok(Self {
+            quarantine: Arc::new(QuarantineLedger::in_dir(&root)),
+            root,
+        })
+    }
+
+    /// A self-contained copy for `spawn_blocking` (which needs `'static`):
+    /// same root, same shared quarantine ledger.
+    fn for_blocking(&self) -> Self {
+        Self {
+            root: self.root.clone(),
+            quarantine: Arc::clone(&self.quarantine),
+        }
     }
 
     fn state_path(&self) -> PathBuf {
@@ -140,12 +161,21 @@ impl JsonStateStore {
         result
     }
 
-    /// Validate + atomic-rename + snapshot. The caller must already hold the
-    /// exclusive lock (so `claim_blocking` can read-modify-write in one section).
+    /// Validate + audit + atomic-rename + snapshot. The caller must already
+    /// hold the exclusive lock (so `claim_blocking` can read-modify-write in
+    /// one section). The pre-existing schema-level validation is untouched;
+    /// the structural-integrity audit (CXA-F229) is the additional gate that
+    /// refuses a corrupted post-state and quarantines its payload.
     fn write_locked(&self, state: &ProjectState) -> Result<(), PortError> {
-        state
-            .validate()
-            .map_err(|e| PortError::Corrupt(format!("refusing to save invalid state: {e}")))?;
+        // gate_save may HEAL (drop dangling ticket-keyed entries) — work on a
+        // clone so the healed shape is what gets persisted. The JSON store's
+        // ledger is the file-backed one; the recorded entry needs no further
+        // persistence here.
+        let mut state = state.clone();
+        let state = {
+            gate_save(&mut state, &self.quarantine).map_err(|refused| refused.error)?;
+            &state
+        };
 
         let json =
             serde_json::to_vec_pretty(state).map_err(|e| PortError::Backend(e.to_string()))?;
@@ -283,6 +313,7 @@ impl JsonStateStore {
             models: caps.models.clone(),
             git: caps.git.clone(),
             tooling: caps.tooling.clone(),
+            version: caps.version.clone(),
         });
         let outcome = self.write_coord(&coord);
         drop(lock);
@@ -308,21 +339,49 @@ impl JsonStateStore {
         prune_backups(&dir, MAX_BACKUPS);
         Ok(())
     }
+
+    /// Blocking counterpart of [`JsonStateStore::delete`] — see that method.
+    fn delete_blocking(&self) -> Result<(), PortError> {
+        for path in [
+            self.state_path(),
+            self.coord_path(),
+            self.lock_path(),
+            self.root.join(BACKUP_DIR),
+        ] {
+            let removed = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            match removed {
+                Ok(()) => {}
+                // Already gone is the goal state (idempotent delete).
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(PortError::Backend(format!(
+                        "remove {}: {e}",
+                        path.display()
+                    )))
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl StateStorePort for JsonStateStore {
     async fn load(&self) -> Result<ProjectState, PortError> {
-        let root = self.root.clone();
-        tokio::task::spawn_blocking(move || JsonStateStore { root }.load_blocking())
+        let store = self.for_blocking();
+        tokio::task::spawn_blocking(move || store.load_blocking())
             .await
             .map_err(|e| PortError::Backend(e.to_string()))?
     }
 
     async fn save(&self, state: &ProjectState) -> Result<(), PortError> {
-        let root = self.root.clone();
+        let store = self.for_blocking();
         let state = state.clone();
-        tokio::task::spawn_blocking(move || JsonStateStore { root }.save_blocking(&state))
+        tokio::task::spawn_blocking(move || store.save_blocking(&state))
             .await
             .map_err(|e| PortError::Backend(e.to_string()))?
     }
@@ -333,26 +392,22 @@ impl StateStorePort for JsonStateStore {
         worker: &str,
         now: &str,
     ) -> Result<bool, PortError> {
-        let root = self.root.clone();
+        let store = self.for_blocking();
         let id = id.clone();
         let worker = worker.to_owned();
         let now = now.to_owned();
-        tokio::task::spawn_blocking(move || {
-            JsonStateStore { root }.claim_blocking(&id, &worker, &now)
-        })
-        .await
-        .map_err(|e| PortError::Backend(e.to_string()))?
+        tokio::task::spawn_blocking(move || store.claim_blocking(&id, &worker, &now))
+            .await
+            .map_err(|e| PortError::Backend(e.to_string()))?
     }
 
     async fn acquire_leader(&self, worker: &str, now: &str) -> Result<bool, PortError> {
-        let root = self.root.clone();
+        let store = self.for_blocking();
         let worker = worker.to_owned();
         let now = now.to_owned();
-        tokio::task::spawn_blocking(move || {
-            JsonStateStore { root }.acquire_leader_blocking(&worker, &now)
-        })
-        .await
-        .map_err(|e| PortError::Backend(e.to_string()))?
+        tokio::task::spawn_blocking(move || store.acquire_leader_blocking(&worker, &now))
+            .await
+            .map_err(|e| PortError::Backend(e.to_string()))?
     }
 
     async fn claim_stage(
@@ -362,7 +417,7 @@ impl StateStorePort for JsonStateStore {
         worker: &str,
         now: &str,
     ) -> Result<bool, PortError> {
-        let root = self.root.clone();
+        let store = self.for_blocking();
         let (ticket, stage, worker, now) = (
             id.to_string(),
             stage.to_owned(),
@@ -370,7 +425,7 @@ impl StateStorePort for JsonStateStore {
             now.to_owned(),
         );
         tokio::task::spawn_blocking(move || {
-            JsonStateStore { root }.claim_stage_blocking(&ticket, &stage, &worker, &now)
+            store.claim_stage_blocking(&ticket, &stage, &worker, &now)
         })
         .await
         .map_err(|e| PortError::Backend(e.to_string()))?
@@ -384,7 +439,7 @@ impl StateStorePort for JsonStateStore {
         caps: &WorkerCaps,
         now: &str,
     ) -> Result<(), PortError> {
-        let root = self.root.clone();
+        let store = self.for_blocking();
         let (worker, role, ticket, now) = (
             worker.to_owned(),
             role.to_owned(),
@@ -393,18 +448,34 @@ impl StateStorePort for JsonStateStore {
         );
         let caps = caps.clone();
         tokio::task::spawn_blocking(move || {
-            JsonStateStore { root }.heartbeat_blocking(&worker, &role, &ticket, &caps, &now)
+            store.heartbeat_blocking(&worker, &role, &ticket, &caps, &now)
         })
         .await
         .map_err(|e| PortError::Backend(e.to_string()))?
     }
 
     async fn workers(&self) -> Result<Vec<WorkerEntry>, PortError> {
-        let root = self.root.clone();
+        let store = self.for_blocking();
         let now = time::OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)
             .unwrap_or_default();
-        tokio::task::spawn_blocking(move || Ok(JsonStateStore { root }.workers_blocking(&now)))
+        tokio::task::spawn_blocking(move || Ok(store.workers_blocking(&now)))
+            .await
+            .map_err(|e| PortError::Backend(e.to_string()))?
+    }
+
+    async fn quarantined(&self) -> Vec<QuarantineEntry> {
+        self.quarantine.recent()
+    }
+
+    /// Remove the persisted aggregate (`state.json`), its coordination file,
+    /// lock and rolling backups (CXA-B130): the desktop/JSON build's delete
+    /// must leave a store that behaves as never-written, or a recreated
+    /// project under the same id inherits the deleted team's state from disk.
+    /// Best-effort per file — a missing file is already the goal state.
+    async fn delete(&self) -> Result<(), PortError> {
+        let store = self.for_blocking();
+        tokio::task::spawn_blocking(move || store.delete_blocking())
             .await
             .map_err(|e| PortError::Backend(e.to_string()))?
     }
@@ -424,7 +495,7 @@ fn parse_checked(bytes: &[u8]) -> Result<ProjectState, PortError> {
 }
 
 /// Acquire an exclusive advisory lock on the lock file.
-fn acquire_lock(path: &Path) -> Result<File, PortError> {
+pub(crate) fn acquire_lock(path: &Path) -> Result<File, PortError> {
     let file = OpenOptions::new()
         .create(true)
         .write(true)
@@ -437,7 +508,7 @@ fn acquire_lock(path: &Path) -> Result<File, PortError> {
 
 /// Write bytes to a temp file in the same directory, fsync, then rename over the
 /// destination. Rename within a directory is atomic on POSIX and Windows.
-fn atomic_write(dir: &Path, final_path: &Path, bytes: &[u8]) -> Result<(), PortError> {
+pub(crate) fn atomic_write(dir: &Path, final_path: &Path, bytes: &[u8]) -> Result<(), PortError> {
     let tmp = dir.join(format!(".state.tmp.{}", std::process::id()));
     {
         let mut f = OpenOptions::new()
@@ -510,5 +581,36 @@ mod coord_tests {
         // A different ticket's same stage is independent.
         let id2 = TicketId::new("CXC-F002").expect("id");
         assert!(s.claim_stage(&id2, "sa", "luffy@mac", now).await.unwrap());
+    }
+
+    /// CXA-B130: delete removes the persisted aggregate, coordination file and
+    /// backups, leaving a store that behaves as never-written — a project
+    /// recreated on the same state dir must not inherit the deleted team's
+    /// state from disk. Idempotent: deleting an already-deleted store is Ok.
+    #[tokio::test]
+    async fn delete_purges_state_coord_and_backups() {
+        let s = store();
+        let state = ProjectState::default();
+        s.save(&state).await.unwrap();
+        // A backup snapshot is taken on every OVERWRITE of an existing file.
+        s.save(&state).await.unwrap();
+        s.acquire_leader("chopper@mac", "2026-07-15T00:00:00Z")
+            .await
+            .unwrap();
+        assert!(s.state_path().exists(), "fixture: state file written");
+        assert!(s.coord_path().exists(), "fixture: coord file written");
+        assert!(
+            s.root.join(BACKUP_DIR).exists(),
+            "fixture: backup set written"
+        );
+
+        s.delete().await.unwrap();
+
+        assert_eq!(s.load().await.unwrap(), ProjectState::default());
+        assert!(!s.state_path().exists());
+        assert!(!s.coord_path().exists());
+        assert!(!s.root.join(BACKUP_DIR).exists());
+        // Idempotent.
+        s.delete().await.unwrap();
     }
 }

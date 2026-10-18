@@ -42,9 +42,61 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
-/// Host-side ports the `coxagent` service publishes. A compose mapping is
-/// `[host_ip:]host:container[/proto]`, so the host port is the field just
-/// before the container port.
+/// Resolve a compose host-port field — a literal like `8101` or an env-driven
+/// default like `${APP_PORT:-8101}` — into the number docker actually binds when
+/// that variable is unset. Compose publishes the `${VAR:-default}` fallback when
+/// VAR is not set, which is exactly what these guards compare against (the docs
+/// tell readers to browse the *default* host port).
+///
+/// Any other interpolation form (`${VAR}`, `${VAR:?msg}`, `${VAR:+alt}`) has no
+/// read-off-the-file numeric default and is reported as unresolved rather than
+/// guessed (CXA-B069 made published ports env-driven).
+fn resolve_host_port(field: &str) -> Result<u16, String> {
+    let raw = field.strip_prefix("${").and_then(|s| s.strip_suffix('}'));
+    match raw {
+        None => field
+            .parse::<u16>()
+            .map_err(|e| format!("bad host port ({e})")),
+        Some(body) => match body.split(":-").nth(1) {
+            Some(default) => default
+                .parse::<u16>()
+                .map_err(|e| format!("bad host port ({e})")),
+            None => Err(format!(
+                "interpolation `${{{body}}}` has no numeric default this guard can verify"
+            )),
+        },
+    }
+}
+
+/// Split a compose port mapping into its fields on *top-level* colons only,
+/// ignoring any ':' that lives inside an interpolation's braces
+/// (`${VAR:-8101}` keeps its interior colons whole). Fields come back in order:
+/// `[ip]`, `host`, `container` — a bare mapping has just `host` and `container`.
+fn split_mapping(mapping: &str) -> Vec<&str> {
+    let m = mapping.split('/').next().unwrap();
+    let mut fields = Vec::new();
+    let mut depth = 0u32;
+    let mut start = 0usize;
+    for (i, b) in m.char_indices() {
+        match b {
+            '{' => depth += 1,
+            '}' if depth > 0 => depth -= 1,
+            ':' if depth == 0 => {
+                fields.push(&m[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    fields.push(&m[start..]);
+    fields
+}
+
+/// Host-side ports the `coxagent` service publishes under their *default* env
+/// values (docker binds `${VAR:-N}` to N when VAR is unset — what README tells
+/// readers to browse). The host field is always the one just before the
+/// container port; anything further left is an explicit IP prefix, which this
+/// app-service guard drops.
 fn published_host_ports(compose_src: &str) -> Result<Vec<u16>, String> {
     let doc: serde_yaml::Value =
         serde_yaml::from_str(compose_src).map_err(|e| format!("docker-compose.yml: {e}"))?;
@@ -54,23 +106,26 @@ fn published_host_ports(compose_src: &str) -> Result<Vec<u16>, String> {
     if ports.is_empty() {
         return Err("docker-compose.yml publishes no port for the coxagent service".to_string());
     }
-    ports
-        .iter()
-        .map(|entry| {
-            let mapping = entry
-                .as_str()
-                .ok_or_else(|| "port mapping must be a string like \"8101:4000\"".to_string())?;
-            let fields: Vec<&str> = mapping.split('/').next().unwrap().split(':').collect();
-            if fields.len() < 2 {
-                return Err(format!(
-                    "port mapping `{mapping}` publishes no explicit host port"
-                ));
-            }
-            fields[fields.len() - 2]
-                .parse::<u16>()
-                .map_err(|e| format!("port mapping `{mapping}`: bad host port ({e})"))
-        })
-        .collect()
+    ports.iter().try_fold(Vec::new(), |mut out, entry| {
+        let mapping = entry.as_str().ok_or_else(|| {
+            "port mapping must be a string like \"${APP_PORT:-8101}:4000\"".to_string()
+        })?;
+        // Fields are [ip:]host:container; host is always just before container.
+        let fields = split_mapping(mapping);
+        // Expect at least two top-level segments.
+        if fields.len() < 2 {
+            return Err(format!(
+                "port mapping `{mapping}` publishes no explicit host port"
+            ));
+        }
+        let host_field = fields[fields.len() - 2];
+        out.push(
+            resolve_host_port(host_field).map_err(|why| {
+                format!("port mapping `{mapping}` in services.coxagent.ports {why}")
+            })?,
+        );
+        Ok(out)
+    })
 }
 
 /// The body of a markdown section, from its heading up to the next heading of
@@ -269,4 +324,61 @@ fn a_mapping_with_no_host_port_fails_rather_than_passes() {
     )
     .unwrap_err();
     assert!(why.contains("no explicit host port"), "unhelpful: {why}");
+}
+
+// --- CXA-B069: published ports are env-driven (`${APP_PORT:-8101}`) ----------
+// The guards compare against what compose binds by *default*; an interpolation
+// with an inline default resolves to that number. These prove the env-driven
+// form is still enforced — it matches docs when it defaults to 8101 and is
+// caught when its default drifts away from what README tells readers.
+
+#[test]
+fn env_default_host_port_matching_docs_passes() {
+    let ok = docs_agree_with_deploy(
+        &compose_publishing("${APP_PORT:-8101}:4000"),
+        &readme_documenting("# → http://localhost:8101, log in as root"),
+    );
+    assert_eq!(
+        ok,
+        Ok(()),
+        "an env-defaulted mapping at 8101 matching README must not be flagged"
+    );
+}
+
+#[test]
+fn compose_and_readme_defaults_both_move_together_pass() {
+    // If deploy moves its default AND README follows suit, they agree.
+    let ok = docs_agree_with_deploy(
+        &compose_publishing("${APP_PORT:-9999}:4000"),
+        &readme_documenting("# → http://localhost:9999, log in as root"),
+    );
+    assert_eq!(ok, Ok(()), "docs and deploy agreeing on 9999 must pass");
+}
+
+#[test]
+fn an_env_default_that_drifts_from_the_docs_is_caught() {
+    // Deploy defaults to 9999 while README still says 8101 — following README
+    // gives connection refused (the COX-B011 failure mode under new semantics).
+    let why = docs_agree_with_deploy(
+        &compose_publishing("${APP_PORT:-9999}:4000"),
+        &readme_documenting("# → http://localhost:8101, log in as root"),
+    )
+    .unwrap_err();
+    assert!(why.contains("localhost:8101"), "unhelpful message: {why}");
+}
+
+#[test]
+fn a_non_defaulting_interpolation_is_rejected_not_guessed() {
+    // `${APP_PORT}` (bare) resolves only via external input — no number this
+    // guard can read off the file. It must fail rather than guess 8101, or it
+    // would bless a mapping whose real host port nobody can verify.
+    let why = docs_agree_with_deploy(
+        &compose_publishing("${APP_PORT}:4000"),
+        &readme_documenting("# → http://localhost:8101, log in as root"),
+    )
+    .unwrap_err();
+    assert!(
+        why.contains("no numeric default"),
+        "unhelpful message: {why}"
+    );
 }

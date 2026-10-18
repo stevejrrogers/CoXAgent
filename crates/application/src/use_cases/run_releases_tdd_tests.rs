@@ -131,7 +131,11 @@ mod tdd_tests {
         RunReleasesUseCase::new(Arc::clone(&store), PathBuf::from("/tmp"))
             .with_git(Some(git as Arc<dyn GitPort>))
             .with_config(Config {
-                releases: ReleasesConfig { enabled: true },
+                releases: ReleasesConfig {
+                    enabled: true,
+                    cut_every_days: 0,
+                    cut_only_verified: true,
+                },
                 ..Config::default()
             })
     }
@@ -219,7 +223,7 @@ mod tdd_tests {
         );
         assert_eq!(
             *git.tags_created.lock().expect("lock"),
-            vec![name.to_string()],
+            vec![format!("milestone/{}", name.to_lowercase())],
             "tag created"
         );
     }
@@ -364,7 +368,7 @@ mod tdd_tests {
         git.existing_tags
             .lock()
             .expect("lock")
-            .insert(name.to_string());
+            .insert(format!("milestone/{}", name.to_lowercase()));
 
         let released = uk(store.clone(), git.clone())
             .execute()
@@ -453,7 +457,7 @@ mod tdd_tests {
             git.tags_created
                 .lock()
                 .expect("lock")
-                .contains(&"NoHistory".to_string()),
+                .contains(&"milestone/nohistory".to_string()),
             "tag created with empty history"
         );
     }
@@ -501,7 +505,7 @@ mod tdd_tests {
         );
 
         let tags = git.tags_created.lock().expect("lock");
-        assert!(tags.contains(&"M1".to_string()), "M1 tag present");
-        assert!(tags.contains(&"M2".to_string()), "M2 tag present");
+        assert!(tags.contains(&"milestone/m1".to_string()), "M1 tag present");
+        assert!(tags.contains(&"milestone/m2".to_string()), "M2 tag present");
     }
 }

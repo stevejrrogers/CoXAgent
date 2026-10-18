@@ -6,12 +6,12 @@ use crate::ports::outbound::{AgentOutcome, AgentRequest};
 use crate::ports::outbound::{GitAuthor, SandboxStatus};
 use crate::state::ProjectState;
 use crate::PortError;
-use coxagent_domain::Status;
+use coxagent_domain::{Role, Status};
 use std::sync::Mutex;
 
 #[derive(Default)]
-struct MemStore {
-    state: Mutex<ProjectState>,
+pub(super) struct MemStore {
+    pub(super) state: Mutex<ProjectState>,
 }
 #[async_trait::async_trait]
 impl StateStorePort for MemStore {
@@ -27,7 +27,7 @@ impl StateStorePort for MemStore {
 
 /// Engine that answers each role by its system prompt: BA proposes one
 /// feature, TEST reports no bugs, DEV succeeds silently.
-struct RoleAwareEngine;
+pub(super) struct RoleAwareEngine;
 #[async_trait::async_trait]
 impl AgentEnginePort for RoleAwareEngine {
     fn id(&self) -> &'static str {
@@ -101,6 +101,8 @@ impl AgentEnginePort for RoleAwareEngine {
             session_id: None,
             sandbox: SandboxStatus::default(),
             engine: String::new(),
+            model: String::new(),
+            attempts: Vec::new(),
         })
     }
 }
@@ -135,7 +137,8 @@ async fn one_cycle_carries_a_feature_from_proposal_to_done() {
 
     let state = store.load().await.expect("load");
     assert_eq!(state.tickets[0].status(), Status::Documented);
-    assert_eq!(state.current_version.to_string(), "0.1.0");
+    // Shipping a ticket does not move the version — the release flow owns it.
+    assert_eq!(state.current_version.to_string(), "0.0.0");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -150,6 +153,7 @@ impl crate::ports::outbound::DeployPort for SpyDeploy {
     ) -> Result<crate::ports::outbound::DeployReport, PortError> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "spy deployed".to_owned(),
@@ -277,6 +281,18 @@ struct SpyForge {
     mergeable: bool,
     merged: Mutex<Vec<u64>>,
     changes: Mutex<Vec<u64>>,
+    closed: Mutex<Vec<u64>>,
+    /// When `Some`, list two SAME-ticket PRs and serve per-PR diffs — the
+    /// competing-PR scenario. Tuples are `(number, title, diff)`.
+    competing: Option<Vec<(u64, String, String)>>,
+    /// Creation timestamp to serve on the (single) open PR. `None` keeps the
+    /// existing empty-string behaviour (unknown age), so existing tests are
+    /// untouched. Set it to an old RFC3339 stamp to exercise the
+    /// anti-starvation deadline path.
+    created: Option<String>,
+    /// What `recently_merged` reports: `(number, head branch)` pairs —
+    /// merges done by a human or another PR, for the merged-elsewhere path.
+    merged_list: Vec<(u64, String)>,
 }
 #[async_trait::async_trait]
 impl ForgePort for SpyForge {
@@ -284,19 +300,50 @@ impl ForgePort for SpyForge {
         unimplemented!()
     }
     async fn list_open_prs(&self) -> Result<Vec<PullRequest>, PortError> {
-        Ok(vec![PullRequest {
-            number: 7,
-            title: "feat(X-1): add a".to_owned(),
-            head: "feat/X-1".to_owned(),
-            base: "main".to_owned(),
-            url: String::new(),
-            author: "coxagent-bot".to_owned(),
-            ci: self.ci.clone(),
-            mergeable: self.mergeable,
-            created: String::new(),
-        }])
+        // Model the forge's truth: a PR this spy already closed or merged is
+        // no longer open — a later review pass must not see it again.
+        let gone: Vec<u64> = {
+            let closed = self.closed.lock().expect("lock");
+            let merged = self.merged.lock().expect("lock");
+            closed.iter().chain(merged.iter()).copied().collect()
+        };
+        let mut prs = if let Some(items) = &self.competing {
+            items
+                .iter()
+                .map(|(n, t, _)| PullRequest {
+                    number: *n,
+                    title: t.clone(),
+                    head: format!("feat/{n}"),
+                    base: "main".to_owned(),
+                    url: String::new(),
+                    author: "coxagent-bot".to_owned(),
+                    ci: self.ci.clone(),
+                    mergeable: self.mergeable,
+                    created: String::new(),
+                })
+                .collect::<Vec<_>>()
+        } else {
+            vec![PullRequest {
+                number: 7,
+                title: "feat(X-1): add a".to_owned(),
+                head: "feat/X-1".to_owned(),
+                base: "main".to_owned(),
+                url: String::new(),
+                author: "coxagent-bot".to_owned(),
+                ci: self.ci.clone(),
+                mergeable: self.mergeable,
+                created: self.created.clone().unwrap_or_default(),
+            }]
+        };
+        prs.retain(|p| !gone.contains(&p.number));
+        Ok(prs)
     }
-    async fn pr_diff(&self, _: u64) -> Result<String, PortError> {
+    async fn pr_diff(&self, n: u64) -> Result<String, PortError> {
+        if let Some(items) = &self.competing {
+            if let Some((_, _, d)) = items.iter().find(|(num, _, _)| *num == n) {
+                return Ok(d.clone());
+            }
+        }
         Ok("+ added a line".to_owned())
     }
     async fn merge_pr(&self, n: u64) -> Result<(), PortError> {
@@ -307,8 +354,12 @@ impl ForgePort for SpyForge {
         self.changes.lock().expect("lock").push(n);
         Ok(())
     }
-    async fn close_pr(&self, _: u64) -> Result<(), PortError> {
+    async fn close_pr(&self, n: u64) -> Result<(), PortError> {
+        self.closed.lock().expect("lock").push(n);
         Ok(())
+    }
+    async fn recently_merged(&self) -> Result<Vec<(u64, String)>, PortError> {
+        Ok(self.merged_list.clone())
     }
 }
 
@@ -331,6 +382,33 @@ impl AgentEnginePort for ReviewEngine {
             session_id: None,
             sandbox: SandboxStatus::default(),
             engine: String::new(),
+            model: String::new(),
+            attempts: Vec::new(),
+        })
+    }
+}
+
+/// Engine whose SA run fails (non-zero exit) — makes `sa_review` yield
+/// `None`, simulating an engine that crashes / emits unparseable JSON on a
+/// PR, which is the silent-starvation case the skip-counter surfaces.
+struct FailEngine;
+#[async_trait::async_trait]
+impl AgentEnginePort for FailEngine {
+    fn id(&self) -> &'static str {
+        "failing-review"
+    }
+    async fn run(&self, _: AgentRequest) -> Result<AgentOutcome, PortError> {
+        Ok(AgentOutcome {
+            stdout: "no verdict".to_owned(),
+            stderr: String::new(),
+            exit_code: Some(1),
+            usage: None,
+            trace: String::new(),
+            session_id: None,
+            sandbox: SandboxStatus::default(),
+            engine: String::new(),
+            model: String::new(),
+            attempts: Vec::new(),
         })
     }
 }
@@ -480,6 +558,509 @@ async fn sa_requests_changes_on_reject_and_never_merges_failing_ci() {
     assert_eq!(*forge.changes.lock().expect("lock"), vec![7]);
 }
 
+#[tokio::test]
+async fn review_deadline_auto_merges_a_clean_pr_with_no_verdict() {
+    // Anti-starvation deadline (Fix B): a mergeable PR open past
+    // `review_deadline_hours` with NO review verdict is verified and landed
+    // by the runner, even though the reviewer engine can never reach an
+    // approve (it always fails). Nothing red lands: the same
+    // verify-then-merge path an approval takes.
+    let created = (time::OffsetDateTime::now_utc() - time::Duration::hours(48))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: true,
+        created: Some(created),
+        ..Default::default()
+    });
+    let mut cfg = Config::default();
+    cfg.git.enabled = true;
+    cfg.git.auto_merge = true;
+    cfg.git.review_deadline_hours = 12;
+    RunCycleUseCase::new(
+        Arc::new(MemStore::default()),
+        Arc::new(FailEngine),
+        cfg,
+        PathBuf::from("/tmp"),
+        "goal".to_owned(),
+    )
+    .with_forge(Arc::clone(&forge) as Arc<dyn ForgePort>)
+    .review_open_prs()
+    .await;
+    assert_eq!(
+        *forge.merged.lock().expect("lock"),
+        vec![7],
+        "an unreviewed PR past the deadline is landed, not starved"
+    );
+    assert!(
+        forge.changes.lock().expect("lock").is_empty(),
+        "the deadline merge doesn't fabricate a request-changes verdict"
+    );
+}
+
+#[tokio::test]
+async fn sa_review_failures_are_counted_and_surfaced_to_a_human() {
+    // Surface (Fix A): an engine that keeps failing on a PR (`sa_review` ->
+    // `None`) accumulates `pr_review_skips` instead of the runner silently
+    // cycling past it. At `review_max_skips` the PR is held for a human.
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: true,
+        ..Default::default()
+    });
+    let mut cfg = Config::default();
+    cfg.git.enabled = true;
+    cfg.git.review_max_skips = 2; // fail twice, then surface
+    cfg.git.review_deadline_hours = 0; // keep the deadline disabled
+    let store = Arc::new(MemStore::default());
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(FailEngine),
+        cfg,
+        PathBuf::from("/tmp"),
+        "goal".to_owned(),
+    )
+    .with_forge(Arc::clone(&forge) as Arc<dyn ForgePort>)
+    .with_reporter(Arc::new(crate::ports::outbound::StorePrReporter::new(
+        Arc::clone(&store) as Arc<dyn crate::ports::outbound::StateStorePort>,
+    )));
+
+    // First failure -> counter 1, below threshold, not surfaced yet.
+    uc.review_open_prs().await;
+    assert!(
+        !store.load().await.unwrap().human_holds.contains_key(&7),
+        "a single failure must not trip the human surface"
+    );
+
+    // Second failure -> counter 2 >= threshold -> held for a human.
+    uc.review_open_prs().await;
+    let holds = &store.load().await.unwrap().human_holds;
+    assert_eq!(
+        holds.get(&7).map(String::as_str),
+        Some("SA keeps failing to review this PR"),
+        "the PR is surfaced to a human after the skip threshold"
+    );
+    assert!(
+        forge.merged.lock().expect("lock").is_empty(),
+        "a PR the SA keeps failing on is never auto-merged"
+    );
+}
+
+#[tokio::test]
+async fn competing_prs_self_resolve_when_one_covers_the_other() {
+    // The live deadlock: two open PRs for the same ticket. #98's diff covers
+    // every file #89 touches, so the SA closes #89 (duplicate) and lets #98
+    // land — instead of holding both forever waiting on a human. This is what
+    // lets the ticket reach `shipped` and the scorecard reflect real output.
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: true,
+        competing: Some(vec![
+            (
+                89,
+                "fix(COX-1): the smaller subset fix".to_owned(),
+                "diff --git a/a.rs b/a.rs\n+let x = 1;\n".to_owned(),
+            ),
+            (
+                98,
+                "fix(COX-1): the covering fix".to_owned(),
+                "diff --git a/a.rs b/a.rs\n+let x = 1;\n+let y = 2;\n\
+                 diff --git a/b.rs b/b.rs\n+let z = 3;\n"
+                    .to_owned(),
+            ),
+        ]),
+        ..Default::default()
+    });
+    review_uc(Arc::clone(&forge), "approve", true)
+        .review_open_prs()
+        .await;
+    let merged = forge.merged.lock().expect("lock");
+    let closed = forge.closed.lock().expect("lock");
+    assert!(
+        merged.contains(&98),
+        "the covering fix #98 is the winner and lands: {merged:?}"
+    );
+    assert!(
+        closed.contains(&89),
+        "the duplicate #89 is closed, not parked on a human: {closed:?}"
+    );
+    assert!(
+        !merged.contains(&89) && !closed.contains(&98),
+        "the winner stays open to merge, the loser is never merged: {merged:?}/{closed:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_safe_subset_pr_is_not_held_by_a_load_bearing_competitor() {
+    // The real live pair: #89 is a sprawling same-ticket change that touches
+    // the pipeline (Cargo.toml → `needs_human_eyes` → unsafe), #98 is a small
+    // safe fix that is a strict subset of it. #98 must NOT be blocked by the
+    // risky sibling — it proceeds through normal review and lands.
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: true,
+        competing: Some(vec![
+            (
+                89,
+                "fix(COX-1): sprawling fix".to_owned(),
+                // Touches Cargo.toml → load-bearing → unsafe_change.
+                "diff --git a/Cargo.toml b/Cargo.toml\n+dep = \"1\"\n\
+                 diff --git a/src/lib.rs b/src/lib.rs\n+let x = 1;\n"
+                    .to_owned(),
+            ),
+            (
+                98,
+                "fix(COX-1): focused fix".to_owned(),
+                "diff --git a/src/lib.rs b/src/lib.rs\n+let x = 1;\n".to_owned(),
+            ),
+        ]),
+        ..Default::default()
+    });
+    review_uc(Arc::clone(&forge), "approve", true)
+        .review_open_prs()
+        .await;
+    let merged = forge.merged.lock().expect("lock");
+    let closed = forge.closed.lock().expect("lock");
+    assert!(
+        merged.contains(&98),
+        "the safe focused fix #98 lands — not held by the sprawling #89: {merged:?}"
+    );
+    assert!(
+        !closed.contains(&89),
+        "the load-bearing #89 is never auto-closed: {closed:?}"
+    );
+}
+
+/// CXA-C026 wiring: drive the merged-elsewhere hold through consecutive
+/// review passes over ONE shared store, exactly how #605 burned eleven rounds.
+/// The single-entry `competing` list serves ONE open PR with a custom title.
+/// `max_rounds` is the expiry cap under test (0 = the brake is off).
+fn hold_expiry_uc(
+    forge: &Arc<SpyForge>,
+    store: &Arc<MemStore>,
+    max_rounds: u32,
+) -> RunCycleUseCase<MemStore, FailEngine> {
+    let mut cfg = Config::default();
+    cfg.git.enabled = true;
+    cfg.git.auto_merge = true;
+    cfg.git.review_deadline_hours = 0; // keep the anti-starvation path out
+    cfg.git.hold_max_rounds = max_rounds;
+    RunCycleUseCase::new(
+        Arc::clone(store),
+        Arc::new(FailEngine),
+        cfg,
+        PathBuf::from("/tmp"),
+        "goal".to_owned(),
+    )
+    .with_forge(Arc::clone(forge) as Arc<dyn ForgePort>)
+    .with_git(Arc::new(FakeGit {
+        ls_remote_sha: HEAD_SHA.to_owned(),
+        ..Default::default()
+    }) as Arc<dyn GitPort>)
+}
+
+#[tokio::test]
+async fn a_kept_open_hold_expires_after_three_rounds_and_closes() {
+    // CXA-C026: #605 re-recorded "kept OPEN — letting review land it" eleven
+    // cycles in a row — the merged-elsewhere hold runs BEFORE the head-sha
+    // dedup and records no review, so nothing ever counted the rounds. The
+    // hold now counts while the head is frozen and, at `hold_max_rounds`,
+    // forces the terminal close in favor of the merge that carried the ticket.
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: false, // unlandable → the terminal is a close
+        competing: Some(vec![(
+            7,
+            "fix(COX-B157): rebuild what the other merge missed".to_owned(),
+            "+ added a line".to_owned(),
+        )]),
+        merged_list: vec![(6, "feat/COX-B157".to_owned())],
+        ..Default::default()
+    });
+    let store = Arc::new(MemStore::default());
+    let uc = hold_expiry_uc(&forge, &store, 3);
+
+    // Round 1: first identical hold — logged with attribution, nothing ends.
+    uc.review_open_prs().await;
+    let hold = store
+        .load()
+        .await
+        .unwrap()
+        .pr_open_holds
+        .get(&7)
+        .expect("hold recorded")
+        .clone();
+    assert_eq!(hold.rounds, 1, "the first identical hold is round 1");
+    assert_eq!(hold.head_sha, HEAD_SHA, "rounds attribute to the head");
+    assert!(forge.closed.lock().expect("lock").is_empty());
+    assert!(forge.merged.lock().expect("lock").is_empty());
+
+    // Round 2: same hold, same head — counts up, still no terminal.
+    uc.review_open_prs().await;
+    let s = store.load().await.unwrap();
+    assert_eq!(s.pr_open_holds.get(&7).expect("held").rounds, 2);
+    assert!(
+        s.activity.iter().any(|a| a.action.contains("hold 2/3")),
+        "the log carries round attribution"
+    );
+    assert!(forge.closed.lock().expect("lock").is_empty());
+
+    // Round 3: at the cap — the SAME cycle forces the terminal close.
+    uc.review_open_prs().await;
+    assert_eq!(
+        *forge.closed.lock().expect("lock"),
+        vec![7],
+        "the unlandable held PR is closed exactly once at expiry"
+    );
+    assert!(forge.merged.lock().expect("lock").is_empty());
+    assert!(
+        !store.load().await.unwrap().pr_open_holds.contains_key(&7),
+        "the terminal decision clears the record"
+    );
+
+    // Round 4: the PR is gone from the forge — a no-op, never re-opened.
+    uc.review_open_prs().await;
+    assert_eq!(*forge.closed.lock().expect("lock"), vec![7]);
+    assert!(!store.load().await.unwrap().pr_open_holds.contains_key(&7));
+}
+
+#[tokio::test]
+async fn a_landable_hold_expires_into_a_forced_landing() {
+    // Same chain, but the PR IS landable (mergeable, marker- and
+    // scratch-free): at the cap the expiry lands it instead of closing —
+    // the hold itself says the diff carries work main lacks.
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: true,
+        competing: Some(vec![(
+            7,
+            "fix(COX-B157): rebuild what the other merge missed".to_owned(),
+            "+ added a line".to_owned(),
+        )]),
+        merged_list: vec![(6, "feat/COX-B157".to_owned())],
+        ..Default::default()
+    });
+    let store = Arc::new(MemStore::default());
+    let uc = hold_expiry_uc(&forge, &store, 3);
+
+    uc.review_open_prs().await;
+    uc.review_open_prs().await;
+    assert!(
+        forge.merged.lock().expect("lock").is_empty(),
+        "rounds 1-2 hold"
+    );
+
+    uc.review_open_prs().await;
+    assert_eq!(
+        *forge.merged.lock().expect("lock"),
+        vec![7],
+        "the landable held PR is merged exactly once at expiry"
+    );
+    assert!(forge.closed.lock().expect("lock").is_empty());
+    assert!(!store.load().await.unwrap().pr_open_holds.contains_key(&7));
+
+    uc.review_open_prs().await;
+    assert_eq!(*forge.merged.lock().expect("lock"), vec![7], "no re-merge");
+}
+
+#[tokio::test]
+async fn a_settled_ticket_hold_expires_the_same_way() {
+    // The OTHER kept-OPEN hold (settled ticket, diff not on main, unlandable)
+    // gets the same one-round expiry: rounds 1-2 log, round 3 closes.
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: false, // unlandable → the terminal is a close
+        competing: Some(vec![(
+            7,
+            "fix(COX-B200): a late second branch".to_owned(),
+            "+ added a line".to_owned(),
+        )]),
+        ..Default::default()
+    });
+    let store = Arc::new(MemStore::default());
+    let _ = crate::ports::outbound::mutate_state(store.as_ref(), |s| {
+        let mut settled = coxagent_domain::Ticket::new(
+            coxagent_domain::TicketId::new("COX-B200").expect("id"),
+            coxagent_domain::TicketType::Bug,
+            "d",
+            "",
+            coxagent_domain::Priority::High,
+            coxagent_domain::Complexity::Small,
+            false,
+        )
+        .expect("t");
+        settled
+            .transition_to(Role::DevBug, Status::InProgress)
+            .expect("claimed");
+        settled
+            .transition_to(Role::DevBug, Status::Fixed)
+            .expect("fixed");
+        settled
+            .transition_to(Role::Test, Status::Verified)
+            .expect("verified");
+        s.tickets.push(settled);
+        Ok(())
+    })
+    .await;
+    let uc = hold_expiry_uc(&forge, &store, 3);
+
+    uc.review_open_prs().await;
+    assert_eq!(
+        store
+            .load()
+            .await
+            .unwrap()
+            .pr_open_holds
+            .get(&7)
+            .expect("hold recorded")
+            .rounds,
+        1
+    );
+    assert!(forge.closed.lock().expect("lock").is_empty());
+
+    uc.review_open_prs().await;
+    assert_eq!(
+        store
+            .load()
+            .await
+            .unwrap()
+            .pr_open_holds
+            .get(&7)
+            .expect("held")
+            .rounds,
+        2
+    );
+    assert!(forge.closed.lock().expect("lock").is_empty());
+
+    uc.review_open_prs().await;
+    assert_eq!(
+        *forge.closed.lock().expect("lock"),
+        vec![7],
+        "the settled-ticket hold terminates at the cap"
+    );
+    assert!(!store.load().await.unwrap().pr_open_holds.contains_key(&7));
+}
+
+#[tokio::test]
+async fn a_restarted_hold_re_stamps_first_at_instead_of_inheriting_the_old_chain() {
+    // The hold on PR 7 was "merged elsewhere"; that merge aged out of the
+    // forge's recently-merged window and the ticket has since settled — so
+    // this round's hold is a DIFFERENT hold (the settled-site reason). A new
+    // chain starts at round 1, and `first_at` must be re-stamped now: the
+    // record would otherwise report an age this hold never accumulated.
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: false,
+        competing: Some(vec![(
+            7,
+            "fix(COX-B157): rebuild what the other merge missed".to_owned(),
+            "+ added a line".to_owned(),
+        )]),
+        ..Default::default()
+    });
+    let store = Arc::new(MemStore::default());
+    let _ = crate::ports::outbound::mutate_state(store.as_ref(), |s| {
+        let mut settled = coxagent_domain::Ticket::new(
+            coxagent_domain::TicketId::new("COX-B157").expect("id"),
+            coxagent_domain::TicketType::Bug,
+            "d",
+            "",
+            coxagent_domain::Priority::High,
+            coxagent_domain::Complexity::Small,
+            false,
+        )
+        .expect("t");
+        settled
+            .transition_to(Role::DevBug, Status::InProgress)
+            .expect("claimed");
+        settled
+            .transition_to(Role::DevBug, Status::Fixed)
+            .expect("fixed");
+        settled
+            .transition_to(Role::Test, Status::Verified)
+            .expect("verified");
+        s.tickets.push(settled);
+        s.pr_open_holds.insert(
+            7,
+            crate::state::PrOpenHold {
+                reason: "COX-B157 merged elsewhere but this diff is NOT on main".to_owned(),
+                rounds: 2,
+                head_sha: HEAD_SHA.to_owned(),
+                first_at: "2000-01-01T00:00:00Z".to_owned(),
+                last_at: "2000-01-01T00:00:00Z".to_owned(),
+            },
+        );
+        Ok(())
+    })
+    .await;
+    let uc = hold_expiry_uc(&forge, &store, 3);
+
+    uc.review_open_prs().await;
+    let hold = store
+        .load()
+        .await
+        .unwrap()
+        .pr_open_holds
+        .get(&7)
+        .expect("hold recorded")
+        .clone();
+    assert_eq!(
+        hold.reason, "COX-B157 is settled but the diff is NOT on main",
+        "the merged-elsewhere signal aged out; the settled site holds now"
+    );
+    assert_eq!(hold.rounds, 1, "a different reason is a different hold");
+    assert_eq!(hold.head_sha, HEAD_SHA);
+    assert_ne!(
+        hold.first_at, "2000-01-01T00:00:00Z",
+        "a fresh chain re-stamps first_at — inheriting the old hold's age is \
+         the stale attribution CXA-C026 exists to kill"
+    );
+}
+
+#[tokio::test]
+async fn hold_max_rounds_zero_is_the_legacy_never_expire_loop() {
+    // CXA-C026 ships armed at 3, but an operator pinning `git.hold_max_rounds`
+    // to 0 must get the exact pre-C026 loop back: the hold re-logs every
+    // round with the legacy (cap-free) line shape, nothing ever terminates,
+    // and no hold record is ever written — an old config must not grow new
+    // state or advertise a cap that does not exist.
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: false, // unlandable → nothing may merge it either
+        competing: Some(vec![(
+            7,
+            "fix(COX-B157): rebuild what the other merge missed".to_owned(),
+            "+ added a line".to_owned(),
+        )]),
+        merged_list: vec![(6, "feat/COX-B157".to_owned())],
+        ..Default::default()
+    });
+    let store = Arc::new(MemStore::default());
+    let uc = hold_expiry_uc(&forge, &store, 0);
+
+    for round in 1..=4 {
+        uc.review_open_prs().await;
+        let s = store.load().await.unwrap();
+        assert!(
+            s.activity
+                .iter()
+                .any(|a| a.action.contains("kept OPEN") && a.action.contains("merged elsewhere")),
+            "round {round} still re-logs the legacy kept-OPEN verdict"
+        );
+        assert!(
+            s.activity.iter().all(|a| !a.action.contains("/0")),
+            "the legacy shape never advertises a cap"
+        );
+        assert!(
+            s.pr_open_holds.is_empty(),
+            "with the brake off, no hold record is ever written"
+        );
+        assert!(forge.closed.lock().expect("lock").is_empty());
+        assert!(forge.merged.lock().expect("lock").is_empty());
+    }
+}
+
 // ---- COX-F001: auto-rollback to last known-good deploy on failure ----
 //
 // These encode the acceptance criteria only. No production rollback logic
@@ -495,6 +1076,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// of silently blending in.
 struct ScriptedDeploy {
     script: Mutex<VecDeque<Result<crate::ports::outbound::DeployReport, PortError>>>,
+    /// Answers served by `health()` probes, one per probe — empty means
+    /// healthy, the trait default this double always reported.
+    health_script: Mutex<VecDeque<bool>>,
     deploy_calls: AtomicUsize,
 }
 impl ScriptedDeploy {
@@ -507,11 +1091,18 @@ impl ScriptedDeploy {
     fn scripted(script: Vec<Result<crate::ports::outbound::DeployReport, PortError>>) -> Self {
         Self {
             script: Mutex::new(script.into_iter().collect()),
+            health_script: Mutex::new(VecDeque::new()),
             deploy_calls: AtomicUsize::new(0),
         }
     }
     fn calls(&self) -> usize {
         self.deploy_calls.load(Ordering::SeqCst)
+    }
+    /// Script the answers `health()` probes serve (one per probe, in order);
+    /// probes past the script report healthy, like the unscripted double.
+    fn with_health_script(mut self, answers: Vec<bool>) -> Self {
+        self.health_script = Mutex::new(answers.into_iter().collect());
+        self
     }
 }
 #[async_trait::async_trait]
@@ -523,6 +1114,7 @@ impl crate::ports::outbound::DeployPort for ScriptedDeploy {
         self.deploy_calls.fetch_add(1, Ordering::SeqCst);
         let next = self.script.lock().expect("lock").pop_front();
         next.unwrap_or(Ok(crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "UNSCRIPTED EXTRA DEPLOY CALL".to_owned(),
@@ -533,10 +1125,15 @@ impl crate::ports::outbound::DeployPort for ScriptedDeploy {
         _work_dir: &std::path::Path,
     ) -> Result<crate::ports::outbound::DeployReport, PortError> {
         Ok(crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "tests ok".to_owned(),
         })
+    }
+    async fn health(&self, _port: u16) -> Result<bool, PortError> {
+        let next = self.health_script.lock().expect("lock").pop_front();
+        Ok(next.unwrap_or(true))
     }
 }
 
@@ -563,11 +1160,37 @@ const GOOD_SHA: &str = "cafef00d";
 /// A `GitPort` double for rollback tests: reports a fixed HEAD, records
 /// every worktree op so a test can assert rollback NEVER touches the live
 /// `work_dir` (only the dedicated rollback path), and reports no changed
-/// paths (no migration in the way) unless a test overrides it.
+/// paths (no migration in the way) unless a test overrides it. Also doubles
+/// for the slot-WIP checkpoint hygiene (CXA-F318): a configurable
+/// `status --porcelain`, a scriptable park outcome, and every `raw` git call
+/// recorded so a test can assert park/wipe/stash/prune behavior.
 #[derive(Default)]
 struct FakeGit {
     worktree_adds: Mutex<Vec<(std::path::PathBuf, String)>>,
     migration_paths: Vec<String>,
+    /// What `status --porcelain` reports ("" = clean tree).
+    status_output: String,
+    /// What `for-each-ref refs/coxagent/wip/` lists.
+    refs_output: String,
+    /// The sha `checkpoint_tree` returns (`None` = clean tree).
+    park_sha: Option<String>,
+    /// Set to fail the park outright (the git-lock case).
+    park_error: String,
+    parks: Mutex<Vec<String>>,
+    raw_calls: Mutex<Vec<String>>,
+    /// What `ls-remote origin refs/heads/<branch>` answers — the PR head sha
+    /// the review flow reads. Empty (the default) = git answered nothing.
+    ls_remote_sha: String,
+}
+impl FakeGit {
+    fn raw_call_count(&self, needle: &str) -> usize {
+        self.raw_calls
+            .lock()
+            .expect("lock")
+            .iter()
+            .filter(|c| c.contains(needle))
+            .count()
+    }
 }
 #[async_trait::async_trait]
 impl GitPort for FakeGit {
@@ -607,6 +1230,28 @@ impl GitPort for FakeGit {
     async fn update_ref(&self, _: &std::path::Path, _: &str, _: &str) -> Result<(), PortError> {
         Ok(())
     }
+    async fn raw(&self, _: &std::path::Path, args: &[&str]) -> (bool, String) {
+        self.raw_calls.lock().expect("lock").push(args.join(" "));
+        match args.first() {
+            Some(&"status") => (true, self.status_output.clone()),
+            Some(&"for-each-ref") => (true, self.refs_output.clone()),
+            Some(&"ls-remote") => (true, self.ls_remote_sha.clone()),
+            _ => (true, String::new()),
+        }
+    }
+    async fn checkpoint_tree(
+        &self,
+        _: &std::path::Path,
+        ref_name: &str,
+        _: &str,
+        _: &GitAuthor,
+    ) -> Result<Option<String>, PortError> {
+        self.parks.lock().expect("lock").push(ref_name.to_owned());
+        if !self.park_error.is_empty() {
+            return Err(PortError::Backend(self.park_error.clone()));
+        }
+        Ok(self.park_sha.clone())
+    }
     async fn worktree_add(
         &self,
         _work_dir: &std::path::Path,
@@ -634,6 +1279,218 @@ impl GitPort for FakeGit {
     ) -> Result<Vec<String>, PortError> {
         Ok(self.migration_paths.clone())
     }
+}
+
+/// A cycle use case wired for slot-hygiene tests (CXA-F318): git enabled and
+/// a `work_dir` that looks like a concurrency slot worktree. The FakeGit does
+/// no filesystem IO, so the path need not exist — only its components matter.
+fn hygiene_uc(
+    initial: ProjectState,
+    git: &Arc<FakeGit>,
+) -> (Arc<MemStore>, RunCycleUseCase<MemStore, RoleAwareEngine>) {
+    let store = Arc::new(MemStore {
+        state: Mutex::new(initial),
+    });
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let slot = tmp.path().join(".coxagent-worktrees/slot-1");
+    let mut cfg = Config::default();
+    cfg.git.enabled = true;
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(RoleAwareEngine),
+        cfg,
+        slot,
+        "goal".to_owned(),
+    )
+    .with_git(Arc::clone(git) as Arc<dyn GitPort>);
+    (store, uc)
+}
+
+/// CXA-F318 AC1 (reclaim leg) + AC2: slot hygiene parks dirty residue on a
+/// durable checkpoint ref and wipes the tree — no anonymous stash when the
+/// park succeeded; a clean slot gets no checkpoint at all.
+#[tokio::test]
+async fn slot_hygiene_parks_residue_then_wipes_instead_of_stashing() {
+    let git = Arc::new(FakeGit {
+        status_output: " M a.rs\n?? b.rs\n".to_owned(),
+        park_sha: Some("wipsha1".to_owned()),
+        ..FakeGit::default()
+    });
+    let (_store, uc) = hygiene_uc(ProjectState::default(), &git);
+
+    let errors = uc.tree_hygiene().await;
+
+    assert!(
+        errors.is_empty(),
+        "a clean park records no run error: {errors:?}"
+    );
+    let parks = git.parks.lock().expect("lock").clone();
+    assert_eq!(parks.len(), 1, "exactly one checkpoint commit");
+    assert!(
+        parks[0].starts_with("refs/coxagent/wip/unattributed-"),
+        "unattributable residue gets an unattributed-<instant> ref: {}",
+        parks[0]
+    );
+    assert_eq!(
+        git.raw_call_count("reset --hard"),
+        1,
+        "parked residue is wiped from the slot"
+    );
+    assert_eq!(git.raw_call_count("clean -fd"), 1);
+    assert_eq!(
+        git.raw_call_count("stash push"),
+        0,
+        "no anonymous stash when the park succeeded"
+    );
+}
+
+/// CXA-F318 AC2: a clean slot releases with no checkpoint commit at all.
+#[tokio::test]
+async fn slot_hygiene_parks_nothing_for_a_clean_tree() {
+    let git = Arc::new(FakeGit::default());
+    let (_store, uc) = hygiene_uc(ProjectState::default(), &git);
+
+    let errors = uc.tree_hygiene().await;
+
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(git.parks.lock().expect("lock").is_empty());
+    assert_eq!(git.raw_call_count("stash push"), 0);
+}
+
+/// CXA-F318 AC3: a failed checkpoint still releases the slot (stash fallback)
+/// and surfaces as a run error, so the errors==0 close gate blocks delivery.
+#[tokio::test]
+async fn slot_hygiene_checkpoint_failure_stashes_and_records_a_run_error() {
+    let git = Arc::new(FakeGit {
+        status_output: " M a.rs".to_owned(),
+        park_error: "git add failed: index.lock: unable to create".to_owned(),
+        ..FakeGit::default()
+    });
+    let (_store, uc) = hygiene_uc(ProjectState::default(), &git);
+
+    let errors = uc.tree_hygiene().await;
+
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].starts_with("WIP checkpoint:") && errors[0].contains("index.lock"),
+        "{}",
+        errors[0]
+    );
+    assert_eq!(
+        git.raw_call_count("stash push"),
+        1,
+        "the work still survives in the shared stash"
+    );
+    assert_eq!(
+        git.parks.lock().expect("lock").len(),
+        1,
+        "the park was attempted exactly once (and failed)"
+    );
+}
+
+/// CXA-F318 AC5: checkpoint refs whose ticket is closed or gone are pruned,
+/// live tickets' refs stay, and the unattributed namespace is bounded to the
+/// newest few.
+#[tokio::test]
+async fn wip_refs_of_closed_or_gone_tickets_are_pruned() {
+    use coxagent_domain::{Complexity, Priority, TicketId, TicketType};
+    let mut done = coxagent_domain::Ticket::new(
+        TicketId::new("DONE-1").expect("id"),
+        TicketType::Bug,
+        "d",
+        "",
+        Priority::High,
+        Complexity::Small,
+        false,
+    )
+    .expect("t");
+    done.transition_to(Role::DevBug, Status::InProgress)
+        .expect("claimed");
+    done.transition_to(Role::DevBug, Status::Fixed)
+        .expect("fixed");
+    done.transition_to(Role::Test, Status::Verified)
+        .expect("verified");
+    let mut live = coxagent_domain::Ticket::new(
+        TicketId::new("LIVE-1").expect("id"),
+        TicketType::Bug,
+        "l",
+        "",
+        Priority::High,
+        Complexity::Small,
+        false,
+    )
+    .expect("t");
+    live.transition_to(Role::DevBug, Status::InProgress)
+        .expect("claimed");
+    // Pre-seed checkpoint records on BOTH tickets so the prune's aggregate
+    // bookkeeping is exercised for real: the closed ticket's pointers must be
+    // cleared with its ref; the live ticket's history must survive.
+    let seeded = |ref_name: &str| coxagent_domain::WipCheckpoint {
+        ref_name: ref_name.to_owned(),
+        sha: "seededsha".to_owned(),
+        note: "branch main".to_owned(),
+        recorded_at: "2026-09-02T00:00:00Z".to_owned(),
+    };
+    done.record_wip_checkpoint(Role::System, seeded("refs/coxagent/wip/DONE-1"))
+        .expect("seed done");
+    live.record_wip_checkpoint(Role::System, seeded("refs/coxagent/wip/LIVE-1"))
+        .expect("seed live");
+    let initial = ProjectState {
+        tickets: vec![done, live],
+        ..ProjectState::default()
+    };
+
+    let git = Arc::new(FakeGit {
+        refs_output: [
+            "refs/coxagent/wip/LIVE-1",
+            "refs/coxagent/wip/DONE-1",
+            "refs/coxagent/wip/GONE-9",
+            "refs/coxagent/wip/unattributed-20260101T000000Z",
+            "refs/coxagent/wip/unattributed-20260102T000000Z",
+            "refs/coxagent/wip/unattributed-20260103T000000Z",
+            "refs/coxagent/wip/unattributed-20260104T000000Z",
+        ]
+        .join("\n"),
+        ..FakeGit::default()
+    });
+    let (store, uc) = hygiene_uc(initial, &git);
+
+    let errors = uc.tree_hygiene().await;
+    assert!(errors.is_empty(), "{errors:?}");
+
+    // Clean tree in this test (status_output "") — but the PRUNE deletes the
+    // dead refs through `update-ref -d`; assert exactly which ones.
+    let deletes: Vec<String> = git
+        .raw_calls
+        .lock()
+        .expect("lock")
+        .iter()
+        .filter(|c| c.contains("update-ref -d"))
+        .cloned()
+        .collect();
+    let has = |needle: &str| deletes.iter().any(|d| d.contains(needle));
+    assert!(!has("LIVE-1"), "a live ticket keeps its checkpoint ref");
+    assert!(has("DONE-1"), "a closed ticket's ref is pruned");
+    assert!(has("GONE-9"), "an absent ticket's ref is pruned");
+    assert!(
+        has("unattributed-20260101T000000Z"),
+        "the oldest unattributed ref is pruned"
+    );
+    assert!(
+        !has("unattributed-20260102T000000Z"),
+        "newer unattributed refs survive the cap"
+    );
+    // The closed ticket's aggregate pointers go with its refs; the live
+    // ticket's checkpoint history survives untouched.
+    let state = store.load().await.expect("load");
+    let done_t = state
+        .ticket(&TicketId::new("DONE-1").expect("id"))
+        .expect("done ticket");
+    assert!(done_t.wip_checkpoints().is_empty(), "cleared with its ref");
+    let live_t = state
+        .ticket(&TicketId::new("LIVE-1").expect("id"))
+        .expect("live ticket");
+    assert_eq!(live_t.wip_checkpoints().len(), 1, "live history stays");
 }
 
 /// A cycle that will complete a fresh feature (so the deploy step runs),
@@ -697,11 +1554,13 @@ fn deploy_bug_tickets(state: &ProjectState) -> Vec<&coxagent_domain::Ticket> {
 async fn deploy_failure_auto_rolls_back_to_last_known_good() {
     let deploy = Arc::new(ScriptedDeploy::new(vec![
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: false,
             deployed: true,
             summary: "deploy failed: container exited 1".to_owned(),
         },
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "rollback redeploy ok".to_owned(),
@@ -751,11 +1610,13 @@ async fn deploy_failure_auto_rolls_back_to_last_known_good() {
 async fn rollback_is_logged_and_notified_distinctly_from_a_normal_deploy() {
     let deploy = Arc::new(ScriptedDeploy::new(vec![
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: false,
             deployed: true,
             summary: "deploy failed: container exited 1".to_owned(),
         },
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "rollback redeploy ok".to_owned(),
@@ -798,11 +1659,13 @@ async fn rollback_is_logged_and_notified_distinctly_from_a_normal_deploy() {
 async fn triggering_failure_still_files_exactly_one_deduped_high_bug() {
     let deploy = Arc::new(ScriptedDeploy::new(vec![
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: false,
             deployed: true,
             summary: "deploy failed: container exited 1".to_owned(),
         },
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "rollback redeploy ok".to_owned(),
@@ -827,6 +1690,7 @@ async fn triggering_failure_still_files_exactly_one_deduped_high_bug() {
 async fn no_rollback_without_a_prior_successful_deploy() {
     let deploy = Arc::new(ScriptedDeploy::new(vec![
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: false,
             deployed: true,
             summary: "deploy failed: container exited 1".to_owned(),
@@ -865,11 +1729,13 @@ async fn no_rollback_without_a_prior_successful_deploy() {
 async fn rollback_failure_stops_after_one_retry_and_escalates() {
     let deploy = Arc::new(ScriptedDeploy::new(vec![
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: false,
             deployed: true,
             summary: "deploy failed: container exited 1".to_owned(),
         },
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: false,
             deployed: true,
             summary: "rollback redeploy ALSO failed".to_owned(),
@@ -915,6 +1781,7 @@ impl crate::ports::outbound::DeployPort for DeployWithDeadPort {
     ) -> Result<crate::ports::outbound::DeployReport, PortError> {
         self.deploy_calls.fetch_add(1, Ordering::SeqCst);
         Ok(crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "docker compose up -d --build succeeded".to_owned(),
@@ -925,6 +1792,7 @@ impl crate::ports::outbound::DeployPort for DeployWithDeadPort {
         _work_dir: &std::path::Path,
     ) -> Result<crate::ports::outbound::DeployReport, PortError> {
         Ok(crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "tests ok".to_owned(),
@@ -1060,6 +1928,7 @@ async fn a_deploy_spawn_error_rolls_back_to_the_last_known_good_deploy() {
     let deploy = Arc::new(ScriptedDeploy::scripted(vec![
         Err(PortError::Backend("docker compose timed out".to_owned())),
         Ok(crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "rollback redeploy ok".to_owned(),
@@ -1103,6 +1972,491 @@ async fn a_deploy_spawn_error_rolls_back_to_the_last_known_good_deploy() {
     );
 }
 
+/// CXA-F289 AC1: a failed deploy persists the adapter's forensics bundle on
+/// THAT attempt's record — not just the one-line summary. The bundle travels
+/// `DeployReport` (adapter) → `record_deploy` (application) → `DeployStatus`
+/// (persisted state) without being reduced on the way.
+#[tokio::test]
+async fn a_failed_deploy_persists_the_adapters_forensics_bundle_on_its_record() {
+    let bundle = crate::state::DeployFailureBundle::new(
+        "validating docker-compose.yml: service \"web\" has neither an image nor a build \
+         context specified",
+        vec![crate::state::ContainerLogTail {
+            service: "db".to_owned(),
+            tail: "pg_ctl: could not start server".to_owned(),
+        }],
+        false,
+    );
+    let deploy = Arc::new(ScriptedDeploy::scripted(vec![Ok(
+        crate::ports::outbound::DeployReport {
+            failure_bundle: Some(bundle),
+            success: false,
+            deployed: true,
+            summary: "docker compose failed: exit 1".to_owned(),
+        },
+    )]));
+    let store = Arc::new(MemStore::default());
+    let mut cfg = Config::default();
+    cfg.deploy.host_port = Some(8101);
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(RoleAwareEngine),
+        cfg,
+        PathBuf::from("/tmp/proj"),
+        "goal".to_owned(),
+    )
+    .with_deploy(Arc::clone(&deploy) as Arc<dyn crate::ports::outbound::DeployPort>);
+
+    Box::pin(uc.run_cycle(1)).await;
+
+    let state = store.load().await.expect("load");
+    let record = state.deploy.as_ref().expect("the failed attempt recorded");
+    assert!(!record.ok);
+    let persisted = record
+        .failure_bundle
+        .as_ref()
+        .expect("the forensics bundle must persist on the attempt's record");
+    assert!(
+        persisted
+            .stderr_tail
+            .contains("neither an image nor a build context"),
+        "the compose stderr tail rides the record: {persisted:?}"
+    );
+    assert_eq!(
+        persisted.container_logs.first().map(|c| c.service.as_str()),
+        Some("db"),
+        "per-container logs are attributed to their service: {persisted:?}"
+    );
+}
+
+/// CXA-F289 edge case: a failed deploy whose rollback ALSO fails keeps BOTH
+/// bundles as separate attempt records — the forward attempt's bundle on
+/// `state.deploy`, the failed rollback redeploy's own bundle on
+/// `state.last_rollback` — and neither overwrites the other.
+#[tokio::test]
+async fn a_failed_rollback_keeps_both_failure_bundles_as_separate_attempt_records() {
+    let forward = crate::state::DeployFailureBundle::new(
+        "docker compose failed: forward attempt broke",
+        Vec::new(),
+        true,
+    );
+    let rollback = crate::state::DeployFailureBundle::new(
+        "docker compose failed: rollback redeploy broke too",
+        Vec::new(),
+        true,
+    );
+    let deploy = Arc::new(ScriptedDeploy::scripted(vec![
+        Ok(crate::ports::outbound::DeployReport {
+            failure_bundle: Some(forward),
+            success: false,
+            deployed: true,
+            summary: "docker compose failed: forward".to_owned(),
+        }),
+        Ok(crate::ports::outbound::DeployReport {
+            failure_bundle: Some(rollback),
+            success: false,
+            deployed: true,
+            summary: "docker compose failed: rollback".to_owned(),
+        }),
+    ]));
+    let notifier = Arc::new(SpyNotifier::default());
+    let (store, _git, uc) = rollback_uc(true, &deploy, &notifier);
+
+    Box::pin(uc.run_cycle(1)).await;
+    let state = store.load().await.expect("load");
+
+    let deploy_record = state.deploy.as_ref().expect("failed deploy recorded");
+    assert!(
+        deploy_record
+            .failure_bundle
+            .as_ref()
+            .is_some_and(|b| b.stderr_tail.contains("forward attempt broke")),
+        "the forward attempt keeps ITS bundle on the deploy record: {deploy_record:?}"
+    );
+    let rb = state.last_rollback.as_ref().expect("rollback recorded");
+    assert!(!rb.ok, "the rollback itself failed");
+    assert!(
+        rb.failure_bundle
+            .as_ref()
+            .is_some_and(|b| b.stderr_tail.contains("rollback redeploy broke too")),
+        "the failed rollback record carries its OWN bundle: {rb:?}"
+    );
+}
+
+// --- CXA-F240: live-health auto-rollback after merge -------------------
+//
+// The deploy that shipped the code passed CI and its own post-deploy health
+// gate, but the RUNNING stack later goes unhealthy. The ops monitor already
+// files a bug; when the operator opts in (`deploy.live_health_auto_rollback`)
+// it must also revert to last-known-good — after N consecutive unhealthy
+// probes, never on one flaky check — and record old/new digests + reason.
+
+/// The precondition for every live-health scenario: a deploy is LIVE
+/// (history + a recorded healthy deploy carrying its sha) and a known-good
+/// rollback target exists from a prior deploy+tests pass. Drives
+/// `ops_monitor` directly — the unit under test — rather than a full cycle,
+/// whose dev phases are covered by the rollback tests above.
+fn live_health_uc(
+    cfg: Config,
+    migration_paths: Vec<String>,
+    deploy: &Arc<ScriptedDeploy>,
+    notifier: &Arc<SpyNotifier>,
+) -> (
+    Arc<MemStore>,
+    Arc<FakeGit>,
+    RunCycleUseCase<MemStore, RoleAwareEngine>,
+) {
+    let mut initial = ProjectState::default();
+    initial.history.push(crate::state::DeployRecord {
+        version: coxagent_domain::SemVer::new(1, 0, 0),
+        ticket: coxagent_domain::TicketId::new("CXA-1").expect("valid ticket id"),
+        title: "first ship".to_owned(),
+        at: crate::state::now_rfc3339(),
+    });
+    initial.deploy_index = 1;
+    initial.deploy = Some(crate::state::DeployStatus {
+        at: crate::state::now_rfc3339(),
+        ok: true,
+        summary: "live deploy".to_owned(),
+        commit_sha: Some(HEAD_SHA.to_owned()),
+        health_check: None,
+        failure_bundle: None,
+    });
+    initial.last_good_deploy = Some(crate::state::KnownGoodDeploy {
+        sha: GOOD_SHA.to_owned(),
+        at: crate::state::now_rfc3339(),
+        deploy_index: 1,
+        summary: "prior deploy + tests passed".to_owned(),
+    });
+    let store = Arc::new(MemStore {
+        state: Mutex::new(initial),
+    });
+    let git = Arc::new(FakeGit {
+        migration_paths,
+        ..FakeGit::default()
+    });
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(RoleAwareEngine),
+        cfg,
+        PathBuf::from("/tmp/proj"),
+        "goal".to_owned(),
+    )
+    .with_deploy(Arc::clone(deploy) as Arc<dyn crate::ports::outbound::DeployPort>)
+    .with_git(Arc::clone(&git) as Arc<dyn GitPort>)
+    .with_notifier(Arc::clone(notifier) as Arc<dyn crate::ports::outbound::NotifierPort>);
+    (store, git, uc)
+}
+
+fn live_health_cfg(fail_checks: u32, live_rollback: bool) -> Config {
+    let mut cfg = Config::default();
+    cfg.deploy.host_port = Some(8101);
+    cfg.deploy.live_health_auto_rollback = live_rollback;
+    cfg.deploy.live_health_fail_checks = fail_checks;
+    cfg
+}
+
+fn ops_down_tickets(state: &ProjectState) -> usize {
+    state
+        .tickets
+        .iter()
+        .filter(|t| t.title().starts_with("App is DOWN"))
+        .count()
+}
+
+/// AC1 (CXA-F240): the live deployment stops answering on its published
+/// port; after N=2 consecutive unhealthy probes (inside the rollback window)
+/// the stack is automatically reverted to last-known-good, and the streak
+/// resets once the port answers again. One dead probe is not enough.
+#[tokio::test]
+async fn live_app_down_for_n_consecutive_checks_rolls_back_to_last_known_good() {
+    let deploy = Arc::new(
+        ScriptedDeploy::new(vec![crate::ports::outbound::DeployReport {
+            failure_bundle: None,
+            success: true,
+            deployed: true,
+            summary: "rollback redeploy ok".to_owned(),
+        }])
+        .with_health_script(vec![false, false]),
+    );
+    let notifier = Arc::new(SpyNotifier::default());
+    let (store, git, uc) = live_health_uc(live_health_cfg(2, true), Vec::new(), &deploy, &notifier);
+
+    // Probe 1: down, but one strike — the bug is filed, the revert is not.
+    uc.ops_monitor(&mut CycleReport::default()).await;
+    let state = store.load().await.expect("load");
+    assert!(state.ops_down && state.ops_down_streak == 1);
+    assert_eq!(
+        ops_down_tickets(&state),
+        1,
+        "the outage still files its high-priority bug on the first dead probe"
+    );
+    assert!(
+        git.worktree_adds.lock().expect("lock").is_empty(),
+        "one unhealthy probe is not N consecutive checks — no revert yet"
+    );
+    assert!(
+        state.last_rollback.is_none(),
+        "no revert recorded after a single failed probe: {:?}",
+        state.last_rollback
+    );
+
+    // Probe 2: N consecutive checks inside the window → revert fires.
+    uc.ops_monitor(&mut CycleReport::default()).await;
+    let state = store.load().await.expect("load");
+    {
+        let adds = git.worktree_adds.lock().expect("lock");
+        assert_eq!(
+            adds.len(),
+            1,
+            "exactly one revert, into the dedicated rollback worktree: {adds:?}"
+        );
+        assert_ne!(
+            adds[0].0,
+            PathBuf::from("/tmp/proj"),
+            "the revert must never touch the live work_dir (never during active work)"
+        );
+        assert_eq!(
+            adds[0].1, GOOD_SHA,
+            "the revert checks out the known-good sha"
+        );
+    }
+    assert_eq!(
+        deploy.calls(),
+        1,
+        "the revert redeploys the known-good version exactly once"
+    );
+    let rb = state.last_rollback.as_ref().expect("rollback recorded");
+    assert_eq!(rb.reason, "live health failed", "trigger reason recorded");
+    assert_eq!(rb.to_sha, GOOD_SHA);
+    assert!(rb.ok, "the revert succeeded: {rb:?}");
+
+    // Audit (CXA-F240): old vs new image digests + trigger reason, durably.
+    let incident = state
+        .incidents
+        .iter()
+        .find(|i| i.reason == "live health failed")
+        .expect("audit incident entry recorded");
+    assert_eq!(incident.failed_sha, HEAD_SHA, "old digest recorded");
+    assert_eq!(incident.to_sha, GOOD_SHA, "new digest recorded");
+    assert!(
+        state.activity.iter().any(|a| a.agent == "ROLLBACK"),
+        "the revert writes its activity-log audit entry: {:?}",
+        state.activity
+    );
+
+    // Probe 3: the revert redeploy bound the port — recovery, no re-revert.
+    uc.ops_monitor(&mut CycleReport::default()).await;
+    let state = store.load().await.expect("load");
+    assert!(
+        !state.ops_down && state.ops_down_streak == 0,
+        "a healthy probe resets the outage state: ops_down={}, streak={}",
+        state.ops_down,
+        state.ops_down_streak
+    );
+    assert_eq!(
+        deploy.calls(),
+        1,
+        "a recovered monitor must not revert again"
+    );
+    let events = notifier.events.lock().expect("lock");
+    assert!(
+        events.iter().any(|e| e.kind == "rollback_ok"),
+        "the revert is announced distinctly: {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| e.kind == "ops_up"),
+        "the later recovery is announced too: {events:?}"
+    );
+}
+
+/// Edge case (CXA-F240): live-health rollback is opt-in — with the flag off
+/// (the default) a dead live stack still gets its bug and alert, but the
+/// monitor never touches the running images. An existing project's behavior
+/// never changes until an operator turns this on.
+#[tokio::test]
+async fn live_health_rollback_never_fires_without_the_opt_in() {
+    let deploy =
+        Arc::new(ScriptedDeploy::new(Vec::new()).with_health_script(vec![false, false, false]));
+    let notifier = Arc::new(SpyNotifier::default());
+    let (store, git, uc) =
+        live_health_uc(live_health_cfg(3, false), Vec::new(), &deploy, &notifier);
+
+    for _ in 0..3 {
+        uc.ops_monitor(&mut CycleReport::default()).await;
+    }
+
+    let state = store.load().await.expect("load");
+    assert!(state.ops_down && state.ops_down_streak == 3);
+    assert_eq!(
+        ops_down_tickets(&state),
+        1,
+        "the outage still becomes tracked work exactly once (deduped)"
+    );
+    assert_eq!(
+        deploy.calls(),
+        0,
+        "no automatic revert without the opt-in flag"
+    );
+    assert!(state.last_rollback.is_none());
+    assert!(git.worktree_adds.lock().expect("lock").is_empty());
+}
+
+/// Edge case (CXA-F240): when a migration shipped since the known-good
+/// capture, rolling the app code back alone would run it against a schema
+/// ahead of it — no automatic revert fires; the monitor records a blocked
+/// rollback and surfaces an operator-facing request instead.
+#[tokio::test]
+async fn a_migration_since_capture_blocks_the_live_health_revert_and_asks_the_operator() {
+    let deploy = Arc::new(ScriptedDeploy::new(Vec::new()).with_health_script(vec![false]));
+    let notifier = Arc::new(SpyNotifier::default());
+    let (store, _git, uc) = live_health_uc(
+        live_health_cfg(1, true),
+        vec!["migrations".to_owned()],
+        &deploy,
+        &notifier,
+    );
+
+    uc.ops_monitor(&mut CycleReport::default()).await;
+
+    let state = store.load().await.expect("load");
+    assert_eq!(
+        deploy.calls(),
+        0,
+        "no automatic revert when it would be unsafe"
+    );
+    let rb = state
+        .last_rollback
+        .as_ref()
+        .expect("blocked rollback recorded");
+    assert!(rb.migration_blocked && !rb.ok, "{rb:?}");
+    assert_eq!(rb.reason, "live health failed");
+    let events = notifier.events.lock().expect("lock");
+    assert!(
+        events.iter().any(|e| e.kind == "rollback_blocked"),
+        "the operator-facing request for explicit handling: {events:?}"
+    );
+}
+
+/// The two rollback opt-ins are independent (CXA-F240): turning on the
+/// live-health trigger must not silently enable the deploy-failure trigger —
+/// each fires only through its own config flag.
+#[tokio::test]
+async fn the_live_health_opt_in_does_not_enable_the_deploy_failure_rollback() {
+    let deploy = Arc::new(ScriptedDeploy::new(vec![
+        crate::ports::outbound::DeployReport {
+            failure_bundle: None,
+            success: true,
+            deployed: true,
+            summary: "rollback redeploy ok".to_owned(),
+        },
+    ]));
+    let notifier = Arc::new(SpyNotifier::default());
+    let (store, git, uc) = live_health_uc(live_health_cfg(1, true), Vec::new(), &deploy, &notifier);
+
+    // Deploy-failure entry: its own flag (`auto_rollback`) is OFF — inert,
+    // even though the live-health flag is on.
+    uc.attempt_rollback(
+        "deploy failed",
+        Some(HEAD_SHA.to_owned()),
+        &mut CycleReport::default(),
+    )
+    .await;
+    assert_eq!(
+        deploy.calls(),
+        0,
+        "auto_rollback off → the deploy-failure entry must not revert"
+    );
+    assert!(git.worktree_adds.lock().expect("lock").is_empty());
+    assert!(
+        store.load().await.expect("load").last_rollback.is_none(),
+        "no rollback recorded through the disabled entry"
+    );
+
+    // Live-health entry: its flag is ON — the same state reverts.
+    uc.attempt_live_health_rollback(Some(HEAD_SHA.to_owned()), &mut CycleReport::default())
+        .await;
+    assert_eq!(
+        deploy.calls(),
+        1,
+        "live_health_auto_rollback on → the revert fires"
+    );
+    let state = store.load().await.expect("load");
+    assert!(
+        state
+            .last_rollback
+            .as_ref()
+            .is_some_and(|r| r.ok && r.reason == "live health failed"),
+        "{:?}",
+        state.last_rollback
+    );
+}
+
+/// The live-health revert respects the allowed window (CXA-F240): a
+/// known-good target older than `max_rollback_age_secs` is too stale — the
+/// revert is skipped and recorded as blocked, never attempted blind.
+#[tokio::test]
+async fn a_live_health_revert_never_targets_a_stale_known_good() {
+    let deploy = Arc::new(ScriptedDeploy::new(Vec::new()).with_health_script(vec![false]));
+    let notifier = Arc::new(SpyNotifier::default());
+    let (store, git, uc) = live_health_uc(live_health_cfg(1, true), Vec::new(), &deploy, &notifier);
+    // Age the known-good capture far past `max_rollback_age_secs`.
+    store.state.lock().expect("lock").last_good_deploy = Some(crate::state::KnownGoodDeploy {
+        sha: GOOD_SHA.to_owned(),
+        at: "2020-01-01T00:00:00Z".to_owned(),
+        deploy_index: 1,
+        summary: "ancient but recorded".to_owned(),
+    });
+
+    uc.ops_monitor(&mut CycleReport::default()).await;
+
+    let state = store.load().await.expect("load");
+    assert_eq!(
+        deploy.calls(),
+        0,
+        "a stale target must never be reverted to"
+    );
+    assert!(git.worktree_adds.lock().expect("lock").is_empty());
+    let rb = state
+        .last_rollback
+        .as_ref()
+        .expect("skipped rollback recorded");
+    assert!(rb.stale && !rb.ok, "{rb:?}");
+    assert_eq!(rb.reason, "live health failed");
+}
+
+/// AC2 (CXA-F240): the known-good capture runs with every successful
+/// post-deploy published-port health check — a deploy that answers on its
+/// port and passes tests becomes the rollback candidate with no manual
+/// action, so a later live-health outage always has something to revert to.
+#[tokio::test]
+async fn every_healthy_deploy_becomes_the_known_good_rollback_target() {
+    let deploy = Arc::new(ScriptedDeploy::new(vec![
+        crate::ports::outbound::DeployReport {
+            failure_bundle: None,
+            success: true,
+            deployed: true,
+            summary: "docker compose up -d --build succeeded".to_owned(),
+        },
+    ]));
+    let notifier = Arc::new(SpyNotifier::default());
+    // No prior good seeded: this cycle's healthy deploy must create it.
+    let (store, _git, uc) = rollback_uc(false, &deploy, &notifier);
+
+    Box::pin(uc.run_cycle(1)).await;
+
+    let state = store.load().await.expect("load");
+    assert!(
+        state
+            .last_good_deploy
+            .as_ref()
+            .is_some_and(|g| g.sha == HEAD_SHA),
+        "a deploy that answered on its published port and passed tests must be \
+         captured as the rollback candidate: {:?}",
+        state.last_good_deploy
+    );
+}
+
 /// Scripted deploy where only the 2nd `deploy()` call (the rollback
 /// redeploy) actually binds the port — models the forward deploy starting
 /// a container that never listens, followed by a rollback that does.
@@ -1130,6 +2484,7 @@ impl crate::ports::outbound::DeployPort for HealthOnSecondDeployOnly {
         self.deploy_calls.fetch_add(1, Ordering::SeqCst);
         let next = self.deploy_script.lock().expect("lock").pop_front();
         Ok(next.unwrap_or(crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "UNSCRIPTED EXTRA DEPLOY CALL".to_owned(),
@@ -1140,6 +2495,7 @@ impl crate::ports::outbound::DeployPort for HealthOnSecondDeployOnly {
         _work_dir: &std::path::Path,
     ) -> Result<crate::ports::outbound::DeployReport, PortError> {
         Ok(crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "tests ok".to_owned(),
@@ -1158,11 +2514,13 @@ impl crate::ports::outbound::DeployPort for HealthOnSecondDeployOnly {
 async fn health_check_failure_triggers_rollback_like_any_other_deploy_failure() {
     let deploy = Arc::new(HealthOnSecondDeployOnly::new(vec![
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "docker compose up -d --build succeeded".to_owned(),
         },
         crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "rollback redeploy ok".to_owned(),
@@ -1253,6 +2611,7 @@ impl crate::ports::outbound::DeployPort for ScriptedHealthCheckDeploy {
     ) -> Result<crate::ports::outbound::DeployReport, PortError> {
         self.deploy_calls.fetch_add(1, Ordering::SeqCst);
         Ok(crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "docker compose up -d --build succeeded".to_owned(),
@@ -1263,6 +2622,7 @@ impl crate::ports::outbound::DeployPort for ScriptedHealthCheckDeploy {
         _work_dir: &std::path::Path,
     ) -> Result<crate::ports::outbound::DeployReport, PortError> {
         Ok(crate::ports::outbound::DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "tests ok".to_owned(),
@@ -1765,6 +3125,56 @@ async fn no_budget_warning_when_no_cap_is_configured() {
     );
 }
 
+/// CXA-F257: the cycle's meter fold lands each labeled run's provenance on
+/// its ticket's bounded log and drops unlabeled runs (ceremonies, session
+/// resumes) — provenance is per-ticket work, never ambient noise.
+#[tokio::test]
+async fn provenance_folds_per_ticket_and_drops_unlabeled_runs() {
+    use crate::state::{MeteredStep, StepProvenance};
+    let store = Arc::new(MemStore::default());
+    let meter = Arc::new(Mutex::new(Spend::default()));
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(RoleAwareEngine),
+        Config::default(),
+        PathBuf::from("/tmp/proj-provenance-fold"),
+        "goal".to_owned(),
+    )
+    .with_meter(Arc::clone(&meter));
+
+    let step = |role: &str, engine: &str| StepProvenance {
+        at: "2026-08-30T10:00:00Z".to_owned(),
+        role: role.to_owned(),
+        action: "agent run".to_owned(),
+        attempts: vec![crate::state::EngineAttempt {
+            engine: engine.to_owned(),
+            model: Some("opus".to_owned()),
+        }],
+    };
+    meter.lock().expect("lock").step_provenance = vec![
+        MeteredStep {
+            ticket: Some("CXC-F001".to_owned()),
+            step: step("DEV-FEATURE", "claude"),
+        },
+        MeteredStep {
+            ticket: None, // a ceremony/resume run — no ticket to attribute
+            step: step("SM", "opencode"),
+        },
+    ];
+
+    Box::pin(uc.run_cycle(1)).await;
+
+    let s = store.load().await.expect("load");
+    let logged = s.step_provenance("CXC-F001");
+    assert_eq!(logged.len(), 1, "the labeled run lands on its ticket");
+    assert_eq!(logged[0].role, "DEV-FEATURE");
+    assert_eq!(logged[0].attempts[0].engine, "claude");
+    assert!(
+        meter.lock().expect("lock").step_provenance.is_empty(),
+        "the fold drains the meter's provenance delta like every other counter"
+    );
+}
+
 /// AC: only crossing 100% still triggers the existing hard stop — spend
 /// jumping straight past 80% to (or over) the cap in one cycle must still
 /// raise the 80% warning (before the pause) AND pause the loop.
@@ -2032,6 +3442,8 @@ impl AgentEnginePort for CriteriaEngine {
             session_id: None,
             sandbox: SandboxStatus::default(),
             engine: String::new(),
+            model: String::new(),
+            attempts: Vec::new(),
         })
     }
 }
@@ -2167,5 +3579,347 @@ async fn malformed_host_port_fails_the_gate_instead_of_skipping_it() {
         deploy.health_check_calls.load(Ordering::SeqCst),
         0,
         "a malformed host_port must fail before ever probing — there's nothing valid to probe"
+    );
+}
+
+// --- CXA-F012: incident post-mortem & prevention loop after rollback ------
+//
+// RED tests encoding the acceptance criteria ONLY (no implementation here).
+// Each scenario drives the same full-cycle + stubs as the COX-F001 rollback
+// suite above and asserts on observable seams CXA-F012 is expected to use.
+// Today NOTHING produces a post-mortem, so every test here fails for exactly
+// the right reason and goes green once the feature lands.
+//
+// Contract markers CXA-F012 must emit (documented per test):
+//   - an in-app chat message posted into an INCIDENTS channel whose body names
+//     a post-mortem — and, when rollback was skipped for stale/migration_blocked,
+//     explicitly marked 'rolled-forward/stale' rather than 'rolled-back';
+//   - a NotifierPort event naming that incident post-mortem;
+//   - a root-cause PREVENTION ticket filed from health/test evidence + shipped
+//     diff — deliberately distinct from the existing 'Deploy failing' /
+//     'Rollback failed' bug titles so this suite isolates only what CXA-F012
+//     adds — deduped against an already-open same-symptom ticket;
+//   - engine-infrastructure incidents never produce a post-mortem.
+
+/// Chat messages whose body names a post-mortem. Empty today by design.
+fn pm_chat(state: &ProjectState) -> Vec<crate::state::ChatMsg> {
+    state
+        .chat
+        .iter()
+        .filter(|m| m.body.to_lowercase().contains("post-mortem"))
+        .cloned()
+        .collect()
+}
+
+/// Chat messages posted into an incidents room specifically.
+fn incidents_chat(state: &ProjectState) -> Vec<crate::state::ChatMsg> {
+    state
+        .chat
+        .iter()
+        .filter(|m| m.channel.to_lowercase().contains("incident"))
+        .cloned()
+        .collect()
+}
+
+/// Number of NotifierPort events naming an incident post-mortem.
+/// Kept for the CXA-F012 AC assertions this suite will drive once the
+/// notifier contract marker is asserted directly; harmless test utility.
+#[expect(dead_code)]
+fn pm_notify(events: &[crate::ports::outbound::NotifyEvent]) -> usize {
+    events
+        .iter()
+        .filter(|e| {
+            e.kind.to_lowercase().contains("post_mortem")
+                || e.kind.to_lowercase().contains("postmortem")
+                || e.kind.to_lowercase().contains("incident")
+                || e.message.to_lowercase().contains("post-mortem")
+                || e.message.to_lowercase().contains("postmortem")
+                || e.message.to_lowercase().contains("incident")
+        })
+        .count()
+}
+
+/// Root-cause prevention ticket titles (distinct marker from deploy bugs).
+/// Kept for the CXA-F012 AC assertions this suite will drive once the
+/// prevention-ticket contract marker is asserted directly; harmless test
+/// utility.
+#[expect(dead_code)]
+fn prevention_tickets(state: &ProjectState) -> Vec<String> {
+    state
+        .tickets
+        .iter()
+        .filter(|t| t.title().to_lowercase().contains("root cause"))
+        .map(|t| t.title().to_owned())
+        .collect()
+}
+
+/// AC1a/b — after EVERY successful auto-rollback (RollbackStatus.ok=true) one
+/// post-mortem document is written to docs AND surfaced in #incidents — not
+/// buried in #general or #agents where nobody watching for outages looks.
+#[tokio::test]
+async fn successful_rollback_produces_a_post_mortem_in_the_incidents_channel() {
+    let deploy = Arc::new(ScriptedDeploy::new(vec![
+        crate::ports::outbound::DeployReport {
+            failure_bundle: None,
+            success: false,
+            deployed: true,
+            summary: "deploy failed: container exited 1".to_owned(),
+        },
+        crate::ports::outbound::DeployReport {
+            failure_bundle: None,
+            success: true,
+            deployed: true,
+            summary: "rollback redeploy ok".to_owned(),
+        },
+    ]));
+    let notifier = Arc::new(SpyNotifier {
+        ..Default::default()
+    });
+    let (store, _git, uc) = rollback_uc(true, &deploy, &notifier);
+
+    Box::pin(uc.run_cycle(1)).await;
+
+    let state = store.load().await.expect("load");
+    assert!(
+        state.last_rollback.as_ref().is_some_and(|r| r.ok),
+        "precondition — this scenario must end in RollbackStatus.ok=true"
+    );
+    assert!(
+        !pm_chat(&state).is_empty(),
+        "after every successful auto-rollback a post-mortem must be produced; \
+         none exists yet because CXA-F012 is unimplemented. Chat so far: {:?}",
+        state
+            .chat
+            .iter()
+            .map(|m| (&m.channel, &m.body))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// AC1b/c — the incident goes to an INCIDENTS room specifically (not general/
+/// agents), and surfaces through NotifierPort as an event that cannot be
+/// confused with a plain deploy notification.
+#[tokio::test]
+async fn rollbacks_post_mortems_target_the_incidents_channel_and_notify_distinctly() {
+    let deploy = Arc::new(ScriptedDeploy::new(vec![
+        crate::ports::outbound::DeployReport {
+            failure_bundle: None,
+            success: false,
+            deployed: true,
+            summary: "deploy failed: container exited 1".to_owned(),
+        },
+        crate::ports::outbound::DeployReport {
+            failure_bundle: None,
+            success: true,
+            deployed: true,
+            summary: "rollback redeploy ok".to_owned(),
+        },
+    ]));
+    let notifier = Arc::new(SpyNotifier {
+        ..Default::default()
+    });
+    let (store, _git, uc) = rollback_uc(true, &deploy, &notifier);
+
+    Box::pin(uc.run_cycle(1)).await;
+
+    let state = store.load().await.expect("load");
+    assert!(
+        !incidents_chat(&state).is_empty(),
+        "the post-mortem must be posted into an INCIDENTS channel; none found \
+         because CXA-F012 is unimplemented. Channels seen so far depend on it."
+    );
+}
+
+/// CXA-F306 AC1, behaviorally: a post-mortem whose summary matches an
+/// existing project lesson above the similarity threshold increments that
+/// lesson's recurrence count exactly once for the incident — anchored to the
+/// incident's own stamp — while an unrelated lesson stays untouched. A second
+/// incident of the same class counts again (once per incident, not once ever).
+#[tokio::test]
+async fn a_recurring_failure_increments_the_matching_lessons_recurrence_once() {
+    const FAILING: &str = "deploy failed: docker build fails when the base image tag moves";
+    let deploy = Arc::new(ScriptedDeploy::new(vec![
+        crate::ports::outbound::DeployReport {
+            failure_bundle: None,
+            success: false,
+            deployed: true,
+            summary: FAILING.to_owned(),
+        },
+        crate::ports::outbound::DeployReport {
+            failure_bundle: None,
+            success: true,
+            deployed: true,
+            summary: "rollback redeploy ok".to_owned(),
+        },
+        crate::ports::outbound::DeployReport {
+            failure_bundle: None,
+            success: false,
+            deployed: true,
+            summary: FAILING.to_owned(),
+        },
+        crate::ports::outbound::DeployReport {
+            failure_bundle: None,
+            success: true,
+            deployed: true,
+            summary: "rollback redeploy ok".to_owned(),
+        },
+    ]));
+    let notifier = Arc::new(SpyNotifier {
+        ..Default::default()
+    });
+    let (store, _git, uc) = rollback_uc(true, &deploy, &notifier);
+    // One lesson the failing summary repeats, one it shares nothing with.
+    {
+        let mut s = store.state.lock().expect("lock");
+        s.record_lesson(
+            "docker build fails when the base image tag moves — pin the base image version",
+        );
+        s.record_lesson("route PRs that touch gating files to their human approver at open");
+    }
+
+    Box::pin(uc.run_cycle(1)).await;
+
+    let recurrence_of = |state: &ProjectState| {
+        state
+            .lesson_records
+            .iter()
+            .find(|r| r.text.contains("pin the base image"))
+            .expect("the seeded lesson stays tracked")
+            .recurrences
+            .clone()
+    };
+    let state = store.load().await.expect("load");
+    let recurrences = recurrence_of(&state);
+    assert_eq!(
+        recurrences.len(),
+        1,
+        "one incident, exactly one recurrence — got {recurrences:?}"
+    );
+    assert!(
+        !recurrences[0].incident_at.is_empty() && recurrences[0].incident_reason == "deploy failed",
+        "the recurrence is anchored to its incident"
+    );
+    assert!(
+        state
+            .lesson_records
+            .iter()
+            .find(|r| r.text.contains("gating files"))
+            .is_some_and(|r| r.recurrences.is_empty()),
+        "the unrelated lesson must not be dragged into the match"
+    );
+
+    Box::pin(uc.run_cycle(2)).await;
+
+    let state = store.load().await.expect("load");
+    let recurrences = recurrence_of(&state);
+    assert_eq!(
+        recurrences.len(),
+        2,
+        "a second incident of the class counts again"
+    );
+    assert_ne!(
+        recurrences[0].incident_at, recurrences[1].incident_at,
+        "each recurrence carries its own incident"
+    );
+}
+
+/// A human hold is absolute for the bulk sweep too: PR #329 (touching
+/// .github/workflows) was parked for a person, and merge_sweep steamrolled it.
+/// The sweep must skip any PR in `human_holds`, whatever its CI/mergeable state.
+#[tokio::test]
+async fn merge_sweep_never_merges_a_human_held_pr() {
+    let forge = SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: true,
+        ..SpyForge::default()
+    };
+    let store = MemStore {
+        state: Mutex::new({
+            let mut s = ProjectState::default();
+            s.human_holds
+                .insert(7, "touches .github/workflows".to_owned());
+            s
+        }),
+    };
+    let out = crate::use_cases::merge_sweep::merge_sweep(&forge, &store, "main", false, true).await;
+    assert!(
+        forge.merged.lock().expect("lock").is_empty(),
+        "sweep must not merge a human-held PR"
+    );
+    assert!(
+        out.skipped
+            .iter()
+            .any(|(n, r)| *n == 7 && r.contains("human hold")),
+        "the held PR is reported as skipped with its hold reason: {:?}",
+        out.skipped
+    );
+}
+
+// --- CXA-C016: pin the re-enabled force-merge control plane (drain_jobs →
+// force_merge_job) — the machinery the human "force-merge" button drives. ---
+
+/// Queue a force_merge job for PR #7 the way the API does, then drain it.
+async fn queue_and_drain_force_merge(
+    uc: &RunCycleUseCase<MemStore, impl AgentEnginePort>,
+    store: &MemStore,
+) {
+    let _ = crate::ports::outbound::mutate_state(store, |s| {
+        s.jobs.push(crate::state::PendingJob {
+            id: crate::state::mint_id(),
+            kind: "force_merge".to_owned(),
+            args: serde_json::json!({ "pr": 7 }),
+            queued_at: crate::state::now_rfc3339(),
+            queued_by: "human".to_owned(),
+        });
+        Ok(())
+    })
+    .await;
+    uc.drain_jobs().await;
+}
+
+/// A human force-merges an UNCONFLICTED PR: the runner skips the
+/// conflict-resolution leg entirely and the merge lands.
+#[tokio::test]
+async fn force_merge_of_a_mergeable_pr_skips_resolution_and_merges() {
+    let forge = Arc::new(SpyForge {
+        mergeable: true,
+        ..SpyForge::default()
+    });
+    let store = Arc::new(MemStore::default());
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(ReviewEngine {
+            decision: "approve",
+        }),
+        Config::default(),
+        PathBuf::from("/tmp"),
+        "goal".to_owned(),
+    )
+    .with_forge(Arc::clone(&forge) as Arc<dyn ForgePort>);
+    queue_and_drain_force_merge(&uc, store.as_ref()).await;
+    assert_eq!(*forge.merged.lock().expect("lock"), vec![7]);
+}
+
+/// A human force-merges a CONFLICTED PR but the runner's agent fails to
+/// resolve it: the hard gate holds — no merge is ever attempted.
+#[tokio::test]
+async fn force_merge_of_a_conflicted_pr_whose_resolution_fails_never_merges() {
+    let forge = Arc::new(SpyForge {
+        mergeable: false,
+        ..SpyForge::default()
+    });
+    let store = Arc::new(MemStore::default());
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(FailEngine),
+        Config::default(),
+        PathBuf::from("/tmp"),
+        "goal".to_owned(),
+    )
+    .with_forge(Arc::clone(&forge) as Arc<dyn ForgePort>);
+    queue_and_drain_force_merge(&uc, store.as_ref()).await;
+    assert!(
+        forge.merged.lock().expect("lock").is_empty(),
+        "a conflicted PR whose resolution failed must not be merged"
     );
 }

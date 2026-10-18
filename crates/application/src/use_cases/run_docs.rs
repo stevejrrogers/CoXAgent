@@ -90,7 +90,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
     /// 12-30 full-page sonnet rewrites an hour. A handful a day converges the
     /// wiki at a price that does not scale with cycle speed.
     async fn take_refresh_budget(&self, state: &crate::state::ProjectState) -> bool {
-        const REFRESHES_PER_DAY: u32 = 5;
+        let refreshes_per_day = self.config.workflow.cadence.docs_refreshes_per_day();
         let today = crate::state::now_rfc3339()[..10].to_owned();
         let spent = state
             .daily_jobs
@@ -98,7 +98,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
             .and_then(|v| v.strip_prefix(&format!("{today}:")))
             .and_then(|n| n.parse::<u32>().ok())
             .unwrap_or(0);
-        if spent >= REFRESHES_PER_DAY {
+        if spent >= refreshes_per_day {
             return false;
         }
         let (key, val) = (
@@ -146,7 +146,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
              COMPLETE revised page: keep what is still true, correct what changed, delete what is \
              now wrong.\n\nOn the FIRST line output exactly `FOLDER: -` to keep its current \
              home. Then the full page in Markdown following the required skeleton — including a \
-             `**Keywords:**` line and a `## Code map` with the real file paths.\n\n\
+             `**Keywords:**` line and a `## Code map` with the real file paths. VERIFY every Code-map path before writing it: run `ls <path>` (or `git log --name-only`) in the repo and list ONLY paths that exist in this working tree — a planned-but-never-built filename fails the gate.\n\n\
              === PAGE: {} ===\n{excerpt}",
             page.title
         );
@@ -173,7 +173,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
             let fixup = format!(
                 "Your revision of \"{}\" is missing: {missing}.\n\nOutput the COMPLETE page \
                  again — `FOLDER: -` first line, then every required heading verbatim, the \
-                 `**Keywords:**` line, and a `## Code map` with real file paths. Keep everything \
+                 `**Keywords:**` line, and a `## Code map` with real file paths. VERIFY every Code-map path before writing it: run `ls <path>` (or `git log --name-only`) in the repo and list ONLY paths that exist in this working tree — a planned-but-never-built filename fails the gate. Keep everything \
                  you already wrote.",
                 page.title
             );
@@ -339,12 +339,24 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
         // next agent and unsearchable for people. One bounded repair pass, the
         // same deal the code gates give a developer.
         let mut raw = outcome.stdout.clone();
-        if let Some(missing) = docs_gate_failures(&raw, &self.work_dir) {
+        // Flash-tier models can degenerate mid-generation on long token-dense
+        // pages. The skeleton gate rejects that; rather than accept one repair
+        // and move on, retry with feedback and escalate the model tier — the
+        // same recipe as run_dev::self_heal_compile. Each attempt is told
+        // exactly which parts are still missing; later attempts run a stronger
+        // model when a ladder is configured.
+        for attempt in 1_u32..=3 {
+            let Some(missing) = docs_gate_failures(&raw, &self.work_dir) else {
+                break;
+            };
+            if attempt > 1 {
+                tracing::warn!("DOCS gate attempt {attempt} for {id} still failing: {missing}");
+            }
             let fixup = format!(
                 "Your page for {id} is missing required parts: {missing}.\n\nOutput the COMPLETE \
                  page again with the full skeleton — same `FOLDER:` first line, every required \
                  heading verbatim, a `**Keywords:**` line, and a `## Code map` listing the real \
-                 files. Do not drop anything you already wrote."
+                 files. VERIFY every Code-map path before writing it: run `ls <path>` (or `git log --name-only`) in the repo and list ONLY paths that exist in this working tree — a planned-but-never-built filename fails the gate. Do not drop anything you already wrote."
             );
             let repair = self
                 .engine
@@ -354,13 +366,22 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
                     task_prompt: fixup,
                     work_dir: self.work_dir.clone(),
                     timeout: Duration::from_secs(900),
-                    escalation_level: 0,
+                    escalation_level: u8::try_from(attempt.saturating_sub(1)).unwrap_or(3),
                     label: Some(id.to_string()),
                 })
                 .await;
-            if let Ok(o) = repair {
-                if o.succeeded() && docs_gate_failures(&o.stdout, &self.work_dir).is_none() {
-                    raw = o.stdout;
+            match repair {
+                Ok(o) if o.succeeded() => raw = o.stdout,
+                Ok(o) => {
+                    tracing::warn!(
+                        "DOCS repair attempt {attempt} for {id} failed: {}",
+                        o.stderr.chars().take(200).collect::<String>()
+                    );
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!("DOCS repair attempt {attempt} for {id} error: {e}");
+                    break;
                 }
             }
         }
@@ -430,6 +451,39 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
 /// own prose is not a gate.
 #[must_use]
 pub fn docs_gate_failures(raw: &str, work_dir: &std::path::Path) -> Option<String> {
+    // A page that OPENS with first-person process narration ("I'll start by
+    // reading the repo map...", "Let me search...") is the agent's stream of
+    // consciousness, not a document. It sails past every substring check below
+    // because it *talks about* a valid page (it names the headings and real
+    // files) instead of being one — that is how a narration got persisted as a
+    // live page. The mechanical tell: a real page opens with structure (a
+    // `#`/`##` heading, a `**Keywords:**` line, or a short title), never with
+    // the agent narrating its own work. Check the opening line only, so a doc
+    // that ends with a stray note is still accepted.
+    const NARRATION_OPENS: [&str; 22] = [
+        "I'll",
+        "I’ll",
+        "i'll",
+        "I'm",
+        "I’m",
+        "i'm",
+        "I will",
+        "Let me",
+        "let me",
+        "Let's",
+        "Let’s",
+        "let's",
+        "Now I",
+        "now I",
+        "I need to",
+        "i need to",
+        "I'd like",
+        "I want to",
+        "Here is my",
+        "Here's my",
+        "All facts confirmed",
+        "Note: I",
+    ];
     let body = parse_folder_hint(raw).1;
     let text = body.trim();
     let mut missing: Vec<&str> = Vec::new();
@@ -451,6 +505,14 @@ pub fn docs_gate_failures(raw: &str, work_dir: &std::path::Path) -> Option<Strin
     if !missing.is_empty() {
         problems.push(format!("missing headings: {}", missing.join(", ")));
     }
+    if let Some(first) = text.lines().find(|l| !l.trim().is_empty()) {
+        let f = first.trim_start();
+        if let Some(nar) = NARRATION_OPENS.iter().find(|t| f.starts_with(**t)) {
+            problems.push(format!(
+                "page opens with first-person narration (`{nar}`), not a document"
+            ));
+        }
+    }
     if !text.to_lowercase().contains("**keywords:**") {
         problems.push("no `**Keywords:**` line (nothing to search on)".to_owned());
     }
@@ -468,9 +530,18 @@ pub fn docs_gate_failures(raw: &str, work_dir: &std::path::Path) -> Option<Strin
     if cited.is_empty() {
         problems.push("`## Code map` lists no real file paths".to_owned());
     } else {
+        // A `path/file.rs:256` citation names a real place; the `:line`
+        // suffix is for the reader, not the filesystem — strip it before
+        // checking existence (rejecting it wedged pages at the fail cap).
         let missing: Vec<&str> = cited
             .iter()
-            .filter(|p| !work_dir.join(p).exists())
+            .filter(|p| {
+                let bare = p
+                    .rsplit_once(':')
+                    .filter(|(_, ln)| !ln.is_empty() && ln.chars().all(|c| c.is_ascii_digit()))
+                    .map_or(**p, |(path, _)| path);
+                !work_dir.join(bare).exists()
+            })
             .copied()
             .collect();
         if !missing.is_empty() {
@@ -743,6 +814,24 @@ fn sanitize_subfolder(raw: &str, existing: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn code_map_citations_with_line_suffixes_pass_the_gate() {
+        // `file.rs:256` names a real place; the `:line` suffix is for the
+        // reader. Before the strip, a page citing real files with line
+        // numbers failed to the cap and got parked.
+        let page = format!(
+            "## Overview\nx\n## How it works\nx\n## Usage\nx\n## Interface\nx\n\
+             ## Configuration\nx\n## Edge cases and limits\nx\n## Code map\n\
+             - src/lib.rs:3 the crate root\n\n**Keywords:** map\n{}",
+            "pad ".repeat(200)
+        );
+        let dir = std::env::current_dir().expect("cwd");
+        assert_eq!(docs_gate_failures(&page, &dir), None);
+        let bad = page.replace("src/lib.rs:3", "no/such/file.rs:9");
+        let failure = docs_gate_failures(&bad, &dir).expect("missing file still caught");
+        assert!(failure.contains("no/such/file.rs"));
+    }
     use crate::ports::outbound::{AgentOutcome, SandboxStatus};
     use crate::state::ProjectState;
     use coxagent_domain::{Complexity, Priority, TechnicalDesign, Ticket, TicketType};
@@ -782,6 +871,8 @@ mod tests {
                 session_id: None,
                 sandbox: SandboxStatus::default(),
                 engine: String::new(),
+                model: String::new(),
+                attempts: Vec::new(),
             })
         }
     }
@@ -970,6 +1061,33 @@ mod docs_gate_tests {
         assert!(why.contains("no real file paths"), "{why}");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn first_person_agent_narration_is_rejected() {
+        // A live page once stored the agent's whole stream of consciousness —
+        // "I'll start by reading the repo map... Let me search... Now I
+        // understand..." — because it *mentions* every heading and cites real
+        // files, so every substring check passed while no document was saved.
+        // The page must be rejected on its opening line alone.
+        let narration = format!(
+            "I'll start by reading the repo map and finding the real files.\n\
+             Let me search for the ticket and related files.\n\n\
+             {}\n\n\
+             All headings verified: ## Overview, ## How it works, ## Usage, \
+             ## Interface, ## Configuration, ## Edge cases and limits, ## Code map, \
+             ## Related. The `**Keywords:**` line is present.\n\
+             All Code map entries are confirmed real files: \
+             crates/application/src/ports/outbound/deploy.rs.",
+            "## Overview\nFiller. ".repeat(60)
+        );
+        let dir = fixture_repo("narration");
+        let why = docs_gate_failures(&narration, &dir).expect("must be rejected");
+        assert!(
+            why.contains("first-person narration"),
+            "expected narration rejection, got: {why}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]
@@ -1081,7 +1199,7 @@ mod refresh_tests {
                 &s,
                 std::path::Path::new("/nonexistent"),
                 &std::collections::BTreeSet::default(),
-            &std::collections::BTreeSet::default()
+                &std::collections::BTreeSet::default()
             )
             .map(|p| p.id.as_str()),
             Some("legacy")

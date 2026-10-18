@@ -14,6 +14,11 @@ pub trait WorkspaceFilesPort: Send + Sync {
     /// The file's contents, or `None` when it does not exist or cannot be read.
     async fn read(&self, path: &Path) -> Option<String>;
 
+    /// The file's raw bytes, or `None` when it does not exist or cannot be
+    /// read. Unlike [`Self::read`] this is binary-safe (evidence blobs):
+    /// `read` fails on non-UTF-8, this does not.
+    async fn read_bytes(&self, path: &Path) -> Option<Vec<u8>>;
+
     /// Write `content`, creating parent directories as needed. Returns whether
     /// the write landed.
     async fn write(&self, path: &Path, content: &str) -> bool;

@@ -4,6 +4,80 @@
 
 use super::*;
 
+/// The cadence between scheduled debt sweeps: every tenth leader cycle files one
+/// tech-debt chore if none is already open.
+///
+/// Today the LIVE tick decision lives at the call site in mod.rs (`% 10 == 0`);
+/// per CXA-C001 that call site stays untouched to preserve behaviour byte-for-
+/// byte, so outside test builds nothing references this constant directly. It is
+/// still kept here as a single source of truth for [`should_file_debt_sweep`]
+/// so the tests cannot silently drift from what production intends.
+#[cfg_attr(not(test), allow(dead_code))]
+const SWEEP_EVERY_CYCLES: u64 = 10;
+
+/// Whether a still-in-flight "Debt sweep ..." chore already occupies the board —
+/// i.e. one whose status has not reached a terminal outcome yet (`Pending`,
+/// `Ready`, `Open`, ...). A new sweep must not be filed until it terminates,
+/// otherwise every tenth cycle would pile up an endless stack of debt chores.
+#[must_use]
+fn has_open_chore(state: &crate::state::ProjectState) -> bool {
+    use coxagent_domain::ticket::Status;
+    state.tickets.iter().any(|t| {
+        t.title().starts_with("Debt sweep")
+            && !matches!(
+                t.status(),
+                Status::Done | Status::Documented | Status::Verified | Status::Rejected
+            )
+    })
+}
+
+/// Whether a previously filed "Debt sweep ..." chore was REJECTED — the team
+/// looked at the debt and opted out of paying it this time, or an automated
+/// gate marked it non-actionable. A rejected prior sweep must suppress any NEW
+/// cycle-numbered sweep: re-filing after a rejection just stacks one rejected
+/// chore per tick forever (127 and counting in production), because the debt
+/// it points at never gets cleared by a chore that is rejected instead of
+/// done. The cadence still logs the tick in `sweeps_done` for the scorecard,
+/// but no new ticket is spawned.
+#[must_use]
+fn has_rejected_sweep(state: &crate::state::ProjectState) -> bool {
+    use coxagent_domain::ticket::Status;
+    state
+        .tickets
+        .iter()
+        .any(|t| t.title().starts_with("Debt sweep") && t.status() == Status::Rejected)
+}
+
+/// Pure decision rule for whether THIS tick should produce a scheduled tech-debt
+/// chore, computed from persisted state + the current cycle number alone — no IO
+/// behind it — so its cases read plainly in one place and unit-test independently:
+///
+/// * true on a sweep-th tick (`cycle % 10 == 0`) with no open chore and no
+///   previously-rejected sweep;
+/// * false on any other (non-sweep-th) tick;
+/// * false while any still-open "Debt sweep ..." chore exists;
+/// * true again once that prior chore COMPLETES (`Done`/`Verified`/`Documented`);
+/// * false forever once a prior sweep was REJECTED — re-filing after a rejection
+///   only piles up rejected chores, so the cadence records the tick but never
+///   spawns another ticket.
+// Production keeps this rule split across `file_debt_sweep`: the "%10 tick" gate
+// lives at its call site and each blocking case ends in a DIFFERENT side effect
+// (`sweeps_done` records a handled-but-not-filed cycle only on some paths), so a
+// single bool cannot reproduce them losslessly. This predicate therefore exists as
+// an authored, regression-locked statement of ALL four acceptance cases together,
+// exercised by unit tests below rather than reaching out of test builds.
+#[must_use]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn should_file_debt_sweep(state: &crate::state::ProjectState, cycle: u64) -> bool {
+    if cycle % SWEEP_EVERY_CYCLES != 0 {
+        return false;
+    }
+    if state.sweeps_done.contains(&cycle) {
+        return false;
+    }
+    !has_open_chore(state) && !has_rejected_sweep(state)
+}
+
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Reject duplicate tickets (same normalised title, or a semantic near-match)
     /// that haven't started real work yet, keeping the earliest, and call it out
@@ -133,20 +207,24 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// means. Deduped by title prefix AND by recorded cycle number, so a restart
     /// never re-files for a sweep already run.
     pub(super) async fn file_debt_sweep(&self, cycle: u64) {
-        use coxagent_domain::ticket::Status;
         let Ok(state) = self.store.load().await else {
             return;
         };
+        // Restart dedup - SILENT on purpose: a cycle already swept must not be
+        // re-recorded as handled again. In-flight-chore blocking happens below,
+        // where it still ends in `note_swept` so the window stays closed.
         if state.sweeps_done.contains(&cycle) {
             return;
         }
-        let open_exists = state.tickets.iter().any(|t| {
-            t.title().starts_with("Debt sweep")
-                && !matches!(
-                    t.status(),
-                    Status::Done | Status::Documented | Status::Verified | Status::Rejected
-                )
-        });
+        let open_exists = has_open_chore(&state);
+        // A prior sweep that ended REJECTED suppresses any new sweep chore —
+        // re-filing after a rejection just stacks rejected chores every tick
+        // (the debt it tracks is never cleared by a chore that is rejected
+        // instead of done). Record the tick as handled; spawn no ticket.
+        if has_rejected_sweep(&state) {
+            self.note_swept(cycle).await;
+            return;
+        }
         if open_exists && !state.debt_signals.is_empty() {
             self.note_swept(cycle).await;
             return;
@@ -237,6 +315,8 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 complexity: coxagent_domain::ticket::Complexity::Medium,
                 has_ui: false,
                 acceptance_criteria: accepted,
+                goal: None,
+                service_tag: None,
             })
             .await
         else {
@@ -250,5 +330,155 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             Ok(())
         })
         .await;
+    }
+}
+
+#[cfg(test)]
+mod should_file_debt_sweep_tests {
+    use super::should_file_debt_sweep;
+    use crate::state::ProjectState;
+    use coxagent_domain::Role;
+    use coxagent_domain::Status;
+    use coxagent_domain::{Complexity, Priority};
+
+    fn sweep_ticket(target: Status) -> coxagent_domain::Ticket {
+        let mut t = coxagent_domain::Ticket::new(
+            coxagent_domain::TicketId::new("COX-C001").expect("id"),
+            coxagent_domain::TicketType::Chore,
+            "Debt sweep".to_owned(),
+            "pay down tech debt".to_owned(),
+            Priority::Medium,
+            Complexity::Medium,
+            false,
+        )
+        .expect("ticket");
+        // Ready requires a design (DoR); give this fixture one so the whole
+        // lifecycle to Done/Documented can be exercised.
+        assert!(t
+            .set_technical_design(
+                Role::System,
+                coxagent_domain::TechnicalDesign {
+                    approach: "sweep".to_owned(),
+                    files: vec![],
+                    api_contract: String::new(),
+                    data_changes: String::new(),
+                    test_plan: "n/a".to_owned(),
+                    alternatives: String::new(),
+                }
+            )
+            .is_ok());
+        if target == Status::Ready {
+            assert!(t.transition_to(Role::System, Status::Ready).is_ok());
+        } else if target == Status::InProgress {
+            assert!(t.transition_to(Role::System, Status::Ready).is_ok());
+            assert!(t.transition_to(Role::System, Status::InProgress).is_ok());
+        } else if target == Status::Done {
+            assert!(t.transition_to(Role::System, Status::Ready).is_ok());
+            assert!(t.transition_to(Role::System, Status::InProgress).is_ok());
+            assert!(t.transition_to(Role::System, Status::Done).is_ok());
+        } else if target == Status::Documented {
+            assert!(t.transition_to(Role::System, Status::Ready).is_ok());
+            assert!(t.transition_to(Role::System, Status::InProgress).is_ok());
+            assert!(t.transition_to(Role::System, Status::Done).is_ok());
+            assert!(t.transition_to(Role::System, Status::Documented).is_ok());
+        } else if target == Status::Rejected {
+            assert!(t.transition_to(Role::System, Status::Rejected).is_ok());
+        }
+        t
+    }
+
+    fn state(tickets: Vec<coxagent_domain::Ticket>, done: Vec<u64>) -> ProjectState {
+        ProjectState {
+            tickets,
+            sweeps_done: done,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn sweep_files_on_a_sweep_th_tick_with_no_open_chore() {
+        let state = ProjectState::default();
+        assert!(should_file_debt_sweep(&state, 10));
+    }
+
+    #[test]
+    fn sweep_does_not_file_on_a_non_sweep_th_tick() {
+        let state = ProjectState::default();
+        assert!(!should_file_debt_sweep(&state, 11));
+    }
+    #[test]
+    fn sweep_is_blocked_while_a_pending_chore_is_open() {
+        let t = sweep_ticket(Status::Pending);
+        let state = state(vec![t], vec![]);
+        assert!(!should_file_debt_sweep(&state, 10));
+    }
+
+    #[test]
+    fn sweep_is_blocked_while_a_ready_chore_is_open() {
+        let t = sweep_ticket(Status::Ready);
+        let state = state(vec![t], vec![]);
+        assert!(!should_file_debt_sweep(&state, 10));
+    }
+
+    #[test]
+    fn sweep_is_blocked_while_an_in_progress_chore_is_open() {
+        let t = sweep_ticket(Status::InProgress);
+        let state = state(vec![t], vec![]);
+        assert!(!should_file_debt_sweep(&state, 10));
+    }
+
+    #[test]
+    fn sweep_files_again_once_the_prior_reaches_terminal_done() {
+        let prior = sweep_ticket(Status::Done);
+        // next tick (20) not yet swept; only cycle 10 was.
+        let state = state(vec![prior], vec![10]);
+        assert!(should_file_debt_sweep(&state, 20));
+    }
+
+    #[test]
+    fn sweep_files_again_once_the_prior_reaches_terminal_documented() {
+        let prior = sweep_ticket(Status::Documented);
+        // next tick (20) not yet swept; only cycle 10 was.
+        let state = state(vec![prior], vec![10]);
+        assert!(should_file_debt_sweep(&state, 20));
+    }
+
+    #[test]
+    fn sweep_is_suppressed_forever_after_a_rejected_prior_sweep() {
+        // A rejected sweep means the team opted out; re-filing a fresh
+        // cycle-numbered sweep just stacks rejected chores each tick. This is
+        // the regression-lock for the production bug (127 rejected sweeps).
+        let prior = sweep_ticket(Status::Rejected);
+        let st1 = state(vec![prior.clone()], vec![10]);
+        assert!(!should_file_debt_sweep(&st1, 20));
+        // ...and it stays suppressed on every later tick too.
+        let later = state(vec![prior], vec![10, 20, 30, 40, 50]);
+        assert!(!should_file_debt_sweep(&later, 60));
+        assert!(!should_file_debt_sweep(&later, 100));
+    }
+
+    #[test]
+    fn sweep_for_an_already_swept_exact_cycle_is_not_refiled() {
+        let mut s = ProjectState::default();
+        s.sweeps_done.push(10);
+        assert!(!should_file_debt_sweep(&s, 10));
+    }
+
+    #[test]
+    fn an_unrelated_open_ticket_does_not_block_the_sweep() {
+        // An unrelated ticket that happens to be open must NOT suppress
+        // filing; only an open chore of that kind closes the window.
+        let t = coxagent_domain::Ticket::new(
+            coxagent_domain::TicketId::new("COX-C002").expect("id"),
+            coxagent_domain::TicketType::Feature,
+            "Build a thing".to_owned(),
+            "not debt".to_owned(),
+            Priority::Medium,
+            Complexity::Medium,
+            false,
+        )
+        .expect("ticket");
+        let state = state(vec![t], vec![]);
+        assert!(should_file_debt_sweep(&state, 10));
     }
 }

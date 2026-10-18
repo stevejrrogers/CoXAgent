@@ -10,6 +10,12 @@ serde.workspace = true
 thiserror.workspace = true
 time.workspace = true
 semver.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+# CXA-B192's table-driven suite drives the contract through RFC-3339 timestamps.
+time.workspace = true
 
 [lints]
 workspace = true

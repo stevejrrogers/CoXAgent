@@ -12,4 +12,11 @@ pub trait ScreenshotPort: Send + Sync {
     /// Capture `url` as a PNG. `None` = could not capture (no browser,
     /// timeout) — callers treat that as "skip visual QA".
     async fn capture(&self, url: &str) -> Option<Vec<u8>>;
+
+    /// Capture `url`'s rendered DOM as HTML (after JS ran). Text-only agents
+    /// cannot read pixels; this is the eye they CAN use — what is actually on
+    /// the screen, as text. `None` = unsupported/failed, callers skip.
+    async fn capture_dom(&self, _url: &str) -> Option<String> {
+        None
+    }
 }

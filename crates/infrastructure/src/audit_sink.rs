@@ -5,10 +5,9 @@
 use async_trait::async_trait;
 use coxagent_application::ports::outbound::{AuditPort, AuditRecord};
 use coxagent_application::PortError;
-use deadpool_postgres::{Config, Pool, Runtime};
+use deadpool_postgres::Pool;
 use std::collections::VecDeque;
 use std::sync::Mutex;
-use tokio_postgres::NoTls;
 
 /// Bound for the in-memory sink.
 const MEM_CAP: usize = 1000;
@@ -66,11 +65,9 @@ impl SqlAuditSink {
     /// # Errors
     /// [`PortError::Backend`] if the pool or migration fails.
     pub async fn connect(dsn: &str, retention_days: Option<u32>) -> Result<Self, PortError> {
-        let mut cfg = Config::new();
-        cfg.url = Some(dsn.to_owned());
-        let pool = cfg
-            .create_pool(Some(Runtime::Tokio1), NoTls)
-            .map_err(|e| PortError::Backend(format!("audit pool: {e}")))?;
+        let pool = crate::pg::pool(dsn, "audit")
+            .await
+            .map_err(PortError::Backend)?;
         let sink = Self {
             pool,
             retention_days,

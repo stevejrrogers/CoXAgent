@@ -107,7 +107,8 @@ impl<S: StateStorePort> RunReleasesUseCase<S> {
             // Gate 3: a tag for this milestone already exists (e.g. it was
             // released out of band, or a prior run tagged it). Log and skip —
             // never duplicate the tag or the release chore.
-            if git.tag_exists(&self.work_dir, &m.name).await {
+            let tag = milestone_tag(&m.name);
+            if git.tag_exists(&self.work_dir, &tag).await {
                 state.log_activity(
                     "RELEASE",
                     &format!("release already exists for '{}' — skipping", m.name),
@@ -117,7 +118,7 @@ impl<S: StateStorePort> RunReleasesUseCase<S> {
             }
 
             // Create the annotated tag on the current tree.
-            git.create_tag(&self.work_dir, &m.name, "HEAD", &self.release_author())
+            git.create_tag(&self.work_dir, &tag, "HEAD", &self.release_author())
                 .await
                 .map_err(|e| {
                     AppError::from(PortError::Backend(format!(
@@ -200,5 +201,33 @@ impl<S: StateStorePort> RunReleasesUseCase<S> {
         // never recorded.
         self.store.save(&state).await?;
         Ok(released)
+    }
+}
+
+/// A milestone name as a valid git ref: `milestone/<kebab-slug>`. Names carry
+/// spaces and punctuation ("Stability & Quality Gate") which `git tag`
+/// refuses; the slug keeps only alphanumeric runs joined by dashes.
+fn milestone_tag(name: &str) -> String {
+    let slug: Vec<String> = name
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    format!("milestone/{}", slug.join("-"))
+}
+
+#[cfg(test)]
+mod tag_tests {
+    #[test]
+    fn milestone_names_become_valid_git_refs() {
+        assert_eq!(
+            super::milestone_tag("Stability & Quality Gate"),
+            "milestone/stability-quality-gate"
+        );
+        assert_eq!(
+            super::milestone_tag("Release & Incident Operations"),
+            "milestone/release-incident-operations"
+        );
     }
 }

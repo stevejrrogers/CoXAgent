@@ -1,0 +1,1 @@
+This two-file mini-crate has a failing test. The doc comment on `Store::get` states the CONTRACT (expiry is exclusive). Find the real defect and fix it with the MINIMAL correct change. Do not modify the test. Files: main.rs, store.rs (edit in place).

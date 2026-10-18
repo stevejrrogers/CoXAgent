@@ -76,8 +76,51 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> RunStandupUseCase<
 
         let context = self.status_context().await;
         let headline = self.headline().await;
+        // Velocity + engine health: the two numbers a real standup opens
+        // with — trend and tooling — so the SM grounds the room in data
+        // instead of vibes.
+        let extras = {
+            let st = self.store.load().await.ok();
+            let velocity = st
+                .as_ref()
+                .map(|s| {
+                    let tail: Vec<usize> =
+                        s.sprints.iter().rev().take(10).map(|r| r.done).collect();
+                    if tail.is_empty() {
+                        String::new()
+                    } else {
+                        // Integer tenths — sprint counts are tiny, no float casts.
+                        let tenths = tail.iter().sum::<usize>() * 10 / tail.len();
+                        format!(
+                            "Velocity: avg {}.{} shipped/sprint over the last {} sprints.",
+                            tenths / 10,
+                            tenths % 10,
+                            tail.len()
+                        )
+                    }
+                })
+                .unwrap_or_default();
+            let engine = st
+                .as_ref()
+                .map(|s| {
+                    let today = crate::state::now_rfc3339()[..10].to_owned();
+                    let bad: Vec<String> = s
+                        .role_health
+                        .iter()
+                        .filter(|(_, h)| h.last_error_at.get(..10) == Some(today.as_str()))
+                        .map(|(r, h)| format!("{r} ({} err/{} timeout)", h.errors, h.timeouts))
+                        .collect();
+                    if bad.is_empty() {
+                        "Engines healthy today.".to_owned()
+                    } else {
+                        format!("Engine trouble today: {}.", bad.join(", "))
+                    }
+                })
+                .unwrap_or_default();
+            format!("{velocity} {engine}")
+        };
         let task = format!(
-            "{context}\nSprint status: {headline}\n\nRun the full daily standup now. Order:\n\
+            "{context}\nSprint status: {headline}\nTeam data: {extras}\n\nRun the full daily standup now. Order:\n\
              1. SM opens warmly in 1-2 sentences and asks the team to report in.\n\
              2. Each teammate gives their update: what they finished, what's next, and — only if \
              real — a blocker or a cross-cutting risk. When there is one, put `BLOCKER:` or \

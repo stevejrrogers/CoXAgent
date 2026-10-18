@@ -1,0 +1,53 @@
+{
+  "default": [
+    {
+      "id": "CXC-B044",
+      "type": "bug",
+      "title": "Publish assigned host port in compose",
+      "description": "The generated docker-compose.yml must publish the deploy.host_port the port allocator assigned, or the deployed app is unreachable from the host.",
+      "priority": "medium",
+      "complexity": "small",
+      "status": "verified",
+      "has_ui": false,
+      "design": { "technical": null, "ux": null },
+      "parent_id": null,
+      "depends_on": [],
+      "acceptance_criteria": [
+        "compose publishes the assigned host port",
+        "the health endpoint answers on the published port"
+      ],
+      "test_cases": [
+        {
+          "description": "compose config exposes the assigned port",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "id": "CXC-F090",
+      "type": "feature",
+      "title": "Fix payment webhook retries",
+      "description": "Webhook deliveries that fail with a 5xx must retry with backoff instead of being dropped.",
+      "priority": "high",
+      "complexity": "large",
+      "status": "documented",
+      "has_ui": false,
+      "design": { "technical": null, "ux": null },
+      "parent_id": null,
+      "depends_on": []
+    },
+    {
+      "id": "CXC-F013",
+      "type": "feature",
+      "title": "Vendor lock-in audit",
+      "description": "Audit every third-party dependency for an exit plan; rejected after the dependency health scanner covered it.",
+      "priority": "low",
+      "complexity": "large",
+      "status": "rejected",
+      "has_ui": false,
+      "design": { "technical": null, "ux": null },
+      "parent_id": null,
+      "depends_on": []
+    }
+  ]
+}

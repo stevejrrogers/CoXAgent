@@ -76,6 +76,21 @@ impl PrReporterPort for HttpPrReporter {
             .await;
     }
 
+    async fn report_hold(&self, number: u64, reason: &str) {
+        let url = format!("{}/api/pr-report", self.base_url);
+        let body = serde_json::json!({
+            "project": self.project,
+            "hold": { "number": number, "reason": reason }
+        });
+        let _ = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.token)
+            .json(&body)
+            .send()
+            .await;
+    }
+
     async fn fetch_reviews(&self) -> Vec<PrReview> {
         let url = format!("{}/api/pr-report/reviews", self.base_url);
         match self

@@ -46,6 +46,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             if feedback.is_empty() && !conflicted {
                 continue;
             }
+            // Run this fix in the leader's ISOLATED feedback worktree — the
+            // shared checkout is mid-cycle and dirty, so `git checkout` there
+            // aborts ("local changes would be overwritten") and the fix never
+            // lands (the PR that spins forever). The feedback tree shares the
+            // repo's refs, so the branch checkout, commit and push all work
+            // exactly as on the main tree.
+            let fix_dir = self
+                .feedback_work_dir
+                .clone()
+                .unwrap_or_else(|| self.work_dir.clone());
             // Ping-pong brake with an SM escalation LADDER: after 2 fix rounds
             // the SM first sends the SA in for a root-cause rescue (close the
             // PR, or leave concrete instructions and grant one informed retry).
@@ -64,10 +74,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 if attempts == 2 {
                     self.notify(
                         "pr_stuck",
-                        format!(
-                            "PR #{} vẫn kẹt SAU khi SA đã rescue — cần người quyết: {}",
-                            pr.number, pr.url
-                        ),
+                        if self.config.workflow.language.is_vi() {
+                            format!(
+                                "PR #{} vẫn kẹt SAU khi SA đã rescue — cần người quyết: {}",
+                                pr.number, pr.url
+                            )
+                        } else {
+                            format!(
+                                "PR #{} is still stuck AFTER an SA rescue — a person must decide: {}",
+                                pr.number, pr.url
+                            )
+                        },
                     )
                     .await;
                     let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
@@ -119,7 +136,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         coxagent_domain::Role::DevBug,
                         sid,
                         &task_prompt,
-                        &self.work_dir,
+                        &fix_dir,
                         std::time::Duration::from_secs(1800),
                     )
                     .await
@@ -134,7 +151,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         role: coxagent_domain::Role::DevBug,
                         system_prompt: crate::prompts::system_prompt(crate::prompts::DEV),
                         task_prompt,
-                        work_dir: self.work_dir.clone(),
+                        work_dir: fix_dir.clone(),
                         timeout: std::time::Duration::from_secs(1800),
                         // Each prior fix round escalates the model ladder.
                         escalation_level: u8::try_from(attempts.min(3)).unwrap_or(3),
@@ -155,9 +172,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 }
             }
             // The engine may leave the checkout on the PR branch — always park
-            // the shared work_dir back on the base branch for the next stage.
+            // the (isolated) feedback worktree back on the base branch for the
+            // next stage, so the shared checkout stays clean.
             if let Some(git) = &self.git {
-                let _ = git.checkout_branch(&self.work_dir, target).await;
+                let _ = git.checkout_branch(&fix_dir, target).await;
             }
             match outcome {
                 Ok(o) if o.succeeded() => {

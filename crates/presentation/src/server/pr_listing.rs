@@ -26,8 +26,40 @@ pub(super) async fn list_prs_ep(
         .ok()
         .and_then(|t| serde_json::from_str::<Config>(&t).ok())
         .is_some_and(|c| c.git.auto_merge);
-    let enriched: Vec<serde_json::Value> = state
-        .open_prs
+    // Prefer the live forge when one is configured so CI/mergeable are fresh;
+    // fall back to whatever was last persisted (the runner's report) when there
+    // is no forge or the live query fails.
+    // `live` is true only when we got a genuine fresh list from the forge; on
+    // that path we persist the result back into project state so agent/hub
+    // consumers see the same open-PR list immediately instead of waiting for an
+    // agent cycle report.
+    let (raw_prs, live, error): (
+        Vec<coxagent_application::ports::outbound::PrOpen>,
+        bool,
+        Option<String>,
+    ) = match &p.forge {
+        Some(forge) => match forge.list_open_prs().await {
+            Ok(prs) => (
+                prs.into_iter().map(std::convert::Into::into).collect(),
+                true,
+                None,
+            ),
+            Err(e) => (
+                state.open_prs.clone(),
+                false,
+                Some(format!("live refresh failed: {e}")),
+            ),
+        },
+        None => (state.open_prs.clone(), false, None),
+    };
+    if live {
+        let _ = coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), |st| {
+            st.set_open_prs(raw_prs.clone());
+            Ok(())
+        })
+        .await;
+    }
+    let enriched: Vec<serde_json::Value> = raw_prs
         .iter()
         .map(|pr| {
             let mut v = serde_json::to_value(pr).unwrap_or_default();
@@ -41,7 +73,7 @@ pub(super) async fn list_prs_ep(
         .collect();
     let configured = p.forge.is_some();
     Json(serde_json::json!({
-        "configured": configured, "auto_merge": auto_merge, "prs": enriched
+        "configured": configured, "auto_merge": auto_merge, "error": error, "prs": enriched
     }))
     .into_response()
 }
@@ -50,9 +82,8 @@ pub(super) async fn list_prs_ep(
 /// hub-wide guard against concurrent resolutions in one work_dir.
 pub(super) fn force_inflight(
 ) -> &'static tokio::sync::Mutex<std::collections::HashSet<(String, u64)>> {
-    static SET: std::sync::OnceLock<
-        tokio::sync::Mutex<std::collections::HashSet<(String, u64)>>,
-    > = std::sync::OnceLock::new();
+    static SET: std::sync::OnceLock<tokio::sync::Mutex<std::collections::HashSet<(String, u64)>>> =
+        std::sync::OnceLock::new();
     SET.get_or_init(|| tokio::sync::Mutex::new(std::collections::HashSet::new()))
 }
 

@@ -21,12 +21,7 @@ fn pr_path(action: &str) -> String {
 /// Product/analysis/QA roles: may write project data, may NOT review a PR.
 /// Per the gate map "PR thì dev và SA duyệt" these four are the ones held back;
 /// developers review (below).
-const MEMBER_TIER: &[AuthRole] = &[
-    AuthRole::Ba,
-    AuthRole::Po,
-    AuthRole::Qa,
-    AuthRole::Sm,
-];
+const MEMBER_TIER: &[AuthRole] = &[AuthRole::Ba, AuthRole::Po, AuthRole::Qa, AuthRole::Sm];
 
 /// Roles that review PRs: Super/Admin, the lead tier, the legacy Reviewer, the
 /// SA, and every developer.

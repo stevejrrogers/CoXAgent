@@ -1,0 +1,1 @@
+{"at":"2026-08-17-1344","engine":"claude","pass":4,"total":4,"tasks":[{"task":"design-json","pass":true},{"task":"fix-off-by-one","pass":true},{"task":"review-planted-bug","pass":true},{"task":"root-cause","pass":true}]}

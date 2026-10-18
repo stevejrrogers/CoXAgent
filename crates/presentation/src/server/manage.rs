@@ -741,6 +741,16 @@ pub(super) async fn workspace_overview_ep(State(app): State<AppState>) -> axum::
         };
         let m = coxagent_application::metrics::compute(&state);
         let workers = p.store.workers().await.unwrap_or_default();
+        // Structural-integrity signal on the hub overview (CXA-F229): every
+        // project reports whether its persisted state audits clean, and the
+        // quarantine ledger of write-backs the audit already refused.
+        let findings = state.audit_structural_integrity();
+        let quarantined: Vec<_> = p.store.quarantined().await;
+        let quarantined = if quarantined.len() > 10 {
+            quarantined[quarantined.len() - 10..].to_vec()
+        } else {
+            quarantined
+        };
         projects.push(serde_json::json!({
             "id": p.id, "name": p.name, "alias": state.alias,
             "version": m.version,
@@ -749,6 +759,11 @@ pub(super) async fn workspace_overview_ep(State(app): State<AppState>) -> axum::
             "spend": state.spend.total_cost_usd,
             "sprint": state.sprint.as_ref().map(|s| serde_json::json!({"number": s.number, "goal": s.goal})),
             "online": workers.iter().map(|w| w.worker.split('@').next().unwrap_or("").to_owned()).collect::<Vec<_>>(),
+            "integrity": {
+                "healthy": findings.is_empty(),
+                "findings": findings,
+                "quarantined": quarantined,
+            },
         }));
     }
     let members = match app.auth.clone() {

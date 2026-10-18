@@ -22,6 +22,10 @@ impl WorkspaceFilesPort for FsWorkspaceFiles {
         tokio::fs::read_to_string(path).await.ok()
     }
 
+    async fn read_bytes(&self, path: &Path) -> Option<Vec<u8>> {
+        tokio::fs::read(path).await.ok()
+    }
+
     async fn write(&self, path: &Path, content: &str) -> bool {
         if let Some(parent) = path.parent() {
             let _ = tokio::fs::create_dir_all(parent).await;

@@ -17,6 +17,11 @@ pub struct ProposedItem {
     /// Up to 5 acceptance criteria the agent proposes as the "definition of done".
     #[serde(default)]
     pub acceptance_criteria: Vec<String>,
+    /// Optional bounded-context service tag (CXA-F253): set only when the
+    /// proposal is shared infrastructure that may legitimately exist in
+    /// several projects at once. The BA authors it; older outputs omit it.
+    #[serde(default)]
+    pub service_tag: Option<String>,
 }
 
 /// Extract the outermost JSON array from engine output, tolerating surrounding
@@ -245,11 +250,28 @@ pub fn is_backlog_meta(title: &str) -> bool {
     ritual && about_backlog
 }
 
+/// Similarity above which two titles are near-paraphrase duplicates — the bar
+/// [`duplicates_existing`] enforces within one project and the cross-project
+/// duplicate radar (CXA-F253/F254) reuses, so "duplicate" means the same
+/// thing everywhere. One named constant here so no caller forks an inline
+/// threshold.
+pub const DUPLICATE_JACCARD_THRESHOLD: f64 = 0.6;
+
+/// Stricter DISSIMILARITY bound (`1 − similarity`) for a pair whose tickets
+/// BOTH carry the same bounded-context service tag (CXA-F254 AC4): shared
+/// infrastructure legitimately repeats across projects, so a same-tag pair
+/// stays exempt while its dissimilarity is within this bound — exact matches
+/// (dissimilarity 0) are always exempt — and only drift past it (wording that
+/// no longer reads as the same shared service) still surfaces for a human
+/// decision. Lives beside [`DUPLICATE_JACCARD_THRESHOLD`] so the radar and
+/// any future caller share one definition instead of forking thresholds.
+pub const SAME_TAG_MAX_DISSIMILARITY: f64 = 0.2;
+
 /// Whether `title` duplicates one of `existing` — either an exact normalised
-/// match or a near-paraphrase (Jaccard ≥ 0.6 on content tokens), or, for a
-/// backlog-ceremony ticket, any existing ceremony ticket at all. One place so
-/// the BA insert loop and any future caller agree on what "already covered"
-/// means.
+/// match or a near-paraphrase (Jaccard ≥ [`DUPLICATE_JACCARD_THRESHOLD`] on
+/// content tokens), or, for a backlog-ceremony ticket, any existing ceremony
+/// ticket at all. One place so the BA insert loop and any future caller agree
+/// on what "already covered" means.
 #[must_use]
 pub fn duplicates_existing(title: &str, existing: &[String]) -> bool {
     let norm = normalize_title(title);
@@ -261,7 +283,7 @@ pub fn duplicates_existing(title: &str, existing: &[String]) -> bool {
     existing.iter().any(|e| {
         normalize_title(e) == norm
             || (meta && is_backlog_meta(e))
-            || jaccard(&toks, &title_tokens(e)) >= 0.6
+            || jaccard(&toks, &title_tokens(e)) >= DUPLICATE_JACCARD_THRESHOLD
     })
 }
 
@@ -277,6 +299,64 @@ pub fn parse_string_list(raw: &str) -> Result<Vec<String>, String> {
         return Err("malformed array bounds".to_owned());
     }
     serde_json::from_str(&raw[start..=end]).map_err(|e| e.to_string())
+}
+
+/// The structured TEST response — a list of discovered bugs plus a per-acceptance-
+/// criterion verdict for every shipped ticket it verified.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TestOutput {
+    #[serde(default)]
+    pub bugs: Vec<ProposedItem>,
+    #[serde(default)]
+    pub verdicts: Vec<TestVerdict>,
+}
+
+/// One acceptance-criterion verdict from the TEST agent.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TestVerdict {
+    /// The EXACT acceptance-criterion text this verdict is for. The system
+    /// matches it word-for-word against the ticket's test cases, falling back
+    /// to keyword + fuzzy overlap (CXA-F024) when the agent paraphrased.
+    #[serde(default)]
+    pub ac: String,
+    #[serde(default)]
+    pub passed: bool,
+    /// One line of concrete evidence (command/request + actual response).
+    #[serde(default)]
+    pub note: String,
+    /// URL path that demonstrates this criterion (per-case screenshot target),
+    /// or empty when none applies.
+    #[serde(default)]
+    pub route: String,
+    /// Relative paths of the test files that demonstrate this criterion
+    /// (CXA-F024 traceability), or empty when the evidence is an API
+    /// request/response rather than a file-based test. Optional — the agent
+    /// may omit it, and older outputs never had it.
+    #[serde(default)]
+    pub tests: Vec<String>,
+}
+
+/// Parse the TEST engine output into (bugs, verdicts). Accepts BOTH the new
+/// `{"bugs":[…], "verdicts":[…]}` object and the legacy bare bug array — the
+/// legacy form yields an empty verdict list. Lenient: prose/code fences are
+/// tolerated, and a malformed `verdicts` array still yields the bugs.
+///
+/// # Errors
+/// Returns a message when neither form yields any parseable bugs.
+pub fn parse_test_output(raw: &str) -> Result<(Vec<ProposedItem>, Vec<TestVerdict>), String> {
+    let stripped = strip_code_fences(raw);
+    // New object format first: a complete {bugs, verdicts} document.
+    for obj in top_level_objects(&stripped) {
+        if obj.contains("\"bugs\"") || obj.contains("\"verdicts\"") {
+            if let Ok(out) = serde_json::from_str::<TestOutput>(&obj) {
+                return Ok((out.bugs, out.verdicts));
+            }
+        }
+    }
+    // Legacy bare bug array (or an object whose `bugs` couldn't parse) — the
+    // tolerant array parser still recovers the bugs; verdicts are simply none.
+    let bugs = parse_items(&stripped)?;
+    Ok((bugs, Vec::new()))
 }
 
 #[cfg(test)]
@@ -433,5 +513,40 @@ mod tests {
                 "expected Err for {raw:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_output_object_parses_bugs_and_verdicts() {
+        let raw = r#"```json
+{"bugs":[{"title":"B","priority":"high","complexity":"medium","has_ui":true}],
+ "verdicts":[{"ac":"login works","passed":true,"note":"GET /login 200","route":"/login"},{"ac":"logout works","passed":false,"note":"500","route":"/logout"}]}
+```"#;
+        let (bugs, verdicts) = parse_test_output(raw).expect("parse object");
+        assert_eq!(bugs.len(), 1);
+        assert_eq!(bugs[0].title, "B");
+        assert_eq!(verdicts.len(), 2);
+        assert_eq!(verdicts[0].ac, "login works");
+        assert!(verdicts[0].passed);
+        assert_eq!(verdicts[0].route, "/login");
+        assert!(!verdicts[1].passed);
+    }
+
+    #[test]
+    fn test_output_legacy_bare_array_yields_no_verdicts() {
+        let (bugs, verdicts) =
+            parse_test_output(r#"[{"title":"B","priority":"low","complexity":"small"}]"#)
+                .expect("legacy array still parses");
+        assert_eq!(bugs.len(), 1);
+        assert!(verdicts.is_empty());
+    }
+
+    #[test]
+    fn test_output_all_pass_yields_empty_bugs() {
+        let (bugs, verdicts) = parse_test_output(
+            r#"{"bugs":[],"verdicts":[{"ac":"a","passed":true,"note":"ok","route":""}]}"#,
+        )
+        .expect("empty bugs okay");
+        assert!(bugs.is_empty());
+        assert_eq!(verdicts.len(), 1);
     }
 }

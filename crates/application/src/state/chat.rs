@@ -238,6 +238,11 @@ pub struct AgentQuestion {
     /// once: repeated escalation is just a second kind of spam.
     #[serde(default)]
     pub escalated: bool,
+    /// Held for the owner's focus-window digest (CXA-F176) instead of being
+    /// delivered as it arrived. Cleared when the digest flushes or when the
+    /// question escalates past its SLA — a starving question never waits.
+    #[serde(default)]
+    pub deferred: bool,
 }
 
 impl AgentQuestion {

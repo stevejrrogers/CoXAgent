@@ -374,8 +374,10 @@ mod tests {
     fn an_out_of_range_host_port_fails_the_load_and_the_file_survives() {
         let (_dir, state) = workspace("70000");
 
-        let msg = load_config_with_probe(&state).expect_err("70000 is outside u16");
+        let msg =
+            load_config_with_probe(&state).expect_err("a port outside u16 must fail the load");
 
+        assert!(msg.contains("coxagent.json"), "{msg}");
         assert!(msg.contains("deploy.host_port"), "{msg}");
         let on_disk = std::fs::read_to_string(state.parent().expect("root").join("coxagent.json"))
             .expect("config still readable");

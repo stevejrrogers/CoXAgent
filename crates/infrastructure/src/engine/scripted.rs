@@ -34,6 +34,8 @@ impl ScriptedEngine {
             session_id: None,
             sandbox: coxagent_application::ports::outbound::SandboxStatus::NotRequested,
             engine: "scripted".to_owned(),
+            model: String::new(),
+            attempts: Vec::new(),
         }
     }
 }

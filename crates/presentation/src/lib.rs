@@ -7,12 +7,13 @@
 
 pub mod cli;
 pub mod middleware;
+pub mod overview_panels;
 pub mod server;
 
 pub use cli::{parse, Cli, CodegraphQuery, Command};
 pub use server::{
-    serve_full, BrokenProject, HubExtras, NewProjectReq, ProjectFactory, ProjectHandle,
-    ProjectRemover,
+    serve_full, BrokenProject, FactoryError, FactoryErrorKind, HubExtras, NewProjectReq,
+    ProjectFactory, ProjectHandle, ProjectRemover,
 };
 
 use coxagent_application::state::ProjectState;
@@ -65,5 +66,6 @@ fn status_label(status: Status) -> &'static str {
         Status::Open => "open",
         Status::Fixed => "fixed",
         Status::Verified => "verified",
+        Status::OnHold => "on_hold",
     }
 }

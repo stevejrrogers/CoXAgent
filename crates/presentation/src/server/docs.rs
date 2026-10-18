@@ -5,64 +5,6 @@
 
 use super::*;
 
-/// Docker janitor: agents deploy a lot — the host must not silt up. Hourly:
-/// any `cox-*` compose project whose containers are ALL stopped gets a full
-/// `down --remove-orphans` (dead previews, stale deploys), any PR preview
-/// still running past [`PREVIEW_TTL`] is reclaimed, then dangling build images
-/// are pruned. Scoped strictly to the `cox-` prefix — the backing-services
-/// group (`cox-infra`) is running, so it is never touched, and a RUNNING
-/// non-preview project is someone's live deploy and is left alone.
-pub(super) async fn docker_janitor() {
-    loop {
-        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-        let Ok(out) = tokio::process::Command::new("docker")
-            .args(["compose", "ls", "-a", "--format", "json"])
-            .stdin(std::process::Stdio::null())
-            .output()
-            .await
-        else {
-            continue;
-        };
-        let Ok(list) = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout) else {
-            continue;
-        };
-        for p in &list {
-            let name = p
-                .get("Name")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
-            let status = p
-                .get("Status")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
-            // Only OUR projects, and only fully-stopped ones.
-            if !name.starts_with("cox-") || name == "cox-infra" {
-                continue;
-            }
-            let mut reason = "dead";
-            if status.contains("running") {
-                if !name.starts_with(PREVIEW_PROJECT_PREFIX)
-                    || !preview_is_stale(name, PREVIEW_TTL).await
-                {
-                    continue;
-                }
-                reason = "expired preview";
-            }
-            let _ = tokio::process::Command::new("docker")
-                .args(["compose", "-p", name, "down", "--remove-orphans"])
-                .stdin(std::process::Stdio::null())
-                .output()
-                .await;
-            tracing::info!("docker janitor: removed {reason} compose project {name}");
-        }
-        let _ = tokio::process::Command::new("docker")
-            .args(["image", "prune", "-f"])
-            .stdin(std::process::Stdio::null())
-            .output()
-            .await;
-    }
-}
-
 /// List the project's documentation pages.
 pub(super) async fn docs_list_ep(
     State(app): State<AppState>,
@@ -73,6 +15,56 @@ pub(super) async fn docs_list_ep(
     };
     let docs = app.doc_list(&pid, &p).await;
     Json(docs).into_response()
+}
+
+/// Query parameters for the wiki sidebar search.
+#[derive(serde::Deserialize)]
+pub(super) struct WikiSearchParams {
+    q: Option<String>,
+}
+
+/// In-wiki search (CXA-F364): titles + bodies, ranked with snippets — the
+/// backend of the docs rail's filter box. Matching is pure
+/// (`application::wiki_views::wiki_search`); a blank query returns an empty
+/// list, which the rail reads as "unfiltered".
+pub(super) async fn wiki_search_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    Query(params): Query<WikiSearchParams>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let pages = app.doc_list(&pid, &p).await;
+    Json(coxagent_application::wiki_views::wiki_search(
+        &pages,
+        params.q.as_deref().unwrap_or_default(),
+    ))
+    .into_response()
+}
+
+/// Backlinks for one page (CXA-F364): every sibling page body and ticket
+/// description that references it, so the reader view can list "referenced
+/// by" beneath the body. Unknown page → 404 like every doc route.
+pub(super) async fn doc_backlinks_ep(
+    State(app): State<AppState>,
+    Path((pid, id)): Path<(String, String)>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Some(page) = app.doc_get(&pid, &p, &id).await else {
+        return not_found();
+    };
+    let pages = app.doc_list(&pid, &p).await;
+    let tickets = p.store.load().await.map(|s| s.tickets).unwrap_or_default();
+    let mut links = coxagent_application::wiki_views::page_backlinks(&pages, &page.id, &page.title);
+    links.extend(coxagent_application::wiki_views::ticket_backlinks(
+        &tickets,
+        &page.id,
+        &page.title,
+    ));
+    Json(links).into_response()
 }
 
 /// Mint an id for a brand-new page (used only when the client sends none).

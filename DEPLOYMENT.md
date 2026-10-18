@@ -59,6 +59,38 @@ a CLI.
 - Keep docker tidy on hosts where agents deploy previews:
   `./scripts/docker-clean.sh` (add `--deep` for builder cache).
 
+### Minimal self-host stack (repo root `docker-compose.yml`)
+
+The repo root carries a minimal two-service compose — app published on host
+port 8101 (override with `APP_PORT`) plus Postgres — for a self-host without
+MinIO/Mongo/coturn:
+
+```sh
+PG_PASSWORD=<strong> COXAGENT_ADMIN_PASSWORD=<strong> docker compose up -d --build
+# → http://localhost:8101, log in as root
+```
+
+**Password rotation & the pgdata volume (CXA-B115):** `POSTGRES_PASSWORD` is
+applied only when the `pgdata` volume is **first initialized**. Changing
+`PG_PASSWORD` against an existing volume does NOT update the password stored
+inside it — the db healthcheck authenticates with `psql` on every probe, so a
+mismatch makes `db` go **unhealthy** with `password authentication failed`
+and `coxagent` never boots (fail-fast by design; the old `pg_isready` check
+never authenticated, so the stack deployed "healthy" while the app silently
+degraded). Recover without losing data:
+
+```sh
+docker compose exec db psql -U postgres -c "ALTER USER postgres PASSWORD '<new>'"
+```
+
+`exec` connects over the container's unix socket, which the image's pg_hba
+keeps trust-authenticated — it works precisely because the stored password is
+unknown. Deleting the `pgdata` volume also restores access but **wipes all
+stored state**; prefer the `ALTER USER` path. The same first-init rule applies
+to every Postgres volume in this repo (`deploy/docker-compose.yml`'s `db`,
+`docker-compose.split.yml`'s `db`, `docker-compose.cxa.yml`'s
+`source_cxa_data`).
+
 ## 3. Kubernetes (Helm)
 
 ```sh
@@ -188,6 +220,45 @@ gateway pods. Start with `cox-all`; split only when load asks for it.
   (`cox-<parent>-<dir>`); an hourly hub janitor `down`s fully-stopped `cox-*`
   projects (never `cox-infra`) and prunes dangling images. Manual sweep:
   `./scripts/docker-clean.sh` (`--deep` adds builder cache).
+- Hub shim directories (`$TMPDIR/coxagent-shims-*`) are reclaimed at every hub
+  start (CXA-B117): pid-suffixed dirs whose hub process is no longer running
+  are removed, while the legacy shared `coxagent-shims/` directory (the
+  pre-CXA-B109 format, possibly still advertised by an old hub) is rewritten
+  with fallback-guarded scripts — never removed, so the old hub's agents keep
+  working. No manual sweep needed; a hub restart does it.
+
+## Standalone CXA backend (`deploy/docker-compose.cxa.yml`)
+
+For running **only** Postgres + Redis as a shared backend for the *native CXA
+hub* on this host (not the full web stack). It uses its own project name
+(`cxa-backend`) and mounts CXA's existing data volume directly, so it never
+collides with the root compose or `local-infra`.
+
+```sh
+cd deploy
+cp .env.example .env     # fill in real secrets — do not reuse placeholders
+docker compose -f docker-compose.cxa.yml up -d
+```
+
+Required variables (`${VAR:?}` — compose fails fast if any is unset):
+
+| Var | Used by |
+|---|---|
+| `PG_USER` | `db` service — `POSTGRES_USER` + healthcheck |
+| `PG_PASSWORD` | `db` service — `POSTGRES_PASSWORD` |
+| `REDIS_PASSWORD` | `redis` service — redis auth (`--requirepass`) |
+
+Set them inline instead of `.env`, e.g.:
+
+```sh
+PG_USER=coxagent PG_PASSWORD=<secret> REDIS_PASSWORD=<secret> \
+  docker compose -f docker-compose.cxa.yml up -d
+```
+
+Host ports: Postgres on **127.0.0.1:5433**, Redis on **127.0.0.1:6379**
+(loopback-only; matching what the native hub expects in coordination.json).
+An unauthenticated Redis is an authentication bypass (live session keys), so
+never run with an empty password.
 
 ## Migrate to another machine
 

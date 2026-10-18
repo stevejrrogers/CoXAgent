@@ -65,10 +65,7 @@ pub fn discover_opencode_models() -> Vec<String> {
     let Some(bin) = resolve_binary("opencode") else {
         return Vec::new();
     };
-    let Ok(out) = std::process::Command::new(bin)
-        .arg("models")
-        .output()
-    else {
+    let Ok(out) = std::process::Command::new(bin).arg("models").output() else {
         return Vec::new();
     };
     if !out.status.success() {

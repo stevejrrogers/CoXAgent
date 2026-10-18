@@ -8,7 +8,7 @@ test('the inbox view renders (empty state) and the nav badge stays hidden', asyn
   await openApp(page);
 
   await page.locator('a[data-v="inbox"]').click();
-  await expect(page.locator('#inbox-body')).toContainText('Nothing waits on the team');
+  await expect(page.locator('#inbox-body')).toContainText('Nothing waits on you');
   await expect(page.locator('#inbox-badge')).toBeHidden();
 
   await assertNoConsoleErrors(errors);

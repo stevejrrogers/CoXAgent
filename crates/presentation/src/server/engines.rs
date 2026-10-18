@@ -461,7 +461,14 @@ pub(super) async fn create_my_token_ep(
         return (StatusCode::BAD_REQUEST, "label is required").into_response();
     }
     let label = format!("{}{short}", personal_token_prefix(&user.username));
-    match auth.create_token(&label, user.role).await {
+    // A personal token is bound to its minting member (CXA-F350): the bearer
+    // resolves the caller's project memberships live, so a lead-tier runner
+    // passes the per-project gates exactly where its owner's account does.
+    // Admin-minted service tokens (create_token_ep) stay owner-less.
+    match auth
+        .create_token_for(&label, user.role, Some(&user.username))
+        .await
+    {
         Some(secret) => {
             audit_push(
                 &app.audit,

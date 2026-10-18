@@ -2,6 +2,9 @@
 // API-level login that returns the session cookie, so specs don't repeat the
 // same credential plumbing in every file.
 import { expect } from '@playwright/test';
+// The SSE snapshot wait is shared with the open suite: both apps hydrate
+// STATE over the same 1 Hz stream, so the hydration gate is defined once.
+import { awaitStateSnapshot } from '../specs/helpers.mjs';
 
 export const ADMIN_USER = 'adminos';
 export const ADMIN_PASSWORD = 'ChangeMe_12345';
@@ -34,7 +37,10 @@ export async function signInAs(page, username, password) {
   ]);
 }
 
-/// Open / and wait until the app either paints content or shows the login form.
+/// Open the app signed-in and wait until it has hydrated the fixture state.
+/// Login-wall paths keep their bare page.goto — behind the wall no app shell
+/// (and no STATE) ever renders, so they must not wait for one.
 export async function openApp(page) {
   await page.goto('/');
+  await awaitStateSnapshot(page);
 }

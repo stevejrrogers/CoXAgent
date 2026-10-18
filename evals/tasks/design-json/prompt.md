@@ -1,0 +1,1 @@
+Design the technical approach for this ticket: "Add rate limiting to the login endpoint (5 attempts/minute per IP)". Respond with ONLY a JSON object with exactly these keys: "approach" (string), "files" (array of strings), "api_contract" (string), "test_plan" (string).

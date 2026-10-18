@@ -74,6 +74,7 @@ struct DeployWithDeadPort;
 impl DeployPort for DeployWithDeadPort {
     async fn deploy(&self, _work_dir: &std::path::Path) -> Result<DeployReport, PortError> {
         Ok(DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "docker compose up -d --build succeeded".to_owned(),
@@ -89,6 +90,7 @@ struct HealthyDeploy;
 impl DeployPort for HealthyDeploy {
     async fn deploy(&self, _work_dir: &std::path::Path) -> Result<DeployReport, PortError> {
         Ok(DeployReport {
+            failure_bundle: None,
             success: true,
             deployed: true,
             summary: "docker compose up -d --build succeeded".to_owned(),
@@ -123,11 +125,14 @@ fn project_handle_with_raw_host_port(
         config_path,
         engine: Arc::new(UnusedEngine),
         work_dir: dir.path().to_path_buf(),
+        outbox: None,
         budget: Arc::new(Mutex::new(BudgetCaps::default())),
         context_path: dir.path().join("project_context.md"),
         forge: None,
         deploy: Some(deploy),
+        storage: None,
         files: None,
+        deps_discovery: None,
     };
     (dir, handle)
 }
@@ -136,6 +141,39 @@ fn project_handle_with_raw_host_port(
 /// `deploy.host_port` `pr_preview` reads to probe health.
 fn project_handle(deploy: Arc<dyn DeployPort>) -> (tempfile::TempDir, ProjectHandle) {
     project_handle_with_raw_host_port(deploy, "8101")
+}
+
+/// A project workspace whose `coxagent.json` is exactly `raw_config` — for
+/// exercising corruption above the `host_port` leaf (unparseable JSON, a
+/// non-object `deploy` section) that `project_handle_with_raw_host_port`
+/// can't reach since it always wraps the value in a well-formed
+/// `{"deploy":{"host_port":...}}` shell.
+fn project_handle_with_raw_config(
+    deploy: Arc<dyn DeployPort>,
+    raw_config: &str,
+) -> (tempfile::TempDir, ProjectHandle) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_path = dir.path().join("coxagent.json");
+    std::fs::write(&config_path, raw_config).expect("write config");
+    let handle = ProjectHandle {
+        id: "proj".to_owned(),
+        name: "proj".to_owned(),
+        alias: "proj".to_owned(),
+        store: Arc::new(MemStore::default()) as Arc<dyn StateStorePort>,
+        runner: Arc::new(RunnerHandle::default()),
+        config_path,
+        engine: Arc::new(UnusedEngine),
+        work_dir: dir.path().to_path_buf(),
+        outbox: None,
+        budget: Arc::new(Mutex::new(BudgetCaps::default())),
+        context_path: dir.path().join("project_context.md"),
+        forge: None,
+        deploy: Some(deploy),
+        storage: None,
+        files: None,
+        deps_discovery: None,
+    };
+    (dir, handle)
 }
 
 /// AC (COX-B009): restoring the main build after a PR preview must run
@@ -274,11 +312,14 @@ async fn git_preview_fixture(
         config_path,
         engine: Arc::new(UnusedEngine),
         work_dir: work.path().to_path_buf(),
+        outbox: None,
         budget: Arc::new(Mutex::new(BudgetCaps::default())),
         context_path: work.path().join("project_context.md"),
         forge: None,
         deploy: Some(deploy),
+        storage: None,
         files: None,
+        deps_discovery: None,
     };
     (bare, work, handle)
 }
@@ -420,6 +461,45 @@ async fn a_zero_host_port_is_rejected_rather_than_probed() {
 #[tokio::test(start_paused = true)]
 async fn an_out_of_range_host_port_is_rejected_rather_than_skipping_the_gate() {
     let (_dir, handle) = project_handle_with_raw_host_port(Arc::new(HealthyDeploy), "70000");
+    let forge: Arc<dyn ForgePort> = Arc::new(UnusedForge);
+
+    let resp = pr_preview(&handle, &forge, 1, false).await;
+
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+/// AC (COX-B062): a `coxagent.json` that fails to parse as JSON at all —
+/// not just a bad `host_port` value — must still fail the mandatory health
+/// gate rather than being read as "unconfigured" (`Ok(None)`) and passing
+/// unconditionally. Uses `DeployWithDeadPort` so a false pass here would
+/// mean a dead-on-arrival app got reported as a successful restore.
+#[tokio::test(start_paused = true)]
+async fn corrupt_json_is_rejected_rather_than_skipping_the_gate() {
+    let (_dir, handle) =
+        project_handle_with_raw_config(Arc::new(DeployWithDeadPort), "{not valid json at all");
+    let forge: Arc<dyn ForgePort> = Arc::new(UnusedForge);
+
+    let resp = pr_preview(&handle, &forge, 1, false).await;
+
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        text.contains("health check failed"),
+        "expected the health-gate failure reason in the response: {text}"
+    );
+}
+
+/// AC (COX-B062): a `deploy` section that exists but isn't a JSON object
+/// (e.g. `{"deploy":"oops"}`) must also fail the gate — `value.get("deploy")
+/// .and_then(|d| d.get("host_port"))` silently returns `None` for this shape
+/// same as a genuinely absent field, so it must be checked explicitly.
+#[tokio::test(start_paused = true)]
+async fn a_non_object_deploy_section_is_rejected_rather_than_skipping_the_gate() {
+    let (_dir, handle) =
+        project_handle_with_raw_config(Arc::new(DeployWithDeadPort), r#"{"deploy":"oops"}"#);
     let forge: Arc<dyn ForgePort> = Arc::new(UnusedForge);
 
     let resp = pr_preview(&handle, &forge, 1, false).await;

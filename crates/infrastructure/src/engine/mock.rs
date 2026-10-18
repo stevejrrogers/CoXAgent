@@ -33,6 +33,8 @@ impl MockEngine {
                 session_id: None,
                 sandbox: coxagent_application::ports::outbound::SandboxStatus::NotRequested,
                 engine: "mock".to_owned(),
+                model: String::new(),
+                attempts: Vec::new(),
             })
             .collect();
         Self {

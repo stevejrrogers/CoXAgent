@@ -71,7 +71,7 @@ pub(super) async fn chat_list_ep(
         .into_iter()
         .filter(|m| m.channel == channel)
         .collect();
-    Json(chat).into_response()
+    Json(paginate_tail(&chat, q.limit, q.before.as_deref())).into_response()
 }
 
 /// Post a team-chat message as the signed-in user. Any authenticated principal
@@ -101,6 +101,7 @@ pub(super) async fn chat_post_ep(
     let channel = req
         .channel
         .unwrap_or_else(|| coxagent_application::GENERAL_CHANNEL.to_owned());
+    let atts_for_engine = req.attachments.clone();
     if deliver_chat(&app, &p, &user, body, &channel, req.attachments).await {
         // A human asking the TEAM in a channel deserves an answer there —
         // until now only the Scrum box had a listener, so channel questions
@@ -133,8 +134,12 @@ pub(super) async fn chat_post_ep(
                 )
                 .with_files(p2.files.clone())
                 .with_reply_channel(Some(reply_channel))
-                .with_actor_role(actor_role);
-                let _ = uc.execute(&msg).await;
+                .with_actor_role(actor_role)
+                .with_attachments(atts_for_engine);
+                // Box::pin: the use-case future grew past clippy's 16 KB
+                // large-future limit when the governance ledger joined
+                // ProjectState (CXA-F230) — same future, just heap-pinned.
+                let _ = Box::pin(uc.execute(&msg)).await;
             });
         }
         Json(serde_json::json!({ "ok": true })).into_response()
@@ -383,13 +388,43 @@ pub(super) async fn syschat_messages_ep(
         let Ok(state) = p.store.load().await else {
             return internal_error("load failed");
         };
-        return Json(state.chat_in(&room)).into_response();
+        return Json(paginate_tail(
+            &state.chat_in(&room),
+            q.limit,
+            q.before.as_deref(),
+        ))
+        .into_response();
     }
     let sc = app.syschat.inner.lock().await;
     if !sc.can_view(&channel, &user, &ctx) {
         return Json(Vec::<coxagent_application::ChatMsg>::new()).into_response();
     }
-    Json(sc.messages_in(&channel)).into_response()
+    Json(paginate_tail(
+        &sc.messages_in(&channel),
+        q.limit,
+        q.before.as_deref(),
+    ))
+    .into_response()
+}
+
+/// Newest-`limit` slice of a chronologically ordered message list, optionally
+/// only messages strictly OLDER than the `before` id (the load-more cursor).
+/// Order is preserved (oldest→newest within the returned window).
+fn paginate_tail(
+    msgs: &[coxagent_application::ChatMsg],
+    limit: Option<usize>,
+    before: Option<&str>,
+) -> Vec<coxagent_application::ChatMsg> {
+    let limit = limit.unwrap_or(50).clamp(1, 500);
+    let upper = match before {
+        Some(id) => match msgs.iter().position(|m| m.id == id) {
+            Some(i) => i,
+            None => msgs.len(), // unknown cursor: serve the newest window
+        },
+        None => msgs.len(),
+    };
+    let lower = upper.saturating_sub(limit);
+    msgs[lower..upper].to_vec()
 }
 
 /// Post a message to a system channel over REST (WS is the primary path).
@@ -468,14 +503,23 @@ pub(super) async fn syschat_dm_ep(
 }
 
 /// Toggle the caller's emoji reaction on a message; broadcast the update.
+/// Only the declared [`REACTION_EMOJIS`] set is accepted — the picker limits
+/// the UI, this check enforces the rule (CXA-F367).
 pub(super) async fn syschat_react_ep(
     State(app): State<AppState>,
     headers: axum::http::HeaderMap,
     Json(req): Json<ReactReq>,
 ) -> axum::response::Response {
     let user = resolve_username(&app, &headers).await;
-    let emoji = req.emoji.chars().take(8).collect::<String>();
-    let updated = { app.syschat.inner.lock().await.react(&req.id, &user, &emoji) };
+    let emoji = req.emoji.trim();
+    if !coxagent_application::REACTION_EMOJIS.contains(&emoji) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "unsupported reaction — pick one of the five offered",
+        )
+            .into_response();
+    }
+    let updated = { app.syschat.inner.lock().await.react(&req.id, &user, emoji) };
     let Some(msg) = updated else {
         return not_found();
     };
@@ -643,15 +687,26 @@ pub(super) async fn syschat_delete_ep(
     if user.is_empty() {
         return (StatusCode::UNAUTHORIZED, "sign in").into_response();
     }
+    // The one carve-out to author-only delete (CXA-F367): an admin may
+    // tombstone any message. Edit stays author-only — no admin override.
+    let admin = user_can_manage(&app, &headers).await;
     let mut sc = app.syschat.inner.lock().await;
-    let Some(msg) = sc.chat.iter_mut().find(|m| m.id == mid) else {
+    let Some(idx) = sc.chat.iter().position(|m| m.id == mid) else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
-    if msg.user != user {
+    if sc.chat[idx].user != user && !admin {
         return (StatusCode::FORBIDDEN, "not yours").into_response();
     }
-    msg.deleted = true;
-    msg.body = String::new();
+    let channel = sc.chat[idx].channel.clone();
+    sc.chat[idx].deleted = true;
+    sc.chat[idx].body = String::new();
+    // Tombstoning unpins: the pins list serves live messages only, so a kept
+    // id would be an invisible slot the MAX_PINS_PER_CHANNEL cap still counts
+    // — five such deletes would wedge the channel's pin bar with nothing left
+    // to unpin.
+    if let Some(pins) = sc.pins.get_mut(&channel) {
+        pins.retain(|p| p != &mid);
+    }
     drop(sc);
     app.syschat.save().await;
     let frame = json!({ "op": "delete", "msg": { "id": mid } });
@@ -688,6 +743,11 @@ pub(super) async fn syschat_search_ep(
 }
 
 // ── Pin ──────────────────────────────────────────────────────────────────
+/// Pin/unpin a message (toggle). The rule (CXA-F367): the channel owner or an
+/// admin — enforced here, not by hiding buttons. Owner-less computed channels
+/// (#general, project rooms) therefore pin by admin authority, and DMs — whose
+/// owner field is empty and whose content even admins cannot view — take no
+/// pins at all. A channel holds at most [`MAX_PINS_PER_CHANNEL`] pins.
 pub(super) async fn syschat_pin_ep(
     State(app): State<AppState>,
     Path(mid): Path<String>,
@@ -697,23 +757,52 @@ pub(super) async fn syschat_pin_ep(
     if user.is_empty() {
         return (StatusCode::UNAUTHORIZED, "sign in").into_response();
     }
-    let mid_clone = mid.clone();
+    let admin = user_can_manage(&app, &headers).await;
+    let ctx = app.chat_context().await;
     let mut sc = app.syschat.inner.lock().await;
-    let Some(channel) = sc
-        .chat
-        .iter()
-        .find(|m| m.id == mid_clone)
-        .map(|m| m.channel.clone())
-    else {
+    let Some(msg) = sc.chat.iter().find(|m| m.id == mid) else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
-    let pins = sc.pins.entry(channel.clone()).or_default();
-    if pins.contains(&mid_clone) {
-        pins.retain(|p| p != &mid_clone);
-    } else {
-        pins.push(mid_clone.clone());
+    if msg.deleted {
+        // A tombstone is not pinnable — the pins list serves live messages
+        // only, so accepting the write would mint an invisible slot.
+        return (StatusCode::BAD_REQUEST, "cannot pin a deleted message").into_response();
     }
-    let pinned = pins.contains(&mid_clone);
+    let channel = msg.channel.clone();
+    let is_owner = sc
+        .channels
+        .iter()
+        .find(|c| c.id == channel)
+        .is_some_and(|c| c.owner == user);
+    if !admin && !is_owner {
+        return (
+            StatusCode::FORBIDDEN,
+            "only the channel owner or an admin can pin",
+        )
+            .into_response();
+    }
+    if !sc.can_view(&channel, &user, &ctx) {
+        return (StatusCode::FORBIDDEN, "not a member of this channel").into_response();
+    }
+    let pins = sc.pins.entry(channel.clone()).or_default();
+    let pinned = if pins.contains(&mid) {
+        // The toggle IS the unpin affordance.
+        pins.retain(|p| p != &mid);
+        false
+    } else {
+        if pins.len() >= coxagent_application::MAX_PINS_PER_CHANNEL {
+            return (
+                StatusCode::CONFLICT,
+                format!(
+                    "a channel pins at most {} messages — unpin one first",
+                    coxagent_application::MAX_PINS_PER_CHANNEL
+                ),
+            )
+                .into_response();
+        }
+        pins.push(mid.clone());
+        true
+    };
     let pins_clone = pins.clone();
     drop(sc);
     app.syschat.save().await;
@@ -726,10 +815,18 @@ pub(super) async fn syschat_pin_ep(
 
 pub(super) async fn syschat_pins_ep(
     State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> axum::response::Response {
     let ch = q.get("channel").cloned().unwrap_or_default();
+    let user = resolve_username(&app, &headers).await;
+    let ctx = app.chat_context().await;
     let sc = app.syschat.inner.lock().await;
+    // Pins name messages; the same membership rule as `syschat_messages_ep`
+    // governs who may read them (a DM's pins are participants-only).
+    if !sc.can_view(&ch, &user, &ctx) {
+        return Json(Vec::<ChatMsg>::new()).into_response();
+    }
     let pins = sc.pins.get(&ch).cloned().unwrap_or_default();
     let msgs: Vec<ChatMsg> = pins
         .iter()
@@ -1121,6 +1218,10 @@ pub(super) async fn chat_reply_ep(
         .as_deref()
         .and_then(|t| serde_json::from_str::<Config>(t).ok())
         .unwrap_or_default();
+    // Independently parsed from the SAME raw text (COX-B035): distinguishes
+    // "no host_port configured" from "host_port present but malformed",
+    // which `cfg.deploy.host_port` alone cannot once a corrupt config has
+    // already collapsed to `Config::default()` above.
     let host_port_probe = raw_cfg.as_deref().map_or(Ok(None), |t| {
         coxagent_application::ports::outbound::parse_deploy_host_port(t)
     });
@@ -1146,7 +1247,9 @@ pub(super) async fn chat_reply_ep(
         };
         uc = uc.with_forge(Arc::clone(f), target, cfg.git.require_ci);
     }
-    match uc.execute(msg).await {
+    // Same Box::pin as the spawned path above: the future crossed clippy's
+    // 16 KB large-future limit when the governance ledger joined ProjectState.
+    match Box::pin(uc.execute(msg)).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => internal_error(&e.to_string()),
     }

@@ -186,9 +186,33 @@ fn production_sources() -> Vec<PathBuf> {
     out
 }
 
+/// Every source file of the `proc` module — `proc.rs` plus anything under
+/// `proc/` — concatenated. The policy may live in a submodule (it does:
+/// `proc/seatbelt.rs`), and the guard is about the policy being IN THE BUILD,
+/// not about which file holds it.
 fn proc_source() -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../infrastructure/src/proc.rs");
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../infrastructure/src");
+    let mut paths = vec![dir.join("proc.rs")];
+    if let Ok(entries) = std::fs::read_dir(dir.join("proc")) {
+        paths.extend(
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|e| e == "rs")),
+        );
+    }
+    paths.sort();
+    let src: String = paths
+        .iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !src.trim().is_empty(),
+        "no `proc` module source found under {} — the guard itself is broken",
+        dir.display()
+    );
+    src
 }
 
 /// COX-B022 failure mode 1: the fix is missing from the branch being built.
@@ -214,6 +238,16 @@ fn the_seatbelt_retry_policy_is_present_in_this_build() {
     assert!(
         src.contains("code == Some(71)"),
         "the retry must key on sandbox-exec's own EX_OSERR (71)"
+    );
+    // COX-B016: retrying is only half the policy. When every attempt is
+    // refused nothing ran, and the helpers must hand that back so no caller
+    // reports the OS's refusal as a confined run that failed on its own.
+    assert!(
+        src.contains("SandboxStatus::Denied"),
+        "the confined-spawn helpers must downgrade the status to \
+         SandboxStatus::Denied once the retries are exhausted (COX-B016) — \
+         without it an OS refusal is indistinguishable from an agent failure \
+         and the run is still reported as confined"
     );
 }
 

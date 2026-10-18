@@ -72,6 +72,30 @@ pub struct ChromeScreenshot;
 
 #[async_trait::async_trait]
 impl coxagent_application::ports::outbound::ScreenshotPort for ChromeScreenshot {
+    async fn capture_dom(&self, url: &str) -> Option<String> {
+        let chrome = chrome_binary()?;
+        let run = tokio::process::Command::new(&chrome)
+            .args([
+                "--headless=new",
+                "--disable-gpu",
+                "--no-first-run",
+                "--virtual-time-budget=6000",
+                "--dump-dom",
+                url,
+            ])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output();
+        let out = tokio::time::timeout(Duration::from_secs(30), run)
+            .await
+            .ok()?
+            .ok()?;
+        if !out.status.success() || out.stdout.is_empty() {
+            return None;
+        }
+        String::from_utf8(out.stdout).ok()
+    }
+
     async fn capture(&self, url: &str) -> Option<Vec<u8>> {
         let tmp = std::env::temp_dir().join(format!("cox-shot-{}.png", std::process::id()));
         let ok = capture(url, &tmp).await;

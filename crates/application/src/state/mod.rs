@@ -3,18 +3,36 @@
 //! Kept in the application layer because `schema_version` is a persistence
 //! concern; the domain stays free of it.
 
-use coxagent_domain::{DebtSignal, SemVer, Ticket, TicketId};
+use coxagent_domain::{DebtSignal, Goal, SemVer, Ticket, TicketId};
 use serde::{Deserialize, Serialize};
 
 mod chat;
 mod docs;
+mod drift;
+mod goals;
+mod governance;
+mod integrity;
+mod lessons;
 mod ops;
+mod outbox;
+mod provenance;
+mod shards;
 mod work;
+mod workspace_id;
 
 pub use chat::*;
 pub use docs::*;
+pub use drift::*;
+pub use goals::*;
+pub use governance::*;
+pub use integrity::*;
+pub use lessons::*;
 pub use ops::*;
+pub use outbox::*;
+pub use provenance::*;
+pub use shards::*;
 pub use work::*;
+pub use workspace_id::*;
 
 /// Current on-disk schema version. Bumped when the serialized shape changes;
 /// the store refuses to silently load a newer version than it understands.
@@ -29,6 +47,36 @@ pub struct ActivityEntry {
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,
+}
+
+/// The workspace master run switch (CXA-F356): one flag every runner on every
+/// machine honours at its cycle boundary. `running` defaults to `true` so
+/// existing states load unchanged; the attribution fields are empty until an
+/// admin first flips it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceRun {
+    /// `false` = the whole workspace is paused (drain: in-flight work finishes).
+    pub running: bool,
+    /// Who flipped it last (username), for the "paused by X" attribution line.
+    #[serde(default)]
+    pub by: String,
+    /// RFC3339 timestamp of the last flip.
+    #[serde(default)]
+    pub at: String,
+    /// Optional human reason, surfaced in the run-control UI and audit line.
+    #[serde(default)]
+    pub reason: String,
+}
+
+impl Default for WorkspaceRun {
+    fn default() -> Self {
+        Self {
+            running: true,
+            by: String::new(),
+            at: String::new(),
+            reason: String::new(),
+        }
+    }
 }
 
 /// Keep the activity feed bounded.
@@ -47,6 +95,10 @@ pub const AGENTS_CHANNEL: &str = "agents";
 /// Where work waiting on a PERSON is announced. Separate from `agents` so a
 /// human can watch decisions without reading the whole machine's chatter.
 pub const APPROVALS_CHANNEL: &str = "approvals";
+/// Where incident post-mortems land (CXA-F012): a single room for outage
+/// analysis so someone watching for service problems isn't sifting `#general`
+/// or re-reading routine deploy chatter.
+pub const INCIDENTS_CHANNEL: &str = "incidents";
 
 fn general_channel() -> String {
     GENERAL_CHANNEL.to_owned()
@@ -62,6 +114,19 @@ pub const STANDARD_DOC_FOLDERS: &[&str] = &[
     "Operations",    // ops — runbooks, deploy & infra
     "Team",          // SM — retros, decisions, ways of working
 ];
+
+/// How many closed days of spend history to retain.
+pub const MAX_SPEND_HISTORY: usize = 60;
+
+/// One closed UTC day's total engine spend, kept so the Cost view can chart
+/// a trend instead of only "today".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpendDay {
+    /// UTC date, `YYYY-MM-DD`.
+    pub day: String,
+    /// Total spend recorded on that day.
+    pub usd: f64,
+}
 
 /// The whole state of one managed project.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -80,6 +145,11 @@ pub struct ProjectState {
     pub tickets: Vec<Ticket>,
     #[serde(default)]
     pub history: Vec<DeployRecord>,
+    /// Merged-then-reverted work (CXA-F047): revert commits the scan linked to
+    /// shipped tickets, each with a human approve/dismiss verdict. Bounded,
+    /// newest last — approved events are what planning is allowed to learn from.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reverted_work: Vec<RevertEvent>,
     #[serde(default)]
     pub activity: Vec<ActivityEntry>,
     #[serde(default)]
@@ -88,6 +158,18 @@ pub struct ProjectState {
     pub sprint: Option<Sprint>,
     #[serde(default)]
     pub sprints: Vec<SprintRecord>,
+    /// Upcoming sprints prepared ahead of time, consumed front-first at
+    /// rollover. See [`PlannedSprint`].
+    #[serde(default)]
+    pub sprint_queue: Vec<PlannedSprint>,
+    /// Why each on-hold ticket is parked (ticket id → reason). Written on
+    /// hold (human or the auto-hold sweep), cleared on resume.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub hold_reasons: std::collections::BTreeMap<String, String>,
+    /// Per-role engine health (role label → counters), fed by the cycle's
+    /// error report. Rendered on the Agents view.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub role_health: std::collections::BTreeMap<String, RoleHealth>,
     #[serde(default)]
     pub deploy: Option<DeployStatus>,
     /// Discussion threads: per-ticket and team-channel comments.
@@ -101,6 +183,17 @@ pub struct ProjectState {
     /// Review tab — it never lists PRs itself.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub open_prs: Vec<crate::ports::outbound::PrOpen>,
+    /// PRs the SA approved but held for a person (`needs_human_eyes`): PR
+    /// number → why the machine refused to land it alone. Surfaced in the
+    /// Inbox with approve/dismiss; entries for PRs no longer open are pruned
+    /// on every open-PR sync.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub human_holds: std::collections::BTreeMap<u64, String>,
+    /// Attachments per ticket id (PD design images, screenshots) — the bytes
+    /// live in blob storage (`StoragePort`: MinIO/S3 or the local blob dir);
+    /// this holds the records the UI lists.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub ticket_attachments: std::collections::BTreeMap<String, Vec<TicketAttachment>>,
     /// Team chat: human-to-human messages among the people on the project.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chat: Vec<ChatMsg>,
@@ -114,6 +207,17 @@ pub struct ProjectState {
     /// Product milestones the sprints work toward (authored once by the PO).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub milestones: Vec<Milestone>,
+    /// Declared product goals with stable ids (CXA-F228) — the lines the PO's
+    /// goal gate proposes against. Associations and ledger entries bind to
+    /// `Goal::id`, never to the title, so rewording a goal never rewrites
+    /// attribution. Absent until the first goal is declared.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub goals: Vec<Goal>,
+    /// Append-only outcome ledger (CXA-F228): one entry per ticket that
+    /// reached `Verified`, freezing ticket -> declared goal -> capture commit
+    /// -> verification timestamp. Newest last; see [`MAX_OUTCOME_LEDGER`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outcome_ledger: Vec<OutcomeLedgerEntry>,
     /// Living documentation pages (product + technical) written by agents/humans.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub docs: Vec<DocPage>,
@@ -136,6 +240,19 @@ pub struct ProjectState {
     /// the team actually improves over time (kept bounded, newest last).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lessons: Vec<String>,
+    /// Per-lesson efficacy ledger (CXA-F306): recorded-at, re-recordings,
+    /// recurrences anchored to their incidents, escalation. Bounded at
+    /// [`lessons::MAX_LESSON_RECORDS`]; see [`lessons::LessonRecord`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lesson_records: Vec<LessonRecord>,
+    /// Incident→lesson matches a reviewer dismissed (CXA-F306 AC3) — persisted
+    /// so a dismissed match never increments a recurrence count again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dismissed_matches: Vec<DismissedMatch>,
+    /// UTC day (`YYYY-MM-DD`) the CXA-F306 lesson-efficacy sweep last ran, so
+    /// the daily forcing sweep files each repeater's structural ticket once.
+    #[serde(default)]
+    pub lesson_sweep_day: String,
     /// The team's durable decisions & conventions (ADR-style one-liners): the
     /// architecture calls, tech choices, and "how we do X" every agent should
     /// honour — so parallel LLM calls stay consistent instead of contradicting.
@@ -153,6 +270,16 @@ pub struct ProjectState {
     /// forward, so sprints keep rolling regardless of restarts.
     #[serde(default)]
     pub sprint_cycle: u64,
+    /// Persistent, restart-safe project-cycle counter — the authoritative cycle
+    /// number, advanced once per leader cycle and reused for scoring + cadence.
+    /// The per-process counter resets to 1 every worker launch, so both the
+    /// scorecard key and the `% N` cadence (codegraph, debt sweep, BA, scrum
+    /// topic) drifted after a restart. This counter lives in state, only moves
+    /// forward, and is unbounded (it is NOT truncated by the cycle_scores 100-cap),
+    /// so cadence positions and `sweeps_done` values stay consistent across
+    /// restarts. Non-leader runners ignore it — their reports are un-scored.
+    #[serde(default)]
+    pub cycle: u64,
     /// The PO's goal for the upcoming sprint (human-set from the Scrum view). When
     /// set it becomes the sprint goal on the next roll-over and steers the BA's
     /// proposals, so the team works toward what the PO asked for — not just
@@ -168,6 +295,19 @@ pub struct ProjectState {
     /// burning tokens forever; entries are dropped when the PR closes.
     #[serde(default)]
     pub pr_fix_attempts: std::collections::BTreeMap<u64, u32>,
+    /// How many times in a ROW the SA reviewer failed to render a verdict on
+    /// each open PR (engine crash / unparseable JSON), so a PR the reviewer
+    /// silently chokes on is surfaced to a human instead of starving forever.
+    /// Cleared whenever the PR gets a real review or the record is reset on
+    /// merge/close.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub pr_review_skips: std::collections::BTreeMap<u64, u32>,
+    /// The kept-OPEN review hold currently being counted per open PR
+    /// (CXA-C026): identical hold + unchanged head for `git.hold_max_rounds`
+    /// rounds forces a terminal decision (land or close) instead of re-logging
+    /// the hold forever. One entry per open PR; cleared on merge/close.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub pr_open_holds: std::collections::BTreeMap<u64, PrOpenHold>,
     /// Engine conversation id of the last fix run per PR — the next fix round
     /// RESUMES that conversation (the agent still has the branch, the feedback
     /// and its own changes in context) instead of starting cold. Dropped with
@@ -204,10 +344,26 @@ pub struct ProjectState {
     /// the forge must reflect back exactly once).
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub seen_merged_prs: std::collections::BTreeSet<u64>,
+    /// When each ticket last had a PR MERGE (ticket id → RFC3339). Feeds the
+    /// fix-on-fix brake: a second PR for a ticket merged within the last day
+    /// is the stacked-chain smell (B036→B044, B065 twice in one night) — it
+    /// waits for a person instead of auto-landing another layer.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub ticket_last_merge: std::collections::BTreeMap<String, String>,
     /// Closed-without-merge PR numbers already processed into lessons, so a
     /// human rejection is learned from exactly once.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub seen_closed_prs: std::collections::BTreeSet<u64>,
+    /// Ticket ids the end-of-cycle ship sweep has already committed and pushed
+    /// a branch for. The sweep is otherwise a pure function of status
+    /// (`Fixed`/`Done` + unassigned), so a shipped ticket would be re-selected
+    /// every cycle forever — re-cloning its work, re-opening duplicate PRs, and
+    /// (when the worktree is dirty from those rejected attempts) logging the
+    /// same `checkout` failure each time. Recording the sweep here makes it
+    /// idempotent in truth, not just in happy-path theory: a shipped ticket is
+    /// shipped once.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub swept_tickets: std::collections::BTreeSet<String>,
     /// Tickets a human approved to run despite the cost estimate.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub cost_approved: std::collections::BTreeSet<String>,
@@ -216,10 +372,40 @@ pub struct ProjectState {
     /// dashboard. All deterministic; SM announces every change.
     #[serde(default, skip_serializing_if = "Tuning::is_default")]
     pub tuning: Tuning,
+    /// Operator freeze/override per self-tuning brake (CXA-F238), keyed by
+    /// brake field name (`bugs_first` / `skip_ba`). Composed AFTER the
+    /// autonomous decision each tuning pass and expired against a bound, so
+    /// an override steers the loop without rewriting its hysteresis state.
+    /// Persists across restarts until cleared by another operator action or
+    /// its own expiry.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub tuning_overrides: std::collections::BTreeMap<String, BrakeHold>,
+    /// Append-only brake-cockpit audit trail (CXA-F238): one entry per brake
+    /// field change, whoever wrote it — the autonomous pass included. Bounded,
+    /// newest last; see [`MAX_TUNING_HISTORY`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tuning_history: Vec<TuningAuditEntry>,
     /// Definition-of-Done evidence per ticket (bounded per ticket) — a ticket
     /// only reaches Verified with context-appropriate proof attached.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub ticket_evidence: std::collections::BTreeMap<String, Vec<Evidence>>,
+    /// Engine & model provenance per ticket (CXA-F257, bounded per ticket —
+    /// see [`provenance`]): which engine and model ACTUALLY executed each
+    /// agent step, post-failover and post-escalation, so the human verify
+    /// gate sees what produced the work it is approving. serde-defaulted
+    /// (the `ticket_failures` additive precedent) so pre-change snapshots
+    /// load to an empty map — no migration, no schema bump.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub ticket_step_provenance: std::collections::BTreeMap<String, Vec<StepProvenance>>,
+    /// Resolved live reproduction URL per shipped ticket (CXA-F246): ticket id
+    /// → the `http://127.0.0.1:{host_port}/` link the evidence-capture funnel
+    /// recorded when it collected the ticket's DoD evidence, so every verify
+    /// surface renders one clickable link without re-deriving it from config.
+    /// serde-defaulted (the `ticket_failures` additive precedent) so
+    /// pre-change snapshots load to an empty map — no migration, no schema
+    /// bump.
+    #[serde(default)]
+    pub repro_urls: std::collections::BTreeMap<String, String>,
     /// True while the team is in merge-queue RECOVERY: the open-PR count blew
     /// past twice the WIP limit, so cycles do merge/conflict work only until
     /// the queue is back under the limit.
@@ -295,6 +481,19 @@ pub struct ProjectState {
     /// tracked so it files exactly one bug per outage and can announce recovery.
     #[serde(default)]
     pub ops_down: bool,
+    /// The workspace-wide master run switch (CXA-F356 tier 1). When off, every
+    /// runner on every machine idles at its next cycle boundary (drain
+    /// semantics: in-flight work finishes, nothing new starts) regardless of
+    /// each operator's own desired flag — and per-machine switches cannot
+    /// override it. Admin-only to flip; who/when/why is kept for the UI.
+    #[serde(default)]
+    pub workspace_run: WorkspaceRun,
+    /// Consecutive unhealthy Ops-monitor probes (one per leader cycle) for the
+    /// current outage — CXA-F240's "N consecutive checks" trigger: the
+    /// live-health auto-rollback fires when this reaches
+    /// `deploy.live_health_fail_checks`. Reset to 0 on the first healthy probe.
+    #[serde(default)]
+    pub ops_down_streak: u32,
     /// Spend accumulated on the current calendar day (UTC), for the daily budget
     /// policy. Resets when the day rolls over.
     #[serde(default)]
@@ -302,6 +501,11 @@ pub struct ProjectState {
     /// The UTC date (`YYYY-MM-DD`) `spend_today_usd` is counting.
     #[serde(default)]
     pub spend_day: String,
+    /// Closed daily spend totals, appended by [`ProjectState::add_daily_spend`]
+    /// when the UTC day rolls over. Bounded to [`MAX_SPEND_HISTORY`] days so
+    /// the state row cannot grow without limit.
+    #[serde(default)]
+    pub spend_history: Vec<SpendDay>,
     /// Whether the lifetime `budget_usd` early-warning (`budget_warning`,
     /// [`crate::policy::approaching_cap`]) has already fired for the current
     /// approach toward the cap. Cleared once spend is no longer approaching
@@ -331,12 +535,75 @@ pub struct ProjectState {
     /// Outcome of the most recent auto-rollback attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_rollback: Option<RollbackStatus>,
+    /// Rolling incident history (CXA-F012): one post-mortem per deploy
+    /// revision or incident, newest last, capped so a long outage storm cannot
+    /// grow state without bound. The durable inspection record that links a
+    /// rollback to its root-cause prevention ticket and team lesson.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub incidents: Vec<IncidentRecord>,
+    /// Commit shas blacklisted from known-good promotion (CXA-F012): after a
+    /// rollback the failing sha is pinned here so the self-healing loop cannot
+    /// re-promote the SAME broken commit every cycle until its root-cause bug
+    /// is verified. Consult-only against state — no git ref changes.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub rolled_back_commits: std::collections::BTreeSet<String>,
+    /// One bug-status count per UTC day (`YYYY-MM-DD` → counts), recorded by
+    /// the leader cycle so the burn-down history survives restarts instead of
+    /// leaving only today's snapshot in `metrics::compute` (CXA-F032). Bounded
+    /// by [`MAX_BUG_SNAPSHOT_DAYS`]; every added field is serde-defaulted so
+    /// the schema stays at version 1.
+    #[serde(default)]
+    pub bug_snapshots: std::collections::BTreeMap<String, BugSnapshot>,
+    /// Human governance-attention ledger (CXA-F230): the append-only, bounded
+    /// record of every discrete operator review decision (ready approvals,
+    /// verify verdicts, cost approvals, PR hold resolutions, undo approvals),
+    /// each frozen with its ticket class and action time. serde-defaulted so
+    /// state persisted before this existed loads clean — no migration.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub governance_interventions: Vec<InterventionRecord>,
+    /// Open architecture-drift alerts (CXA-F226): one per standing conformance
+    /// violation, deduped by (area, message), each linking the bug filed for
+    /// it. Deliberately serialized even when empty (like `engine_incidents`)
+    /// — the dashboard's zero indicator must read 0, never absence.
+    #[serde(default)]
+    pub drift_alerts: Vec<DriftAlert>,
+    /// Open loop-liveness stall episode (CXA-F259): `Some` while the hub-side
+    /// watchdog has an unresolved stall alert (dedupe key + the chip's data).
+    /// serde-defaulted so state written before this existed loads untouched.
+    #[serde(default)]
+    pub liveness: Option<StallEpisode>,
 }
+
+/// One day's open/fixed/verified bug counts — the persisted burn-down point
+/// (CXA-F032).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct BugSnapshot {
+    #[serde(default)]
+    pub open: u32,
+    #[serde(default)]
+    pub fixed: u32,
+    #[serde(default)]
+    pub verified: u32,
+}
+
+/// Cap on persisted daily bug snapshots — a full leap year of days; older
+/// entries are dropped as new ones arrive so state cannot grow without bound.
+pub const MAX_BUG_SNAPSHOT_DAYS: usize = 366;
+
+/// Cap on how many incident records are kept (newest first). One per deploy
+/// revision means a storm of failures still stays bounded and readable.
+pub const MAX_INCIDENTS: usize = 12;
+
+/// Cap on the brake-cockpit audit trail (CXA-F238): ~500 entries covers months
+/// of daily flips plus every operator intervention; older entries drop as new
+/// ones arrive so the trail cannot grow without bound.
+pub const MAX_TUNING_HISTORY: usize = 500;
 
 impl Default for ProjectState {
     fn default() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
+            workspace_run: WorkspaceRun::default(),
             queue_recovery: false,
             last_memory_hygiene_day: String::new(),
             jobs: Vec::new(),
@@ -348,29 +615,43 @@ impl Default for ProjectState {
             current_version: SemVer::default(),
             tickets: Vec::new(),
             history: Vec::new(),
+            reverted_work: Vec::new(),
             activity: Vec::new(),
             spend: Spend::default(),
             sprint: None,
             sprints: Vec::new(),
+            sprint_queue: Vec::new(),
+            hold_reasons: std::collections::BTreeMap::new(),
+            role_health: std::collections::BTreeMap::new(),
             deploy: None,
             comments: Vec::new(),
             reviews: Vec::new(),
             open_prs: Vec::new(),
+            human_holds: std::collections::BTreeMap::new(),
+            ticket_attachments: std::collections::BTreeMap::new(),
             chat: Vec::new(),
             channels: Vec::new(),
             design_system: None,
             milestones: Vec::new(),
+            goals: Vec::new(),
+            outcome_ledger: Vec::new(),
             docs: Vec::new(),
             doc_folders: Vec::new(),
             doc_refresh: std::collections::BTreeMap::new(),
             cycle_scores: Vec::new(),
             lessons: Vec::new(),
+            lesson_records: Vec::new(),
+            dismissed_matches: Vec::new(),
+            lesson_sweep_day: String::new(),
             decisions: Vec::new(),
             refactor_mode: false,
             sprint_cycle: 0,
+            cycle: 0,
             sprint_goal: String::new(),
             last_digest_day: String::new(),
             pr_fix_attempts: std::collections::BTreeMap::new(),
+            pr_review_skips: std::collections::BTreeMap::new(),
+            pr_open_holds: std::collections::BTreeMap::new(),
             pr_sessions: std::collections::BTreeMap::new(),
             ticket_sessions: std::collections::BTreeMap::new(),
             cost_holds: std::collections::BTreeMap::new(),
@@ -378,10 +659,16 @@ impl Default for ProjectState {
             debt_signals: Vec::new(),
             sweeps_done: Vec::new(),
             seen_merged_prs: std::collections::BTreeSet::new(),
+            ticket_last_merge: std::collections::BTreeMap::new(),
             seen_closed_prs: std::collections::BTreeSet::new(),
+            swept_tickets: std::collections::BTreeSet::new(),
             cost_approved: std::collections::BTreeSet::new(),
             tuning: Tuning::default(),
+            tuning_overrides: std::collections::BTreeMap::new(),
+            tuning_history: Vec::new(),
             ticket_evidence: std::collections::BTreeMap::new(),
+            ticket_step_provenance: std::collections::BTreeMap::new(),
+            repro_urls: std::collections::BTreeMap::new(),
             drain_notice_sprint: 0,
             ticket_fail_attempts: std::collections::BTreeMap::new(),
             pr_rescue_attempts: std::collections::BTreeMap::new(),
@@ -394,14 +681,22 @@ impl Default for ProjectState {
             engine_incidents: Vec::new(),
             daily_jobs: std::collections::BTreeMap::new(),
             ops_down: false,
+            ops_down_streak: 0,
             spend_today_usd: 0.0,
             spend_day: String::new(),
+            spend_history: Vec::new(),
             budget_warned_lifetime: false,
             budget_warned_daily: false,
             deploy_index: 0,
             in_rollback: false,
             last_good_deploy: None,
             last_rollback: None,
+            incidents: Vec::new(),
+            rolled_back_commits: std::collections::BTreeSet::new(),
+            bug_snapshots: std::collections::BTreeMap::new(),
+            governance_interventions: Vec::new(),
+            drift_alerts: Vec::new(),
+            liveness: None,
         }
     }
 }
@@ -421,14 +716,70 @@ impl ProjectState {
         }
     }
 
+    /// Record one detected revert (CXA-F047), deduped by commit sha — the
+    /// ledger and the human decision surface are both keyed by sha, so one
+    /// git undo is one event no matter how attribution drifts between scans.
+    /// A re-scan must never re-flag (or double-count) a commit this ledger
+    /// already holds, whatever its decision. Returns whether the event is
+    /// NEW; callers announce it only then.
+    pub fn record_revert(&mut self, ev: RevertEvent) -> bool {
+        if self.reverted_work.iter().any(|e| e.sha == ev.sha) {
+            return false;
+        }
+        self.reverted_work.push(ev);
+        let overflow = self.reverted_work.len().saturating_sub(MAX_REVERT_EVENTS);
+        if overflow > 0 {
+            self.reverted_work.drain(0..overflow);
+        }
+        true
+    }
+
+    /// Apply a human's approve/dismiss verdict to the revert commit `sha`
+    /// (CXA-F047). Returns whether a PENDING event was found and decided —
+    /// an already-decided event is never re-decided.
+    pub fn decide_revert(&mut self, sha: &str, decision: RevertDecision, by: &str) -> bool {
+        let Some(ev) = self
+            .reverted_work
+            .iter_mut()
+            .find(|e| e.sha == sha && e.decision == RevertDecision::Pending)
+        else {
+            return false;
+        };
+        ev.decision = decision;
+        ev.decided_at = Some(now_rfc3339());
+        ev.decided_by = Some(by.to_owned());
+        true
+    }
+
     /// Attach a piece of DoD evidence to a ticket (bounded: 6 per ticket,
     /// detail capped) — dashboards render these; TEST requires them.
     pub fn add_evidence(&mut self, ticket: &str, kind: &str, label: &str, detail: &str) {
+        self.add_evidence_for(ticket, kind, label, detail, &[], "");
+    }
+
+    /// Attach DoD evidence WITH its provenance (CXA-F241): which gate
+    /// decision(s) the item supports and who attached it. Every new capture
+    /// goes through here so the forensics view can attribute proof to the
+    /// exact gate transition it supported; [`Self::add_evidence`] callers
+    /// that cannot attribute (legacy/agent-internal ledgers) keep empty
+    /// provenance, which the view renders as provenance unknown — never a
+    /// guessed link.
+    pub fn add_evidence_for(
+        &mut self,
+        ticket: &str,
+        kind: &str,
+        label: &str,
+        detail: &str,
+        source_gates: &[&str],
+        actor: &str,
+    ) {
         let ev = Evidence {
             kind: kind.to_owned(),
             label: label.chars().take(120).collect(),
             detail: detail.chars().take(1200).collect(),
             at: now_rfc3339(),
+            source_gates: source_gates.iter().map(|g| (*g).to_owned()).collect(),
+            actor: actor.to_owned(),
         };
         let list = self.ticket_evidence.entry(ticket.to_owned()).or_default();
         list.push(ev);
@@ -453,6 +804,17 @@ impl ProjectState {
         let overflow = log.len().saturating_sub(6);
         if overflow > 0 {
             log.drain(0..overflow);
+        }
+    }
+
+    /// Append one brake-cockpit audit entry (CXA-F238), pruning the oldest
+    /// past [`MAX_TUNING_HISTORY`]. Never fails: a full trail drops history,
+    /// it does not block the tuning write it is recording.
+    pub fn record_tuning_change(&mut self, entry: TuningAuditEntry) {
+        self.tuning_history.push(entry);
+        let overflow = self.tuning_history.len().saturating_sub(MAX_TUNING_HISTORY);
+        if overflow > 0 {
+            self.tuning_history.drain(0..overflow);
         }
     }
 
@@ -516,6 +878,7 @@ impl ProjectState {
             answered_at: String::new(),
             forwarded: false,
             escalated: false,
+            deferred: false,
         });
         // Keep the log bounded; answered questions age out before open ones.
         while self.questions.len() > 40 {
@@ -600,6 +963,19 @@ impl ProjectState {
     pub fn add_daily_spend(&mut self, usd: f64) -> f64 {
         let today = now_rfc3339().get(..10).unwrap_or_default().to_owned();
         if self.spend_day != today {
+            // Close out the day that just ended before the counter resets, so
+            // the Cost view can chart a per-day trend. Zero-spend days are
+            // kept too: a gap and a quiet day look different on purpose.
+            if !self.spend_day.is_empty() {
+                self.spend_history.push(SpendDay {
+                    day: std::mem::take(&mut self.spend_day),
+                    usd: self.spend_today_usd,
+                });
+                if self.spend_history.len() > MAX_SPEND_HISTORY {
+                    let excess = self.spend_history.len() - MAX_SPEND_HISTORY;
+                    self.spend_history.drain(..excess);
+                }
+            }
             self.spend_day = today;
             self.spend_today_usd = 0.0;
             // A new day resets the cap itself, so a stale "already warned"
@@ -660,15 +1036,37 @@ impl ProjectState {
 
     /// Record (or replace) the SA agent's latest review verdict for a PR.
     pub fn upsert_review(&mut self, number: u64, decision: &str, summary: &str, head_sha: &str) {
+        // PR-open → verdict latency, from the mirrored open-PR record: the
+        // dispatch model's headline health metric. First verdict wins — a
+        // re-review of a moved head measures the fix loop, not dispatch.
+        let latency_secs = self
+            .open_prs
+            .iter()
+            .find(|p| p.number == number)
+            .and_then(|p| {
+                let fmt = &time::format_description::well_known::Rfc3339;
+                let created = time::OffsetDateTime::parse(&p.created, fmt).ok()?;
+                let secs = (time::OffsetDateTime::now_utc() - created).whole_seconds();
+                u64::try_from(secs).ok()
+            })
+            .or_else(|| {
+                self.reviews
+                    .iter()
+                    .find(|r| r.number == number)
+                    .and_then(|r| r.latency_secs)
+            });
         let review = PrReview {
             number,
             decision: decision.to_owned(),
             summary: summary.to_owned(),
             at: now_rfc3339(),
             head_sha: head_sha.to_owned(),
+            latency_secs,
         };
         if let Some(r) = self.reviews.iter_mut().find(|r| r.number == number) {
+            let first_latency = r.latency_secs.or(review.latency_secs);
             *r = review;
+            r.latency_secs = first_latency;
         } else {
             self.reviews.push(review);
         }
@@ -697,6 +1095,10 @@ impl ProjectState {
         let mut v = prs;
         v.truncate(50);
         self.open_prs = v;
+        // A hold on a PR that is no longer open is stale — merged or closed
+        // elsewhere; prune so the Inbox never asks about a decided PR.
+        self.human_holds
+            .retain(|n, _| self.open_prs.iter().any(|p| p.number == *n));
     }
 
     /// Toggle `user`'s `emoji` reaction on comment `id`; returns the updated
@@ -820,20 +1222,7 @@ impl ProjectState {
             .count()
     }
 
-    /// Record a retro lesson (deduped, newest last, capped at 12).
-    pub fn add_lesson(&mut self, lesson: &str) {
-        let lesson = lesson.trim();
-        if lesson.is_empty() || self.lessons.iter().any(|l| l == lesson) {
-            return;
-        }
-        self.lessons.push(lesson.to_owned());
-        let overflow = self.lessons.len().saturating_sub(12);
-        if overflow > 0 {
-            self.lessons.drain(0..overflow);
-        }
-    }
-
-    /// Record a durable team decision / convention (deduped, newest last, capped
+    /// Record a team decision / convention (deduped, newest last, capped
     /// at 20). Trimmed to one line so it reads as an ADR entry.
     pub fn add_decision(&mut self, decision: &str) {
         let d = decision.trim().replace('\n', " ");
@@ -1230,19 +1619,13 @@ pub fn now_rfc3339() -> String {
         .unwrap_or_default()
 }
 
-/// Derive a short uppercase alias from a project name: its capital letters
-/// (`CoXChat` -> `CXC`), else the first three alphanumerics uppercased.
+/// Unix seconds now — the clock the outbox's retry deadlines and leases use.
 #[must_use]
-pub fn derive_alias(name: &str) -> String {
-    let caps: String = name.chars().filter(char::is_ascii_uppercase).collect();
-    if caps.len() >= 2 {
-        return caps.chars().take(4).collect();
-    }
-    name.chars()
-        .filter(char::is_ascii_alphanumeric)
-        .take(3)
-        .collect::<String>()
-        .to_uppercase()
+#[allow(clippy::cast_possible_wrap)] // seconds since UNIX_EPOCH fits i64 for a very long time
+pub fn unix_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 impl ProjectState {
@@ -1407,21 +1790,7 @@ mod dependency_tests {
 }
 
 #[cfg(test)]
-mod alias_tests {
-    use super::derive_alias;
-
-    #[test]
-    fn derives_from_capitals() {
-        assert_eq!(derive_alias("CoXChat"), "CXC");
-        assert_eq!(derive_alias("CoXAgent"), "CXA");
-    }
-
-    #[test]
-    fn falls_back_to_first_letters() {
-        assert_eq!(derive_alias("quotes"), "QUO");
-        assert_eq!(derive_alias("my app"), "MYA");
-    }
-
+mod state_bound_tests {
     #[test]
     fn journal_note_bounded_and_capped() {
         let mut st = super::ProjectState::default();
@@ -1460,5 +1829,51 @@ mod alias_tests {
         assert_eq!(ev.len(), 6, "keeps last 6");
         assert!(ev[0].label.contains("proof 2"), "oldest dropped");
         assert!(ev.iter().all(|e| e.detail.chars().count() <= 1200));
+    }
+
+    #[test]
+    fn linked_evidence_carries_its_gate_and_actor() {
+        // CXA-F241: the attributed capture path records WHICH gate decision
+        // the item supports and WHO attached it — and the plain path keeps
+        // recording unattributed (empty) provenance, which the forensics view
+        // renders as provenance unknown, never a guessed link.
+        let mut st = super::ProjectState::default();
+        st.add_evidence_for("T-1", "test", "REGRESSION TEST", "pass", &["verify"], "rev");
+        st.add_evidence("T-1", "api", "live request/response", "HTTP 200");
+        let ev = &st.ticket_evidence["T-1"];
+        assert_eq!(ev[0].source_gates, vec!["verify".to_owned()]);
+        assert_eq!(ev[0].actor, "rev");
+        assert!(ev[1].source_gates.is_empty() && ev[1].actor.is_empty());
+        // The bound is shared by both paths: one ticket never outgrows 6.
+        for i in 0..8 {
+            st.add_evidence_for("T-1", "test", &format!("r{i}"), "d", &["verify"], "rev");
+        }
+        assert_eq!(st.ticket_evidence["T-1"].len(), 6);
+    }
+
+    #[test]
+    fn day_rollover_closes_the_previous_day_into_spend_history() {
+        // First-ever spend: no previous day exists, so nothing is closed out.
+        let mut st = super::ProjectState {
+            spend_day: String::new(),
+            ..Default::default()
+        };
+        st.add_daily_spend(1.5);
+        assert!(st.spend_history.is_empty());
+        // Force a rollover: the finished day lands in history with its total,
+        // and the counter restarts for the new day.
+        st.spend_day = "2000-01-01".to_owned();
+        st.spend_today_usd = 3.25;
+        let today_total = st.add_daily_spend(0.75);
+        assert!((today_total - 0.75).abs() < f64::EPSILON);
+        assert_eq!(st.spend_history.len(), 1);
+        assert_eq!(st.spend_history[0].day, "2000-01-01");
+        assert!((st.spend_history[0].usd - 3.25).abs() < f64::EPSILON);
+        // The history is bounded: only the newest MAX_SPEND_HISTORY days stay.
+        for i in 0..super::MAX_SPEND_HISTORY + 5 {
+            st.spend_day = format!("1999-{:02}-{:02}", i / 28 + 1, i % 28 + 1);
+            st.add_daily_spend(0.0);
+        }
+        assert_eq!(st.spend_history.len(), super::MAX_SPEND_HISTORY);
     }
 }

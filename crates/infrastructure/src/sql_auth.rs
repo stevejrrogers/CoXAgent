@@ -12,11 +12,10 @@ use async_trait::async_trait;
 use coxagent_application::auth::{
     AuthPort, AuthRole, AuthUser, LoginResult, SessionInfo, TokenInfo,
 };
-use deadpool_postgres::{Config, Pool, Runtime};
+use deadpool_postgres::Pool;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tokio_postgres::NoTls;
 
 use crate::auth::{hash_password, mint_token, now_rfc3339, sha256_hex, unix_now};
 
@@ -42,6 +41,7 @@ CREATE TABLE IF NOT EXISTS auth_tokens (
     hash    TEXT NOT NULL,
     created TEXT NOT NULL
 );
+ALTER TABLE auth_tokens ADD COLUMN IF NOT EXISTS owner TEXT NOT NULL DEFAULT '';
 CREATE TABLE IF NOT EXISTS auth_sessions (
     token    TEXT PRIMARY KEY,
     username TEXT NOT NULL,
@@ -110,11 +110,7 @@ impl SqlAuthService {
     /// # Errors
     /// Returns a message if the pool cannot be built or migration fails.
     pub async fn connect(dsn: &str) -> Result<Self, String> {
-        let mut cfg = Config::new();
-        cfg.url = Some(dsn.to_owned());
-        let pool = cfg
-            .create_pool(Some(Runtime::Tokio1), NoTls)
-            .map_err(|e| format!("auth pool: {e}"))?;
+        let pool = crate::pg::pool(dsn, "auth").await?;
         let svc = Self {
             pool,
             sessions: Mutex::new(HashMap::new()),
@@ -472,6 +468,38 @@ impl SqlAuthService {
         }
     }
 
+    /// Mint an API token under `label` with `role`, recording `owner` (empty
+    /// for a service token). Returns the plaintext secret exactly once, or
+    /// `None` when the label is taken or the write fails.
+    async fn mint_token_row(&self, label: &str, role: AuthRole, owner: &str) -> Option<String> {
+        let client = self.client().await.ok()?;
+        if client
+            .query_opt("SELECT 1 FROM auth_tokens WHERE label = $1", &[&label])
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return None; // label taken
+        }
+        let secret = mint_token();
+        client
+            .execute(
+                "INSERT INTO auth_tokens (label, role, hash, created, owner)
+                 VALUES ($1, $2, $3, $4, $5)",
+                &[
+                    &label,
+                    &role_str(role),
+                    &sha256_hex(&secret),
+                    &now_rfc3339(),
+                    &owner,
+                ],
+            )
+            .await
+            .ok()?;
+        Some(secret)
+    }
+
     fn is_locked(&self, username: &str) -> bool {
         self.attempts.lock().is_ok_and(|a| {
             a.get(username)
@@ -673,46 +701,44 @@ impl AuthPort for SqlAuthService {
         let client = self.client().await.ok()?;
         let row = client
             .query_opt(
-                "SELECT label, role FROM auth_tokens WHERE hash = $1",
+                "SELECT label, role, owner FROM auth_tokens WHERE hash = $1",
                 &[&hash],
             )
             .await
             .ok()
             .flatten()?;
+        let owner: String = row.get(2);
+        // A personal token resolves its owner's project memberships LIVE —
+        // never a mint-time snapshot — so unassigning a project (or deleting
+        // the owner's account) revokes the token's project reach on the very
+        // next call, with no re-mint. A missing owner fails closed to no
+        // projects. Service tokens (owner '') stay hub-wide for their role.
+        let projects = if owner.is_empty() {
+            Vec::new()
+        } else {
+            self.load_user_projects(&owner).await
+        };
         Some(AuthUser {
             username: format!("svc:{}", row.get::<_, String>(0)),
             name: String::new(),
             email: String::new(),
             role: role_from(&row.get::<_, String>(1)),
-            projects: Vec::new(),
+            projects,
         })
     }
 
     async fn create_token(&self, label: &str, role: AuthRole) -> Option<String> {
-        let client = self.client().await.ok()?;
-        if client
-            .query_opt("SELECT 1 FROM auth_tokens WHERE label = $1", &[&label])
+        self.mint_token_row(label, role, "").await
+    }
+
+    async fn create_token_for(
+        &self,
+        label: &str,
+        role: AuthRole,
+        owner: Option<&str>,
+    ) -> Option<String> {
+        self.mint_token_row(label, role, owner.unwrap_or_default())
             .await
-            .ok()
-            .flatten()
-            .is_some()
-        {
-            return None; // label taken
-        }
-        let secret = mint_token();
-        client
-            .execute(
-                "INSERT INTO auth_tokens (label, role, hash, created) VALUES ($1, $2, $3, $4)",
-                &[
-                    &label,
-                    &role_str(role),
-                    &sha256_hex(&secret),
-                    &now_rfc3339(),
-                ],
-            )
-            .await
-            .ok()?;
-        Some(secret)
     }
 
     /// Harvest a personal bearer token at login time on the same self-service
@@ -724,17 +750,34 @@ impl AuthPort for SqlAuthService {
     async fn auto_issue_personal_token(&self, username: &str) -> Option<String> {
         let prefix = format!("user:{}:", username.to_ascii_lowercase());
         let client = self.client().await.ok()?;
-        // Idempotent: an existing personal token for this user wins; do not mint a duplicate.
+        // Match on exact prefix equality, never LIKE: `create_user` only
+        // rejects empty names, so a username may itself contain `_` or `%`,
+        // and a LIKE pattern built from it would match other users' tokens —
+        // fatal for the backfill below, which WRITES an owner onto what it
+        // matches. `left(label, char_length(prefix)) = prefix` is the same
+        // intent with no wildcard semantics.
         if client
             .query_opt(
-                "SELECT 1 FROM auth_tokens WHERE label LIKE $1",
-                &[&format!("{prefix}%")],
+                "SELECT 1 FROM auth_tokens
+                 WHERE left(label, char_length($1::text)) = $1::text",
+                &[&prefix],
             )
             .await
             .ok()
             .flatten()
             .is_some()
         {
+            // Self-heal (CXA-F350): tokens minted before the owner column
+            // existed carry owner '' — backfill it from the label's namespace
+            // so their bearer inherits the member's project reach too. Still
+            // no re-mint, no secret re-issue.
+            let _ = client
+                .execute(
+                    "UPDATE auth_tokens SET owner = $2
+                     WHERE owner = '' AND left(label, char_length($1::text)) = $1::text",
+                    &[&prefix, &username],
+                )
+                .await;
             return None;
         }
         // Bind to the caller's own stored role — never an elevation.
@@ -747,10 +790,16 @@ impl AuthPort for SqlAuthService {
             .ok()
             .flatten()?
             .get::<_, Option<String>>(0)?;
-        // Same path as create_my_token_ep(): mint via create_token under the
-        // user-prefixed label; a deterministic label keeps re-login idempotent.
-        self.create_token(&format!("{prefix}remote-store"), role_from(&role_str))
-            .await
+        // Same path as create_my_token_ep(): mint via create_token_for under
+        // the user-prefixed label with the caller as owner — a deterministic
+        // label keeps re-login idempotent, and the owner column is what binds
+        // the bearer to the member's project memberships.
+        self.create_token_for(
+            &format!("{prefix}remote-store"),
+            role_from(&role_str),
+            Some(username),
+        )
+        .await
     }
 
     async fn list_tokens(&self) -> Vec<TokenInfo> {

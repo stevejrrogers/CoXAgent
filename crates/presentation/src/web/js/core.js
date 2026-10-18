@@ -7,14 +7,14 @@ const FCOLS=[["pending","Pending","--muted"],["ready","Ready","--blue"],["in_pro
 const BCOLS=[["open","Open","--red"],["fixed","Fixed","--amber"],["verified","Verified","--green"]];
 // Unified board: one lifecycle for features + bugs, each column collecting both.
 const UCOLS=[
-  ["backlog","Backlog","--muted",["pending","open"]],
+  ["backlog","Backlog","--muted",["pending","open","on_hold"]],
   ["ready","Ready","--accent2",["ready"]],
   ["in_progress","In Progress","--amber",["in_progress"]],
   ["done","Done","--green",["done","fixed"]],
   ["shipped","Shipped","--teal",["documented","verified"]],
 ];
 const ROLES=["ba","po","sm","sa","pd","dev_bug","dev_feature","test","docs"];
-const MODELS={claude:["sonnet","opus","haiku"],copilot:["auto","claude-sonnet-4.6","claude-sonnet-4.5","claude-haiku-4.5","gpt-5.4","gpt-5.4-mini","gpt-5.3-codex","gemini-3.1-pro-preview","grok-4.5"],scripted:["n/a"],mock:["n/a"],opencode:null,hermes:["hermes-3-llama-3.1-70b","hermes-2-pro-mistral-7b"],gemini:["gemini-2.5-pro","gemini-2.5-flash","gemini-2.0-flash"],codex:["gpt-4o","gpt-5","gpt-4"]};
+const MODELS={claude:["sonnet","opus","haiku"],copilot:["auto","claude-sonnet-4.6","claude-sonnet-4.5","claude-haiku-4.5","gpt-5.4","gpt-5.4-mini","gpt-5.3-codex","gemini-3.1-pro-preview","grok-4.5"],scripted:["n/a"],mock:["n/a"],opencode:null,harxes:null,hermes:["hermes-3-llama-3.1-70b","hermes-2-pro-mistral-7b"],gemini:["gemini-2.5-pro","gemini-2.5-flash","gemini-2.0-flash"],codex:["gpt-4o","gpt-5","gpt-4"]};
 // Common opencode provider/model choices (it accepts any, incl. local ollama).
 const OPENCODE_PROVIDERS=[{id:"anthropic",label:"Anthropic"},{id:"openai",label:"OpenAI"},{id:"google",label:"Google"},{id:"openrouter",label:"OpenRouter"},{id:"groq",label:"Groq"},{id:"deepseek",label:"DeepSeek"},{id:"ollama",label:"Ollama (local)"},{id:"mistral",label:"Mistral"}];
 let OC_MODELS=["claude-sonnet-4-5","claude-opus-4-1","gpt-5","gpt-4o","gemini-2.5-pro","gemini-2.5-flash","llama3.1","qwen2.5-coder","mixtral-8x7b","deepseek-v3","deepseek-r1"];
@@ -41,6 +41,19 @@ setTimeout(()=>{if(ME?.auth)loadOpencodeModels();},2000);
 function modelControl(eng,cur,sid){
   if(!eng)return `<input id="mdl-${sid}" value="" placeholder="uses default model" disabled style="flex:1;opacity:.45"/>`;
   const list=MODELS[eng];
+  if(eng==="harxes"){
+    // Harxes routes by model prefix: anthropic/<m> and copilot/<m> hit those
+    // native APIs; anything WITHOUT a prefix goes to the LiteLLM endpoint
+    // (which 403s on '/' in the model name — so litellm composes NO prefix).
+    const HX=[{id:"",label:"litellm"},{id:"anthropic",label:"anthropic"},{id:"copilot",label:"copilot"}];
+    const [curProv,curModel]=(cur||"").includes("/")?cur.split("/",2):["",(cur||"GLM-5.3")];
+    const effective=curProv?`${curProv}/${curModel}`:curModel;
+    return `<select id="mdl-prov-${sid}" onchange="harxesModelChange('${sid}')" style="width:140px;flex:none">`+
+      HX.map(p=>`<option value="${p.id}" ${p.id===curProv?'selected':''}>${p.label}</option>`).join("")+
+      `</select>
+      <input id="mdl-${sid}" value="${esc(curModel)}" oninput="harxesModelChange('${sid}')" placeholder="model id" style="flex:1;min-width:140px"/>
+      <span id="mdl-hint-${sid}" style="font-size:10px;color:var(--dim);padding:0 4px;white-space:nowrap">= ${esc(effective)}</span>`;
+  }
   if(!list){ // opencode: provider picker + model with datalist
     const providers=OC_PROVIDERS.length?OC_PROVIDERS:OPENCODE_PROVIDERS;
     const models=OC_MODELS.length?OC_MODELS:["sonnet","opus","gpt-4o"];
@@ -55,6 +68,12 @@ function modelControl(eng,cur,sid){
   const opts=[...list]; if(cur&&!opts.includes(cur))opts.unshift(cur);
   return `<select id="mdl-${sid}" style="flex:1">${opts.map(m=>`<option ${m===cur?'selected':''}>${esc(m)}</option>`).join("")}</select>`;
 }
+function harxesModelChange(sid){
+  const prov=document.getElementById("mdl-prov-"+sid)?.value||"";
+  const model=document.getElementById("mdl-"+sid)?.value||"";
+  const hint=document.getElementById("mdl-hint-"+sid);
+  if(hint)hint.textContent="= "+(prov?prov+"/"+model:model);
+}
 function opencodeModelChange(sid){
   const prov=document.getElementById("mdl-prov-"+sid)?.value;
   const model=document.getElementById("mdl-"+sid)?.value||"";
@@ -64,16 +83,25 @@ function opencodeModelChange(sid){
 function onEngine(sid){const eng=document.getElementById("eng-"+sid).value;
   const list=MODELS[eng];const def=(list&&list.length)?list[0]:(OC_PROVIDERS[0]?.id||"anthropic")+"/"+(OC_MODELS[0]||"sonnet");
   document.getElementById("mc-"+sid).innerHTML=modelControl(eng,def,sid);}
-const KPI_IC={Shipped:"ti-rocket","In flight":"ti-plane-tilt","Open bugs":"ti-bug",Documented:"ti-book",Releases:"ti-versions",Cost:"ti-coin","Total spend":"ti-coin",Tokens:"ti-cpu",Runs:"ti-repeat","Agent actions":"ti-bolt","Tickets shipped":"ti-rocket","Bugs open":"ti-bug","Team cost":"ti-coin"};
 const money=n=>"$"+(Number(n)||0).toFixed(2);
 const fmtK=n=>{n=Number(n)||0;return n>=1e9?(n/1e9).toFixed(1)+"B":n>=1e6?(n/1e6).toFixed(1)+"M":n>=1000?(n/1000).toFixed(1)+"k":String(n);};
 const AC={BA:"--blue","DEV-FEATURE":"--green","DEV-BUG":"--red",SA:"--purple",TEST:"--teal",DOCS:"--blue",PO:"--amber",SM:"--teal",PD:"--purple",USER:"--accent"};
 // Stable nicknames so each role reads as one consistent person, not a label.
 const AGENT_NICK={BA:"Bella",PO:"Pola",SM:"Sam",SA:"Aria","DEV-FEATURE":"Finn","DEV-BUG":"Bex",TEST:"Quinn",DOCS:"Dana",PD:"Piper"};
-const TITLES={"mg-spaces":["Spaces","every team space in the hub"],"mg-space":["Space","deep dive"],"mg-users":["Users","everyone across the hub"],"mg-usage":["Usage","who burns what"],"mg-audit":["Audit","every action across the hub"],home:["Home","your company · projects · your agents"],overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],inbox:["Inbox","everything waiting on YOU — approve · verify · answer"],activity:["Activity","what the agents are doing"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Scrum","standups, sprint events & team threads"],docs:["Wiki","product & technical knowledge base"],codemap:["Code map","files · symbols · dependencies the agents navigate"],calendar:["Calendar","meetings · schedule"],terminal:["Terminal","real shell in the project codebase — admin only"],chat:["Chat","talk with your teammates"],review:["Review","open pull requests — approve & merge"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
+const TITLES={"mg-spaces":["Spaces","every team space in the hub"],"mg-space":["Space","deep dive"],"mg-users":["Users","everyone across the hub"],"mg-usage":["Usage","who burns what"],"mg-fleet":["Fleet spend","every project's burn · hub ceiling"],"mg-audit":["Audit","every action across the hub"],home:["Home","your company · projects · your agents"],river:["Fleet river","every agent, every project — one live stream"],dupes:["Dupes radar","cross-project duplicate tickets — redirect · reject · allow"],overview:["Overview","project health at a glance"],team:["Agents","your autonomous workers"],board:["Work","board · sprint · backlog"],inbox:["Inbox","everything waiting on YOU — approve · verify · answer"],activity:["Transcripts & alerts","per-run transcripts · outbound alerts · audit export — this project"],roadmap:["Roadmap","now · next · later, auto-generated"],discuss:["Scrum","standups, sprint events & team threads"],docs:["Wiki","product & technical knowledge base"],codemap:["Code map","files · symbols · dependencies the agents navigate"],calendar:["Calendar","meetings · schedule"],terminal:["Terminal","real shell in the project codebase — admin only"],chat:["Chat","talk with your teammates"],review:["Review","open pull requests — approve & merge"],people:["People","per-user activity & productivity"],audit:["Audit","who did what, when"],access:["Users","accounts, project access & tokens"],insights:["Cost","token spend across the team"],settings:["Settings","engines, models, workflow"]};
 const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+// Engine/model provenance (CXA-F257): one attempt as the verify surfaces
+// render it — JS mirror of application::engine_provenance::attempt_label, so
+// an engine that cannot report a model id shows the explicit "model unknown"
+// marker instead of a blank field, identically on card and detail.
+const provLabel=a=>`${a.engine} · ${a.model&&a.model.trim()?a.model:"model unknown"}`;
+const provChip=p=>`<span style="font-family:ui-monospace,Menlo,monospace;font-size:11.5px;font-weight:600;background:var(--card);border:1px solid var(--border2);border-radius:20px;padding:2px 8px;color:${p.model&&p.model.trim()?"var(--muted)":"var(--amber)"};white-space:nowrap">${esc(provLabel(p))}</span>`;
 const cvar=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim()||"#888";
-let STATE={}, CUR="overview", BF="all", INIT_ACT=false, WORKTAB="board";
+let STATE={}, CUR="overview", BF="all", SF="all", INIT_ACT=false, WORKTAB="board";
+// The roadmap's milestone drill-in (CXA-F361): the strip row's committed-scope
+// filter. "" shows every ticket; a milestone name narrows the buckets to that
+// milestone's attributed tickets; clicking the same row again clears it.
+let MSFILTER="";
 function setWorkTab(w){WORKTAB=w;
   document.querySelectorAll("#work-seg button").forEach(b=>b.classList.toggle("on",b.dataset.w===w));
   document.getElementById("work-board").style.display=w==="board"?"":"none";
@@ -82,6 +110,10 @@ function setWorkTab(w){WORKTAB=w;
   renderActive();}
 
 function nav(v){
+  // An unknown view (stale hash, typo, removed screen) used to blank the
+  // whole pane: every view lost `on` and THEN getElementById(null) threw.
+  // Fall back to overview instead of dying mid-switch.
+  if(!document.getElementById("view-"+v))v="overview";
   // Manage views live in manage mode; everything else in workspace mode.
   if(String(v).startsWith("mg-")&&MODE!=="manage"){MODE="manage";localStorage.setItem("cox_mode",MODE);document.body.classList.add("mode-manage");document.body.classList.remove("mode-chat");}
   if(!String(v).startsWith("mg-")&&MODE==="manage"){MODE="workspace";localStorage.setItem("cox_mode",MODE);document.body.classList.remove("mode-manage");}
@@ -90,13 +122,15 @@ function nav(v){
   // Settings is open to everyone (members see the self-service MCP tab).
   if(v==="access"&&!canManage())v="overview";
   CUR=v;location.hash=v;
+  // The fleet river owns an SSE stream only while it is on screen.
+  if(v!=="river"&&typeof closeFleetRiver==="function")closeFleetRiver();
   document.querySelectorAll(".view").forEach(x=>x.classList.remove("on"));
   document.getElementById("view-"+v).classList.add("on");
   document.querySelectorAll(".nav a").forEach(a=>a.classList.toggle("on",a.dataset.v===v));
   document.getElementById("pg-title").textContent=TITLES[v][0];
   document.getElementById("pg-sub").textContent=TITLES[v][1];
   try{updateSegments();}catch(e){}
-   if(v==="settings")loadSettings(); else if(v==="calendar"){if(!Array.isArray(MEETINGS))MEETINGS=[];loadMeetings().then(renderCalendar).catch(()=>{MEETINGS=[];renderCalendar();});} else if(v==="discuss"){loadComments();} else if(v==="docs"){loadDocs();} else if(v==="people"){renderPeople();} else if(v==="audit"){renderAudit();} else if(v==="access"){renderAccess();} else if(v==="roadmap"){renderRoadmap();} else if(v==="review"){renderReview();} else if(v==="inbox"){renderInbox();} else if(v==="codemap"){renderCodeMap();} else if(v==="team"){loadAgentEvals();renderActive();} else if(v==="terminal"){openTerminal();} else renderActive();
+   if(v==="settings")loadSettings(); else if(v==="calendar"){if(!Array.isArray(MEETINGS))MEETINGS=[];loadMeetings().then(renderCalendar).catch(()=>{MEETINGS=[];renderCalendar();});} else if(v==="discuss"){loadComments();} else if(v==="docs"){loadDocs();} else if(v==="people"){renderPeople();} else if(v==="audit"){renderAudit();} else if(v==="access"){renderAccess();} else if(v==="roadmap"){renderRoadmap();} else if(v==="review"){renderReview();} else if(v==="inbox"){renderInbox();} else if(v==="codemap"){renderCodeMap();} else if(v==="team"){loadAgentEvals();renderActive();renderEngineHealth();} else if(v==="river"){openFleetRiver();} else if(v==="dupes"){renderDupes();} else if(v==="terminal"){openTerminal();} else renderActive();
    setTimeout(centerContent,50);}
 function initials(r){return r.replace("DEV-","").slice(0,2);}
 // A hostname as a person would say it: "Lutons-MacBook-Pro.local" -> "MacBook
@@ -129,7 +163,6 @@ function metricsFrom(s){const t=s.tickets||[],h=s.history||[],isF=x=>x.type!=="b
 // repaints every few seconds, and identical rewrites restart CSS animations
 // (bars, pulses) making the whole page judder.
 function setHTML(el,html){if(!el)return;if(el.__h!==html){el.__h=html;el.innerHTML=html;}}
-function kpi(k,v,sub){return `<div class="kpi"><div class="ic"><i class="ti ${KPI_IC[k]||'ti-point'}"></i></div><div class="v">${v}</div><div class="k">${k}${sub?` <span style="color:var(--green);font-weight:600">· ${sub}</span>`:""}</div></div>`;}
 function alertsHtml(s,m,spend){
   const al=[];
   if(s.deploy&&!s.deploy.ok)al.push(["red","cloud-x","Last deployment failed",esc(s.deploy.summary)]);
@@ -137,6 +170,15 @@ function alertsHtml(s,m,spend){
   if(bud&&spend.total_cost_usd>=bud)al.push(["red","alert-triangle","Budget cap reached",money(spend.total_cost_usd)+" of "+money(bud)+" — loop paused"]);
   else if(bud&&spend.total_cost_usd>=bud*0.8)al.push(["amber","alert-triangle","Budget nearly reached",Math.round(spend.total_cost_usd/bud*100)+"% of "+money(bud)]);
   if(m.openBugs>=5)al.push(["amber","bug",m.openBugs+" open bugs","DEV-BUG is prioritising fixes over features"]);
+  // Merged-then-reverted work (CXA-F047): shipped value that did not stick.
+  // Amber while detections wait on a human; red once confirmed — a fact, not
+  // a suspicion, and planning discounts it next cycle.
+  const rv=s.reverted_work||[];
+  if(rv.length){
+    const pend=rv.filter(e=>e.decision==="pending").length,okd=rv.length-pend;
+    if(pend)al.push(["amber","arrow-back-up","Reverted work",pend+" detected revert"+(pend===1?" needs":"s need")+" your review — decide in the Inbox"]);
+    else if(okd)al.push(["red","arrow-back-up","Reverted work",okd+" confirmed revert"+(okd===1?"":"s")+" — planning weights them down next cycle"]);
+  }
   if(!al.length)return "";
   return al.map(([c,ic,t,d])=>`<div class="panel" style="margin-bottom:12px;display:flex;align-items:center;gap:12px;border-color:var(--${c})">
     <i class="ti ti-${ic}" style="font-size:20px;color:var(--${c})"></i>
@@ -153,6 +195,50 @@ function velocityHtml(sprints){
       <div style="font-size:10px;color:var(--dim)">#${s.number}</div></div>`;}).join("");
   return `<div class="sec">Velocity</div><div class="panel"><div style="display:flex;gap:10px;align-items:flex-end">${bars}</div>
     <div style="color:var(--dim);font-size:11px;margin-top:10px">shipped (cyan) vs committed (grey) per closed sprint</div></div>`;
+}
+// Human governance-attention ledger (CXA-F230): where the operator's own
+// review effort goes, per ticket class and gate kind. Reads the analytics
+// response the backend already computes (60s cache, keyed by project — the
+// same pattern the token-saver panel uses), because the raw ledger never
+// rides the 1 Hz state snapshot. Zero gates render NOTHING: until a first
+// decision lands, the overview reads exactly as before.
+function loadGovernanceAttention(){
+  // The cache is keyed by project: switching projects must never show the
+  // previous project's attention data for the rest of the cache window.
+  if(window._govPid!==PID){window._gov=null;window._govAt=0;}
+  if(window._govAt&&Date.now()-window._govAt<60000){renderGovernanceAttention();return;}
+  window._govPid=PID;window._govAt=Date.now();
+  fetch(api("/metrics/summary")).then(r=>r.json()).then(d=>{
+    window._gov=(d&&d.attention)?d.attention:null;
+    if(CUR==="overview")renderGovernanceAttention();
+  }).catch(()=>{window._gov=null;});
+}
+function renderGovernanceAttention(){
+  const el=document.getElementById("ov-attention");if(!el)return;
+  const a=window._gov;
+  if(!a||!a.interventions_total){setHTML(el,"");return;}
+  const kinds={ready_approve:"ready",verify_pass:"verify ✓",verify_send_back:"verify ↩",cost_approve:"cost",human_pr_reviewed:"PR landed",human_pr_dismissed:"PR dismissed",undo_auto_approve:"undo approval"};
+  const rows=Object.entries(a.attention_by_area||{}).map(([area,counts])=>({
+    area,total:Object.values(counts||{}).reduce((x,y)=>x+(y||0),0),counts:counts||{}
+  })).sort((x,y)=>y.total-x.total);
+  const max=Math.max(1,...rows.map(r=>r.total));
+  const bar=r=>{
+    const w=Math.max(3,Math.round(r.total/max*100));
+    const tip=Object.entries(r.counts).filter(([,v])=>v).map(([k,v])=>(kinds[k]||k)+": "+v).join(" · ")||"no attributed decisions";
+    return `<div style="display:flex;align-items:center;gap:12px;padding:8px 0">
+      <span style="min-width:70px;font-size:12px;text-transform:capitalize">${esc(r.area)}</span>
+      <div style="flex:1;background:var(--card2);border-radius:6px;height:8px;overflow:hidden" title="${esc(tip)}"><div style="width:${w}%;height:100%;background:var(--accent)"></div></div>
+      <span style="font-size:12px;font-family:ui-monospace,monospace;min-width:30px;text-align:right">${r.total}</span></div>`;
+  };
+  const anomaly=a.anomaly?`<div style="display:flex;align-items:flex-start;gap:10px;margin-top:10px;padding:9px 12px;border:1px solid var(--border2);border-left:3px solid var(--amber);border-radius:10px;background:var(--card)">
+    <i class="ti ti-alert-triangle" style="color:var(--amber);font-size:15px"></i>
+    <div style="font-size:12px;color:var(--muted)"><b style="color:var(--text);text-transform:capitalize">${esc(a.anomaly.area)}</b> governance attention spiked — ${a.anomaly.recent_interventions} decisions in 3 days vs ${Number(a.anomaly.baseline_mean).toFixed(1)}/day trailing, with 0 verified tickets of that class in 14 days. Tune the gate, don't just enforce it.</div></div>`:"";
+  setHTML(el,`<div class="sec" style="margin-top:22px">Governance attention <span style="font-size:11px;color:var(--dim);font-weight:400">· your own review effort by ticket class — ${a.interventions_total} gate decision${a.interventions_total===1?"":"s"} recorded</span></div>
+    <div class="panel">
+      ${rows.map(bar).join("")}
+      ${a.unattributed?`<div style="font-size:11px;color:var(--dim);margin-top:8px"><i class="ti ti-eye-off"></i> ${a.unattributed} unattributed — decisions with no resolvable ticket class, counted but never guessed</div>`:""}
+      ${anomaly}
+    </div>`);
 }
 function chartsHtml(s){
   const ts=s.tickets||[],h=s.history||[];
@@ -184,6 +270,13 @@ function chartsHtml(s){
 function vnum(v){const p=String(v||"0.0.0").split(".").map(Number);return (p[0]||0)*10000+(p[1]||0)*100+(p[2]||0);}
 function roadmapGantt(s){
   const ms=s.milestones||[];if(!ms.length)return "";
+  // CXA-F361: per-milestone progress, the done state and the drill-in render
+  // from the projection read model the snapshot carries as derived.milestones
+  // — the same figures the projection endpoint serves. Absent rows (an older
+  // hub behind the view) fall back to the version arithmetic below rather
+  // than rendering a fabricated figure.
+  const dm=(s.derived||{}).milestones||[];
+  const ts=s.tickets||[];
   const proj=(PROJECTS.find(p=>p.id===PID)||{}).name||PID;
   const hist=(s.history||[]).map(r=>({v:r.version,title:r.title,t:Date.parse(r.at)})).filter(r=>!isNaN(r.t)).sort((a,b)=>a.t-b.t);
   const now=Date.now(),cur=vnum(s.current_version);
@@ -195,11 +288,21 @@ function roadmapGantt(s){
   const relDate=tv=>{const n=vnum(tv);const past=hist.filter(r=>vnum(r.v)<=n);return past.length?past[past.length-1].t:null;};
   const t0=hist.length?hist[0].t:now;
   let prev=t0,firstActive=true;
+  // Days-since-created (CXA-F361): the persisted model carries no milestone
+  // date — never fabricate one. Derive the age from real tickets: linked =
+  // the sprint.rs pushes_goal rule mirrored (a 5+ char title word inside the
+  // milestone's name+goal text), age = the OLDEST linked ticket's created_at;
+  // nothing linked carries a date → omit the figure entirely.
+  const msAge=m=>{
+    const text=(m.name+" "+(m.goal||"")).toLowerCase();
+    const oldest=ts.flatMap(t=>(t.created_at&&String(t.title||"").toLowerCase().split(/[^a-z0-9]+/).some(w=>w.length>=5&&text.includes(w))?[Date.parse(t.created_at)]:[])).filter(t=>!isNaN(t)).sort((a,b)=>a-b)[0];
+    return oldest==null?null:Math.max(0,Math.floor((now-oldest)/DAY));
+  };
   const rows=ms.map(m=>{const reached=cur>=vnum(m.target_version);
     const end=reached?(relDate(m.target_version)||now):now+(vnum(m.target_version)-cur)*perUnit;
     const start=Math.min(prev,end);prev=end;
     let st="planned";if(reached)st="reached";else if(firstActive){st="active";firstActive=false;}
-    return {name:m.name,goal:m.goal,ver:m.target_version,start,end,st};});
+    return {name:m.name,goal:m.goal,ver:m.target_version,start,end,st,gc:m.goal_complete,d:dm.find(x=>x.name===m.name),age:msAge(m)};});
   // NOTE: this is an ordered stepper, not a time-positioned chart. Milestones
   // routinely land days apart (all five of cox's did), and placing them on a
   // real date axis stacks them into one illegible clump — so each card carries
@@ -210,43 +313,49 @@ function roadmapGantt(s){
   const n=rows.length;
   const cols=rows.map((r,i)=>{
     const prevNum=i?vnum(rows[i-1].ver):0,thisNum=vnum(r.ver);
-    let prog=r.st==="reached"?100:(r.st==="planned"?0:Math.max(4,Math.min(96,Math.round((cur-prevNum)/Math.max(1,thisNum-prevNum)*100))));
+    const d=r.d||{};
+    // Done is the completion signal, two honest sources: the release
+    // pipeline's own record (fulfilled→released) or the human/PO call the
+    // pipeline waits on (goal_complete). A done card renders compact — the
+    // work shipped, so its forecast date and goal prose stop earning space.
+    const done=!!d.released||r.gc;
+    let prog=d.progress!=null?d.progress:(r.st==="reached"?100:(r.st==="planned"?0:Math.max(4,Math.min(96,Math.round((cur-prevNum)/Math.max(1,thisNum-prevNum)*100)))));
     const col=r.st==="reached"?"var(--green)":(r.st==="active"?"var(--accent2)":"var(--muted)");
-    const icon=r.st==="reached"?"circle-check-filled":(r.st==="active"?"progress":"flag");
-    const tag=r.st==="reached"?'<span class="msk-tag reached">reached</span>':(r.st==="active"?'<span class="msk-tag active">in progress</span>':'<span class="msk-tag">planned</span>');
+    const icon=done?"circle-check-filled":(r.st==="active"?"progress":"flag");
+    const tag=done?'<span class="msk-tag reached">✓ complete</span>':(r.st==="reached"?'<span class="msk-tag reached">reached</span>':(r.st==="active"?'<span class="msk-tag active">in progress</span>':'<span class="msk-tag">planned</span>'));
+    const age=r.age!=null?`<span class="msage" title="days since the oldest goal-linked ticket was filed — milestones carry no persisted date"><i class="ti ti-hourglass" style="font-size:11px"></i> ${r.age}d</span>`:"";
+    // The bar's context (depth rule: a number never stands alone). With the
+    // read model present, rows with attributed scope carry their percent and
+    // rows with none say why instead of reading as a bare 0; without it (an
+    // older hub), only the legacy version arithmetic exists, so the percent
+    // is shown as-is rather than claiming anything about scope.
+    const hasScope=Array.isArray(d.committed)&&d.committed.length>0;
+    const pct=d.progress!=null
+      ?((d.released||hasScope)?`${prog}%`:'<span class="mspct">scope not committed</span>')
+      :`<span class="mspct">${prog}%</span>`;
     const lineDone=r.st==="reached";const prevDone=i>0&&rows[i-1].st==="reached";
+    const click=escAttr(JSON.stringify(r.name));
     return `<div class="mscol">
       <div class="msrail"><div class="msline ${i===0?'hide':''} ${prevDone?'done':''}"></div>
         <div class="msknob ${r.st}" style="--kc:${col}"><i class="ti ti-${icon}"></i></div>
         <div class="msline ${i===n-1?'hide':''} ${lineDone?'done':''}"></div></div>
-      <div class="mscard ${r.st}">
+      <div class="mscard ${r.st}${MSFILTER===r.name?' ms-sel':''}${(d.released||r.gc)?' collapsed':''}" onclick="MSFILTER=MSFILTER===${click}?'':${click};renderRoadmap()">
         <div class="mstitle" title="${esc(r.name)}">${esc(r.name)}</div>
-        <div class="msmetaline"><span class="msver">v${esc(r.ver)}</span> ${tag}</div>
-        <div class="msq"><i class="ti ti-calendar-event" style="font-size:12px"></i> ${quarter(r.end)} · ${fmt(r.end)}</div>
-        <div class="msprog"><div style="width:${prog}%;background:${col}"></div></div>
-        <div class="msgoaltxt" title="${esc(r.goal)}">${esc(r.goal)}</div></div></div>`;}).join("");
-  return `<div class="sec" style="margin-top:22px">Milestone roadmap <span style="font-size:11px;color:var(--dim);font-weight:400">· ${esc(proj)} — shippable targets in delivery order, each with the date it lands</span></div>
+        <div class="msmetaline"><span class="msver">v${esc(r.ver)}</span> ${tag}${age}</div>
+        ${done?'':`<div class="msq"><i class="ti ti-calendar-event" style="font-size:12px"></i> ${quarter(r.end)} · ${fmt(r.end)}</div>`}
+        <div style="display:flex;align-items:center;gap:8px;margin-top:8px"><div class="msprog" style="flex:1;margin-top:0"><div style="width:${prog}%;background:${col}"></div></div>${pct}</div>
+        ${done?'':`<div class="msgoaltxt" title="${esc(r.goal)}">${esc(r.goal)}</div>`}</div></div>`;}).join("");
+  return `<div class="sec" style="margin-top:22px">Milestone roadmap <span style="font-size:11px;color:var(--dim);font-weight:400">· ${esc(proj)} — shippable targets in delivery order, each with the date it lands · click one to drill into its tickets</span></div>
     <div class="panel" style="overflow-x:auto;margin-bottom:26px" data-keepscroll="rm-milestones"><div class="mstepper">${cols}</div></div>`;
 }
-// Milestone roadmap — each is a shippable target (a version), spanning several
-// sprints. Status derived from the shipped version.
-function milestonesHtml(s){
-  const ms=s.milestones||[];if(!ms.length)return "";
-  const cur=String(s.current_version||"0.0.0");const sprintsRun=(s.sprints||[]).length+(s.sprint?1:0);
-  let activeShown=false;
-  const rows=ms.map((m,i)=>{
-    const reached=cmpVer(cur,m.target_version)>=0;
-    const active=!reached&&!activeShown;if(active)activeShown=true;
-    const col=reached?"var(--green)":(active?"var(--accent2)":"var(--muted)");
-    const icon=reached?"circle-check-filled":(active?"target":"flag");
-    const tag=reached?'<span class="pbadge" style="background:color-mix(in srgb,var(--green) 18%,transparent);color:var(--green)">reached</span>':(active?'<span class="pbadge on">in progress</span>':'<span class="pbadge off">planned</span>');
-    return `<div class="msrow">
-      ${i<ms.length-1?'<div class="msline-c"></div>':''}
-      <div class="msdot" style="color:${col};border-color:${col}"><i class="ti ti-${icon}"></i></div>
-      <div class="msmeta"><div class="msname">${esc(m.name)} <span class="msver">v${esc(m.target_version)}</span> ${tag}</div>
-        <div class="msgoal">${esc(m.goal)}</div></div></div>`;}).join("");
-  return `<div class="sec" style="margin-top:4px">Milestones <span style="font-size:11px;color:var(--dim);font-weight:400">· shippable targets — each spans several sprints (${sprintsRun} run so far)</span></div>
-    <div class="panel msline">${rows}</div>`;
+// One click on a reached-but-unconfirmed milestone: the explicit completion
+// the release pipeline waits for.
+async function milestoneComplete(name){
+  try{
+    const r=await fetch(api("/milestone-complete/"+encodeURIComponent(name)),{method:"POST"});
+    if(!r.ok){toast("Could not mark complete: "+(await r.text()));return;}
+    toast("Milestone '"+name+"' marked complete");
+  }catch(e){toast("Could not mark complete");}
 }
 function designSystemHtml(ds){
   if(!ds)return "";
@@ -275,12 +384,25 @@ function renderRoadmap(){
   const s=STATE,ts=s.tickets||[],hist=s.history||[];
   const el=document.getElementById("roadmap-body");if(!el)return;
   if(!ts.length){el.innerHTML='<div class="panel"><div class="empty">No tickets yet — the roadmap builds itself as work lands.</div></div>';return;}
-  const isDone=t=>t.status==="done"||t.status==="documented";
-  const shipped=ts.filter(isDone);
-  const inflight=ts.filter(t=>t.status==="in_progress"||t.status==="ready"||(t.type==="bug"&&t.status==="open"));
-  const next=ts.filter(t=>t.status==="pending"&&(t.design&&t.design.technical));
-  const later=ts.filter(t=>t.status==="pending"&&!(t.design&&t.design.technical));
-  const total=ts.length,donePct=Math.round(shipped.length/total*100);
+  // Every status maps to exactly one bucket: fixed/verified/on_hold used to
+  // match NOTHING, so those tickets vanished from the roadmap entirely and
+  // the header math contradicted the columns ("0 of 5" over 3 visible cards).
+  const isDone=t=>t.status==="done"||t.status==="documented"||t.status==="verified";
+  // Milestone drill-in (CXA-F361): a strip row click narrows the buckets to
+  // that milestone's attributed tickets — the read model's committed list,
+  // the F252 derivation — and clicking the row again clears. The headline
+  // percent stays whole-project: delivery progress is a fact about every
+  // ticket, the filter is a lens over the board, and the banner says so.
+  const dm=(s.derived||{}).milestones||[];
+  const sel=MSFILTER?dm.find(x=>x.name===MSFILTER):null;
+  const scope=sel&&Array.isArray(sel.committed)?new Set(sel.committed):null;
+  const inScope=t=>!scope||scope.has(t.id);
+  const doneAll=ts.filter(isDone);
+  const shipped=doneAll.filter(inScope);
+  const inflight=ts.filter(t=>t.status==="in_progress"||t.status==="ready"||t.status==="fixed"||(t.type==="bug"&&t.status==="open")).filter(inScope);
+  const next=ts.filter(t=>t.status==="pending"&&(t.design&&t.design.technical)).filter(inScope);
+  const later=ts.filter(t=>(t.status==="pending"&&!(t.design&&t.design.technical))||t.status==="on_hold").filter(inScope);
+  const total=ts.length,donePct=Math.round(doneAll.length/total*100);
   const rank={high:0,medium:1,low:2};
   const sort=a=>a.slice().sort((x,y)=>(rank[x.priority]??3)-(rank[y.priority]??3));
   const prio=arr=>({high:arr.filter(t=>t.priority==="high").length,medium:arr.filter(t=>t.priority==="medium").length,low:arr.filter(t=>t.priority==="low").length});
@@ -314,17 +436,42 @@ function renderRoadmap(){
   // Delivery timeline from release history.
   let timeline='';
   if(hist.length){const recent=hist.slice(-8);
+    // A ship record stamps the version that was LIVE when it merged, but the
+    // change itself LANDS in the next cut release — labelling five items
+    // "v2.30.0" when they all ship inside v2.31.0 reads as a broken version
+    // counter. Label each node with the release that contains it: the first
+    // higher version seen later in history, else the running current version,
+    // else "next release".
+    const all=(s.history||[]).slice();
+    const landsIn=(rec)=>{
+      const n=vnum(rec.version);const t=Date.parse(rec.at)||0;
+      for(const h of all){const hv=vnum(h.version);
+        if(hv>n&&(Date.parse(h.at)||0)>=t)return h.version;}
+      const cur=String(s.current_version||"");
+      if(cur&&vnum(cur)>n)return cur;
+      return null;
+    };
     timeline=`<div class="sec" style="margin-top:22px">Delivery timeline</div><div class="panel" style="overflow-x:auto" data-keepscroll="rm-timeline" data-scrollend="1">
       <div style="display:flex;align-items:flex-start;min-width:min-content;padding:6px 0">${recent.map((r,i)=>`
         <div style="flex:1 1 0;min-width:118px;max-width:190px;position:relative;text-align:center;padding:0 4px">
           ${i<recent.length-1?'<div style="position:absolute;top:8px;left:50%;width:100%;height:2px;background:var(--border2);pointer-events:none"></div>':''}
           <div style="width:16px;height:16px;border-radius:50%;background:transparent;border:3px solid var(--green);margin:0 auto;position:relative;z-index:1"></div>
-          <div style="font-size:13px;font-weight:700;margin-top:7px;color:var(--accent2)">v${esc(r.version)}</div>
+          ${(()=>{const l=landsIn(r);return l
+            ?`<div style="font-size:13px;font-weight:700;margin-top:7px;color:var(--accent2)" title="merged while v${esc(r.version)} was live — shipped in the v${esc(l)} release">v${esc(l)}</div>`
+            :`<div style="font-size:13px;font-weight:700;margin-top:7px;color:var(--accent2)">v${esc(r.version)} <span style="font-size:10px;color:var(--dim);font-weight:400" title="merged after v${esc(r.version)} — ships in the next release">· next release</span></div>`;})()}
           <div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.title)}">${esc(r.title)}</div>
           <div style="font-size:10px;color:var(--dim)">${esc((r.at||'').slice(0,10))}</div></div>`).join("")}</div></div>`;
   }
+  // Drill-in lens banner: the board below shows one milestone's committed
+  // scope — say so (the denominator is THAT scope, not the project), note
+  // what the lens hides, and give the filter an inverse right where it acts.
+  const shown=shipped.length+inflight.length+next.length+later.length;
+  const banner=scope?`<div class="panel" style="margin-bottom:16px;display:flex;align-items:center;gap:10px;border-left:3px solid var(--accent2)">
+    <i class="ti ti-filter" style="color:var(--accent2)"></i>
+    <span style="font-size:12.5px;color:var(--muted)">Milestone <b style="color:var(--text)">${esc(MSFILTER)}</b> — ${shown} of ${sel.committed.length} committed tickets shown · ${total-shown} other project tickets hidden</span>
+    <button class="gc-btn" style="margin-left:auto" onclick="MSFILTER='';renderRoadmap()"><i class="ti ti-x"></i> Clear filter</button></div>`:"";
   const keep=grabScroll(el);
-  el.innerHTML=header+timeline+roadmapGantt(s)+board;
+  el.innerHTML=header+timeline+roadmapGantt(s)+banner+board;
   applyScroll(el,keep);
 }
 // A view re-renders on every state poll, and replacing innerHTML resets each
@@ -402,12 +549,42 @@ function renderCycleScores(s){
   if(!rows.length){el.innerHTML='<div class="empty">no cycles scored yet</div>';return;}
   const gc={A:"var(--green)",B:"var(--accent2)",C:"var(--muted)",D:"var(--red)"};
   el.innerHTML='<table class="scoretbl"><thead><tr><th></th><th>cycle</th><th>shipped</th><th>useful/runs</th><th>cost</th><th>errors</th><th>when</th></tr></thead><tbody>'+
-    rows.map(r=>`<tr>
+    rows.map(r=>{
+      // Per-phase breakdown (secs + $) as a hover title — where the cycle went.
+      const secs=r.phase_secs||{},cost=r.phase_cost||{};
+      const keys=[...new Set([...Object.keys(secs),...Object.keys(cost)])];
+      const brk=keys.map(k=>{
+        const t=secs[k]?(secs[k]>=60?Math.round(secs[k]/60)+'m':secs[k]+'s'):'';
+        const c=cost[k]?('$'+cost[k].toFixed(2)):'';
+        return k+': '+[t,c].filter(Boolean).join(' · ');
+      }).join('\n');
+      return `<tr title="${esc(brk)}">
       <td><span class="grade" style="background:color-mix(in srgb,${gc[r.grade]||'var(--muted)'} 16%,transparent);color:${gc[r.grade]||'var(--muted)'}">${esc(r.grade)}</span></td>
       <td>#${r.cycle}</td><td>${r.shipped||0}</td><td>${r.useful||0}/${r.runs||0}</td>
       <td>${r.cost_usd?('$'+r.cost_usd.toFixed(2)):'—'}</td>
       <td>${(r.errors||0)+(r.incidents?(' · '+r.incidents+'⛔'):'')}</td>
-      <td style="color:var(--dim)">${esc((r.at||'').slice(11,16))}</td></tr>`).join("")+'</tbody></table>';
+      <td style="color:var(--dim)">${esc((r.at||'').slice(11,16))}</td></tr>`;}).join("")+'</tbody></table>'
+    +costPerShip(s.cycle_scores||[]);
+}
+// 7-day FinOps digest from the scorecard: cost per role + the headline number
+// "cost per shipped ticket" — the KPI the engine-per-role tuning aims at.
+function costPerShip(scores){
+  const cutoff=Date.now()-7*86400000;
+  const rows=scores.filter(r=>r.at&&new Date(r.at).getTime()>=cutoff);
+  if(!rows.length)return "";
+  let shipped=0,total=0;const byRole={};
+  for(const r of rows){
+    shipped+=r.shipped||0;total+=r.cost_usd||0;
+    for(const[k,v]of Object.entries(r.phase_cost||{}))byRole[k]=(byRole[k]||0)+v;
+  }
+  if(total<0.005)return "";
+  const roles=Object.entries(byRole).sort((a,b)=>b[1]-a[1]).slice(0,6);
+  const per=shipped?("$"+(total/shipped).toFixed(2)):"∞ (nothing shipped)";
+  return `<div class="cps"><div class="cps-head">7 days · $${total.toFixed(2)} spent · ${shipped} shipped · <b>${per}/ship</b></div>
+    <div class="cps-bars">${roles.map(([k,v])=>{
+      const w=Math.max(4,Math.round(v/total*100));
+      return `<div class="cps-row" title="$${v.toFixed(2)}"><span class="cps-lbl">${esc(k)}</span><div class="cps-bar" style="width:${w}%"></div><span class="cps-val">$${v.toFixed(2)}</span></div>`;
+    }).join("")}</div></div>`;
 }
 function actItem(a){const col=cvar(AC[a.agent]||"--muted");
   return `<div class="tlrow"><div class="tl-node" style="--nc:${col}"><i class="ti ti-${actIcon(a.action)}"></i></div>
@@ -417,8 +594,37 @@ function card(t){const a={high:"var(--red)",medium:"var(--amber)",low:"var(--dim
   const ui=t.has_ui?'<span class="b ui">UI</span>':'',bug=t.type==="bug"?'<span class="b bug">bug</span>':'';
   // A human-assigned ticket is out of the agent pool — say WHO owns it.
   const who=t.assignee?`<span class="b" style="background:var(--accentbg);color:var(--accent2)"><i class="ti ti-user" style="font-size:10px"></i> @${esc(t.assignee)}</span>`:'';
-  return `<div class="card-t" onclick="showTicket('${t.id}')"><div class="cid">${esc(t.id)}</div>
-    <div class="ct">${esc(t.title)}</div><div class="badges"><span class="b ${t.priority}">${t.priority}</span>${ui}${bug}${who}</div></div>`;}
+  const doneSet=["done","documented","verified","rejected"];
+  const blockers=(t.depends_on||[]).filter(d=>{const dt=(STATE.tickets||[]).find(x=>x.id===d);return dt&&!doneSet.includes(dt.status);});
+  const blocked=blockers.length?`<span class="b" style="background:color-mix(in srgb,var(--red) 16%,transparent);color:var(--red)" title="blocked by ${esc(blockers.join(', '))}"><i class="ti ti-lock" style="font-size:10px"></i> blocked</span>`:'';
+  const hold=t.status==="on_hold"?`<span class="b" style="background:color-mix(in srgb,var(--amber) 18%,transparent);color:var(--amber)" title="${esc((STATE.hold_reasons||{})[t.id]||'on hold')}"><i class="ti ti-player-pause" style="font-size:10px"></i> on hold</span>`:'';
+  // Age heat: how long a ticket has WAITED. Only pre-work statuses — a card
+  // being built isn't stale — and only tickets that carry created_at (older
+  // ones have unknown age and stay quiet). Amber at 3 days, red at 7.
+  let age='';
+  if(t.created_at&&(t.status==="pending"||t.status==="open")){
+    const days=Math.floor((Date.now()-Date.parse(t.created_at))/86400000);
+    if(days>=3){const c=days>=7?"var(--red)":"var(--amber)";
+      age=`<span class="b" style="background:color-mix(in srgb,${c} 14%,transparent);color:${c}" title="filed ${esc(t.created_at.slice(0,10))}"><i class="ti ti-hourglass" style="font-size:10px"></i> ${days}d</span>`;}
+  }
+  // Subtask lineage (CXA-F381): a child says which oversize parent it was
+  // split from; a parent counts its children and how many already landed.
+  const sub=t.parent_id?`<span class="b" style="background:color-mix(in srgb,var(--purple) 14%,transparent);color:var(--purple)" title="subtask of ${esc(t.parent_id)}"><i class="ti ti-corner-down-right" style="font-size:10px"></i> ${esc(t.parent_id)}</span>`:'';
+  const kids=(STATE.tickets||[]).filter(x=>x.parent_id===t.id);
+  // The 🪓 badge is a disclosure: click to unfold the subtask tree in place
+  // (stopPropagation so the card's own click keeps opening the detail).
+  const open=window.SUBTREE_OPEN&&SUBTREE_OPEN.has(t.id);
+  const split=kids.length?`<span class="b" onclick="event.stopPropagation();toggleSubtree('${t.id}')" style="cursor:pointer;background:color-mix(in srgb,var(--purple) 14%,transparent);color:var(--purple)" title="split into ${esc(kids.map(k=>k.id).join(', '))} — click to ${open?'collapse':'expand'}"><i class="ti ti-axe" style="font-size:10px"></i> ${kids.filter(k=>doneSet.includes(k.status)).length}/${kids.length} <i class="ti ti-chevron-${open?'up':'down'}" style="font-size:9px"></i></span>`:'';
+  const tree=(kids.length&&open)?`<div class="subtree">${kids.map(k=>{
+    const kdone=doneSet.includes(k.status);
+    const kc=kdone?"var(--green)":(k.status==="in_progress"?"var(--accent2)":"var(--dim)");
+    return `<div class="subtree-row" onclick="event.stopPropagation();showTicket('${k.id}')"><i class="ti ti-${kdone?'circle-check':'corner-down-right'}" style="color:${kc};font-size:11px"></i><span class="st-id">${esc(k.id)}</span><span class="st-title">${esc(k.title)}</span><span class="st-st" style="color:${kc}">${esc(k.status.replace(/_/g,' '))}</span></div>`;
+  }).join("")}</div>`:'';
+  return `<div class="card-t" onclick="showTicket('${t.id}')" ${t.status==="on_hold"?'style="opacity:.65"':''}><div class="cid">${esc(t.id)}</div>
+    <div class="ct">${esc(t.title)}</div><div class="badges"><span class="b ${t.priority}">${t.priority}</span>${hold}${blocked}${sub}${split}${collisionBadge(STATE,t)}${age}${ui}${bug}${who}</div>${tree}</div>`;}
+// Session-local set of parents whose subtask tree is unfolded on the board.
+window.SUBTREE_OPEN=window.SUBTREE_OPEN||new Set();
+function toggleSubtree(id){if(SUBTREE_OPEN.has(id))SUBTREE_OPEN.delete(id);else SUBTREE_OPEN.add(id);renderActive();}
 function column([k,l,c],ts){const items=ts.filter(t=>t.status===k);
   return `<div class="col"><h3><span class="dot" style="background:var(${c})"></span>${l}<span class="n">${items.length}</span></h3>${items.length?items.map(card).join(""):'<div class="empty">—</div>'}</div>`;}
 // Unified column: collects both features and bugs whose status maps to this stage.
@@ -426,12 +632,151 @@ function ucolumn([k,l,c,statuses],ts){const items=ts.filter(t=>statuses.includes
     .sort((a,b)=>(a.type==="bug")-(b.type==="bug")); // bugs after features in the same column
   return `<div class="col"><h3><span class="dot" style="background:var(${c})"></span>${l}<span class="n">${items.length}</span></h3>${items.length?items.map(card).join(""):'<div class="empty">—</div>'}</div>`;}
 
+// ── Ticket archive read-back (CXA-F274) ────────────────────────────────────
+// Evicted tickets live behind GET /tickets/archive (paged, id-descending).
+// The board touches them only when the cold store actually holds work: one
+// probe (limit=1) sizes the archive, and while it is in flight — or when it
+// comes back empty/disabled — every render below is byte-identical to the
+// pre-archive board. Hot columns are never touched; the Archive column is a
+// separate lazy feed with its own paging, so the 1 Hz snapshot stays small.
+const ARCH_PAGE=50;
+// Closed statuses = the board's terminal columns (UCOLS done+shipped): the
+// same set the eviction path archives, so "hot closed + archived" counts every
+// finished ticket exactly once.
+const ARCH_CLOSED=["done","fixed","documented","verified"];
+let ARCHIVE={pid:null,total:0,probed:false,on:false,tickets:[],loaded:0,err:null,loading:false};
+function probeArchive(){
+  if(ARCHIVE.probed&&ARCHIVE.pid===PID)return;
+  ARCHIVE={pid:PID,total:0,probed:true,on:false,tickets:[],loaded:0,err:null,loading:false};
+  // A failed probe degrades to "no archive" — the same surface a disabled or
+  // empty cold store presents — and never errors the console.
+  fetch(api("/tickets/archive?limit=1")).then(r=>r.ok?r.json():{total:0}).then(d=>{
+    ARCHIVE.total=Number(d.total)||0;
+    if(ARCHIVE.total>0){ARCHIVE.on=true;loadArchivePage();}
+  }).catch(()=>{}).finally(()=>{if(CUR==="board")renderActive();});
+}
+function archiveFilterHtml(){
+  if(ARCHIVE.total<1)return"";
+  const chip=`<span class="fchip ${ARCHIVE.on?'on':''}" onclick="ARCHIVE.on=!ARCHIVE.on;renderActive()" title="Tickets evicted to the archive cold store — open any card to read it"><i class="ti ti-archive" style="font-size:12px"></i> Archived · ${ARCHIVE.total}</span>`;
+  if(!ARCHIVE.on)return chip;
+  const hot=(STATE.tickets||[]).filter(t=>ARCH_CLOSED.includes(t.status)).length;
+  return chip+`<span style="margin-left:auto;align-self:center;font-size:11.5px;color:var(--dim)" title="closed tickets: hot board columns + the archive">closed: <b style="color:var(--text)">${hot}</b> hot + <b style="color:var(--text)">${ARCHIVE.total}</b> archived</span>`;
+}
+// The archive column renders card() unchanged (it reads only the ticket plus
+// hot STATE, which archived ids never collide with) and adds the one chip the
+// hot columns don't need: the saved status, since the column itself isn't one.
+function archCard(t){
+  const col={done:"var(--green)",fixed:"var(--amber)",documented:"var(--teal)",verified:"var(--green)",rejected:"var(--dim)"}[t.status]||"var(--dim)";
+  return card(t).replace('<div class="badges">',
+    `<div class="badges"><span class="b" style="background:color-mix(in srgb,${col} 15%,transparent);color:${col}">${esc(t.status)}</span>`);
+}
+function archiveColumnHtml(){
+  if(!ARCHIVE.on||ARCHIVE.total<1)return"";
+  const head=`<div class="col"><h3><span class="dot" style="background:var(--purple)"></span>Archive<span class="n" style="background:color-mix(in srgb,var(--purple) 16%,transparent);color:var(--purple)">${ARCHIVE.total}</span></h3>`;
+  if(ARCHIVE.err)return head+`<div class="empty">Couldn’t load the archive <span class="fchip" style="margin-left:8px" onclick="loadArchivePage()">Retry</span></div></div>`;
+  if(ARCHIVE.loading&&!ARCHIVE.tickets.length)return head+[0,1,2].map(()=>`<div class="card-t" style="height:58px;opacity:.45;cursor:default"><div class="cid">···</div><div class="ct" style="color:var(--dim)">loading…</div></div>`).join("")+'</div>';
+  let tail=ARCHIVE.loaded<ARCHIVE.total
+    ?`<div class="empty" style="cursor:pointer" onclick="loadArchivePage()">Load ${Math.min(ARCH_PAGE,ARCHIVE.total-ARCHIVE.loaded)} more · ${ARCHIVE.total-ARCHIVE.loaded} left</div>`
+    :`<div class="empty" style="color:var(--dim)">Showing all ${ARCHIVE.total} archived</div>`;
+  return head+ARCHIVE.tickets.map(archCard).join("")+tail+'</div>';
+}
+async function loadArchivePage(){
+  if(ARCHIVE.loading)return;
+  ARCHIVE.loading=true;ARCHIVE.err=null;if(CUR==="board")renderActive();
+  try{
+    const r=await fetch(api("/tickets/archive?limit="+ARCH_PAGE+"&offset="+ARCHIVE.loaded));
+    if(!r.ok)throw new Error("archive fetch "+r.status);
+    const d=await r.json();
+    ARCHIVE.tickets=ARCHIVE.tickets.concat(d.tickets||[]);
+    ARCHIVE.loaded=ARCHIVE.tickets.length;
+    ARCHIVE.total=Number(d.total)||ARCHIVE.total;
+  }catch(e){ARCHIVE.err=true;}
+  ARCHIVE.loading=false;if(CUR==="board")renderActive();
+}
+
+// Merged-then-reverted work (CXA-F047) on the Work board: the most recent
+// events, with the approve/dismiss decision pending ones still wait on.
+// Renders nothing when the ledger is empty — the board reads as before.
+function renderRevertedWork(s){
+  const el=document.getElementById("board-reverts");if(!el)return;
+  const rv=s.reverted_work||[];
+  if(!rv.length){el.innerHTML="";return;}
+  const row=e=>`<div class="rel" style="align-items:center">
+    <span class="rv" style="background:color-mix(in srgb,var(--red) 14%,transparent);color:var(--red)"><i class="ti ti-arrow-back-up"></i></span>
+    <div class="rt">${esc(e.ticket)} — reverted work<div class="rd">${esc(e.subject)} · ${esc(e.role)} · ${e.decision==="pending"?"awaiting review":esc(e.decision)}</div></div>
+    ${e.decision==="pending"?`<span class="ibx-acts" onclick="event.stopPropagation()">${ibtn("Dismiss",`inboxRevert('${esc(e.sha)}','dismiss')`)+ibtn("Confirm",`inboxRevert('${esc(e.sha)}','approve')`,1)}</span>`:""}</div>`;
+  el.innerHTML=`<div class="panel" style="margin-bottom:12px"><h4><i class="ti ti-arrow-back-up" style="color:var(--red)"></i> Reverted work</h4>${[...rv].reverse().slice(0,5).map(row).join("")}</div>`;
+}
+
+// Engine-health detail for one agent role: what failed, how often, and when —
+// the line on the card is the headline, this is the story.
+function showRoleHealth(role){
+  const hl=(STATE.role_health||{})[role];if(!hl)return;
+  const when=hl.last_error_at?relTime(hl.last_error_at):"—";
+  coxModal({title:role+" · engine health",
+    message:`${hl.errors} error(s), ${hl.timeouts} timeout(s) recorded.\n\nMost recent (${when}):\n${hl.last_error||"—"}\n\nTimeouts mean the provider stalled — failover retried on the fallback chain. Frequent timeouts under parallel load usually mean the concurrency is too high for the provider; lower it in Settings → Workflow.`,
+    confirmText:"OK",cancelText:"Open live log"}).then(ok=>{if(!ok)openAgent(role);});
+}
+
 function renderSidebar(s){
   document.getElementById("ver").textContent=s.current_version||"0.0.0";
   document.getElementById("pn-tickets").textContent=(s.tickets||[]).length+" tickets";
   document.title="CoXAgent · "+(document.getElementById("proj-name").textContent||"");}
+// CXA-F289 — deploy failure forensics. The persisted bundle is already masked
+// at capture; this masks AGAIN before render/copy (defence in depth: state may
+// carry a legacy unmasked bundle). Same secret-shaped rule as the Rust side:
+// KEY=value (or KEY: value when the line has no `=`), non-empty values only.
+function maskSecrets(t){return (t||"").split("\n").map(l=>{
+  const eq=l.indexOf("="),i=eq>=0?eq:l.indexOf(":");
+  if(i<0)return l;
+  const v=l.slice(i+1).trim().replace(/^["']+|["']+$/g,"");
+  if(!v||!/password|passwd|pwd|secret|token|api_key|apikey|credential|private_key/i.test(l.slice(0,i)))return l;
+  return l.slice(0,i)+(l[i]===":"?": ":"=")+"***";}).join("\n");}
+// The full masked bundle text behind the Copy affordance — set on every render
+// of the forensics section so the clipboard always carries the WHOLE bundle.
+let _fbText="";
+function failureBundleText(dp){
+  const b=dp&&dp.failure_bundle;if(!b)return"";
+  const logs=b.container_logs||[];
+  const out=["Deploy failure forensics","","== compose stderr (tail) ==",maskSecrets(b.stderr_tail||""),"","== container logs =="];
+  if(b.no_container_logs||!logs.length)out.push("No container logs available — compose failed before any container started.");
+  else for(const c of logs)out.push(`--- ${c.service} ---`,maskSecrets(c.tail));
+  return out.join("\n");
+}
+function failureForensicsHtml(dp){
+  const b=dp&&dp.failure_bundle;if(!b)return"";
+  _fbText=failureBundleText(dp);
+  const logs=b.container_logs||[];
+  const logsHtml=logs.length?logs.map(c=>`<div style="margin-top:12px">
+    <div style="font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--dim)">container · ${esc(c.service)}</div>
+    <pre style="margin:4px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11.5px;line-height:1.55;color:var(--text);background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:8px 11px;white-space:pre-wrap;word-break:break-word">${esc(maskSecrets(c.tail))}</pre></div>`).join("")
+    :`<div style="margin-top:12px;font-size:12.5px;color:var(--muted)">No container logs available — compose failed before any container started.</div>`;
+  return `<div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
+    <div style="display:flex;align-items:center;gap:8px">
+      <div style="font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--dim)">Failure forensics</div>
+      <button type="button" onclick="copyFailureBundle(this)" style="margin-left:auto;background:var(--card2);border:1px solid var(--border2);color:var(--muted);border-radius:9px;padding:4px 13px;font-size:12.5px;font-weight:600;cursor:pointer;transition:all .15s">Copy</button>
+    </div>
+    <pre style="margin:8px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11.5px;line-height:1.55;color:var(--text);background:var(--card2);border:1px solid var(--border);border-radius:8px;padding:8px 11px;white-space:pre-wrap;word-break:break-word">${esc(maskSecrets(b.stderr_tail||""))}</pre>
+    ${logsHtml}</div>`;
+}
+function copyFailureBundle(btn){
+  if(!(_fbText&&navigator.clipboard&&navigator.clipboard.writeText))return;
+  navigator.clipboard.writeText(_fbText).then(()=>{btn.textContent="Copied";
+    setTimeout(()=>{btn.textContent="Copy";},1500);},()=>{});
+}
+function rollbackOutcomeHtml(rb){
+  if(!rb)return"";
+  const ok=rb.ok!==false,col=ok?"var(--green)":"var(--red)";
+  return `<div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;display:flex;align-items:center;gap:8px">
+    <span style="flex:none;border-radius:20px;padding:2px 8px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;background:${col}22;color:${col}">${ok?"Rolled back":"Rollback failed"}</span>
+    <div style="flex:1;font-size:12px;color:var(--muted)">${esc(rb.summary||rb.reason||"")}</div>
+    <div style="flex:none;font-size:11px;color:var(--dim)">${esc((rb.at||"").slice(0,16).replace("T"," "))}</div></div>`;
+}
 function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overview")return;
   if(CUR==="overview"){
+    renderDriftAlerts(s);
+    renderOvWorking();
+    setTimeout(ovDiagAutoOpen,60);
     if(!(s.tickets||[]).length&&!(s.activity||[]).length){
       document.getElementById("kpis").innerHTML=`<div class="panel" style="grid-column:1/-1;text-align:center;padding:40px 20px">
         <i class="ti ti-rocket" style="font-size:34px;color:var(--accent2)"></i>
@@ -442,20 +787,28 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
       document.getElementById("ov-deploy").innerHTML='';
       document.getElementById("ov-activity").innerHTML='<div class="empty">activity appears as agents work</div>';
       document.getElementById("ov-changelog").innerHTML='<div class="empty">no releases yet</div>';
+      const gov=document.getElementById("ov-attention");if(gov)gov.innerHTML='';
+      const eff=document.getElementById("ov-lessons");if(eff)eff.innerHTML='';
       return;
     }
     const m=metricsFrom(s);
     const spend=s.spend||{};
     document.getElementById("ov-alerts").innerHTML=alertsHtml(s,m,spend);
     drainBanner("ov-drain");
-    document.getElementById("kpis").innerHTML=[kpi("Shipped",m.shipped),kpi("In flight",m.inflight),kpi("Open bugs",m.openBugs),kpi("Documented",m.docd),kpi("Releases",m.releases),kpi("Cost",money(spend.total_cost_usd))].join("");
+    document.getElementById("kpis").innerHTML=overviewKpis(s);
+    const ovv=document.getElementById("ov-velocity");if(ovv)ovv.innerHTML=velocityHtml(s);
     renderHealth(s);
     const dp=s.deploy;
-    document.getElementById("ov-deploy").innerHTML=dp?`<div class="panel" style="margin-top:16px;display:flex;align-items:center;gap:13px">
-      <div class="av" style="width:36px;height:36px;background:${dp.ok?'var(--green)':'var(--red)'}22;color:${dp.ok?'var(--green)':'var(--red)'}"><i class="ti ti-${dp.ok?'cloud-check':'cloud-x'}"></i></div>
-      <div style="flex:1"><div style="font-size:13px;font-weight:600">Deployment ${dp.ok?'healthy':'failed'}</div><div style="font-size:12px;color:var(--muted)">${esc(dp.summary)}</div></div>
-      <div style="font-size:11px;color:var(--dim)">${esc((dp.at||"").slice(0,16).replace("T"," "))}</div></div>`:"";
+    document.getElementById("ov-deploy").innerHTML=dp?`<div class="panel" style="margin-top:16px">
+      <div style="display:flex;align-items:center;gap:13px">
+        <div class="av" style="width:36px;height:36px;background:${dp.ok?'var(--green)':'var(--red)'}22;color:${dp.ok?'var(--green)':'var(--red)'}"><i class="ti ti-${dp.ok?'cloud-check':'cloud-x'}"></i></div>
+        <div style="flex:1"><div style="font-size:13px;font-weight:600">Deployment ${dp.ok?'healthy':'failed'}</div><div style="font-size:12px;color:var(--muted)">${esc(dp.summary)}</div></div>
+        <div style="font-size:11px;color:var(--dim)">${esc((dp.at||"").slice(0,16).replace("T"," "))}</div></div>
+      ${failureForensicsHtml(dp)}
+      ${rollbackOutcomeHtml(s.last_rollback)}</div>`:"";
     document.getElementById("ov-charts").innerHTML=chartsHtml(s);
+    loadGovernanceAttention();
+    if(typeof loadLessonEfficacy==="function")loadLessonEfficacy();
     document.getElementById("ov-design").innerHTML=designSystemHtml(s.design_system);
     const act=[...(s.activity||[])].reverse().slice(0,7);
     document.getElementById("ov-activity").innerHTML=act.length?act.map(actItem).join(""):'<div class="empty">no activity yet</div>';
@@ -494,6 +847,10 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
         const mine=runners.find(x=>x.who===me);
         if(mine){mine.ticket=RUNNER.active_note||mine.ticket;} else {runners.unshift({who:me,ticket:RUNNER.active_note||''});}
       }
+      // Ground truth fallback (CXA-F386): a fresh live-log write means this
+      // role is working even when the claim registry hasn't caught up.
+      const lvHit=(window.LIVENESS||[]).find(l=>((l.role||"").replace(/_/g,"-").toUpperCase()===r)&&(l.age_secs??9999)<=120);
+      if(lvHit&&!runners.length)runners.push({who:"",ticket:lvHit.ticket||""});
       const working=runners.length>0;
       // Fallback ticket for the idle "last touched" line.
       let cur=null,live=working;
@@ -507,37 +864,61 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
       if(working){
         const rows=runners.map(rn=>`<div class="ag-run" onclick="event.stopPropagation();openAgent('${r}','${esc(rn.who)}')" style="cursor:pointer" title="View ${esc(short(rn.who))}'s live log">`
           +`<span class="ag-task">${rn.ticket?`<span class="tid">${esc(rn.ticket)}</span>`:'working'}</span>`
-          +`<span class="ag-by" title="${esc(rn.who)}"><i class="ti ti-user-cog"></i> ${esc(short(rn.who))}</span></div>`).join("");
+          +(rn.who?`<span class="ag-by" title="${esc(rn.who)}"><i class="ti ti-user-cog"></i> ${esc(short(rn.who))}</span>`:'<span class="ag-by"><i class="ti ti-activity-heartbeat"></i> live</span>')+`</div>`).join("");
         statusHtml=`<div class="ag-now"><i class="ti ti-loader-2 att-spin"></i> working now${runners.length>1?`<span class="ag-nteams">${runners.length} teams</span>`:''}</div>
           <div class="ag-runs">${rows}</div>`;
       }else{
-        statusHtml=`<div class="ag-last"><i class="ti ti-point"></i> ${cur?'last touched':'idle'}${lastOp?` · <span class="ag-by" title="${esc(lastOp)}"><i class="ti ti-user-cog"></i> ${esc(workerLabel(lastOp,[lastOp]))}</span>`:''}</div>
+        // Say WHY it idles, not just that it does — the difference between
+        // "nothing scoped for DEV" and "engine down" is the whole diagnosis.
+        let idleWhy='';
+        if(!cur){
+          const scoped=((s.sprint&&s.sprint.committed)||[]).map(id=>((s.tickets||[]).find(x=>x.id===id)||{}));
+          if(r.startsWith('DEV')&&!scoped.some(t=>["ready","open"].includes(t.status)))idleWhy=' — no scoped work';
+          else if(s.ops_down)idleWhy=' — ops down';
+          else idleWhy=' — waiting for its phase';
+        }
+        statusHtml=`<div class="ag-last"><i class="ti ti-point"></i> ${cur?'last touched':'idle'+idleWhy}${lastOp?` · <span class="ag-by" title="${esc(lastOp)}"><i class="ti ti-user-cog"></i> ${esc(workerLabel(lastOp,[lastOp]))}</span>`:''}</div>
           ${cur?taskChip('',cur,'idle'):''}`;
       }
       // Which engine CLI this role is really on — copilot/opencode/claude/… —
       // stamped from the run that actually happened, so failover shows through.
       const engBadge=eng?`<span class="ag-eng" title="engine actually running this agent">${esc(eng)}</span>`:'';
+      const hl=(s.role_health||{})[r];
+      const healthHtml=hl&&hl.errors>0?`<div class="ag-health" title="click for details" onclick="event.stopPropagation();showRoleHealth('${esc(r)}')"><i class="ti ti-alert-triangle"></i> ${hl.errors} error${hl.errors===1?'':'s'}${hl.timeouts?` · ${hl.timeouts} timeout${hl.timeouts===1?'':'s'}`:''}${hl.timeouts>=3?' · <b>provider under load — consider a lower concurrency</b>':''}</div>`:'';
       return `<div class="agent ${live?'run':''}" onclick="openAgent('${r}')" style="cursor:pointer">
         <div class="ag-head"><div class="av" style="background:${col}22;color:${col}">${initials(r)}<span class="sr"></span></div>
           <div class="ag-id"><div class="rl">${r}${engBadge}</div><div class="ds">${d}</div></div>
           <i class="ti ti-terminal-2 ag-term"></i></div>
         <div class="agstats"><span title="actions"><i class="ti ti-bolt"></i> ${st.n}</span><span title="tickets touched"><i class="ti ti-ticket"></i> ${st.tk.size}</span>${cost>0?`<span title="cost"><i class="ti ti-coin"></i> ${money(cost)}</span>`:''}</div>
-        <div class="ag-status">${statusHtml}</div></div>`;}).join("");
+        <div class="ag-status">${statusHtml}</div>${healthHtml}</div>`;}).join("");
     renderDupWarn(s);
+    renderLiveness(s);
     renderCycleScores(s);
     renderTeamsOnline();
     renderSessions();
-    if(ME&&ME.role==="admin")renderTeamPeople();
+    // Populate whenever the card is VISIBLE — applyRole shows .admin-only for
+    // the hub-admin tier (admin, super, open mode; see isHubAdmin). Gating on
+    // role==="admin" alone stranded this card on "loading…" twice: open mode
+    // once, and the hub owner's "super" role until CXA-B132.
+    if(isHubAdmin())renderTeamPeople();
   }else if(CUR==="board"){
     let feats=(s.tickets||[]).filter(t=>t.type!=="bug"),bugs=(s.tickets||[]).filter(t=>t.type==="bug");
     if(BF!=="all"){feats=feats.filter(t=>t.priority===BF);bugs=bugs.filter(t=>t.priority===BF);}
     const fc=["all","high","medium","low"];
-    document.getElementById("board-filters").innerHTML=fc.map(f=>`<span class="fchip ${BF===f?'on':''}" onclick="BF='${f}';renderActive()">${f==='all'?'all priorities':f}</span>`).join("");
+    const sc=["all","pending","ready","in_progress","open","fixed","done","documented","verified","on_hold","rejected"];
+    document.getElementById("board-filters").innerHTML=
+      fc.map(f=>`<span class="fchip ${BF===f?'on':''}" onclick="BF='${f}';renderActive()">${f==='all'?'all priorities':f}</span>`).join("")
+      +'<span style="width:1px;background:var(--border2);margin:0 4px;align-self:stretch"></span>'
+      +sc.map(f=>`<span class="fchip ${SF===f?'on':''}" onclick="SF='${f}';renderActive()">${f==='all'?'all statuses':f.replace('_',' ')}</span>`).join("")
+      +archiveFilterHtml();
     // One unified board: features + bugs share columns mapped by lifecycle stage.
     let all=(s.tickets||[]);if(BF!=="all")all=all.filter(t=>t.priority===BF);
-    document.getElementById("board-cols").innerHTML=UCOLS.map(c=>ucolumn(c,all)).join("");
+    if(SF!=="all")all=all.filter(t=>t.status===SF);
+    document.getElementById("board-cols").innerHTML=UCOLS.map(c=>ucolumn(c,all)).join("")+archiveColumnHtml();
+    renderRevertedWork(s);
     renderSprintPanel(s);
     renderBacklogPanel(s);
+    probeArchive();
   }else if(CUR==="activity"){
     const sel=document.getElementById("act-filter");
     if(!INIT_ACT){const agents=[...new Set((s.activity||[]).map(a=>a.agent))];
@@ -548,7 +929,11 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
       if(day&&day!==lastDay){lastDay=day;html+=`<div class="tl-day">${esc(day)}</div>`;}
       html+=actItem(a);}
     document.getElementById("activity-full").innerHTML=act.length?`<div class="timeline">${html}</div>`:'<div class="empty">no activity yet</div>';
+    if(typeof renderAlerts==="function")renderAlerts();
     renderTranscripts();
+    // CXA-B131: the Work log panel must never sit on 'loading…' when the
+    // agent drawer was never opened — paint its terminal state here.
+    if(typeof paintAgentLogIdle==="function")paintAgentLogIdle();
   }else if(CUR==="insights"){
     const sp=s.spend||{by_role:{}};const tok=(sp.input_tokens||0)+(sp.output_tokens||0);
     // These KPIs are the real measured totals — no counterfactual. The old
@@ -586,5 +971,86 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
         <div style="background:var(--card2);border-radius:6px;height:10px;overflow:hidden"><div style="width:${used}%;height:100%;background:${used>=90?'var(--red)':used>=70?'var(--amber)':'var(--accent2)'}"></div></div>
         <div style="color:var(--dim);font-size:11px;margin-top:8px">Loop auto-pauses when the cap is reached.</div>`);
     }else{setHTML(document.getElementById("cost-budget"),'<div class="empty">no budget cap set — add "budget_usd" in coxagent.json</div>');}
+    // Daily spend trend: closed UTC days from spend_history plus the running
+    // "today" bar (accent). Bars, not a line — a single day is the unit the
+    // daily budget cap reasons about, so days should read individually.
+    const shist=(s.spend_history||[]).slice(-30)
+      .concat(s.spend_day?[{day:s.spend_day,usd:s.spend_today_usd||0,today:true}]:[]);
+    const smax=Math.max(...shist.map(d=>d.usd||0),0.01);
+    setHTML(document.getElementById("cost-trend"),shist.length?`<div style="display:flex;gap:4px;align-items:flex-end;height:92px">${shist.map(d=>{
+      const h=Math.max(3,Math.round((d.usd||0)/smax*80));
+      return `<div title="${escAttr(d.day+": "+money(d.usd||0))}" style="flex:1;max-width:26px;height:${h}px;background:${d.today?"var(--accent)":"var(--accent2)"};border-radius:3px 3px 0 0"></div>`;}).join("")}</div>
+      <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--dim);margin-top:6px"><span>${esc(shist[0].day||"")}</span><span>today ${money(s.spend_today_usd||0)}</span></div>`:'<div class="empty">no spend recorded yet</div>');
+    // Engine reliability: the question "is GLM healthy today?" answered
+    // where cost already lives, instead of only in hub.log greps.
+    const rh=Object.entries(s.role_health||{}).sort((a,b)=>((b[1].errors||0)+(b[1].timeouts||0))-((a[1].errors||0)+(a[1].timeouts||0)));
+    setHTML(document.getElementById("cost-engines"),rh.length?rh.map(([r,h])=>{
+      const total=(h.errors||0)+(h.timeouts||0);
+      const today=(h.last_error_at||"").slice(0,10)===new Date().toISOString().slice(0,10);
+      const col=today?"var(--red)":(total?"var(--amber)":"var(--green)");
+      return `<div style="display:flex;align-items:center;gap:12px;padding:7px 0">
+        <span style="min-width:110px;font-size:12px">${esc(r)}</span>
+        <span style="font-size:12px;color:${col};min-width:150px">${h.errors||0} error(s) &middot; ${h.timeouts||0} timeout(s)</span>
+        <span style="flex:1;font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escAttr(h.last_error||"")}">${today?"today: ":""}${esc((h.last_error||"").slice(0,90))}</span></div>`;
+    }).join(""):'<div class="empty">no engine failures recorded — all roles healthy</div>');
     renderTokenSaver();
-  }else if(CUR==="discuss"){renderDiscuss();}else if(CUR==="roadmap"){renderRoadmap();}else if(CUR==="home"){renderHome();}else if(CUR==="mg-spaces"){renderManage();}else if(CUR==="mg-users"){renderManage();}else if(CUR==="mg-usage"){renderManage();}else if(CUR==="mg-audit"){renderManage();}}
+  }else if(CUR==="discuss"){renderDiscuss();}else if(CUR==="roadmap"){renderRoadmap();}else if(CUR==="home"){renderHome();}else if(CUR==="mg-spaces"){renderManage();}else if(CUR==="mg-users"){renderManage();}else if(CUR==="mg-usage"){renderManage();}else if(CUR==="mg-fleet"){renderManage();}else if(CUR==="mg-audit"){renderManage();}}
+
+
+// CXA-F384: the collapsed Diagnostics disclosure must not HIDE bad news —
+// when drift has open alerts or go-live says not-ready, it opens itself.
+// A user's own toggle (click on the summary) wins for the session.
+window.OV_DIAG_TOUCHED=window.OV_DIAG_TOUCHED||false;
+function ovDiagAutoOpen(){
+  const d=document.getElementById("ov-diag");
+  if(!d||OV_DIAG_TOUCHED||d.open)return;
+  const txt=id=>{const e=document.getElementById(id);return e?e.innerText||"":"";};
+  const drift=txt("ov-drift");
+  const m=drift.match(/(\d+)\s+open/);
+  const driftBad=!!(m&&+m[1]>0);
+  const pf=txt("ov-preflight");
+  const pfBad=pf.length>0&&!/ready to go/i.test(pf)&&/FAIL|not ready|blocked/i.test(pf);
+  if(driftBad||pfBad)d.open=true;
+}
+
+
+// CXA-F385: the Overview breathes while agents work — a live strip naming
+// each busy agent and its ticket (click-through to the live log). The log
+// was alive behind a click; the front door showed nothing.
+let OV_WORK_LAST=0;
+function renderOvWorking(){
+  const el=document.getElementById("ov-working");if(!el)return;
+  const now=Date.now();
+  if(now-OV_WORK_LAST<4000)return; // the 1 Hz snapshot repaints often; fetch gently
+  OV_WORK_LAST=now;
+  Promise.all([
+    fetch(api("/workers")).then(r=>r.json()).catch(()=>[]),
+    fetch(api("/agent-liveness")).then(r=>r.json()).catch(()=>[]),
+  ]).then(([ws,lv])=>{
+    window.WORKERS=Array.isArray(ws)?ws:[];
+    window.LIVENESS=Array.isArray(lv)?lv:[];
+    const chips=[];
+    const seen=new Set();
+    for(const w of (window.WORKERS||[])){
+      if(/^(leader|worker|idle)$/i.test(w.role||"idle"))continue;
+      const role=(w.role||"").replace(/_/g,"-").toUpperCase();
+      seen.add(role);
+      chips.push({role,ticket:w.ticket||"",who:w.worker||""});
+    }
+    // Ground truth: a live-log file written in the last 2 minutes IS a
+    // working agent, whatever the claim registry says (CXA-F386 — in-process
+    // runs looked idle from outside while their log grew every second).
+    for(const l of (window.LIVENESS||[])){
+      if((l.age_secs??9999)>120)continue;
+      const role=(l.role||"").replace(/_/g,"-").toUpperCase();
+      if(seen.has(role))continue;
+      seen.add(role);
+      chips.push({role,ticket:l.ticket||"",who:""});
+    }
+    if(!chips.length){setHTML(el,"");return;}
+    setHTML(el,`<div class="ov-work">`+chips.map(w=>
+      `<div class="ov-work-chip" onclick="openAgent('${esc(w.role)}','${esc(w.who)}')" title="open ${esc(w.role)}'s live log">
+        <span class="ov-work-dot"></span><b>${esc(w.role)}</b>${w.ticket?`<span class="tk">${esc(w.ticket)}</span>`:""}<span class="ov-work-lbl">working now</span></div>`
+    ).join("")+`</div>`);
+  }).catch(()=>{});
+}

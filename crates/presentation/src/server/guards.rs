@@ -97,10 +97,7 @@ pub(super) async fn principal_name(
 }
 
 /// Resolve the signed-in username, or `"user"` when auth is disabled.
-pub(super) async fn resolve_username(
-    app: &AppState,
-    headers: &axum::http::HeaderMap,
-) -> String {
+pub(super) async fn resolve_username(app: &AppState, headers: &axum::http::HeaderMap) -> String {
     match &app.auth {
         Some(auth) => resolve_principal(auth, headers)
             .await
@@ -111,10 +108,7 @@ pub(super) async fn resolve_username(
 
 /// Whether the caller holds admin/super authority, which outranks channel
 /// ownership everywhere it is checked.
-pub(super) async fn user_can_manage(
-    app: &AppState,
-    headers: &axum::http::HeaderMap,
-) -> bool {
+pub(super) async fn user_can_manage(app: &AppState, headers: &axum::http::HeaderMap) -> bool {
     let Some(auth) = app.auth.clone() else {
         return true; // running open (no auth configured)
     };
