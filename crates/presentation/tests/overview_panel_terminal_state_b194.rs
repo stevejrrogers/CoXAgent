@@ -199,7 +199,9 @@ fn js_panel_manifest_mirrors_the_rust_manifest() {
 fn retry_after_failure_redispatches_and_reaches_ready() {
     let script = format!(
         r#"
-const window={{}};
+const window=globalThis;
+var __noopEl=function(){{return {{id:"",textContent:""}};}};
+window.document={{getElementById:function(){{return null;}},createElement:__noopEl,head:{{appendChild:function(){{}}}}}};
 {}
 const calls={{n:0}};
 const host={{querySelectorAll:(sel)=>sel==='[data-ts-slot="primaryAction"]'?[btn]:[]}};
@@ -226,7 +228,9 @@ setTimeout(()=>{{
 fn failing_retry_reenters_error_with_the_new_cause() {
     let script = format!(
         r#"
-const window={{}};
+const window=globalThis;
+var __noopEl=function(){{return {{id:"",textContent:""}};}};
+window.document={{getElementById:function(){{return null;}},createElement:__noopEl,head:{{appendChild:function(){{}}}}}};
 {}
 const btn={{disabled:false,listeners:{{}},addEventListener(t,f){{this.listeners[t]=f;}},style:{{}}}};
 const host={{querySelectorAll:(sel)=>sel==='[data-ts-slot="primaryAction"]'?[btn]:[]}};
@@ -297,4 +301,219 @@ fn manifest_contract_still_holds_on_this_branch() {
             p.dom_id
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// CXA-B271 — Empty-state depth: guidance, counts, filtered-empty inverse,
+// paginated empty page, permission-dimmed unauthorized actions. All pure
+// functions over the wiring's view-model slice `{counts, filter, total,
+// sort, page, pageSize, onClearFilter, onBack, permission}` — no DOM, no IO;
+// the one rendered scenario goes through TerminalState.paint exactly as the
+// browser does.
+// ---------------------------------------------------------------------------
+
+/// Without a detail slice the empty state is still never a bare blank: it
+/// carries the panel-specific what-fills-this hint and a non-defaulted copy.
+#[test]
+fn b271_no_data_empty_state_names_what_fills_the_panel() {
+    let spec = eval_js("JSON.stringify(OvPanelStates.emptySpec('working', null))");
+    assert!(
+        spec.contains("\"state\":\"empty\""),
+        "not an empty spec: {spec}"
+    );
+    assert!(
+        spec.contains("claim a ticket"),
+        "empty state lost the what-fills-this guidance: {spec}"
+    );
+    // Bare-blank guard: title AND body are always non-empty strings.
+    let body_nonblank = eval_js(
+        "OvPanelStates.emptySpec('releases', {}).title.length > 0 && OvPanelStates.emptySpec('releases', {}).body.length > 0",
+    );
+    assert_eq!(body_nonblank, "true", "empty state rendered a bare blank");
+}
+
+/// Sibling data elsewhere in the panel's scope surfaces as a count line —
+/// zero never stands alone.
+#[test]
+fn b271_no_data_with_scope_counts_shows_the_totals() {
+    let spec = eval_js(
+        "JSON.stringify(OvPanelStates.emptySpec('alerts', {counts: '12 tickets open'}))",
+    );
+    assert!(
+        spec.contains("12 tickets open"),
+        "scope counts missing from the no-data state: {spec}"
+    );
+}
+
+/// Filtered-empty echoes the active filter verbatim, offers its inverse
+/// (clear filter) and states that the sort survives the clear.
+#[test]
+fn b271_filtered_empty_echoes_the_filter_and_offers_the_inverse() {
+    let spec = eval_js(
+        r#"JSON.stringify(OvPanelStates.emptySpec('kpis', {filter: 'cost>0', total: 41, sort: 'newest first'}))"#,
+    );
+    assert!(
+        spec.contains("Nothing matches the current filter"),
+        "filtered-empty kept the generic title: {spec}"
+    );
+    assert!(
+        spec.contains("cost&gt;0") || spec.contains("cost>0") || spec.contains("cost\\u003e0"),
+        "active filter not echoed verbatim: {spec}"
+    );
+    assert!(
+        spec.contains("41 entries exist without the filter"),
+        "unfiltered total missing: {spec}"
+    );
+    assert!(
+        spec.contains("Still sorted by newest first"),
+        "sort preservation not stated: {spec}"
+    );
+    assert!(
+        spec.contains("Clear filter"),
+        "inverse affordance (clear filter) missing: {spec}"
+    );
+}
+
+/// A pagination window past its end shows position ('no results on page N'),
+/// the totals and a way back to the last real page.
+#[test]
+fn b271_past_end_page_shows_position_and_a_way_back() {
+    let spec = eval_js(
+        "JSON.stringify(OvPanelStates.emptySpec('kpis', {page: 7, pageSize: 50, total: 120}))",
+    );
+    assert!(
+        spec.contains("No results on page 7"),
+        "page position missing: {spec}"
+    );
+    assert!(
+        spec.contains("120 entries in total") && spec.contains("(3 pages)"),
+        "totals/pages context missing: {spec}"
+    );
+    assert!(
+        spec.contains("Back to page 3"),
+        "way back to the last populated page missing: {spec}"
+    );
+}
+
+/// Variant decision is pure: past-end wins over an active filter (both can be
+/// set), an in-range page with a filter is filtered-empty, everything else is
+/// plain no-data.
+#[test]
+fn b271_variant_decision_precedence_is_pure() {
+    // Past-end beats filter.
+    let v = eval_js(
+        "OvPanelStates.emptyVariantOf({filter: 'x', page: 4, pageSize: 10, total: 20})",
+    );
+    assert_eq!(v, "past-end-page");
+    // In-range page + filter → filtered.
+    let v = eval_js(
+        "OvPanelStates.emptyVariantOf({filter: 'x', page: 1, pageSize: 10, total: 0})",
+    );
+    assert_eq!(v, "filtered");
+    // Plain shapes degrade to no-data, never throw.
+    for shape in ["null", "{\"", "{'filter':''}", "{}"] {
+        let _ = shape; // placeholder to keep the loop readable below
+    }
+    let v = eval_js("OvPanelStates.emptyVariantOf(null)");
+    assert_eq!(v, "no-data");
+    let v = eval_js("OvPanelStates.emptyVariantOf({})");
+    assert_eq!(v, "no-data");
+    let v = eval_js("OvPanelStates.emptyVariantOf({filter: ''})");
+    assert_eq!(v, "no-data");
+}
+
+/// Rendered (through TerminalState.paint, the real path): a DENIED
+/// clear-filter stays visible and labelled but renders dimmed-with-reason —
+/// never hidden, never silently inert.
+#[test]
+fn b271_unauthorized_action_renders_dimmed_with_a_why_not_hidden() {
+    let script = format!(
+        r#"
+const window=globalThis;
+var __noopEl=function(){{return {{id:"",textContent:""}};}};
+window.document={{getElementById:function(){{return null;}},createElement:__noopEl,head:{{appendChild:function(){{}}}}}};
+{}
+{}
+const btn={{
+  slot:"secondaryAction", disabled:false, attrs:{{}}, style:{{}},
+  getAttribute:function(){{ return this.slot; }},
+  setAttribute:function(k,v){{ this.attrs[k]=String(v); }},
+  addEventListener:function(){{}}
+}};
+const host={{
+  innerHTML:"",
+  querySelectorAll:function(){{ return [btn]; }}
+}};
+window.OvPanelStates.renderPhase('kpis','empty',{{emptyDetail:{{
+  filter:"mine", onClearFilter:function(){{}},
+  permission:{{allowed:false, deniedWhy:"viewers cannot edit board filters"}}
+}}}}, host);
+if(!host.innerHTML.includes("Clear filter")) throw new Error("denied affordance was hidden: "+host.innerHTML);
+if(btn.disabled!==true) throw new Error("denied action not disabled: "+JSON.stringify(btn.attrs));
+if(btn.attrs["data-ts-dimmed"]!=="1") throw new Error("dim marker missing: "+JSON.stringify(btn.attrs));
+if(!String(btn.attrs.title||"").includes("viewers cannot edit board filters")) throw new Error("why-hint missing: "+btn.attrs.title);
+console.log("OK");
+"#,
+        include_str!("../src/web/js/terminal_state.js"),
+        include_str!("../src/web/js/overview_states.js")
+    );
+    assert_eq!(run_node(&script), "OK");
+}
+
+/// The allowed path stays untouched: no dim marker, no disabled, click bound.
+#[test]
+fn b271_authorized_actions_render_undimmed_and_clickable() {
+    let script = format!(
+        r#"
+const window=globalThis;
+var __noopEl=function(){{return {{id:"",textContent:""}};}};
+window.document={{getElementById:function(){{return null;}},createElement:__noopEl,head:{{appendChild:function(){{}}}}}};
+{}
+{}
+let fired=false;
+const btn={{
+  slot:"secondaryAction", disabled:false, attrs:{{}}, style:{{}}, fire:function(){{}},
+  getAttribute:function(){{ return this.slot; }},
+  setAttribute:function(k,v){{ this.attrs[k]=String(v); }},
+  addEventListener:function(ev,fn){{ this.fire=function(){{ fn(); }}; }}
+}};
+const host={{
+  innerHTML:"",
+  querySelectorAll:function(){{ return [btn]; }}
+}};
+window.OvPanelStates.renderPhase('kpis','empty',{{emptyDetail:{{
+  filter:"mine", onClearFilter:function(){{ fired=true; }}
+}}}}, host);
+if(btn.disabled===true || btn.attrs["data-ts-dimmed"]) throw new Error("allowed action was dimmed: "+JSON.stringify(btn.attrs));
+btn.fire();
+if(!fired) throw new Error("clear-filter callback not bound");
+console.log("OK");
+"#,
+        include_str!("../src/web/js/terminal_state.js"),
+        include_str!("../src/web/js/overview_states.js")
+    );
+    assert_eq!(run_node(&script), "OK");
+}
+
+/// The unauthorized clear-filter still KEEPS its label in the spec even when
+/// permission info arrives only at paint time (pure wrapper, no dropping).
+#[test]
+fn b271_permission_wrapper_dims_but_never_drops_the_label() {
+    let spec = eval_js(
+        r#"JSON.stringify(OvPanelStates.authorizedAction({label: "Clear filter", onClick: null}, {allowed: false, deniedWhy: "read-only role"}))"#,
+    );
+    assert!(spec.contains("Clear filter"), "label dropped: {spec}");
+    assert!(
+        spec.contains("read-only role"),
+        "why-hint not attached: {spec}"
+    );
+    // Allowed or absent permission → the action passes through unchanged.
+    let passthrough = eval_js(
+        r#"JSON.stringify(OvPanelStates.authorizedAction({label: "Clear filter"}, {allowed: true}))"#,
+    );
+    assert!(passthrough.contains("Clear filter"), "{passthrough}");
+    assert!(
+        !passthrough.contains("unauthorizedReason"),
+        "{passthrough}"
+    );
 }
