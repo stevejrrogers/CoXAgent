@@ -41,6 +41,7 @@ pub mod prompts_resolve;
 pub mod release_candidates;
 pub mod repo_map;
 pub mod repro_url;
+pub mod security_sweep;
 pub mod selection;
 pub mod slot_collision_radar;
 pub mod sprint;
