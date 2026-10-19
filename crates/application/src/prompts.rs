@@ -201,8 +201,9 @@ pub fn services_block(services: &[crate::config::ServiceConfig]) -> String {
         return String::new();
     }
     let mut out = String::from(
-        "\n\nServices in this project — set service_tag to the one each ticket's \
-         code lives in (the FIRST is the default for untagged tickets):\n",
+        "\n\nServices in this project — service_tag must be EXACTLY one of the \
+         names below (the FIRST is the default for untagged tickets). Never \
+         invent a tag; when none fits or you are unsure, OMIT the field:\n",
     );
     for s in active {
         let scope = if s.scopes.is_empty() {
