@@ -310,7 +310,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             report,
         )
         .await;
-
     }
     /// Whether any file under `config.deploy.migration_detection_paths`
     /// changed between the known-good sha and the failing one.
@@ -340,7 +339,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// (CXA-F012): blacklist the broken sha, write a docs post-mortem, file or
     /// link a root-cause prevention ticket and record a team lesson.
     #[allow(clippy::too_many_arguments)]
-
     pub(super) async fn finish_rollback(
         &self,
         reason: &str,
@@ -419,7 +417,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             report,
         )
         .await;
-
     }
     /// Record a rollback that was deliberately NOT attempted (stale target or
     /// a migration in the way) — distinct from an attempt that failed. The
@@ -568,7 +565,6 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             .unwrap_or_else(|| summary.clone());
         self.match_lesson_recurrence(&match_text, reason, &incident_at)
             .await;
-
     }
     /// File a High bug when a rollback attempt itself fails (deduped on an
     /// open one) — the root-cause failure already filed its own bug via

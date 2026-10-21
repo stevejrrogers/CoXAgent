@@ -60,7 +60,6 @@ pub fn transition_allowed(ticket_type: TicketType, from: Status, to: Status) -> 
                 | (OnHold, Open | Rejected)
                 // Ship-truth demotion: a claimed-fixed bug absent from main reopens.
                 | (Verified, Open)
-
         ),
     }
 }
@@ -131,7 +130,10 @@ pub fn field_permitted(actor: Role, field: &str) -> bool {
         // the BA stamps it when filing shared-infrastructure work, the PO may
         // amend — the same authority that owns `clarify`. Agents never
         // relabel work, or the duplicate radar's carve-out becomes a dodge.
-        "service_tag" => matches!(actor, Role::Ba | Role::Po | Role::User),
+        // The SA joined with CXA-F420c: splitting an oversize ticket along a
+        // service boundary is an architecture decision, and each minted
+        // subtask carries the service its code lives in.
+        "service_tag" => matches!(actor, Role::Ba | Role::Po | Role::User | Role::Sa),
         // SA owns technical design and dependency graph — parent links are
         // part of that graph (an oversize ticket split into subtasks).
         "design.technical" | "depends_on" | "parent_id" => actor == Role::Sa,

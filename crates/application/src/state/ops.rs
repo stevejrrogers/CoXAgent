@@ -349,34 +349,6 @@ pub struct IncidentRecord {
     pub lesson: Option<String>,
 }
 
-/// One durable incident record (CXA-F012): after every auto-rollback or
-/// rollback-skip the loop writes a single inspection-grade entry linking the
-/// failing commit, what it was rolled back to (or why it wasn't), and any
-/// root-cause prevention ticket + team lesson — turning each outage into one
-/// "why + fix-the-root" cycle instead of a revert-and-forget.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IncidentRecord {
-    /// RFC3339 timestamp.
-    pub at: String,
-    /// What triggered it (`deploy failed` / `tests failed` / …).
-    pub reason: String,
-    /// The commit sha that shipped and broke the health probe / tests.
-    pub failed_sha: String,
-    /// The sha rolled back to; empty when rollback was skipped.
-    #[serde(default)]
-    pub to_sha: String,
-    /// Whether the rollback itself succeeded (`false` when skipped/failed).
-    pub ok: bool,
-    /// Human-readable summary of what happened.
-    pub summary: String,
-    /// Id of the deduped root-cause prevention ticket filed for this incident.
-    #[serde(default)]
-    pub root_cause_ticket: Option<String>,
-    /// A team lesson recorded from this incident (deduped against lessons).
-    #[serde(default)]
-    pub lesson: Option<String>,
-}
-
 /// One queued execution job (control plane → runner). The hub NEVER executes
 /// these itself when a live runner exists — execution stays on the execution
 /// plane. Claim-and-remove is atomic via `mutate_state`.

@@ -63,6 +63,12 @@ pub(super) async fn docker_janitor() {
         sweep_dormant_volumes().await;
         sweep_orphaned_images().await;
         run_docker(&["image", "prune", "-f"]).await;
+        // BuildKit's build cache is the real disk eater: every gate build
+        // leaves layers behind, and nothing above touches them — it grew to
+        // 474 GB and filled the disk on 2026-10-19 (Docker's VM then could
+        // not even boot). Keep a warm working set so gate builds stay fast,
+        // reap everything beyond it.
+        run_docker(&["builder", "prune", "-f", "--keep-storage", "20GB"]).await;
     }
 }
 
