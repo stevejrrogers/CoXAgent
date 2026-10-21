@@ -77,8 +77,8 @@ fn run_js(scenario: &str) -> String {
 /// `render(spec)` → `{threw, message?, html?}` as JSON.
 fn render_json(spec: &str) -> (bool, String) {
     let out = run_js(&format!(
-        r#"function rj(s){{try{{return{{threw:false,html:window.TerminalState.render(s)}};}}catch(e){{return{{threw:true,message:String(e.message)}};}}}}
-console.log(JSON.stringify(rj({spec})));"#
+        r"function rj(s){{try{{return{{threw:false,html:window.TerminalState.render(s)}};}}catch(e){{return{{threw:true,message:String(e.message)}};}}}}
+console.log(JSON.stringify(rj({spec})));"
     ));
     let threw = out.contains(r#""threw":true"#);
     (threw, out)
@@ -128,7 +128,7 @@ fn the_module_is_served_by_the_router_and_loaded_by_the_shell() {
 #[test]
 fn js_contract_mirrors_the_frozen_rust_manifest() {
     let out = run_js(
-        r#"console.log(JSON.stringify({S:window.TerminalState.STATES,R:window.TerminalState.REQUIRED,O:window.TerminalState.OPTIONAL,L:window.TerminalState.ROLES}));"#,
+        r"console.log(JSON.stringify({S:window.TerminalState.STATES,R:window.TerminalState.REQUIRED,O:window.TerminalState.OPTIONAL,L:window.TerminalState.ROLES}));",
     );
     // Every Rust state name exists in the JS state list, in manifest order.
     let rust_states = ["loading", "empty", "error", "ready", "attention", "zero"];
@@ -417,7 +417,7 @@ fn unknown_state_and_unknown_spec_keys_throw() {
         out.contains("primary"),
         "non-object action is rejected\n{out}"
     );
-    let out = threw_with(r#"null"#);
+    let out = threw_with(r"null");
     assert!(out.contains("spec object required"), "{out}");
 }
 

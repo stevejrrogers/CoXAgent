@@ -43,6 +43,7 @@ pub mod repo_map;
 pub mod repro_url;
 pub mod security_sweep;
 pub mod selection;
+pub mod service_scan;
 pub mod slot_collision_radar;
 pub mod sprint;
 pub mod state;
