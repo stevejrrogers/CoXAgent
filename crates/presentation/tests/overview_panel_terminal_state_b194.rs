@@ -336,9 +336,8 @@ fn b271_no_data_empty_state_names_what_fills_the_panel() {
 /// zero never stands alone.
 #[test]
 fn b271_no_data_with_scope_counts_shows_the_totals() {
-    let spec = eval_js(
-        "JSON.stringify(OvPanelStates.emptySpec('alerts', {counts: '12 tickets open'}))",
-    );
+    let spec =
+        eval_js("JSON.stringify(OvPanelStates.emptySpec('alerts', {counts: '12 tickets open'}))");
     assert!(
         spec.contains("12 tickets open"),
         "scope counts missing from the no-data state: {spec}"
@@ -401,14 +400,11 @@ fn b271_past_end_page_shows_position_and_a_way_back() {
 #[test]
 fn b271_variant_decision_precedence_is_pure() {
     // Past-end beats filter.
-    let v = eval_js(
-        "OvPanelStates.emptyVariantOf({filter: 'x', page: 4, pageSize: 10, total: 20})",
-    );
+    let v =
+        eval_js("OvPanelStates.emptyVariantOf({filter: 'x', page: 4, pageSize: 10, total: 20})");
     assert_eq!(v, "past-end-page");
     // In-range page + filter → filtered.
-    let v = eval_js(
-        "OvPanelStates.emptyVariantOf({filter: 'x', page: 1, pageSize: 10, total: 0})",
-    );
+    let v = eval_js("OvPanelStates.emptyVariantOf({filter: 'x', page: 1, pageSize: 10, total: 0})");
     assert_eq!(v, "filtered");
     // Plain shapes degrade to no-data, never throw.
     for shape in ["null", "{\"", "{'filter':''}", "{}"] {
@@ -512,8 +508,5 @@ fn b271_permission_wrapper_dims_but_never_drops_the_label() {
         r#"JSON.stringify(OvPanelStates.authorizedAction({label: "Clear filter"}, {allowed: true}))"#,
     );
     assert!(passthrough.contains("Clear filter"), "{passthrough}");
-    assert!(
-        !passthrough.contains("unauthorizedReason"),
-        "{passthrough}"
-    );
+    assert!(!passthrough.contains("unauthorizedReason"), "{passthrough}");
 }
