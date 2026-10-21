@@ -8,7 +8,7 @@ async function renderServicesPanel(){
   el.innerHTML='<div class="panel" style="color:var(--muted)">Loading services…</div>';
   let data={services:[]};
   try{const r=await fetch(api("/services"));if(r.ok)data=await r.json();}catch(e){}
-  const rows=(data.services||[]).map(s=>{
+  const rows=(data.services||[]).map((s,ix)=>{
     const st=s.status||"active";
     const col=st==="active"?"var(--green)":st==="needs-setup"?"var(--amber)":"var(--muted)";
     return `<div class="toolrow">
@@ -17,7 +17,12 @@ async function renderServicesPanel(){
         <span class="tooldim">· ${esc(st)}${s.scopes&&s.scopes.length?` · scopes: ${esc(s.scopes.join(", "))}`:""}</span></div>
         <code class="toolpath">${esc(s.repo||"(project repo)")} → ${esc(s.work_dir||"(project work_dir)")}</code>
         ${s.build_cmd||s.test_cmd?`<div class="tooldim" style="font-size:11.5px">build: <code>${esc(s.build_cmd||"—")}</code> · test: <code>${esc(s.test_cmd||"—")}</code></div>`:""}
-      </div></div>`;}).join("");
+      </div>${ix===0?'<span class="tooldim" title="the first service is the default home for untagged tickets">default</span>'
+        :st==="active"?`<button class="gc-btn" onclick="setServiceStatus('${esc(s.name)}','paused')" title="keep tickets, stop assignment"><i class="ti ti-player-pause"></i> Pause</button>`
+        :st==="paused"||st==="needs-setup"?`<button class="gc-btn" onclick="setServiceStatus('${esc(s.name)}','active')"><i class="ti ti-player-play"></i> Resume</button>
+         <button class="gc-btn" onclick="setServiceStatus('${esc(s.name)}','archived')" title="stop assignment and mark for cleanup"><i class="ti ti-archive"></i> Archive</button>`
+        :`<button class="gc-btn" onclick="setServiceStatus('${esc(s.name)}','active')"><i class="ti ti-player-play"></i> Unarchive</button>`}
+      </div>`;}).join("");
   el.innerHTML=`
     <div class="toolcard">
       <div class="toolhead"><i class="ti ti-stack-2" style="color:var(--accent2)"></i> Services
@@ -95,4 +100,14 @@ async function addService(){
     renderServicesPanel();
   }catch(e){out.innerHTML='<span style="color:var(--red)">Network error — the probe may still be running; reopen Settings → Services to check.</span>';}
   finally{if(btn){btn.disabled=false;btn.innerHTML='<i class="ti ti-rocket"></i> Probe &amp; add';}}
+}
+
+async function setServiceStatus(name,status){
+  try{
+    const r=await fetch(api(`/services/${encodeURIComponent(name)}/status`),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({status})});
+    const b=await r.json().catch(()=>({}));
+    if(!r.ok){toasty(b.error||b||"status change failed","err");}
+    else{toasty(`${name}: ${b.from} → ${b.status}. ${b.note||""}`);}
+  }catch(e){toasty("Network error","err");}
+  renderServicesPanel();
 }

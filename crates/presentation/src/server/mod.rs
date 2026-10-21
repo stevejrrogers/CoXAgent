@@ -954,6 +954,10 @@ pub async fn serve_full(
             "/api/projects/:pid/services/scan",
             post(services::scan_service_ep),
         )
+        .route(
+            "/api/projects/:pid/services/:name/status",
+            post(services::set_service_status_ep),
+        )
         .route("/api/projects/:pid/merge-sweep", post(merge_sweep_ep))
         .route(
             "/api/workspace",

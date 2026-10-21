@@ -355,3 +355,66 @@ fn snapshot_repo(dir: &FsPath, root_name: String) -> RepoSnapshot {
         manifests,
     }
 }
+
+#[derive(serde::Deserialize)]
+pub(super) struct ServiceStatusReq {
+    /// `active | paused | archived` — the §6 lifecycle verbs. `needs-setup`
+    /// is earned by a probe, never set by hand.
+    pub(super) status: String,
+}
+
+/// POST `/api/projects/:pid/services/:name/status` — pause/resume/archive one
+/// service (CXA-F420e, spec §6). Pause keeps tickets and stops assignment;
+/// archive is pause plus intent-to-remove (ticket re-homing and worktree
+/// cleanup stay with the janitor). The FIRST service is the project's default
+/// home for untagged tickets — it can never be paused away.
+pub(super) async fn set_service_status_ep(
+    State(app): State<AppState>,
+    Path((pid, name)): Path<(String, String)>,
+    Json(req): Json<ServiceStatusReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let status = req.status.trim().to_lowercase();
+    if !matches!(status.as_str(), "active" | "paused" | "archived") {
+        return bad_request_error("status must be active, paused or archived");
+    }
+    let mut cfg = read_project_config(&p.config_path);
+    // R1: materialize the implicit single-service form before editing it, so
+    // a legacy project can pause what it only implicitly declared.
+    if cfg.services.is_empty() {
+        cfg.services = cfg.effective_services(&p.work_dir.to_string_lossy());
+    }
+    let first = cfg.services.first().map(|s| s.name.clone());
+    let Some(svc) = cfg.services.iter_mut().find(|s| s.name == name) else {
+        return not_found();
+    };
+    if status != "active" && first.as_deref() == Some(name.as_str()) {
+        return bad_request_error(
+            "the first service is the default home for untagged tickets — it cannot be \
+             paused or archived; reorder services in coxagent.json first",
+        );
+    }
+    let was = svc.status.clone();
+    svc.status.clone_from(&status);
+    let text = match serde_json::to_string_pretty(&cfg) {
+        Ok(t) => t,
+        Err(e) => return internal_error(&e.to_string()),
+    };
+    if let Err(e) = std::fs::write(&p.config_path, text) {
+        return internal_error(&e.to_string());
+    }
+    Json(serde_json::json!({
+        "ok": true,
+        "name": name,
+        "from": was,
+        "status": status,
+        "note": if status == "active" {
+            "worker starts on the next hub restart"
+        } else {
+            "assignment stops at the next cycle; existing worktrees are cleaned by the janitor"
+        },
+    }))
+    .into_response()
+}
