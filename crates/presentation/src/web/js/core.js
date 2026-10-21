@@ -395,7 +395,33 @@ function renderRoadmap(){
   // ticket, the filter is a lens over the board, and the banner says so.
   const dm=(s.derived||{}).milestones||[];
   const sel=MSFILTER?dm.find(x=>x.name===MSFILTER):null;
-  const scope=sel&&Array.isArray(sel.committed)?new Set(sel.committed):null;
+  // Which release a ship record LANDS in: the first higher version cut after
+  // it, else the running current version — shared by the timeline labels and
+  // the released-milestone lens below.
+  const landsIn=(rec)=>{
+    const n=vnum(rec.version);const t=Date.parse(rec.at)||0;
+    for(const h of (s.history||[])){const hv=vnum(h.version);
+      if(hv>n&&(Date.parse(h.at)||0)>=t)return h.version;}
+    const cur=String(s.current_version||"");
+    if(cur&&vnum(cur)>n)return cur;
+    return null;
+  };
+  let scope=sel&&Array.isArray(sel.committed)?new Set(sel.committed):null;
+  // CXA-F252 attributes committed scope to the ACTIVE target only, so a
+  // released milestone arrives with an empty list — and clicking it showed
+  // "0 of 0" over an empty board. A released row's scope is a fact of the
+  // ship history instead: every ticket whose landing release is within
+  // (previous milestone's target, this row's target].
+  const selDelivered=sel&&sel.released&&(!scope||!scope.size);
+  if(selDelivered){
+    const hi=vnum(sel.target_version);
+    const i=dm.findIndex(x=>x.name===MSFILTER);
+    const lo=i>0?vnum(dm[i-1].target_version):-1;
+    scope=new Set((s.history||[]).map(r=>{
+      const l=landsIn(r);const n=l?vnum(l):vnum(String(s.current_version||r.version));
+      return n>lo&&n<=hi?r.ticket:null;
+    }).filter(Boolean));
+  }
   const inScope=t=>!scope||scope.has(t.id);
   const doneAll=ts.filter(isDone);
   const shipped=doneAll.filter(inScope);
@@ -442,15 +468,6 @@ function renderRoadmap(){
     // counter. Label each node with the release that contains it: the first
     // higher version seen later in history, else the running current version,
     // else "next release".
-    const all=(s.history||[]).slice();
-    const landsIn=(rec)=>{
-      const n=vnum(rec.version);const t=Date.parse(rec.at)||0;
-      for(const h of all){const hv=vnum(h.version);
-        if(hv>n&&(Date.parse(h.at)||0)>=t)return h.version;}
-      const cur=String(s.current_version||"");
-      if(cur&&vnum(cur)>n)return cur;
-      return null;
-    };
     timeline=`<div class="sec" style="margin-top:22px">Delivery timeline</div><div class="panel" style="overflow-x:auto" data-keepscroll="rm-timeline" data-scrollend="1">
       <div style="display:flex;align-items:flex-start;min-width:min-content;padding:6px 0">${recent.map((r,i)=>`
         <div style="flex:1 1 0;min-width:118px;max-width:190px;position:relative;text-align:center;padding:0 4px">
@@ -468,7 +485,7 @@ function renderRoadmap(){
   const shown=shipped.length+inflight.length+next.length+later.length;
   const banner=scope?`<div class="panel" style="margin-bottom:16px;display:flex;align-items:center;gap:10px;border-left:3px solid var(--accent2)">
     <i class="ti ti-filter" style="color:var(--accent2)"></i>
-    <span style="font-size:12.5px;color:var(--muted)">Milestone <b style="color:var(--text)">${esc(MSFILTER)}</b> — ${shown} of ${sel.committed.length} committed tickets shown · ${total-shown} other project tickets hidden</span>
+    <span style="font-size:12.5px;color:var(--muted)">Milestone <b style="color:var(--text)">${esc(MSFILTER)}</b> — ${shown} of ${selDelivered?scope.size:sel.committed.length} ${selDelivered?'delivered (from release history)':'committed'} tickets shown · ${total-shown} other project tickets hidden</span>
     <button class="gc-btn" style="margin-left:auto" onclick="MSFILTER='';renderRoadmap()"><i class="ti ti-x"></i> Clear filter</button></div>`:"";
   const keep=grabScroll(el);
   el.innerHTML=header+timeline+roadmapGantt(s)+banner+board;
