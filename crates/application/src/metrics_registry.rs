@@ -145,11 +145,24 @@ impl MetricsRegistry {
                     hist.buckets[i].fetch_add(1, Ordering::Relaxed);
                 }
             }
-            hist.sum_bits
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
-                    Some((f64::from_bits(bits) + seconds).to_bits())
-                })
-                .ok();
+            // Plain CAS loop instead of `fetch_update`: newer toolchains
+            // deprecate it (for `try_update`), older ones lack the
+            // replacement, and the Docker image's rustc is ahead of the host
+            // — under `-D warnings` the deprecation alone broke the Linux
+            // image build while every local build stayed green (2026-10-21).
+            let mut cur = hist.sum_bits.load(Ordering::Relaxed);
+            loop {
+                let next = (f64::from_bits(cur) + seconds).to_bits();
+                match hist.sum_bits.compare_exchange_weak(
+                    cur,
+                    next,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(now) => cur = now,
+                }
+            }
             hist.count.fetch_add(1, Ordering::Relaxed);
         }
     }
