@@ -1633,27 +1633,19 @@ mod tests {
         // CXA-F420a.2: two active services; a runner bound to "engine" must
         // skip the untagged ticket (it resolves to the FIRST service, "hub")
         // and work only the one tagged for it.
-        let mut cfg = Config::default();
-        cfg.services = vec![
-            crate::config::ServiceConfig {
-                name: "hub".into(),
-                repo: String::new(),
-                work_dir: String::new(),
-                scopes: Vec::new(),
-                build_cmd: String::new(),
-                test_cmd: String::new(),
-                status: "active".into(),
-            },
-            crate::config::ServiceConfig {
-                name: "engine".into(),
-                repo: String::new(),
-                work_dir: String::new(),
-                scopes: Vec::new(),
-                build_cmd: String::new(),
-                test_cmd: String::new(),
-                status: "active".into(),
-            },
-        ];
+        let active = |name: &str| crate::config::ServiceConfig {
+            name: name.to_owned(),
+            repo: String::new(),
+            work_dir: String::new(),
+            scopes: Vec::new(),
+            build_cmd: String::new(),
+            test_cmd: String::new(),
+            status: "active".into(),
+        };
+        let cfg = Config {
+            services: vec![active("hub"), active("engine")],
+            ..Config::default()
+        };
         let untagged = ready_feature("FEAT-001");
         let mut tagged = ready_feature("FEAT-002");
         tagged.set_service_tag(Role::Ba, "engine").expect("tag");

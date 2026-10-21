@@ -349,7 +349,7 @@ fn b271_no_data_with_scope_counts_shows_the_totals() {
 #[test]
 fn b271_filtered_empty_echoes_the_filter_and_offers_the_inverse() {
     let spec = eval_js(
-        r#"JSON.stringify(OvPanelStates.emptySpec('kpis', {filter: 'cost>0', total: 41, sort: 'newest first'}))"#,
+        r"JSON.stringify(OvPanelStates.emptySpec('kpis', {filter: 'cost>0', total: 41, sort: 'newest first'}))",
     );
     assert!(
         spec.contains("Nothing matches the current filter"),

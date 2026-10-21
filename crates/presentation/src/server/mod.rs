@@ -74,6 +74,7 @@ mod repro_url;
 mod requests;
 mod search;
 mod security;
+mod services;
 mod share_link;
 mod share_page;
 mod status;
@@ -941,6 +942,15 @@ pub async fn serve_full(
         .route("/api/projects/:pid/sprint/:action", post(sprint_scope_ep))
         .route("/api/projects/:pid/digest", post(digest_ep))
         .route("/api/projects/:pid/deps/scan", post(deps::scan_ep))
+        // CXA-F420b: Add-repo wizard — list, scan/propose, add (probe-first).
+        .route(
+            "/api/projects/:pid/services",
+            get(services::list_services_ep).post(services::add_service_ep),
+        )
+        .route(
+            "/api/projects/:pid/services/scan",
+            post(services::scan_service_ep),
+        )
         .route("/api/projects/:pid/merge-sweep", post(merge_sweep_ep))
         .route(
             "/api/workspace",
