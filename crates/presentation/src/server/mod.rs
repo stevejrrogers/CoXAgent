@@ -183,6 +183,9 @@ const APP_JS: &[(&str, &str)] = &[
         "approval_policy.js",
         include_str!("../web/js/approval_policy.js"),
     ),
+    // Add-repo wizard panel (CXA-F420b) — the Settings Services tab; loads
+    // before shell.js like every view helper.
+    ("services.js", include_str!("../web/js/services.js")),
     // Lesson efficacy panel (CXA-F306) — the Overview recurrence view; loads
     // before shell.js like every view helper.
     ("lessons.js", include_str!("../web/js/lessons.js")),
