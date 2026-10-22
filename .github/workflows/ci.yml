@@ -140,6 +140,15 @@ jobs:
       # leak-guard runs here on every PR — docker-free (pure scan + git ls-files).
       - name: Doc credential leak guard (CXA-B315 — post-CXA-B311a regression gate)
         run: cargo test -p coxagent-app --test doc_leak_guard && cargo test -p coxagent-application --lib doc_leak
+      # CXA-B201 / CXA-B187.2 / CXA-B188: the named guardrail suite plus the
+      # panel structural and depth contracts are wired into this PR-gate job.
+      # These pins make their removal a red wiring guard, not a silent unhooking.
+      - name: Guardrail scaffold + panel structural contracts (B201/B187.2)
+        run: cargo test -p coxagent-presentation --test guardrail_scaffold_b201 --test panel_structural_contracts_b187_2
+      - name: Panel depth contracts (B188c live view-model assertions)
+        run: cargo test -p coxagent-presentation --test panel_depth_contracts_b188
+      - name: Strict guardrail registry + depth ratchet gates (B188)
+        run: cargo test -p coxagent-app --test guardrail_registry_gate --test depth_gate
 
   # CXA-F326: the DSN-gated Postgres/Redis integration tests are #[ignore]d —
   # this job is the only sanctioned way to run them. It brings its own
