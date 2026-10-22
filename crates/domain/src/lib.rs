@@ -16,6 +16,8 @@ pub mod overview_panel;
 /// Overview→panel-contract mapping (CXA-B255) — pure, snapshot-free.
 pub mod overview_panel_contract;
 pub mod panel;
+/// Panel-inventory drift (CXA-B301) — pure frozen-vs-live diff + report.
+pub mod panel_drift;
 pub mod panel_inventory_entry;
 /// Panel terminal-state contract (CXA-B192) — pure types + transition fn.
 pub mod panel_terminal_state;
