@@ -798,6 +798,9 @@ fn copy_layer_assets_are_served_and_load_before_their_consumers() {
     // `function copyText` in this shared classic-script scope (chat.js x2,
     // shell.js); the catalog resolver must not be shadowed by them.
     assert!(
+        // Named copyFor, NOT copyText: three clipboard helpers declare
+        // `function copyText` in this shared classic-script scope (chat.js x2,
+        // shell.js); the catalog resolver must not be shadowed by them.
         copy_js.contains("window.copyFor = function"),
         "copy.js must expose window.copyFor"
     );
