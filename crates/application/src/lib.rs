@@ -7,6 +7,7 @@ pub mod archive_read;
 pub mod artifacts;
 pub mod attribution_invariants;
 pub mod auth;
+pub mod backlog_hygiene;
 pub mod backlog_import;
 pub mod backlog_scoping;
 pub mod bootstrap_lessons;
