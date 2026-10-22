@@ -418,3 +418,103 @@ pub(super) async fn set_service_status_ep(
     }))
     .into_response()
 }
+
+/// GET `/api/projects/:pid/services/retag-suggestions` — the CXA-F420e retag
+/// pass (spec §4): propose which untagged / default-tagged open tickets look
+/// like they belong to another active service. Proposals only; applying is a
+/// separate explicit POST with the ticked ids — never silent.
+pub(super) async fn retag_suggestions_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let cfg = read_project_config(&p.config_path);
+    let services = cfg.effective_services(&p.work_dir.to_string_lossy());
+    let Ok(state) = p.store.load().await else {
+        return internal_error("state unavailable");
+    };
+    let views: Vec<coxagent_application::service_retag::TicketView> = state
+        .tickets
+        .iter()
+        .map(|t| coxagent_application::service_retag::TicketView {
+            id: t.id().to_string(),
+            title: t.title().to_owned(),
+            service_tag: t.service_tag().map(ToOwned::to_owned),
+            design_files: t
+                .design()
+                .technical
+                .as_ref()
+                .map(|d| d.files.clone())
+                .unwrap_or_default(),
+            terminal: matches!(
+                t.status(),
+                coxagent_domain::Status::Done
+                    | coxagent_domain::Status::Documented
+                    | coxagent_domain::Status::Verified
+                    | coxagent_domain::Status::Rejected
+            ),
+        })
+        .collect();
+    let suggestions = coxagent_application::service_retag::suggest(&views, &services);
+    Json(serde_json::json!({ "suggestions": suggestions })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct RetagApplyReq {
+    /// The ticked suggestions: ticket id → service name.
+    pub(super) assignments: Vec<RetagAssignment>,
+}
+#[derive(serde::Deserialize)]
+pub(super) struct RetagAssignment {
+    pub(super) ticket: String,
+    pub(super) to: String,
+}
+
+/// POST `/api/projects/:pid/services/retag` — apply the ticked retags as the
+/// human's decision (`Role::User` holds `service_tag` permission). Unknown
+/// tickets or inactive target services are reported, not silently skipped.
+pub(super) async fn retag_apply_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+    Json(req): Json<RetagApplyReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let cfg = read_project_config(&p.config_path);
+    let services = cfg.effective_services(&p.work_dir.to_string_lossy());
+    let active: Vec<String> = services
+        .iter()
+        .filter(|s| s.status == "active")
+        .map(|s| s.name.clone())
+        .collect();
+    let mut applied = Vec::new();
+    let mut refused = Vec::new();
+    for a in req.assignments {
+        if !active.contains(&a.to) {
+            refused.push(format!("{}: '{}' is not an active service", a.ticket, a.to));
+            continue;
+        }
+        let (tid, tag) = (a.ticket.clone(), a.to.clone());
+        let res = coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), move |s| {
+            let t = s
+                .tickets
+                .iter_mut()
+                .find(|t| t.id().as_str() == tid)
+                .ok_or_else(|| {
+                    coxagent_application::PortError::Backend(format!("unknown ticket {tid}"))
+                })?;
+            t.set_service_tag(coxagent_domain::Role::User, &tag)
+                .map_err(|e| coxagent_application::PortError::Backend(e.to_string()))?;
+            Ok(())
+        })
+        .await;
+        match res {
+            Ok(()) => applied.push(a.ticket),
+            Err(e) => refused.push(format!("{}: {e}", a.ticket)),
+        }
+    }
+    Json(serde_json::json!({ "applied": applied, "refused": refused })).into_response()
+}
