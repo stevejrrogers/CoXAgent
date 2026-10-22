@@ -10,6 +10,10 @@
 //! server, no network. Retriability and the retry re-dispatch are covered
 //! against a stub fetch at the same boundary the browser uses.
 
+// Test scratch-parsing of shipped JS/HTML bytes: an `expect` here fails the
+// test loudly, which is exactly what a guardrail should do (repo convention).
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use coxagent_presentation::overview_panels;
 use std::process::Command;
 

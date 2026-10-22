@@ -1630,7 +1630,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_bound_runner_skips_other_services_tickets() {
+async fn service_bound_runner_skips_other_services_tickets() {
         // CXA-F420a.2: two active services; a runner bound to "engine" must
         // skip the untagged ticket (it resolves to the FIRST service, "hub")
         // and work only the one tagged for it.

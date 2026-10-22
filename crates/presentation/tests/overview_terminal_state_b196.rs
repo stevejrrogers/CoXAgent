@@ -9,6 +9,18 @@
 //! ships for `e2e`; the tests never start a server and never touch a network
 //! port: they render strings and count slots in them.
 
+// Test scratch-parsing of shipped JS/HTML bytes: an `expect` here fails the
+// test loudly, which is exactly what a guardrail should do (repo convention).
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::explicit_into_iter_loop,
+    clippy::needless_borrows_for_generic_args,
+    clippy::too_many_arguments,
+    clippy::uninlined_format_args,
+    clippy::needless_raw_string_hashes
+)]
+
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -434,6 +446,8 @@ fn all_html_is_escaped_including_panel_id() {
 
 #[test]
 fn every_manifest_panel_state_combination_renders_with_its_dom_id() {
+    // The panel list is the contract manifest itself: every (panel, state)
+    // pair below must render with its DOM id.
     for p in panel(OverviewPanelId::Drain)
         .into_iter()
         .chain(panel(OverviewPanelId::Alerts))
