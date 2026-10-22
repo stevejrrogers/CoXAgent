@@ -22,6 +22,7 @@ window.CXACOPY = {
   "empty.search":    { params: ["query"], label: "search empty state", text: () => `no results for “{query}” — try a shorter query` },
   "error.load":      { params: ["what"], label: "panel load failure", text: () => `could not load {what} — retry or check the server logs` },
   "toast.saved":     { params: ["what"], label: "generic saved confirmation", text: () => `{what} saved` },
+  "error.network":   { params: ["what"], label: "request-level network failure toast", text: () => `could not reach {what} — check your connection and retry` },
   "toast.deleted":   { params: ["what"], label: "generic deleted confirmation", text: () => `{what} deleted` },
   "toast.long":      { params: ["what", "id"], label: "long-value toast (guard stress fixture)", text: () => `{what} · ref {id}` },
   "action.retry":    { params: [], label: "retry button label",   text: () => `Retry` },

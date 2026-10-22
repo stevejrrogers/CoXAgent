@@ -145,6 +145,6 @@ async function setServiceStatus(name,status){
     const b=await r.json().catch(()=>({}));
     if(!r.ok){toasty(b.error||b||"status change failed","err");}
     else{toasty(`${name}: ${b.from} → ${b.status}. ${b.note||""}`);}
-  }catch(e){toasty("Network error","err");}
+  }catch(e){toastCopy("error.network",["services"],{type:"err"});}
   renderServicesPanel();
 }
