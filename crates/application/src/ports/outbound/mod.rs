@@ -7,6 +7,7 @@ pub mod deploy;
 pub mod deps;
 pub mod doc_store;
 pub mod engine;
+pub mod fold_freeze_source;
 pub mod forge;
 pub mod git;
 pub mod janitor;
