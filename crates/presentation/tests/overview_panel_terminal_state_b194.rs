@@ -19,10 +19,11 @@ fn node() -> Command {
 }
 
 fn run_node(script: &str) -> String {
-    let out =
-        node().arg("-e").arg(script).output().unwrap_or_else(|e| {
-            panic!("node must be available to evaluate the wiring script: {e}")
-        });
+    let out = node()
+        .arg("-e")
+        .arg(script)
+        .output()
+        .unwrap_or_else(|e| panic!("node must be available to evaluate the wiring script: {e}"));
     assert!(
         out.status.success(),
         "node evaluation failed:\nstdout: {}\nstderr: {}",
