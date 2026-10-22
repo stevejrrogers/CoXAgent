@@ -4,6 +4,11 @@
 //! lines 202-215 ("Above the fold: does the project need me…").
 //!
 //! Pure only: no server, no network, no DB, no host harness.
+//!
+//! Fixture construction uses literal ids/titles, so the `expect`s below are
+//! assertions that the domain builders accept them (mirroring the allow-scope
+//! convention of the sibling B252 contract tests).
+#![allow(clippy::expect_used)]
 use coxagent_application::state::{ProjectState, RevertDecision, RevertEvent};
 
 fn rec(at: &str, sha_ticket: &str) -> RevertEvent {
@@ -87,14 +92,16 @@ fn a_human_verdict_is_attributed_once_and_never_re_decided() {
 fn deploy_history_is_append_only_and_window_scoped() {
     // Build from `default()` like every sibling B19x test so the fix mirrors
     // the struct's growth instead of duplicating field lists (B254c merge).
-    let mut s = ProjectState::default();
-    s.tickets = vec![feature()];
-    s.history = vec![coxagent_application::state::DeployRecord {
-        version: coxagent_domain::version::SemVer::new(1, 0, 0),
-        ticket: coxagent_domain::ids::TicketId::new("CXA-F001").expect("id"),
-        title: "shipped work".to_owned(),
-        at: "2026-09-06T10:00:00Z".to_owned(),
-    }];
+    let s = ProjectState {
+        tickets: vec![feature()],
+        history: vec![coxagent_application::state::DeployRecord {
+            version: coxagent_domain::version::SemVer::new(1, 0, 0),
+            ticket: coxagent_domain::ids::TicketId::new("CXA-F001").expect("id"),
+            title: "shipped work".to_owned(),
+            at: "2026-09-06T10:00:00Z".to_owned(),
+        }],
+        ..ProjectState::default()
+    };
     assert_eq!(s.history.len(), 1);
     assert_eq!(s.history[0].at, "2026-09-06T10:00:00Z");
     assert_eq!(

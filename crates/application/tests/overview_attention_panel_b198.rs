@@ -9,6 +9,11 @@
 //! `AttentionSummary.attention_by_area` — the map the JS renderer iterates.
 //!
 //! Pure only: no server, no network, no DB, no host harness.
+//!
+//! Fixture construction uses literal ids/titles, so the `expect`s below are
+//! assertions that the domain builders accept them (mirroring the allow-scope
+//! convention of the sibling B252 contract tests).
+#![allow(clippy::expect_used)]
 use coxagent_application::metrics_governance::{attention_summary, AttentionSummary};
 use coxagent_application::state::ProjectState;
 use coxagent_domain::kinds::{InterventionKind, Priority, TicketType};
@@ -47,8 +52,10 @@ fn zero_state_yields_a_complete_empty_grid_not_a_null() {
 
 #[test]
 fn every_area_renders_the_full_kind_grid_so_the_ui_needs_no_null_guards() {
-    let mut s = ProjectState::default();
-    s.tickets = vec![bug("CXA-B001"), feature("CXA-F001"), feature("CXA-F002")];
+    let mut s = ProjectState {
+        tickets: vec![bug("CXA-B001"), feature("CXA-F001"), feature("CXA-F002")],
+        ..ProjectState::default()
+    };
     s.record_intervention(InterventionKind::VerifySendBack, "CXA-B001", "operator");
     s.record_intervention(InterventionKind::ReadyApprove, "CXA-F001", "sa");
     s.record_intervention(InterventionKind::VerifyPass, "CXA-F002", "operator");
@@ -85,8 +92,10 @@ fn an_unattributable_intervention_is_counted_visibly_not_dropped() {
 
 #[test]
 fn the_window_day_shapes_the_summary_and_counts_never_shrink_the_grid() {
-    let mut s = ProjectState::default();
-    s.tickets = vec![bug("CXA-B001")];
+    let mut s = ProjectState {
+        tickets: vec![bug("CXA-B001")],
+        ..ProjectState::default()
+    };
     s.record_intervention(InterventionKind::VerifyPass, "CXA-B001", "operator");
     let a = attention_summary(&s, "2026-09-14");
     let b = attention_summary(&s, "2026-09-14");

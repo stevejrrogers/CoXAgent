@@ -14,6 +14,11 @@
 //! defaulted lists) symmetry is proven by populating EVERY field on the
 //! outbound side, then also proving the defaulted load path keeps the same
 //! value — never by weakening an assertion.
+//!
+//! Fixture-construction panics (`expect`/`unwrap` on serde round-trips of
+//! literal fixtures) are the test-fixture convention of this suite (same
+//! allow-scope as `terminal_state_contract_b252.rs`).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use coxagent_domain::artifact::ArtifactVersion;
 use coxagent_domain::coverage::{CoverageEntry, CoverageStatus};
@@ -351,7 +356,7 @@ fn coverage_entry_round_trips_and_empty_sources_default_back_in() {
     let back: CoverageEntry = serde_json::from_str(&text).unwrap();
     assert_eq!(back, e);
     // defaulted field: an outbound-omitted `sources` list defaults on load
-    let obj = serde_json::to_value(&a_coverage_entry(CoverageStatus::NotTested)).unwrap();
+    let obj = serde_json::to_value(a_coverage_entry(CoverageStatus::NotTested)).unwrap();
     assert!(obj.get("sources").is_some());
     let bare: CoverageEntry =
         serde_json::from_value(serde_json::json!({"criterion":"ac1","status":"not_tested"}))

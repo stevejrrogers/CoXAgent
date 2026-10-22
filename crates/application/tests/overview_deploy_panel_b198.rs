@@ -4,6 +4,7 @@
 //! lines 202-215 ("Above the fold: does the project need me…").
 //!
 //! Pure only: no server, no network, no DB, no host harness.
+#![allow(clippy::expect_used)]
 use coxagent_application::state::{ProjectState, RevertDecision, RevertEvent};
 
 fn rec(at: &str, sha_ticket: &str) -> RevertEvent {
@@ -56,14 +57,16 @@ fn a_human_verdict_is_attributed_once_and_never_re_decided() {
 
 #[test]
 fn deploy_history_is_append_only_and_window_scoped() {
-    let mut s = ProjectState::default();
-    s.tickets = vec![feature()];
-    s.history = vec![coxagent_application::state::DeployRecord {
-        version: coxagent_domain::version::SemVer::new(1, 0, 0),
-        ticket: coxagent_domain::ids::TicketId::new("CXA-F001").expect("id"),
-        title: "shipped".to_owned(),
-        at: "2026-09-06T10:00:00Z".to_owned(),
-    }];
+    let s = ProjectState {
+        tickets: vec![feature()],
+        history: vec![coxagent_application::state::DeployRecord {
+            version: coxagent_domain::version::SemVer::new(1, 0, 0),
+            ticket: coxagent_domain::ids::TicketId::new("CXA-F001").expect("id"),
+            title: "shipped".to_owned(),
+            at: "2026-09-06T10:00:00Z".to_owned(),
+        }],
+        ..ProjectState::default()
+    };
     assert_eq!(s.history.len(), 1);
     assert_eq!(s.history[0].at, "2026-09-06T10:00:00Z");
     assert_eq!(s.history[0].ticket.to_string(), "CXA-F001", "attribution survives");

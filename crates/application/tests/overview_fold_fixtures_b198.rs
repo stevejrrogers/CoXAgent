@@ -19,6 +19,12 @@
 //! live in the sibling `*_panel_*.rs` files in this directory.
 //!
 //! Pure only: no server, no network, no DB, no host harness.
+//!
+//! Fixture construction uses literal ids/titles, so the `expect`s below are
+//! assertions that the domain builders accept them (mirroring the allow-scope
+//! convention of the sibling B252 contract tests).
+#![allow(clippy::expect_used)]
+
 use coxagent_application::metrics;
 use coxagent_application::state::ProjectState;
 
@@ -62,9 +68,11 @@ fn deploys_bucket_by_utc_day_window_and_never_fabricate_a_day() {
 
 #[test]
 fn deploy_attribution_survives_the_projection() {
-    let mut s = ProjectState::default();
-    s.tickets = vec![shipped_feature("CXA-F009")];
-    s.history = vec![deploy("2026-09-06T10:00:00Z", "CXA-F009")];
+    let s = ProjectState {
+        tickets: vec![shipped_feature("CXA-F009")],
+        history: vec![deploy("2026-09-06T10:00:00Z", "CXA-F009")],
+        ..ProjectState::default()
+    };
     let m = metrics::compute(&s);
     // the changelog renders FROM this projection: ticket id + title must survive
     assert_eq!(m.total_tickets, 1);
@@ -75,9 +83,11 @@ fn deploy_attribution_survives_the_projection() {
 
 #[test]
 fn compute_is_deterministic_and_counts_never_exceed_their_populations() {
-    let mut s = ProjectState::default();
-    s.tickets = vec![feature("CXA-F001"), feature("CXA-F002")];
-    s.history = vec![deploy("2026-09-06T10:00:00Z", "CXA-F001")];
+    let s = ProjectState {
+        tickets: vec![feature("CXA-F001"), feature("CXA-F002")],
+        history: vec![deploy("2026-09-06T10:00:00Z", "CXA-F001")],
+        ..ProjectState::default()
+    };
     let a = metrics::compute(&s);
     let b = metrics::compute(&s);
     assert_eq!(a, b, "pure projection");

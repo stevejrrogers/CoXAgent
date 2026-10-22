@@ -139,29 +139,33 @@ fn cancelled_and_skipped_are_distinct_semantics() {
 /// wires serialization; the value types may carry plain serde derives already.
 /// Asserted at compile time by demanding the std traits here; the source scan
 /// below keeps out foreign crate imports beyond serde derives.
+/// Walk the module tree and collect one `String` per source line (one entry per
+/// `.rs` file under `src/terminal_state/`).
+fn scan(dir: &std::path::Path) -> Vec<String> {
+    let mut lines = Vec::new();
+    for entry in std::fs::read_dir(dir).expect("module tree is readable") {
+        let path = entry.expect("entry").path();
+        if path.is_dir() {
+            lines.extend(scan(&path));
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            lines.extend(
+                std::fs::read_to_string(&path)
+                    .expect("source is readable")
+                    .lines()
+                    .map(str::to_owned),
+            );
+        }
+    }
+    lines
+}
+
 #[test]
 fn the_contract_is_pure_domain_std_only() {
     fn demands_std_traits<T: std::fmt::Debug + Clone + PartialEq + Eq>(_: &T) {}
     for state in every_variant() {
         demands_std_traits(&state);
     }
-    fn scan(dir: &std::path::Path) -> Vec<String> {
-        let mut lines = Vec::new();
-        for entry in std::fs::read_dir(dir).expect("module tree is readable") {
-            let path = entry.expect("entry").path();
-            if path.is_dir() {
-                lines.extend(scan(&path));
-            } else if path.extension().map_or(false, |e| e == "rs") {
-                lines.extend(
-                    std::fs::read_to_string(&path)
-                        .expect("source is readable")
-                        .lines()
-                        .map(str::to_owned),
-                );
-            }
-        }
-        lines
-    }
+
     let src = scan(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/terminal_state"));
     assert!(
         !src.iter().any(|l| l.trim_start().starts_with("use ")

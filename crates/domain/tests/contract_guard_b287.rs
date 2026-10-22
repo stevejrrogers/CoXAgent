@@ -21,6 +21,12 @@
 //!     (`crates/presentation/src/server/mod.rs`: `internal_error`,
 //!     `conflict_error`, `bad_request_error`, `health`).
 
+//!
+//! Guard fixtures panic (`expect`/`unwrap`) when a checked-in registry or
+//! source file violates the shape they assert — that failure IS the guard,
+//! so allow them module-wide (same convention as `dto_serde_round_trip_b254.rs`).
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::collections::BTreeMap;
 
 // ---------------------------------------------------------------------------
@@ -243,15 +249,21 @@ fn payloads() -> Vec<PayloadBoxed> {
 
 /// Type-erased probe handle: keeps the guard generic while every probe
 /// closes over a REAL domain type (pure functions, no harness).
+/// Type alias keeping the probe-row field types readable (clippy
+/// `type_complexity`; the closure signatures ARE the contract being probed).
+type UnknownKeyProbe = Box<dyn Fn() -> Result<bool, String>>;
+/// See [`UnknownKeyProbe`].
+type PartialLoadProbe = Box<dyn Fn(&[&str]) -> Result<(), String>>;
+
 struct PayloadBoxed {
     ty: &'static str,
     try_from_empty: Box<dyn Fn() -> Result<(), String>>,
     /// Load `{full payload + __alien__: 1}` -> `Ok(true)` when the alien key
     /// is tolerated AND dropped, `Ok(false)` when tolerated but kept,
     /// `Err` when refused outright.
-    probe_unknown_key: Box<dyn Fn() -> Result<bool, String>>,
+    probe_unknown_key: UnknownKeyProbe,
     /// Strip `fields` from a minimal-valid payload and try to load.
-    probe_partial: Box<dyn Fn(&[&str]) -> Result<(), String>>,
+    probe_partial: PartialLoadProbe,
     covered_by_strict_list: bool,
 }
 
@@ -355,8 +367,7 @@ fn error_envelope_shape_matches_the_one_handler_set_serves_today() {
     assert!(
         o.get("version")
             .and_then(|v| v.as_str())
-            .map(|v| v.split('.').count() == 3)
-            .unwrap_or(false),
+            .is_some_and(|v| v.split('.').count() == 3),
         "version tag is not a MAJOR.MINOR.PATCH string"
     );
 }

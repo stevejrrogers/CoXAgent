@@ -11,8 +11,15 @@
 //! Spot-check the five goldens at the bottom against part 1's round-trip
 //! tests (`dto_serde_round_trip_b254.rs`) — same strings, independently
 //! asserted.
+//!
+//! Fixture-construction panics (`expect`/`unwrap` on literals) are the
+//! test-fixture convention of this suite (see `terminal_state_contract_b252.rs`
+//! for the same allow-scope), and doc rendering builds strings incrementally.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod contract_surface;
+
+use std::fmt::Write as _;
 
 use coxagent_domain::artifact::ArtifactVersion;
 use coxagent_domain::coverage::{CoverageEntry, CoverageStatus};
@@ -40,9 +47,9 @@ fn render_doc() -> String {
     d.push_str("## Enum wire forms\n\n");
     d.push_str("Every serialized enum variant uses lowercase `snake_case` tags; tags are unique within each enum. Wire-accurate as of the last regeneration.\n\n");
     for e in ENUM_SURFACE {
-        d.push_str(&format!("### `{}`\n\n| Rust variant | wire tag |\n|---|---|\n", e.ty));
+        write!(d, "### `{}`\n\n| Rust variant | wire tag |\n|---|---|\n", e.ty).expect("write to String is infallible");
         for (variant, tag) in e.variants {
-            d.push_str(&format!("| `{variant}` | `{tag}` |\n"));
+            writeln!(d, "| `{variant}` | `{tag}` |").expect("write to String is infallible");
         }
         d.push('\n');
     }
@@ -59,24 +66,27 @@ fn render_doc() -> String {
         "UxDesign",
         "ArtifactVersion",
     ] {
-        let req = REQUIRED_FIELD_WHITELIST
-            .iter()
-            .find(|(t, _)| *t == ty)
-            .map(|(_, r)| r.join(", "))
-            .unwrap_or_else(|| "(none — all fields default)".into());
+        let req = match REQUIRED_FIELD_WHITELIST.iter().find(|(t, _)| *t == ty) {
+            Some((_, r)) => r.join(", "),
+            None => "(none — all fields default)".to_owned(),
+        };
         let strict = STRICT_UNKNOWN_KEY_TYPES.contains(&ty);
-        d.push_str(&format!(
-            "| `{ty}` | {req} | {} |\n",
+        writeln!(
+            d,
+            "| `{ty}` | {req} | {} |",
             if strict { "refused (`deny_unknown_fields`)" } else { "tolerated, dropped" }
-        ));
+        )
+        .expect("write to String is infallible");
     }
     d.push_str("\nTypes not registered here decode tolerantly with all fields defaulted.\n\n");
 
     d.push_str("## Golden wire fixtures\n\n");
     for (ty, path) in GOLDEN_FIXTURES {
-        d.push_str(&format!(
-            "- `{ty}` — [`crates/domain/{path}`](../../../{path}) round-trips byte-stably in `dto_serde_round_trip_b254.rs`\n"
-        ));
+        writeln!(
+            d,
+            "- `{ty}` — [`crates/domain/{path}`](../../../{path}) round-trips byte-stably in `dto_serde_round_trip_b254.rs`"
+        )
+        .expect("write to String is infallible");
     }
     d.push_str("- Envelopes: error `{ \"error\": <string> }`; version-tagged success `{ \"status\": \"ok\", \"version\": MAJOR.MINOR.PATCH }`\n\n");
     d
@@ -99,10 +109,10 @@ fn write_contract_doc_file() {
     // drift check below then proves regeneration is idempotent, i.e. that
     // what CI sees on disk equals what `render_doc()` produces.
     std::fs::create_dir_all(doc_path().parent().unwrap()).expect("doc dir creatable");
-    std::fs::write(&doc_path(), render_doc()).expect("contract doc writable in-tree");
+    std::fs::write(doc_path(), render_doc()).expect("contract doc writable in-tree");
     let fresh = render_doc();
     std::fs::create_dir_all(doc_path().parent().unwrap()).expect("doc directory creatable");
-    std::fs::write(&doc_path(), fresh).expect("contract doc writable in-tree");
+    std::fs::write(doc_path(), fresh).expect("contract doc writable in-tree");
 }
 
 // ---------------------------------------------------------------------------
