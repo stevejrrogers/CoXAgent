@@ -2450,6 +2450,7 @@ async function loadSettings(){
       <button class="settab-btn" data-t="engines" onclick="setSetTab('engines')"><i class="ti ti-cpu"></i> Engines</button>
       <button class="settab-btn" data-t="workflow" onclick="setSetTab('workflow')"><i class="ti ti-adjustments"></i> Workflow</button>
       <button class="settab-btn" data-t="git" onclick="setSetTab('git')"><i class="ti ti-git-branch"></i> Git</button>
+      <button class="settab-btn" data-t="services" onclick="setSetTab('services')"><i class="ti ti-stack-2"></i> Services</button>
       <button class="settab-btn" data-t="profile" onclick="setSetTab('profile')"><i class="ti ti-user-circle"></i> Profile</button>
       <button class="settab-btn" data-t="notify" onclick="setSetTab('notify')"><i class="ti ti-bell"></i> Notify</button>
       <button class="settab-btn" data-t="meetings" onclick="setSetTab('meetings')"><i class="ti ti-calendar-event"></i> Meetings</button>
@@ -2544,6 +2545,7 @@ async function loadSettings(){
         <div class="fr"><span class="lbl">Require CI</span><select id="git-ci"><option value="true" ${git.require_ci!==false?'selected':''}>on — failing/pending CI blocks review &amp; merge</option><option value="false" ${git.require_ci===false?'selected':''}>off — ignore CI (e.g. Actions billing down); local gates carry the review</option></select><span class="hint">Turn off when CI is unavailable for reasons that aren't the code — the SA still runs the diff review and local test gates.</span></div>
       </div>
     </div>
+    <div class="settab" data-p="services" hidden><div id="services-panel"></div></div>
     <div class="settab" data-p="mcp" hidden><div id="mcp-panel"></div></div>
     <div class="settab" data-p="profile" hidden>
       <div class="panel frm">
@@ -2656,4 +2658,5 @@ function setSetTab(name){window._setTab=name;
   document.querySelectorAll(".settab-btn").forEach(b=>b.classList.toggle("on",b.dataset.t===name));
   document.querySelectorAll(".settab").forEach(p=>{p.hidden=p.dataset.p!==name;});
   if(name==="mcp")renderMcpPanel();
+  if(name==="services")renderServicesPanel();
 }

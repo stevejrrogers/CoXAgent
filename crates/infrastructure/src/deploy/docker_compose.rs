@@ -1750,12 +1750,76 @@ fn interpolation_gap(stderr: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+#[cfg(test)]
+mod cross_check_infra_tests {
+    use super::{build_failure_check, looks_like_build_infra_failure};
+
+    #[test]
+    fn registry_deadline_is_unavailable_not_a_code_failure() {
+        let stderr = "------\n > [internal] load metadata for docker.io/library/docker:cli:\n                      ------\nfailed to solve: DeadlineExceeded: context deadline exceeded\n";
+        let c = build_failure_check(stderr);
+        assert!(!c.available, "network weather must not bounce tickets");
+        assert!(c.errors.is_empty());
+        assert!(c.reason.contains("environment"));
+    }
+
+    #[test]
+    fn compiler_diagnostics_still_fail_the_gate() {
+        let stderr = "error[E0425]: cannot find value `x` in this scope\n --> src/main.rs:1:1\n                      DeadlineExceeded mentioned later must not whitewash a real error\n";
+        let c = build_failure_check(stderr);
+        assert!(c.available);
+        assert!(!c.errors.is_empty());
+    }
+
+    #[test]
+    fn plain_build_failures_keep_their_tail() {
+        let c = build_failure_check("some linker exploded\nexit status 1\n");
+        assert!(c.available);
+        assert_eq!(c.errors.len(), 1);
+        assert!(!looks_like_build_infra_failure("ordinary failure"));
+    }
+}
+
+/// Whether a docker-build stderr describes an environment fault (registry,
+/// network, daemon, disk) rather than the project's code. Conservative: only
+/// phrases BuildKit/compose emit before any compiler ran.
+fn looks_like_build_infra_failure(text: &str) -> bool {
+    const MARKS: [&str; 8] = [
+        "DeadlineExceeded",
+        "context deadline exceeded",
+        "failed to solve: failed to fetch",
+        "load metadata for",
+        "TLS handshake timeout",
+        "temporary failure in name resolution",
+        "no space left on device",
+        "Cannot connect to the Docker daemon",
+    ];
+    MARKS.iter().any(|m| text.contains(m))
+}
+
 /// Build a `CrossCheck` reporting a genuine (non-interpolation) build failure
 /// from a `docker ... build` command's stderr — shared by the compose-build
 /// path and the Dockerfile fallback so the two don't drift.
 fn build_failure_check(text: &str) -> coxagent_application::ports::outbound::CrossCheck {
     use coxagent_application::ports::outbound::CrossCheck;
+    // Infra-shaped failures are NOT evidence about the ticket's code. A
+    // registry/network hiccup ("load metadata … DeadlineExceeded") bounced
+    // every ticket of 2026-10-21 as "broke the Linux build" until someone ran
+    // the same build on a clean main and watched it fail identically. When
+    // the stderr carries no compiler diagnostics and matches a known
+    // environment failure, answer "unavailable" so run_dev warns instead of
+    // blocking the queue on weather.
     let (errors, _) = parse_clippy(text);
+    if errors.is_empty() && looks_like_build_infra_failure(text) {
+        let tail: String = text.lines().rev().take(3).collect::<Vec<_>>().join(" | ");
+        return CrossCheck {
+            available: false,
+            reason: format!(
+                "docker build failed for environment reasons (registry/network/daemon),                  not the code: {tail}"
+            ),
+            errors: Vec::new(),
+        };
+    }
     CrossCheck {
         available: true,
         reason: "verified via the Docker (Linux) image build".to_owned(),

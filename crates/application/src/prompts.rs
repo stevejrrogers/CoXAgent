@@ -201,8 +201,9 @@ pub fn services_block(services: &[crate::config::ServiceConfig]) -> String {
         return String::new();
     }
     let mut out = String::from(
-        "\n\nServices in this project — set service_tag to the one each ticket's \
-         code lives in (the FIRST is the default for untagged tickets):\n",
+        "\n\nServices in this project — service_tag must be EXACTLY one of the \
+         names below (the FIRST is the default for untagged tickets). Never \
+         invent a tag; when none fits or you are unsure, OMIT the field:\n",
     );
     for s in active {
         let scope = if s.scopes.is_empty() {
@@ -218,6 +219,33 @@ pub fn services_block(services: &[crate::config::ServiceConfig]) -> String {
         let _ = writeln!(out, "- {} — {repo}{scope}", s.name);
     }
     out
+}
+
+/// CXA-F420d (R4): the DEV brief names the scope its service owns, so a
+/// monorepo change stays inside the folders the ticket is about and the
+/// narrowed test gate (`scoped_tests`) stays provably sufficient. Renders
+/// nothing when the resolved service declares no scopes — single-repo
+/// projects keep their byte-identical prompts.
+#[must_use]
+pub fn service_scope_block(
+    services: &[crate::config::ServiceConfig],
+    service_tag: Option<&str>,
+) -> String {
+    let Some(svc) = crate::config::Config::resolve_service(services, service_tag) else {
+        return String::new();
+    };
+    if svc.scopes.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\n## Service scope (stay inside it)\nThis ticket belongs to service \
+         '{}', which owns: {}. Keep EVERY change inside those folders — the test \
+         gate narrows to the affected package, so an out-of-scope edit ships with \
+         weaker verification and belongs in its own ticket. If the fix genuinely \
+         requires touching another service's folders, STOP and ask the BA instead.\n",
+        svc.name,
+        svc.scopes.join(", ")
+    )
 }
 
 /// Solution Architect — produces the technical design for one feature. UX is
@@ -1409,6 +1437,37 @@ mod tests {
         assert!(!out.contains("- old"));
         assert!(out.contains("FIRST is the default"));
     }
+    #[test]
+    fn service_scope_block_names_the_owned_folders_or_stays_silent() {
+        let svc = |name: &str, scopes: &[&str]| crate::config::ServiceConfig {
+            name: name.into(),
+            repo: String::new(),
+            work_dir: String::new(),
+            scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
+            build_cmd: String::new(),
+            test_cmd: String::new(),
+            status: "active".into(),
+        };
+        // No scopes declared: byte-for-byte nothing (single-repo projects).
+        assert_eq!(
+            super::service_scope_block(&[svc("hub", &[])], Some("hub")),
+            ""
+        );
+        // Scoped service, tagged ticket: block names service and folders.
+        let out = super::service_scope_block(
+            &[svc("hub", &["crates/", "web/"]), svc("harxes", &[])],
+            Some("hub"),
+        );
+        assert!(out.contains("'hub'"));
+        assert!(out.contains("crates/, web/"));
+        // Untagged resolves to the first active service — same block.
+        let out2 =
+            super::service_scope_block(&[svc("hub", &["crates/"]), svc("harxes", &[])], None);
+        assert!(out2.contains("'hub'"));
+        // No services at all: nothing.
+        assert_eq!(super::service_scope_block(&[], None), "");
+    }
+
     use super::{deploy_constraints, design_constraints, extract_brief_notes, repo_map_block};
     use crate::config::DeployConfig;
     use crate::state::DesignSystem;

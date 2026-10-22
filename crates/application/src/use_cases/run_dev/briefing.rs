@@ -94,6 +94,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         } else {
             String::new()
         };
+        // CXA-F420d: a monorepo ticket's brief names the folders its service
+        // owns, pairing the narrowed test gate with an explicit boundary.
+        let scope_block = prompts::service_scope_block(
+            &self.config.services,
+            ticket.and_then(coxagent_domain::Ticket::service_tag),
+        );
         let context_block = self
             .context
             .as_deref()
@@ -318,7 +324,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             system_prompt: prompts::system_prompt(prompts::DEV),
             task_prompt: format!(
                 "Ticket {id}: {title}\n{brief}{stale_design}{collision_warning}{orientation}\nImplement it \
-                 now.{preamble}{stack}{deploy}{design}{context_block}{focus_t}{history}{knowledge}{repo_map_t}{memory_t}{hub_t}{steering}{journal}{wip_block}{asking_t}{protocol_t}"
+                 now.{preamble}{stack}{deploy}{design}{scope_block}{context_block}{focus_t}{history}{knowledge}{repo_map_t}{memory_t}{hub_t}{steering}{journal}{wip_block}{asking_t}{protocol_t}"
             ),
             work_dir: self.work_dir.clone(),
             timeout: Duration::from_secs(3600),

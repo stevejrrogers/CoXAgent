@@ -210,6 +210,12 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/prs/:num/diff", &["get"]),
     route("/api/projects/:pid/reverts/:sha", &["post"]),
     route("/api/projects/:pid/runner", &["get"]),
+    // CXA-F420b: Add-repo wizard — list/add services, scan a candidate repo.
+    route("/api/projects/:pid/services", &["get", "post"]),
+    route("/api/projects/:pid/services/scan", &["post"]),
+    route("/api/projects/:pid/services/:name/status", &["post"]),
+    route("/api/projects/:pid/services/retag-suggestions", &["get"]),
+    route("/api/projects/:pid/services/retag", &["post"]),
     route("/api/projects/:pid/share-links", &["get", "post"]),
     route("/api/projects/:pid/share-links/:token", &["delete"]),
     route("/api/projects/:pid/sprint/:action", &["post"]),

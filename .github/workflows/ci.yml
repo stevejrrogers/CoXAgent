@@ -131,6 +131,10 @@ jobs:
       # docs/wiki/engineering/cxa-b199-guardrail-triage.md.
       - name: Overview panel guardrails (CXA-B199.3 regression gate)
         run: cargo test -p coxagent-presentation --test guardrail_scaffold_b201 --test overview_kpis_panel_b199 --test overview_activity_panel_b199 --test overview_alerts_panel_b199 --test overview_deploy_health_panel_b199 --test overview_drain_panel_b199 --test overview_working_strip_b199 && cargo test -p coxagent-application --test overview_fold_guardrails_b181 --test overview_attention_panel_b181 --test overview_deploy_panel_b181
+      # CXA-B315 / SEC-41E384: docs have no review lane of their own, so the
+      # leak-guard runs here on every PR — docker-free (pure scan + git ls-files).
+      - name: Doc credential leak guard (CXA-B315 — post-CXA-B311a regression gate)
+        run: cargo test -p coxagent-app --test doc_leak_guard && cargo test -p coxagent-application --lib doc_leak
 
   # CXA-F326: the DSN-gated Postgres/Redis integration tests are #[ignore]d —
   # this job is the only sanctioned way to run them. It brings its own

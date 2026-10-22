@@ -119,6 +119,17 @@ const MUST_BE_EXCLUDED: &[(&str, &str)] = &[
         ".git/config",
         "repository metadata the build has no use for",
     ),
+    // CXA-B313: dependency caches and host tooling state must not ride into
+    // the context — they bloat it and can diverge from what CI builds with.
+    (
+        "node_modules/playwright-core/package.json",
+        "a JS dependency cache (web tooling, never used by the image)",
+    ),
+    (
+        "e2e/node_modules/playwright-core/package.json",
+        "the Playwright suite's node_modules, a large dep cache",
+    ),
+    (".npmrc", "host npm auth tokens are secrets too"),
 ];
 
 /// Paths the build genuinely needs, or that document the secrets without

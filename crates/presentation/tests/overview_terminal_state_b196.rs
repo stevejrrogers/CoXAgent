@@ -59,9 +59,13 @@ fn run_js(scenario: &str) -> String {
         std::process::id(),
         RUN.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::create_dir_all(&dir).expect("scratch dir");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        panic!("scratch dir: {e}");
+    }
     let module = dir.join("terminal_state.js");
-    std::fs::write(&module, MODULE).expect("write module");
+    if let Err(e) = std::fs::write(&module, MODULE) {
+        panic!("write module: {e}");
+    }
     // Shim first (window/document must exist before the IIFE assigns into
     // window and before paint injects styles), then the module, then scenario.
     let main = dir.join("scenario.js");
@@ -72,11 +76,11 @@ fn run_js(scenario: &str) -> String {
             module.display().to_string().replace('\\', "/")
         ),
     )
-    .expect("write scenario");
+    .unwrap_or_else(|e| panic!("write scenario: {e}"));
     let out = Command::new("node")
         .arg(&main)
         .output()
-        .expect("node runtime (same one the e2e/ stack uses)");
+        .unwrap_or_else(|e| panic!("node runtime (same one the e2e/ stack uses): {e}"));
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         out.status.success(),
@@ -89,8 +93,8 @@ fn run_js(scenario: &str) -> String {
 /// `render(spec)` → `{threw, message?, html?}` as JSON.
 fn render_json(spec: &str) -> (bool, String) {
     let out = run_js(&format!(
-        r#"function rj(s){{try{{return{{threw:false,html:window.TerminalState.render(s)}};}}catch(e){{return{{threw:true,message:String(e.message)}};}}}}
-console.log(JSON.stringify(rj({spec})));"#
+        r"function rj(s){{try{{return{{threw:false,html:window.TerminalState.render(s)}};}}catch(e){{return{{threw:true,message:String(e.message)}};}}}}
+console.log(JSON.stringify(rj({spec})));"
     ));
     let threw = out.contains(r#""threw":true"#);
     (threw, out)
@@ -128,19 +132,19 @@ fn the_module_is_served_by_the_router_and_loaded_by_the_shell() {
             && SERVER.contains(r#"include_str!("../web/js/terminal_state.js")"#),
         "server/mod.rs must embed terminal_state.js as a served asset"
     );
-    let core = INDEX_HTML
-        .find(r#"src="/assets/js/core.js""#)
-        .expect("core.js script tag");
-    let ts = INDEX_HTML
-        .find(r#"src="/assets/js/terminal_state.js""#)
-        .expect("terminal_state.js script tag");
+    let Some(core) = INDEX_HTML.find(r#"src="/assets/js/core.js""#) else {
+        panic!("core.js script tag missing from index.html");
+    };
+    let Some(ts) = INDEX_HTML.find(r#"src="/assets/js/terminal_state.js""#) else {
+        panic!("terminal_state.js script tag missing from index.html");
+    };
     assert!(ts < core, "terminal_state.js must load before core.js");
 }
 
 #[test]
 fn js_contract_mirrors_the_frozen_rust_manifest() {
     let out = run_js(
-        r#"console.log(JSON.stringify({S:window.TerminalState.STATES,R:window.TerminalState.REQUIRED,O:window.TerminalState.OPTIONAL,L:window.TerminalState.ROLES}));"#,
+        r"console.log(JSON.stringify({S:window.TerminalState.STATES,R:window.TerminalState.REQUIRED,O:window.TerminalState.OPTIONAL,L:window.TerminalState.ROLES}));",
     );
     // Every Rust state name exists in the JS state list, in manifest order.
     let rust_states = ["loading", "empty", "error", "ready", "attention", "zero"];
@@ -160,7 +164,7 @@ fn js_contract_mirrors_the_frozen_rust_manifest() {
         TerminalState::Zero,
     ] {
         let name = state.name();
-        for slot in required_slots(state) {
+        for &slot in required_slots(state) {
             assert!(
                 out.contains(&format!("\"{}\":[", slot_key(*slot)))
                     || out.contains(&format!("\",\"{}\"", slot_key(*slot)))
@@ -169,7 +173,7 @@ fn js_contract_mirrors_the_frozen_rust_manifest() {
                 slot_key(*slot)
             );
         }
-        for slot in optional_slots(state) {
+        for &slot in optional_slots(state) {
             assert!(
                 out.contains(&format!("\",\"{}\"", slot_key(*slot)))
                     || out.contains(&format!("[\"{}", slot_key(*slot))),
@@ -238,13 +242,12 @@ fn every_state_renders_its_required_slots_and_announces_correctly() {
         TerminalState::Attention,
         TerminalState::Zero,
     ] {
-        let html = html_of(&good_spec(state));
+        let (html, state_name) = (html_of(&good_spec(state)), state.name());
         assert!(
-            html.contains(&format!(r#"data-ts-state="{}""#, state.name())),
-            "{:?}: missing data-ts-state\n{html}",
-            state
+            html.contains(&format!(r#"data-ts-state="{state_name}""#)),
+            "{state:?}: missing data-ts-state\n{html}"
         );
-        for slot in required_slots(state) {
+        for &slot in required_slots(state) {
             assert!(
                 html.contains(&format!(r#"data-ts-slot="{}""#, dom_slot(*slot))),
                 "{:?}: required slot {} not rendered\n{html}",
@@ -257,10 +260,10 @@ fn every_state_renders_its_required_slots_and_announces_correctly() {
         } else {
             "status"
         };
+        let want = format!(r#"role="{want_role}""#);
         assert!(
-            html.contains(&format!(r#"role="{want_role}""#)),
-            "{:?}: expected role={want_role}\n{html}",
-            state
+            html.contains(&want),
+            "{state:?}: expected role={want_role}\n{html}"
         );
     }
 }
@@ -429,7 +432,7 @@ fn unknown_state_and_unknown_spec_keys_throw() {
         out.contains("primary"),
         "non-object action is rejected\n{out}"
     );
-    let out = threw_with(r#"null"#);
+    let out = threw_with(r"null");
     assert!(out.contains("spec object required"), "{out}");
 }
 
@@ -448,8 +451,7 @@ fn all_html_is_escaped_including_panel_id() {
 }
 
 #[test]
-fn every_manifest_panel_state_combination_renders_with_its_dom_id() {
-    let all_panels = [
+fn every_manifest_panel_state_combination_renders_with_its_dom_id() {    let all_panels = [
         OverviewPanelId::Drain,
         OverviewPanelId::Alerts,
         OverviewPanelId::Working,
@@ -462,7 +464,28 @@ fn every_manifest_panel_state_combination_renders_with_its_dom_id() {
         .into_iter()
         .filter_map(|id| panel(id).into_iter().next())
     {
-        for state in p.states {
+||||||| dc990bd8
+    for p in panel(OverviewPanelId::Drain).into_iter().chain(
+        panel(OverviewPanelId::Alerts)
+            .into_iter()
+            .chain(panel(OverviewPanelId::Working).into_iter())
+            .chain(panel(OverviewPanelId::Kpis).into_iter())
+            .chain(panel(OverviewPanelId::Health).into_iter())
+            .chain(panel(OverviewPanelId::RecentActivity).into_iter())
+            .chain(panel(OverviewPanelId::Releases).into_iter()),
+    ) {
+    for (_, p) in [
+        OverviewPanelId::Drain,
+        OverviewPanelId::Alerts,
+        OverviewPanelId::Working,
+        OverviewPanelId::Kpis,
+        OverviewPanelId::Health,
+        OverviewPanelId::RecentActivity,
+        OverviewPanelId::Releases,
+    ]
+    .into_iter()
+    .filter_map(|id| Some((id, panel(id)?)))
+    {        for state in p.states {
             let spec = match state {
                 TerminalState::Ready => format!(
                     r#"{{"state":"ready","readyHtml":"<div>{}</div>","panelId":"{}"}}"#,

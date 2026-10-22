@@ -1074,9 +1074,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 let fixup = format!(
                     "Your fix for {id} ships with NO regression test. Add a test that FAILS \
                      without your fix and passes with it — that is the only proof the bug is \
-                     dead. Put it where the gate can see it: a `tests/` path, a `*_test.rs` / \
-                     `*.test.ts` file, or an added `#[test]`/`#[tokio::test]`/`it(`/`def test_` \
-                     block. Do not start new work or commit."
+                     dead. Put it where the gate can see it: a `tests/` path, an e2e spec at \
+                     `*.spec.ts` / `*.spec.js`, a `*_test.rs` / `*.test.ts` file, or an added \
+                     `#[test]`/`#[tokio::test]`/`it(`/`def test_` block. Do not start new work \
+                     or commit."
                 );
                 if let Some(sid) = &session {
                     let _ = self
@@ -1633,17 +1634,19 @@ async fn service_bound_runner_skips_other_services_tickets() {
         // CXA-F420a.2: two active services; a runner bound to "engine" must
         // skip the untagged ticket (it resolves to the FIRST service, "hub")
         // and work only the one tagged for it.
-        let mut cfg = Config::default();
-        cfg.services = vec![
-            crate::config::ServiceConfig {
-                name: "hub".into(),
-                ..Default::default()
-            },
-            crate::config::ServiceConfig {
-                name: "engine".into(),
-                ..Default::default()
-            },
-        ];
+        let active = |name: &str| crate::config::ServiceConfig {
+            name: name.to_owned(),
+            repo: String::new(),
+            work_dir: String::new(),
+            scopes: Vec::new(),
+            build_cmd: String::new(),
+            test_cmd: String::new(),
+            status: "active".into(),
+        };
+        let cfg = Config {
+            services: vec![active("hub"), active("engine")],
+            ..Config::default()
+        };
         let untagged = ready_feature("FEAT-001");
         let mut tagged = ready_feature("FEAT-002");
         tagged.set_service_tag(Role::Ba, "engine").expect("tag");

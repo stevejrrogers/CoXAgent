@@ -377,9 +377,10 @@ function roadmapCard(t){const pc={high:"var(--red)",medium:"var(--amber)",low:"v
   const deps=(t.depends_on||[]);
   const depBadge=deps.length?`<span class="b" style="background:color-mix(in srgb,var(--purple) 13%,transparent);color:var(--purple)"><i class="ti ti-link" style="font-size:11px"></i> ${deps.length}</span>`:"";
   const ui=t.has_ui?'<span class="b ui">UI</span>':'',bug=t.type==="bug"?'<span class="b bug">bug</span>':'';
+  const svc=t.service_tag?`<span class="b" style="background:color-mix(in srgb,var(--accent2) 13%,transparent);color:var(--accent2)"><i class="ti ti-stack-2" style="font-size:10px"></i> ${esc(t.service_tag)}</span>`:"";
   return `<div class="card-t" onclick="showTicket('${t.id}')" style="border-left:3px solid ${pc}">
     <div class="cid">${esc(t.id)}</div><div class="ct">${esc(t.title)}</div>
-    <div class="badges"><span class="b ${t.priority}">${t.priority}</span>${ui}${bug}${depBadge}</div></div>`;}
+    <div class="badges"><span class="b ${t.priority}">${t.priority}</span>${svc}${ui}${bug}${depBadge}</div></div>`;}
 function renderRoadmap(){
   const s=STATE,ts=s.tickets||[],hist=s.history||[];
   const el=document.getElementById("roadmap-body");if(!el)return;
@@ -395,7 +396,33 @@ function renderRoadmap(){
   // ticket, the filter is a lens over the board, and the banner says so.
   const dm=(s.derived||{}).milestones||[];
   const sel=MSFILTER?dm.find(x=>x.name===MSFILTER):null;
-  const scope=sel&&Array.isArray(sel.committed)?new Set(sel.committed):null;
+  // Which release a ship record LANDS in: the first higher version cut after
+  // it, else the running current version — shared by the timeline labels and
+  // the released-milestone lens below.
+  const landsIn=(rec)=>{
+    const n=vnum(rec.version);const t=Date.parse(rec.at)||0;
+    for(const h of (s.history||[])){const hv=vnum(h.version);
+      if(hv>n&&(Date.parse(h.at)||0)>=t)return h.version;}
+    const cur=String(s.current_version||"");
+    if(cur&&vnum(cur)>n)return cur;
+    return null;
+  };
+  let scope=sel&&Array.isArray(sel.committed)?new Set(sel.committed):null;
+  // CXA-F252 attributes committed scope to the ACTIVE target only, so a
+  // released milestone arrives with an empty list — and clicking it showed
+  // "0 of 0" over an empty board. A released row's scope is a fact of the
+  // ship history instead: every ticket whose landing release is within
+  // (previous milestone's target, this row's target].
+  const selDelivered=sel&&sel.released&&(!scope||!scope.size);
+  if(selDelivered){
+    const hi=vnum(sel.target_version);
+    const i=dm.findIndex(x=>x.name===MSFILTER);
+    const lo=i>0?vnum(dm[i-1].target_version):-1;
+    scope=new Set((s.history||[]).map(r=>{
+      const l=landsIn(r);const n=l?vnum(l):vnum(String(s.current_version||r.version));
+      return n>lo&&n<=hi?r.ticket:null;
+    }).filter(Boolean));
+  }
   const inScope=t=>!scope||scope.has(t.id);
   const doneAll=ts.filter(isDone);
   const shipped=doneAll.filter(inScope);
@@ -442,15 +469,6 @@ function renderRoadmap(){
     // counter. Label each node with the release that contains it: the first
     // higher version seen later in history, else the running current version,
     // else "next release".
-    const all=(s.history||[]).slice();
-    const landsIn=(rec)=>{
-      const n=vnum(rec.version);const t=Date.parse(rec.at)||0;
-      for(const h of all){const hv=vnum(h.version);
-        if(hv>n&&(Date.parse(h.at)||0)>=t)return h.version;}
-      const cur=String(s.current_version||"");
-      if(cur&&vnum(cur)>n)return cur;
-      return null;
-    };
     timeline=`<div class="sec" style="margin-top:22px">Delivery timeline</div><div class="panel" style="overflow-x:auto" data-keepscroll="rm-timeline" data-scrollend="1">
       <div style="display:flex;align-items:flex-start;min-width:min-content;padding:6px 0">${recent.map((r,i)=>`
         <div style="flex:1 1 0;min-width:118px;max-width:190px;position:relative;text-align:center;padding:0 4px">
@@ -468,7 +486,7 @@ function renderRoadmap(){
   const shown=shipped.length+inflight.length+next.length+later.length;
   const banner=scope?`<div class="panel" style="margin-bottom:16px;display:flex;align-items:center;gap:10px;border-left:3px solid var(--accent2)">
     <i class="ti ti-filter" style="color:var(--accent2)"></i>
-    <span style="font-size:12.5px;color:var(--muted)">Milestone <b style="color:var(--text)">${esc(MSFILTER)}</b> — ${shown} of ${sel.committed.length} committed tickets shown · ${total-shown} other project tickets hidden</span>
+    <span style="font-size:12.5px;color:var(--muted)">Milestone <b style="color:var(--text)">${esc(MSFILTER)}</b> — ${shown} of ${selDelivered?scope.size:sel.committed.length} ${selDelivered?'delivered (from release history)':'committed'} tickets shown · ${total-shown} other project tickets hidden</span>
     <button class="gc-btn" style="margin-left:auto" onclick="MSFILTER='';renderRoadmap()"><i class="ti ti-x"></i> Clear filter</button></div>`:"";
   const keep=grabScroll(el);
   el.innerHTML=header+timeline+roadmapGantt(s)+banner+board;
@@ -621,14 +639,22 @@ function card(t){const a={high:"var(--red)",medium:"var(--amber)",low:"var(--dim
     return `<div class="subtree-row" onclick="event.stopPropagation();showTicket('${k.id}')"><i class="ti ti-${kdone?'circle-check':'corner-down-right'}" style="color:${kc};font-size:11px"></i><span class="st-id">${esc(k.id)}</span><span class="st-title">${esc(k.title)}</span><span class="st-st" style="color:${kc}">${esc(k.status.replace(/_/g,' '))}</span></div>`;
   }).join("")}</div>`:'';
   return `<div class="card-t" onclick="showTicket('${t.id}')" ${t.status==="on_hold"?'style="opacity:.65"':''}><div class="cid">${esc(t.id)}</div>
-    <div class="ct">${esc(t.title)}</div><div class="badges"><span class="b ${t.priority}">${t.priority}</span>${hold}${blocked}${sub}${split}${collisionBadge(STATE,t)}${age}${ui}${bug}${who}</div>${tree}</div>`;}
+    <div class="ct">${esc(t.title)}</div><div class="badges"><span class="b ${t.priority}">${t.priority}</span>${svcChip(t)}${hold}${blocked}${sub}${split}${collisionBadge(STATE,t)}${age}${ui}${bug}${who}</div>${tree}</div>`;}
+// CXA-F420e: service chip — rendered only when the ticket carries a tag.
+// Click toggles a board-wide service lens (same spirit as the milestone lens).
+window.SVCFILTER=window.SVCFILTER||"";
+function svcChip(t){if(!t.service_tag)return"";
+  const on=SVCFILTER===t.service_tag;
+  return `<span class="b" onclick="event.stopPropagation();toggleSvcFilter('${esc(t.service_tag)}')" style="cursor:pointer;background:color-mix(in srgb,var(--accent2) ${on?'30%':'13%'},transparent);color:var(--accent2)${on?';outline:1px solid var(--accent2)':''}" title="service ${esc(t.service_tag)} — click to ${on?'clear the':'filter the board by this'} service"><i class="ti ti-stack-2" style="font-size:10px"></i> ${esc(t.service_tag)}</span>`;}
+function toggleSvcFilter(n){SVCFILTER=SVCFILTER===n?"":n;renderActive();}
+function svcPass(t){return !SVCFILTER||t.service_tag===SVCFILTER;}
 // Session-local set of parents whose subtask tree is unfolded on the board.
 window.SUBTREE_OPEN=window.SUBTREE_OPEN||new Set();
 function toggleSubtree(id){if(SUBTREE_OPEN.has(id))SUBTREE_OPEN.delete(id);else SUBTREE_OPEN.add(id);renderActive();}
-function column([k,l,c],ts){const items=ts.filter(t=>t.status===k);
+function column([k,l,c],ts){const items=ts.filter(t=>t.status===k&&svcPass(t));
   return `<div class="col"><h3><span class="dot" style="background:var(${c})"></span>${l}<span class="n">${items.length}</span></h3>${items.length?items.map(card).join(""):'<div class="empty">—</div>'}</div>`;}
 // Unified column: collects both features and bugs whose status maps to this stage.
-function ucolumn([k,l,c,statuses],ts){const items=ts.filter(t=>statuses.includes(t.status))
+function ucolumn([k,l,c,statuses],ts){const items=ts.filter(t=>statuses.includes(t.status)&&svcPass(t))
     .sort((a,b)=>(a.type==="bug")-(b.type==="bug")); // bugs after features in the same column
   return `<div class="col"><h3><span class="dot" style="background:var(${c})"></span>${l}<span class="n">${items.length}</span></h3>${items.length?items.map(card).join(""):'<div class="empty">—</div>'}</div>`;}
 
