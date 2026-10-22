@@ -238,7 +238,11 @@ pub fn service_scope_block(
         return String::new();
     }
     format!(
-        "\n\n## Service scope (stay inside it)\nThis ticket belongs to service          '{}', which owns: {}. Keep EVERY change inside those folders — the          test gate narrows to the affected package, so an out-of-scope edit          ships with weaker verification and belongs in its own ticket. If the          fix genuinely requires touching another service's folders, STOP and          ask the BA instead.\n",
+        "\n\n## Service scope (stay inside it)\nThis ticket belongs to service \
+         '{}', which owns: {}. Keep EVERY change inside those folders — the test \
+         gate narrows to the affected package, so an out-of-scope edit ships with \
+         weaker verification and belongs in its own ticket. If the fix genuinely \
+         requires touching another service's folders, STOP and ask the BA instead.\n",
         svc.name,
         svc.scopes.join(", ")
     )

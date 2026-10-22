@@ -65,11 +65,10 @@ fn run_js(scenario: &str) -> String {
         ),
     )
     .unwrap_or_else(|e| panic!("write scenario: {e}"));
-    let out = Command::new("node").arg(&main).output().unwrap_or_else(|e| {
-        panic!(
-            "node runtime (same one the e2e/ stack uses): {e}"
-        )
-    });
+    let out = Command::new("node")
+        .arg(&main)
+        .output()
+        .unwrap_or_else(|e| panic!("node runtime (same one the e2e/ stack uses): {e}"));
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         out.status.success(),
