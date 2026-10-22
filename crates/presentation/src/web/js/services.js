@@ -66,7 +66,7 @@ async function applyRetags(){
   const sg=window._retagSuggestions||[];
   const picked=[...document.querySelectorAll(".retag-ck")].filter(c=>c.checked).map(c=>sg[Number(c.dataset.i)]).filter(Boolean)
     .map(x=>({ticket:x.ticket,to:x.to}));
-  if(!picked.length){toasty("Nothing ticked on retag suggestions — tick at least one suggestion first","err");return;}
+  if(!picked.length){toasty(copyText("toast.nothingPicked",{surface:"retag suggestions"}),"err");return;}
   try{
     const r=await fetch(api("/services/retag"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({assignments:picked})});
     const b=await r.json().catch(()=>({}));
