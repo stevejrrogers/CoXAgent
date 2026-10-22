@@ -52,7 +52,10 @@ struct Leak {
 }
 
 fn is_watchdog_script(path: &str) -> bool {
-    path.starts_with(".cox-watchdog/") && path.ends_with(".py")
+    path.starts_with(".cox-watchdog/")
+        && Path::new(path)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("py"))
 }
 
 fn is_comment(line: &str) -> bool {
@@ -64,7 +67,7 @@ fn is_comment(line: &str) -> bool {
 /// the environment (`'redis://:%s@…' % os.environ.get(…)`) rather than the
 /// secret baked in.
 fn is_interpolation_hole(value: &str) -> bool {
-    value.contains("%s") || value.contains('{') || value.contains("<")
+    value.contains("%s") || value.contains('{') || value.contains('<')
 }
 
 /// Extract the inside of a quoted Python string starting at `open_q`.
@@ -98,17 +101,18 @@ fn literal_leak(line: &str) -> Option<String> {
     });
     if let Some((after, q)) = pw_assign {
         let value = quoted_body(after, q).unwrap_or("");
-        let rest = &after[after.find(q).map(|e| e + 1).unwrap_or(0)..];
+        let rest = &after[after.find(q).map_or(0, |e| e + 1)..];
         let env_read = rest.contains("os.environ")
             || rest.contains("os.getenv")
             || value.is_empty()
             || is_interpolation_hole(value);
         if !env_read {
-            return Some(format!(
+            return Some(
                 "a postgres password literal is committed here. Read it from \
                  the environment instead: `os.environ.get('PG_PASSWORD', '')` \
                  (exported from the sanctioned deploy-secrets store)"
-            ));
+                    .to_string(),
+            );
         }
     }
     // Redis: `REDIS_URL = 'redis://:SECRET@host/…'`. An interpolated hole
@@ -121,11 +125,12 @@ fn literal_leak(line: &str) -> Option<String> {
             let url = quoted_body(&tail[tail.find(q).unwrap_or(0)..], q).unwrap_or(tail);
             if let Some(secret) = redis_url_secret(url) {
                 if !is_interpolation_hole(secret) {
-                    return Some(format!(
+                    return Some(
                         "a credentialed Redis URL literal is committed here. Build it \
                          from the environment at run time instead: \
                          `'redis://:%s@host/db' % os.environ.get('REDIS_PASSWORD', '')`"
-                    ));
+                            .to_string(),
+                    );
                 }
             }
         }
@@ -196,7 +201,10 @@ fn watchdog_scripts() -> Vec<(String, String)> {
     {
         let p = entry.unwrap().path();
         let name = p.file_name().unwrap().to_string_lossy().into_owned();
-        if name.ends_with(".py") {
+        if Path::new(&name)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("py"))
+        {
             let body = fs::read_to_string(&p).unwrap_or_else(|e| panic!("cannot read {name}: {e}"));
             found.push((format!(".cox-watchdog/{name}"), body));
         }

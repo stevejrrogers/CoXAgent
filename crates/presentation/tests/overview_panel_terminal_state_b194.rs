@@ -23,7 +23,7 @@ fn run_node(script: &str) -> String {
         .arg("-e")
         .arg(script)
         .output()
-        .expect("node must be available to evaluate the wiring script");
+        .unwrap_or_else(|e| panic!("node must be available to evaluate the wiring script: {e}"));
     assert!(
         out.status.success(),
         "node evaluation failed:\nstdout: {}\nstderr: {}",

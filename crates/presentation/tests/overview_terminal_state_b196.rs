@@ -47,9 +47,11 @@ fn run_js(scenario: &str) -> String {
         std::process::id(),
         RUN.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::create_dir_all(&dir).expect("scratch dir");
+    std::fs::create_dir_all(&dir)
+        .unwrap_or_else(|e| panic!("failed to create scratch dir {}: {e}", dir.display()));
     let module = dir.join("terminal_state.js");
-    std::fs::write(&module, MODULE).expect("write module");
+    std::fs::write(&module, MODULE)
+        .unwrap_or_else(|e| panic!("failed to write terminal_state.js module: {e}"));
     // Shim first (window/document must exist before the IIFE assigns into
     // window and before paint injects styles), then the module, then scenario.
     let main = dir.join("scenario.js");
@@ -60,11 +62,11 @@ fn run_js(scenario: &str) -> String {
             module.display().to_string().replace('\\', "/")
         ),
     )
-    .expect("write scenario");
+    .unwrap_or_else(|e| panic!("failed to write scenario file: {e}"));
     let out = Command::new("node")
         .arg(&main)
         .output()
-        .expect("node runtime (same one the e2e/ stack uses)");
+        .unwrap_or_else(|e| panic!("node runtime missing (same one the e2e/ stack uses): {e}"));
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         out.status.success(),
@@ -118,10 +120,10 @@ fn the_module_is_served_by_the_router_and_loaded_by_the_shell() {
     );
     let core = INDEX_HTML
         .find(r#"src="/assets/js/core.js""#)
-        .expect("core.js script tag");
+        .unwrap_or_else(|| panic!("index.html must reference the core.js script tag"));
     let ts = INDEX_HTML
         .find(r#"src="/assets/js/terminal_state.js""#)
-        .expect("terminal_state.js script tag");
+        .unwrap_or_else(|| panic!("index.html must reference the terminal_state.js script tag"));
     assert!(ts < core, "terminal_state.js must load before core.js");
 }
 
@@ -150,19 +152,19 @@ fn js_contract_mirrors_the_frozen_rust_manifest() {
         let name = state.name();
         for slot in required_slots(state) {
             assert!(
-                out.contains(&format!("\"{}\":[", slot_key(slot)))
-                    || out.contains(&format!("\",\"{}\"", slot_key(slot)))
-                    || out.contains(&format!("[\"{}", slot_key(slot))),
+                out.contains(&format!("\"{}\":[", slot_key(*slot)))
+                    || out.contains(&format!("\",\"{}\"", slot_key(*slot)))
+                    || out.contains(&format!("[\"{}", slot_key(*slot))),
                 "JS REQUIRED[{name}] missing Rust-required slot {}:\n{out}",
-                slot_key(slot)
+                slot_key(*slot)
             );
         }
         for slot in optional_slots(state) {
             assert!(
-                out.contains(&format!("\",\"{}\"", slot_key(slot)))
-                    || out.contains(&format!("[\"{}", slot_key(slot))),
+                out.contains(&format!("\",\"{}\"", slot_key(*slot)))
+                    || out.contains(&format!("[\"{}", slot_key(*slot))),
                 "JS OPTIONAL[{name}] missing Rust-optional slot {}:\n{out}",
-                slot_key(slot)
+                slot_key(*slot)
             );
         }
         let expect_role = if state.requires_reason() {
@@ -177,7 +179,7 @@ fn js_contract_mirrors_the_frozen_rust_manifest() {
     }
 }
 
-fn slot_key(slot: &Slot) -> &'static str {
+fn slot_key(slot: Slot) -> &'static str {
     match slot {
         Slot::Icon => "icon",
         Slot::Title => "title",
@@ -188,7 +190,7 @@ fn slot_key(slot: &Slot) -> &'static str {
 }
 
 /// Slot name → the `data-ts-slot` the renderer stamps on that element.
-fn dom_slot(slot: &Slot) -> &'static str {
+fn dom_slot(slot: Slot) -> &'static str {
     slot_key(slot)
 }
 
@@ -229,15 +231,13 @@ fn every_state_renders_its_required_slots_and_announces_correctly() {
         let html = html_of(&good_spec(state));
         assert!(
             html.contains(&format!(r#"data-ts-state="{}""#, state.name())),
-            "{:?}: missing data-ts-state\n{html}",
-            state
+            "{state:?}: missing data-ts-state\n{html}"
         );
         for slot in required_slots(state) {
             assert!(
-                html.contains(&format!(r#"data-ts-slot="{}""#, dom_slot(slot))),
-                "{:?}: required slot {} not rendered\n{html}",
-                state,
-                slot_key(slot)
+                html.contains(&format!(r#"data-ts-slot="{}""#, dom_slot(*slot))),
+                "{state:?}: required slot {} not rendered\n{html}",
+                slot_key(*slot)
             );
         }
         let want_role = if state.requires_reason() {
@@ -247,8 +247,7 @@ fn every_state_renders_its_required_slots_and_announces_correctly() {
         };
         assert!(
             html.contains(&format!(r#"role="{want_role}""#)),
-            "{:?}: expected role={want_role}\n{html}",
-            state
+            "{state:?}: expected role={want_role}\n{html}"
         );
     }
 }
@@ -437,15 +436,19 @@ fn all_html_is_escaped_including_panel_id() {
 
 #[test]
 fn every_manifest_panel_state_combination_renders_with_its_dom_id() {
-    for p in panel(OverviewPanelId::Drain).into_iter().chain(
-        panel(OverviewPanelId::Alerts)
-            .into_iter()
-            .chain(panel(OverviewPanelId::Working).into_iter())
-            .chain(panel(OverviewPanelId::Kpis).into_iter())
-            .chain(panel(OverviewPanelId::Health).into_iter())
-            .chain(panel(OverviewPanelId::RecentActivity).into_iter())
-            .chain(panel(OverviewPanelId::Releases).into_iter()),
-    ) {
+    let panels = [
+        OverviewPanelId::Drain,
+        OverviewPanelId::Alerts,
+        OverviewPanelId::Working,
+        OverviewPanelId::Kpis,
+        OverviewPanelId::Health,
+        OverviewPanelId::RecentActivity,
+        OverviewPanelId::Releases,
+    ];
+    for id in panels {
+        let Some(p) = panel(id) else {
+            panic!("manifest is missing panel {id:?}");
+        };
         for state in p.states {
             let spec = match state {
                 TerminalState::Ready => format!(
