@@ -298,3 +298,18 @@ finds them and `docker compose -p <project> down -v` removes them.
 
 CI runs the same suites in the `integration` job; the fixture provisions the
 ephemeral pair per test, so the job exports no database env vars at all.
+
+## Pre-deploy container build gate (CXA-B313)
+
+Before pushing or deploying, prove the compose stack still builds:
+
+    scripts/docker-build-check.sh              # config check + cached build
+    scripts/docker-build-check.sh --no-cache   # cold build, what CI runs
+
+It runs `docker compose config -q` then `docker compose build`; on failure it
+prints the real tail of the build log to stdout (never a docker-desktop://
+dashboard link) and exits non-zero. A second consecutive run after an unrelated
+source edit finishes in minutes because dependency layers are cached — the
+Dockerfile copies manifests/lockfiles first and uses BuildKit cache mounts.
+Base images are pinned by digest; re-pin deliberately via the command noted at
+the top of `Dockerfile`.
