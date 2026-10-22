@@ -136,8 +136,7 @@ fn rendered_mount_ids(root: &Path) -> BTreeSet<String> {
 fn coverage(root: &Path) -> (BTreeSet<String>, BTreeSet<String>) {
     let contains = |file: &str, needles: &[&str]| {
         fs::read_to_string(root.join(file))
-            .map(|src| needles.iter().any(|n| src.contains(n)))
-            .unwrap_or(false)
+            .is_ok_and(|src| needles.iter().any(|n| src.contains(n)))
     };
     let mut structural = BTreeSet::new();
     // The pilot KPI panel (scaffold exemplar) and batch 2's five panels —
@@ -228,7 +227,7 @@ fn the_panel_registry_is_strictly_covered_and_layout_matched() {
     );
     let orphans: Vec<&str> = registered
         .iter()
-        .map(|n| n.as_str())
+        .map(std::string::String::as_str)
         .filter(|n| {
             !mounted
                 .iter()
