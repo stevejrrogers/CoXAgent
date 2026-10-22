@@ -19,6 +19,7 @@ pub mod list_panels;
 pub mod manual_rollback;
 pub mod merge_policy;
 pub mod merge_sweep;
+pub mod overview_contracts;
 pub mod question_batching;
 pub mod readiness_preflight;
 pub mod recover;
@@ -75,6 +76,9 @@ pub use merge_policy::{
     MAX_TICKET_RESCUES,
 };
 pub use merge_sweep::{merge_sweep, SweepOutcome};
+pub use overview_contracts::{
+    all_overview_contracts, overview_contracts, OverviewContractRow, OverviewContracts,
+};
 pub use question_batching::{flush_batches, select_deferred, should_defer};
 pub use readiness_preflight::{
     run_preflight, PreflightItem, PreflightProbe, PreflightReport, PreflightSnapshot,
