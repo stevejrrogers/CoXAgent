@@ -157,6 +157,9 @@ const APP_JS: &[(&str, &str)] = &[
         "terminal_state.js",
         include_str!("../web/js/terminal_state.js"),
     ),
+    // View-mesh (CXA-B232b) — overview_states.js resolves panel mounts
+    // through window.OvViewMesh at runtime; loads first or panels don't mount.
+    ("overview_vm.js", include_str!("../web/js/overview_vm.js")),
     (
         "overview_states.js",
         include_str!("../web/js/overview_states.js"),

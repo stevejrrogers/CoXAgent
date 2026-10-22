@@ -39,7 +39,10 @@ pub enum DeployTerminal<'a> {
     /// The attempt reached its terminal state successfully.
     Succeeded(&'a DeployStatus),
     /// The attempt failed; `reason` is WHY, and is never dropped on the floor.
-    Failed { attempt: &'a DeployStatus, reason: &'a str },
+    Failed {
+        attempt: &'a DeployStatus,
+        reason: &'a str,
+    },
 }
 
 impl<'a> DeployTerminal<'a> {
@@ -91,7 +94,9 @@ impl<'a> DeployTerminal<'a> {
 pub fn deploy_terminal_lines(deploy: Option<&DeployStatus>) -> Vec<String> {
     match DeployTerminal::classify(deploy) {
         DeployTerminal::NotStarted => {
-            vec![format!("deploy         : {LABEL_NOT_STARTED}\n                 ({HINT_NOT_STARTED})")]
+            vec![format!(
+                "deploy         : {LABEL_NOT_STARTED}\n                 ({HINT_NOT_STARTED})"
+            )]
         }
         DeployTerminal::Succeeded(attempt) => {
             let mut lines = vec![
