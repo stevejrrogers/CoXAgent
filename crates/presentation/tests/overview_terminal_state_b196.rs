@@ -166,19 +166,19 @@ fn js_contract_mirrors_the_frozen_rust_manifest() {
         let name = state.name();
         for &slot in required_slots(state) {
             assert!(
-                out.contains(&format!("\"{}\":[", slot_key(*slot)))
-                    || out.contains(&format!("\",\"{}\"", slot_key(*slot)))
-                    || out.contains(&format!("[\"{}", slot_key(*slot))),
+                out.contains(&format!("\"{}\":[", slot_key(slot)))
+                    || out.contains(&format!("\",\"{}\"", slot_key(slot)))
+                    || out.contains(&format!("[\"{}", slot_key(slot))),
                 "JS REQUIRED[{name}] missing Rust-required slot {}:\n{out}",
-                slot_key(*slot)
+                slot_key(slot)
             );
         }
         for &slot in optional_slots(state) {
             assert!(
-                out.contains(&format!("\",\"{}\"", slot_key(*slot)))
-                    || out.contains(&format!("[\"{}", slot_key(*slot))),
+                out.contains(&format!("\",\"{}\"", slot_key(slot)))
+                    || out.contains(&format!("[\"{}", slot_key(slot))),
                 "JS OPTIONAL[{name}] missing Rust-optional slot {}:\n{out}",
-                slot_key(*slot)
+                slot_key(slot)
             );
         }
         let expect_role = if state.requires_reason() {
@@ -249,10 +249,10 @@ fn every_state_renders_its_required_slots_and_announces_correctly() {
         );
         for &slot in required_slots(state) {
             assert!(
-                html.contains(&format!(r#"data-ts-slot="{}""#, dom_slot(*slot))),
+                html.contains(&format!(r#"data-ts-slot="{}""#, dom_slot(slot))),
                 "{:?}: required slot {} not rendered\n{html}",
                 state,
-                slot_key(*slot)
+                slot_key(slot)
             );
         }
         let want_role = if state.requires_reason() {
@@ -451,41 +451,24 @@ fn all_html_is_escaped_including_panel_id() {
 }
 
 #[test]
-fn every_manifest_panel_state_combination_renders_with_its_dom_id() {    let all_panels = [
-        OverviewPanelId::Drain,
-        OverviewPanelId::Alerts,
-        OverviewPanelId::Working,
-        OverviewPanelId::Kpis,
-        OverviewPanelId::Health,
-        OverviewPanelId::RecentActivity,
-        OverviewPanelId::Releases,
+fn every_manifest_panel_state_combination_renders_with_its_dom_id() {
+    // The panel list is the contract manifest itself: every (panel, state)
+    // pair below must render with its DOM id.
+    let panels = [
+        (OverviewPanelId::Drain, "drain"),
+        (OverviewPanelId::Alerts, "alerts"),
+        (OverviewPanelId::Working, "working"),
+        (OverviewPanelId::Kpis, "kpis"),
+        (OverviewPanelId::Health, "health"),
+        (OverviewPanelId::RecentActivity, "recent-activity"),
+        (OverviewPanelId::Releases, "releases"),
     ];
-    for p in all_panels
-        .into_iter()
-        .filter_map(|id| panel(id).into_iter().next())
-    {
-||||||| dc990bd8
-    for p in panel(OverviewPanelId::Drain).into_iter().chain(
-        panel(OverviewPanelId::Alerts)
-            .into_iter()
-            .chain(panel(OverviewPanelId::Working).into_iter())
-            .chain(panel(OverviewPanelId::Kpis).into_iter())
-            .chain(panel(OverviewPanelId::Health).into_iter())
-            .chain(panel(OverviewPanelId::RecentActivity).into_iter())
-            .chain(panel(OverviewPanelId::Releases).into_iter()),
-    ) {
-    for (_, p) in [
-        OverviewPanelId::Drain,
-        OverviewPanelId::Alerts,
-        OverviewPanelId::Working,
-        OverviewPanelId::Kpis,
-        OverviewPanelId::Health,
-        OverviewPanelId::RecentActivity,
-        OverviewPanelId::Releases,
-    ]
-    .into_iter()
-    .filter_map(|id| Some((id, panel(id)?)))
-    {        for state in p.states {
+    for (id, name) in panels {
+        let Some(p) = panel(id).into_iter().next() else {
+            continue;
+        };
+        assert_eq!(name.is_empty(), false);
+        for state in p.states {
             let spec = match state {
                 TerminalState::Ready => format!(
                     r#"{{"state":"ready","readyHtml":"<div>{}</div>","panelId":"{}"}}"#,
