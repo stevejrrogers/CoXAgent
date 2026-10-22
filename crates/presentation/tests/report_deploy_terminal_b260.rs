@@ -11,8 +11,7 @@
 use coxagent_application::state::{DeployStatus, ProjectState};
 use coxagent_presentation::{
     deploy_terminal_state::{
-        deploy_terminal_lines, HINT_NOT_STARTED, LABEL_FAILED, LABEL_NOT_STARTED,
-        LABEL_SUCCEEDED,
+        deploy_terminal_lines, HINT_NOT_STARTED, LABEL_FAILED, LABEL_NOT_STARTED, LABEL_SUCCEEDED,
     },
     render_report,
 };
@@ -38,7 +37,10 @@ fn render_report_shows_a_failed_deploys_label_and_why() {
     };
 
     let report = render_report(&state);
-    assert!(report.contains(LABEL_FAILED), "missing FAILED label:\n{report}");
+    assert!(
+        report.contains(LABEL_FAILED),
+        "missing FAILED label:\n{report}"
+    );
     assert!(
         report.contains("why          : compose up exited 1"),
         "failure WHY must survive the full-report path:\n{report}"
@@ -88,6 +90,9 @@ fn render_report_emits_every_line_the_component_produces() {
 
     let report = render_report(&state);
     for line in expected {
-        assert!(report.contains(line), "line `{line}` missing from report:\n{report}");
+        assert!(
+            report.contains(line),
+            "line `{line}` missing from report:\n{report}"
+        );
     }
 }

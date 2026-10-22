@@ -17,7 +17,11 @@ fn attempt(ok: bool, summary: &str) -> DeployStatus {
 }
 
 fn probe(passed: bool, http_status: Option<u16>) -> HealthCheckResult {
-    HealthCheckResult { passed, http_status, response_time_ms: Some(12) }
+    HealthCheckResult {
+        passed,
+        http_status,
+        response_time_ms: Some(12),
+    }
 }
 
 #[test]
@@ -45,7 +49,10 @@ fn a_failed_deploy_always_renders_its_why() {
     let lines = deploy_terminal_lines(Some(&attempt(false, "compose up exited 1")));
     let joined = lines.join("\n");
     assert!(joined.contains(LABEL_FAILED), "{joined}");
-    assert!(joined.contains("why          : compose up exited 1"), "{joined}");
+    assert!(
+        joined.contains("why          : compose up exited 1"),
+        "{joined}"
+    );
 }
 
 #[test]
@@ -66,7 +73,10 @@ fn a_failed_health_probe_is_attributed_on_top_of_the_failure() {
     let mut failed = attempt(false, "gateway unreachable after deploy");
     failed.health_check = Some(probe(false, Some(503)));
     let joined = deploy_terminal_lines(Some(&failed)).join("\n");
-    assert!(joined.contains("health       : failed (HTTP 503)"), "{joined}");
+    assert!(
+        joined.contains("health       : failed (HTTP 503)"),
+        "{joined}"
+    );
 }
 
 #[test]
@@ -81,8 +91,11 @@ fn a_passing_health_probe_is_attributed_on_success() {
 fn every_state_classifies_to_a_nonempty_label() {
     // Exhaustive-name check: each classifiable snapshot yields a label; new
     // variants cannot appear without touching `classify`.
-    let snapshots: Vec<Option<DeployStatus>> =
-        vec![None, Some(attempt(true, "ok")), Some(attempt(false, "boom"))];
+    let snapshots: Vec<Option<DeployStatus>> = vec![
+        None,
+        Some(attempt(true, "ok")),
+        Some(attempt(false, "boom")),
+    ];
     for deploy in &snapshots {
         assert!(!DeployTerminal::classify(deploy.as_ref()).label().is_empty());
     }
