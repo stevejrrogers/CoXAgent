@@ -23,6 +23,7 @@ mod backlog;
 mod ceremonies;
 mod debt_sweep;
 mod escalation;
+mod hygiene;
 mod po_daily;
 mod pr_truth;
 mod preflight;
@@ -842,6 +843,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.pr_truth_sweep().await;
             self.po_daily_pass().await;
             self.security_sweep_pass().await;
+            self.backlog_hygiene_pass().await;
             // Stop starting, start finishing: review + merge the PR queue at
             // the TOP of the cycle. This used to run at the very end — after
             // codegraph, ceremonies and the (tens-of-minutes) dev phases — so
