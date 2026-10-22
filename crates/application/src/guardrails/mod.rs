@@ -17,6 +17,7 @@
 //! - [`report`] — aggregate counts and printable text for logs / CI.
 
 pub mod case;
+pub mod filter_sort_cases;
 pub mod report;
 pub mod runner;
 

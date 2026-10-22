@@ -1,0 +1,25 @@
+//! FROZEN above-the-fold panel inventory — CXA-B240.2 guardrail snapshot.
+//!
+//! THIS FILE IS INTENTIONALLY FROZEN. It pins the exact render order of the
+//! Overview screen's above-the-fold panels, as enumerated by
+//! `crates/presentation/src/overview_panels.rs` (`OVERVIEW_PANELS`, DOM
+//! order) at freeze time (CXA-B228 enumeration).
+//!
+//! ANY CHANGE to this list — a panel added, removed or reordered — requires a
+//! REVIEWED DIFF: the guardrail case `fold_panel_inventory_matches_snapshot`
+//! fails the suite on any drift so that above-the-fold layout changes are an
+//! explicit decision, never an accident. To move the freeze forward, edit
+//! both this list AND the adapter feeding it, then read the failure message
+//! to confirm only the intended panels moved.
+//!
+//! Viewport: desktop (the single viewport rendered today).
+
+[
+  { "id": "drain",           "dom_id": "ov-drain" },
+  { "id": "alerts",          "dom_id": "ov-alerts" },
+  { "id": "working",         "dom_id": "ov-working" },
+  { "id": "kpis",            "dom_id": "kpis" },
+  { "id": "health",          "dom_id": "ov-health" },
+  { "id": "recent-activity", "dom_id": "ov-activity" },
+  { "id": "releases",        "dom_id": "ov-changelog" }
+]
