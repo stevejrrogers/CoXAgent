@@ -32,8 +32,27 @@ const MAX_JUDGMENT_ITEMS: usize = 15;
 
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Daily backlog-hygiene pass. See the module docs.
-    #[allow(clippy::too_many_lines)] // one pass, read top to bottom (house style)
+    /// Bounded wrapper: whatever goes wrong inside (a stuck engine, a store
+    /// that never answers), the CYCLE must keep breathing — the 2026-10-22
+    /// boot wedged exactly here on the pass's first prod run, silently.
     pub(super) async fn backlog_hygiene_pass(&self) {
+        if tokio::time::timeout(
+            std::time::Duration::from_secs(900),
+            self.backlog_hygiene_inner(),
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!(
+                "backlog hygiene: pass exceeded its 15-minute budget — aborted; the \
+                 cycle continues and the pass retries at its next daily slot"
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_lines)] // one pass, read top to bottom (house style)
+    async fn backlog_hygiene_inner(&self) {
+        tracing::info!("backlog hygiene: loading state");
         let Ok(state) = self.store.load().await else {
             return;
         };
@@ -69,6 +88,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             })
             .collect();
         let hplan = crate::backlog_hygiene::plan(&views);
+        tracing::info!(
+            "backlog hygiene: plan — {} resume, {} duplicate-reject, {} for SM judgment",
+            hplan.resume.len(),
+            hplan.reject_duplicates.len(),
+            hplan.report_held.len()
+        );
         self.report("SM", "backlog hygiene (daily triage)");
         let resumes: Vec<String> = hplan
             .resume
@@ -133,6 +158,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
         }
         // SM judgment layer over the reported pile.
+        tracing::info!("backlog hygiene: mechanical actions applied — starting SM judgment");
         let judged = self.sm_judgment(&state, &hplan.report_held).await;
         let digest = format!(
             "🧹 Backlog hygiene: resumed {n_resumed} parked ticket(s), rejected {n_rejected} \
