@@ -8,7 +8,7 @@ async function renderServicesPanel(){
   el.innerHTML='<div class="panel" style="color:var(--muted)">Loading services…</div>';
   let data={services:[]};
   try{const r=await fetch(api("/services"));if(r.ok)data=await r.json();}catch(e){}
-  const rows=(data.services||[]).map(s=>{
+  const rows=(data.services||[]).map((s,ix)=>{
     const st=s.status||"active";
     const col=st==="active"?"var(--green)":st==="needs-setup"?"var(--amber)":"var(--muted)";
     return `<div class="toolrow">
@@ -17,7 +17,12 @@ async function renderServicesPanel(){
         <span class="tooldim">· ${esc(st)}${s.scopes&&s.scopes.length?` · scopes: ${esc(s.scopes.join(", "))}`:""}</span></div>
         <code class="toolpath">${esc(s.repo||"(project repo)")} → ${esc(s.work_dir||"(project work_dir)")}</code>
         ${s.build_cmd||s.test_cmd?`<div class="tooldim" style="font-size:11.5px">build: <code>${esc(s.build_cmd||"—")}</code> · test: <code>${esc(s.test_cmd||"—")}</code></div>`:""}
-      </div></div>`;}).join("");
+      </div>${ix===0?'<span class="tooldim" title="the first service is the default home for untagged tickets">default</span>'
+        :st==="active"?`<button class="gc-btn" onclick="setServiceStatus('${esc(s.name)}','paused')" title="keep tickets, stop assignment"><i class="ti ti-player-pause"></i> Pause</button>`
+        :st==="paused"||st==="needs-setup"?`<button class="gc-btn" onclick="setServiceStatus('${esc(s.name)}','active')"><i class="ti ti-player-play"></i> Resume</button>
+         <button class="gc-btn" onclick="setServiceStatus('${esc(s.name)}','archived')" title="stop assignment and mark for cleanup"><i class="ti ti-archive"></i> Archive</button>`
+        :`<button class="gc-btn" onclick="setServiceStatus('${esc(s.name)}','active')"><i class="ti ti-player-play"></i> Unarchive</button>`}
+      </div>`;}).join("");
   el.innerHTML=`
     <div class="toolcard">
       <div class="toolhead"><i class="ti ti-stack-2" style="color:var(--accent2)"></i> Services
@@ -32,7 +37,44 @@ async function renderServicesPanel(){
       <button class="gc-btn pri" id="svc-scan-btn" onclick="scanService()" style="margin-top:6px;align-self:flex-start"><i class="ti ti-radar-2"></i> Scan &amp; propose</button>
       <div id="svc-proposal"></div>
       <div id="svc-result" style="margin-top:6px;font-size:12.5px"></div>
+    </div>
+    <div class="panel frm" style="margin-top:12px">
+      <div style="font-weight:700;margin-bottom:4px"><i class="ti ti-tags" style="color:var(--accent2)"></i> Retag suggestions
+        <span class="tooldim" style="font-weight:400">· untagged backlog that looks like it belongs to another service</span></div>
+      <button class="gc-btn" onclick="loadRetagSuggestions()" style="align-self:flex-start"><i class="ti ti-radar-2"></i> Suggest</button>
+      <div id="svc-retag"></div>
     </div>`;
+}
+
+async function loadRetagSuggestions(){
+  const el=document.getElementById("svc-retag");
+  el.innerHTML='<div class="tooldim">Scanning…</div>';
+  let b={suggestions:[]};
+  try{const r=await fetch(api("/services/retag-suggestions"));if(r.ok)b=await r.json();}catch(e){}
+  const sg=b.suggestions||[];
+  if(!sg.length){el.innerHTML='<div class="tooldim" style="padding:6px 0">No suggestions — every eligible ticket already sits where it belongs (or evidence is ambiguous, which stays a human call).</div>';return;}
+  el.innerHTML=`<div style="display:flex;flex-direction:column;gap:4px;margin-top:8px">${sg.map((x,i)=>`
+    <label style="display:flex;align-items:center;gap:8px;font-size:12.5px">
+      <input type="checkbox" class="retag-ck" data-i="${i}" checked/>
+      <b>${esc(x.ticket)}</b> → <span class="tk">${esc(x.to)}</span>
+      <span class="tooldim">· ${esc(x.why)}</span></label>`).join("")}
+    <button class="gc-btn pri" onclick="applyRetags()" style="align-self:flex-start;margin-top:6px"><i class="ti ti-check"></i> Apply ticked</button></div>`;
+  window._retagSuggestions=sg;
+}
+
+async function applyRetags(){
+  const sg=window._retagSuggestions||[];
+  const picked=[...document.querySelectorAll(".retag-ck")].filter(c=>c.checked).map(c=>sg[Number(c.dataset.i)]).filter(Boolean)
+    .map(x=>({ticket:x.ticket,to:x.to}));
+  if(!picked.length){toasty(copyFor("toast.nothingPicked",{surface:"retag suggestions"}),"err");return;}
+  try{
+    const r=await fetch(api("/services/retag"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({assignments:picked})});
+    const b=await r.json().catch(()=>({}));
+    if(!r.ok){toasty(b.error||"retag failed","err");return;}
+    toasty(`Retagged ${(b.applied||[]).length} ticket(s)${(b.refused||[]).length?` · ${b.refused.length} refused`:""}`);
+    if((b.refused||[]).length)console.warn("retag refused:",b.refused);
+  }catch(e){toasty(copyText("error.network",{where:"retag"}),"err");}
+  loadRetagSuggestions();
 }
 
 async function scanService(){
@@ -95,4 +137,14 @@ async function addService(){
     renderServicesPanel();
   }catch(e){out.innerHTML='<span style="color:var(--red)">Network error — the probe may still be running; reopen Settings → Services to check.</span>';}
   finally{if(btn){btn.disabled=false;btn.innerHTML='<i class="ti ti-rocket"></i> Probe &amp; add';}}
+}
+
+async function setServiceStatus(name,status){
+  try{
+    const r=await fetch(api(`/services/${encodeURIComponent(name)}/status`),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({status})});
+    const b=await r.json().catch(()=>({}));
+    if(!r.ok){toasty(b.error||b||"status change failed","err");}
+    else{toasty(`${name}: ${b.from} → ${b.status}. ${b.note||""}`);}
+  }catch(e){toasty(copyText("error.network",{where:"service status"}),"err");}
+  renderServicesPanel();
 }
