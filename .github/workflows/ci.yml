@@ -122,6 +122,10 @@ jobs:
         run: cargo test -p coxagent-app --test deploy_smoke --test ci_availability_gate --test test_env_guard_f326_gate
       - name: Hexagonal gate (CXA-B211 — application layer does no direct IO)
         run: cargo test -p coxagent-app --test hexagonal_gate -- --nocapture
+      # CXA-B315: docs have no review lane of their own, so the leak-guard runs
+      # here on every PR — docker-free (pure scan + git ls-files), sub-second.
+      - name: Doc credential leak guard (CXA-B315 — post-CXA-B311a regression gate)
+        run: cargo test -p coxagent-app --test doc_leak_guard && cargo test -p coxagent-application --lib doc_leak
 
   # CXA-F326: the DSN-gated Postgres/Redis integration tests are #[ignore]d —
   # this job is the only sanctioned way to run them. It brings its own
