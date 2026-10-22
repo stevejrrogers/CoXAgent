@@ -37,7 +37,44 @@ async function renderServicesPanel(){
       <button class="gc-btn pri" id="svc-scan-btn" onclick="scanService()" style="margin-top:6px;align-self:flex-start"><i class="ti ti-radar-2"></i> Scan &amp; propose</button>
       <div id="svc-proposal"></div>
       <div id="svc-result" style="margin-top:6px;font-size:12.5px"></div>
+    </div>
+    <div class="panel frm" style="margin-top:12px">
+      <div style="font-weight:700;margin-bottom:4px"><i class="ti ti-tags" style="color:var(--accent2)"></i> Retag suggestions
+        <span class="tooldim" style="font-weight:400">· untagged backlog that looks like it belongs to another service</span></div>
+      <button class="gc-btn" onclick="loadRetagSuggestions()" style="align-self:flex-start"><i class="ti ti-radar-2"></i> Suggest</button>
+      <div id="svc-retag"></div>
     </div>`;
+}
+
+async function loadRetagSuggestions(){
+  const el=document.getElementById("svc-retag");
+  el.innerHTML='<div class="tooldim">Scanning…</div>';
+  let b={suggestions:[]};
+  try{const r=await fetch(api("/services/retag-suggestions"));if(r.ok)b=await r.json();}catch(e){}
+  const sg=b.suggestions||[];
+  if(!sg.length){el.innerHTML='<div class="tooldim" style="padding:6px 0">No suggestions — every eligible ticket already sits where it belongs (or evidence is ambiguous, which stays a human call).</div>';return;}
+  el.innerHTML=`<div style="display:flex;flex-direction:column;gap:4px;margin-top:8px">${sg.map((x,i)=>`
+    <label style="display:flex;align-items:center;gap:8px;font-size:12.5px">
+      <input type="checkbox" class="retag-ck" data-i="${i}" checked/>
+      <b>${esc(x.ticket)}</b> → <span class="tk">${esc(x.to)}</span>
+      <span class="tooldim">· ${esc(x.why)}</span></label>`).join("")}
+    <button class="gc-btn pri" onclick="applyRetags()" style="align-self:flex-start;margin-top:6px"><i class="ti ti-check"></i> Apply ticked</button></div>`;
+  window._retagSuggestions=sg;
+}
+
+async function applyRetags(){
+  const sg=window._retagSuggestions||[];
+  const picked=[...document.querySelectorAll(".retag-ck")].filter(c=>c.checked).map(c=>sg[Number(c.dataset.i)]).filter(Boolean)
+    .map(x=>({ticket:x.ticket,to:x.to}));
+  if(!picked.length){toasty("Nothing ticked","err");return;}
+  try{
+    const r=await fetch(api("/services/retag"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({assignments:picked})});
+    const b=await r.json().catch(()=>({}));
+    if(!r.ok){toasty(b.error||"retag failed","err");return;}
+    toasty(`Retagged ${(b.applied||[]).length} ticket(s)${(b.refused||[]).length?` · ${b.refused.length} refused`:""}`);
+    if((b.refused||[]).length)console.warn("retag refused:",b.refused);
+  }catch(e){toasty("Network error","err");}
+  loadRetagSuggestions();
 }
 
 async function scanService(){
