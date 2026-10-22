@@ -41,7 +41,10 @@ fn eval_js(expr: &str) -> String {
         .arg("-e")
         .arg(&script)
         .output()
-        .expect("node must be available to evaluate the view-mesh + wiring scripts");
+        // `expect` is lint-banned here; match the sibling tests' panic form.
+        .unwrap_or_else(|e| {
+            panic!("node must be available to evaluate the view-mesh + wiring scripts: {e}")
+        });
     assert!(
         out.status.success(),
         "node evaluation failed:\nstdout: {}\nstderr: {}",
@@ -60,8 +63,8 @@ fn js_view_mesh_mirrors_the_pure_domain_contract_field_for_field() {
         .map(|id| (*id, panel_contract(*id)))
         .collect();
     let mesh = eval_js(
-        r#"JSON.stringify(OvViewMesh.panels().map(function(p){
-            return {key:p.key, domId:p.domId, paintSite:p.paintSite};}))"#,
+        r"JSON.stringify(OvViewMesh.panels().map(function(p){
+            return {key:p.key, domId:p.domId, paintSite:p.paintSite};}))",
     );
 
     // Walk the JSON by hand — serde_json is not a presentation dependency;
