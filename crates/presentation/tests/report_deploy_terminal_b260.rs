@@ -32,8 +32,10 @@ fn failed_attempt(summary: &str) -> DeployStatus {
 /// WHY. Fails on the pre-B260 `render_report`, which emitted no deploy lines.
 #[test]
 fn render_report_shows_a_failed_deploys_label_and_why() {
-    let mut state = ProjectState::default();
-    state.deploy = Some(failed_attempt("compose up exited 1"));
+    let state = ProjectState {
+        deploy: Some(failed_attempt("compose up exited 1")),
+        ..ProjectState::default()
+    };
 
     let report = render_report(&state);
     assert!(report.contains(LABEL_FAILED), "missing FAILED label:\n{report}");
@@ -48,12 +50,14 @@ fn render_report_shows_a_failed_deploys_label_and_why() {
 /// AC: success names itself in the report rather than blending into silence.
 #[test]
 fn render_report_shows_a_succeeded_deploy() {
-    let mut state = ProjectState::default();
-    state.deploy = Some(DeployStatus {
-        ok: true,
-        summary: "released 0.4.1".to_string(),
-        ..failed_attempt("unused")
-    });
+    let state = ProjectState {
+        deploy: Some(DeployStatus {
+            ok: true,
+            summary: "released 0.4.1".to_string(),
+            ..failed_attempt("unused")
+        }),
+        ..ProjectState::default()
+    };
 
     let report = render_report(&state);
     assert!(report.contains(LABEL_SUCCEEDED), "{report}");
@@ -75,8 +79,10 @@ fn render_report_shows_the_not_started_empty_state() {
 /// wiring cannot drop or reorder lines relative to the tested contract.
 #[test]
 fn render_report_emits_every_line_the_component_produces() {
-    let mut state = ProjectState::default();
-    state.deploy = Some(failed_attempt("out of disk"));
+    let state = ProjectState {
+        deploy: Some(failed_attempt("out of disk")),
+        ..ProjectState::default()
+    };
     let binding = deploy_terminal_lines(state.deploy.as_ref());
     let expected: Vec<&str> = binding.iter().map(String::as_str).collect();
 
