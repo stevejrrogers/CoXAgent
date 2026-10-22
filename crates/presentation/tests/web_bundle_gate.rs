@@ -29,10 +29,17 @@ const EXCEPTIONS: [&str; 4] = [
 fn every_web_js_module_is_embedded_and_loaded() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/web/js");
     let mut missing: Vec<String> = Vec::new();
-    for entry in std::fs::read_dir(&dir).expect("read web/js") {
-        let name = entry.expect("dir entry").file_name();
+    let entries = std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read web/js: {e}"));
+    for entry in entries {
+        let name = entry
+            .unwrap_or_else(|e| panic!("dir entry: {e}"))
+            .file_name();
         let name = name.to_string_lossy().into_owned();
-        if !name.ends_with(".js") || EXCEPTIONS.contains(&name.as_str()) {
+        if !std::path::Path::new(&name)
+            .extension()
+            .is_some_and(|x| x.eq_ignore_ascii_case("js"))
+            || EXCEPTIONS.contains(&name.as_str())
+        {
             continue;
         }
         let embedded = SERVER_MOD.contains(&format!("web/js/{name}"));
