@@ -774,8 +774,38 @@ async fn build_project_inner(
     // Auto-resume this machine's operator if the user left it running last time
     // (per-operator desired state). This restores only THIS user's operator —
     // it never starts anyone else's, so no one's credentials get spent for them.
-    if let Ok(op) = std::env::var("COXAGENT_OPERATOR") {
-        if !op.is_empty() {
+    //
+    // Identity comes from COXAGENT_OPERATOR — but macOS GUI launchctl envs
+    // have now vanished three times without a reboot (2026-10-16, -20, -22),
+    // and every loss read as a total "hub wedge": boot looks healthy, the
+    // runner silently stays paused forever (the Oct-20 outage alone was 17h).
+    // So the identity is PERSISTED next to operator.token the first time the
+    // env is seen, later boots fall back to that file, and having neither is
+    // a LOUD warning that names the fix — never a silent pause again.
+    let identity_path = operator_token_path().map(|p| p.with_file_name("operator.identity"));
+    let op_env = std::env::var("COXAGENT_OPERATOR")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    let op = op_env.clone().or_else(|| {
+        let p = identity_path.as_ref()?;
+        let from_file = std::fs::read_to_string(p).ok()?.trim().to_owned();
+        if from_file.is_empty() {
+            None
+        } else {
+            tracing::warn!(
+                "COXAGENT_OPERATOR is unset — recovered operator identity '{from_file}'                  from {} (launchctl envs are known to vanish; restore them when convenient)",
+                p.display()
+            );
+            Some(from_file)
+        }
+    });
+    match op {
+        Some(op) => {
+            if op_env.is_some() {
+                if let Some(p) = &identity_path {
+                    let _ = std::fs::write(p, &op);
+                }
+            }
             let operator = format!("{op}@{}", worker_host());
             if matches!(store.get_desired(&operator).await, Ok(Some(true))) {
                 handle.set_operator(&op, &worker_host());
@@ -783,6 +813,9 @@ async fn build_project_inner(
                 tracing::info!("auto-resumed operator {operator} (left running)");
             }
         }
+        None => tracing::warn!(
+            "auto-resume SKIPPED: COXAGENT_OPERATOR is unset and no operator.identity              file exists — the runner stays PAUSED until someone presses Resume.              Fix: `launchctl setenv COXAGENT_OPERATOR <name>` and restart, or write              the name into ~/CoXAgent/operator.identity"
+        ),
     }
 
     // Self-upgrade (dogfood CD, opt-in): every 15 min a DETACHED script checks
