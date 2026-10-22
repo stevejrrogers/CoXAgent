@@ -799,23 +799,22 @@ async fn build_project_inner(
             Some(from_file)
         }
     });
-    match op {
-        Some(op) => {
-            if op_env.is_some() {
-                if let Some(p) = &identity_path {
-                    let _ = std::fs::write(p, &op);
-                }
-            }
-            let operator = format!("{op}@{}", worker_host());
-            if matches!(store.get_desired(&operator).await, Ok(Some(true))) {
-                handle.set_operator(&op, &worker_host());
-                handle.resume();
-                tracing::info!("auto-resumed operator {operator} (left running)");
+    if let Some(op) = op {
+        if op_env.is_some() {
+            if let Some(p) = &identity_path {
+                let _ = std::fs::write(p, &op);
             }
         }
-        None => tracing::warn!(
+        let operator = format!("{op}@{}", worker_host());
+        if matches!(store.get_desired(&operator).await, Ok(Some(true))) {
+            handle.set_operator(&op, &worker_host());
+            handle.resume();
+            tracing::info!("auto-resumed operator {operator} (left running)");
+        }
+    } else {
+        tracing::warn!(
             "auto-resume SKIPPED: COXAGENT_OPERATOR is unset and no operator.identity              file exists — the runner stays PAUSED until someone presses Resume.              Fix: `launchctl setenv COXAGENT_OPERATOR <name>` and restart, or write              the name into ~/CoXAgent/operator.identity"
-        ),
+        );
     }
 
     // Self-upgrade (dogfood CD, opt-in): every 15 min a DETACHED script checks

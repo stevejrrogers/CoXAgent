@@ -1074,9 +1074,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 let fixup = format!(
                     "Your fix for {id} ships with NO regression test. Add a test that FAILS \
                      without your fix and passes with it — that is the only proof the bug is \
-                     dead. Put it where the gate can see it: a `tests/` path, a `*_test.rs` / \
-                     `*.test.ts` file, or an added `#[test]`/`#[tokio::test]`/`it(`/`def test_` \
-                     block. Do not start new work or commit."
+                     dead. Put it where the gate can see it: a `tests/` path, an e2e spec at \
+                     `*.spec.ts` / `*.spec.js`, a `*_test.rs` / `*.test.ts` file, or an added \
+                     `#[test]`/`#[tokio::test]`/`it(`/`def test_` block. Do not start new work \
+                     or commit."
                 );
                 if let Some(sid) = &session {
                     let _ = self

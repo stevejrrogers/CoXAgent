@@ -8,6 +8,8 @@
 //! gitlink at all: the project deliberately has no submodules, so every
 //! 160000 entry is a leak.
 
+#![allow(clippy::expect_used)]
+
 use std::process::Command;
 
 #[test]

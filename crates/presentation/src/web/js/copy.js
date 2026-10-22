@@ -25,7 +25,9 @@ window.CXACOPY = {
   "toast.deleted":   { params: ["what"], label: "generic deleted confirmation", text: () => `{what} deleted` },
   "toast.long":      { params: ["what", "id"], label: "long-value toast (guard stress fixture)", text: () => `{what} · ref {id}` },
   "action.retry":    { params: [], label: "retry button label",   text: () => `Retry` },
-  "action.dismiss":  { params: [], label: "dismiss button label", text: () => `Dismiss` }
+  "error.network":   { params: ["where"], label: "request failed / offline", text: () => `Network error on {where} — check your connection and try again` },
+  "action.dismiss":  { params: [], label: "dismiss button label", text: () => `Dismiss` },
+  "toast.nothingPicked": { params: ["surface"], label: "no rows selected (Settings → Services retag)", text: () => `Nothing ticked on {surface} — tick at least one suggestion first` }
 };
 
 // Fixed skeleton kinds (CXA-B163 invariant): every skeleton span in the DOM
