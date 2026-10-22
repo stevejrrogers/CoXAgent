@@ -6,6 +6,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod cli;
+pub mod deploy_terminal_state;
 pub mod middleware;
 pub mod overview_panels;
 pub mod server;
@@ -34,6 +35,11 @@ pub fn render_report(state: &ProjectState) -> String {
     let _ = writeln!(out, "tickets        : {}", state.tickets.len());
     for (status, n) in counts {
         let _ = writeln!(out, "  {status:<12} : {n}");
+    }
+    // CXA-B260: terminal state of the cycle/deploy flow with attribution —
+    // pure formatting of what the snapshot already carries.
+    for line in crate::deploy_terminal_state::deploy_terminal_lines(state.deploy.as_ref()) {
+        let _ = writeln!(out, "{line}");
     }
     out
 }
