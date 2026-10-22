@@ -66,14 +66,14 @@ async function applyRetags(){
   const sg=window._retagSuggestions||[];
   const picked=[...document.querySelectorAll(".retag-ck")].filter(c=>c.checked).map(c=>sg[Number(c.dataset.i)]).filter(Boolean)
     .map(x=>({ticket:x.ticket,to:x.to}));
-  if(!picked.length){toasty("Nothing ticked","err");return;}
+  if(!picked.length){toasty(copyText("toast.nothingPicked",{surface:"retag suggestions"}),"err");return;}
   try{
     const r=await fetch(api("/services/retag"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({assignments:picked})});
     const b=await r.json().catch(()=>({}));
     if(!r.ok){toasty(b.error||"retag failed","err");return;}
     toasty(`Retagged ${(b.applied||[]).length} ticket(s)${(b.refused||[]).length?` · ${b.refused.length} refused`:""}`);
     if((b.refused||[]).length)console.warn("retag refused:",b.refused);
-  }catch(e){toasty("Network error","err");}
+  }catch(e){toasty(copyText("error.network",{where:"retag"}),"err");}
   loadRetagSuggestions();
 }
 
@@ -145,6 +145,6 @@ async function setServiceStatus(name,status){
     const b=await r.json().catch(()=>({}));
     if(!r.ok){toasty(b.error||b||"status change failed","err");}
     else{toasty(`${name}: ${b.from} → ${b.status}. ${b.note||""}`);}
-  }catch(e){toastCopy("error.network",["services"],{type:"err"});}
+  }catch(e){toasty(copyText("error.network",{where:"service status"}),"err");}
   renderServicesPanel();
 }

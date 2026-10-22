@@ -157,9 +157,9 @@ fn scan(files: &[(String, String)]) -> Vec<Leak> {
             }
         }
         for key in ENV_KEYS {
-            let sourced = contents.lines().any(|l| {
-                l.contains(key) && (l.contains("os.environ") || l.contains("os.getenv"))
-            });
+            let sourced = contents
+                .lines()
+                .any(|l| l.contains(key) && (l.contains("os.environ") || l.contains("os.getenv")));
             if !sourced {
                 leaks.push(Leak {
                     path: path.clone(),
@@ -192,14 +192,12 @@ fn repo_root() -> PathBuf {
 fn watchdog_scripts() -> Vec<(String, String)> {
     let dir = repo_root().join(".cox-watchdog");
     let mut found = Vec::new();
-    for entry in fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("cannot list {}: {e}", dir.display()))
+    for entry in fs::read_dir(&dir).unwrap_or_else(|e| panic!("cannot list {}: {e}", dir.display()))
     {
         let p = entry.unwrap().path();
         let name = p.file_name().unwrap().to_string_lossy().into_owned();
         if name.ends_with(".py") {
-            let body =
-                fs::read_to_string(&p).unwrap_or_else(|e| panic!("cannot read {name}: {e}"));
+            let body = fs::read_to_string(&p).unwrap_or_else(|e| panic!("cannot read {name}: {e}"));
             found.push((format!(".cox-watchdog/{name}"), body));
         }
     }
@@ -264,11 +262,15 @@ fn the_unfixed_script_fails_every_rule_of_the_guard() {
         "every finding must point at the sanctioned env source: {leaks:?}"
     );
     assert!(
-        leaks.iter().any(|l| l.why.contains("postgres password literal")),
+        leaks
+            .iter()
+            .any(|l| l.why.contains("postgres password literal")),
         "{leaks:?}"
     );
     assert!(
-        leaks.iter().any(|l| l.why.contains("credentialed Redis URL literal")),
+        leaks
+            .iter()
+            .any(|l| l.why.contains("credentialed Redis URL literal")),
         "{leaks:?}"
     );
 }
@@ -299,7 +301,9 @@ PG = dict(host='127.0.0.1', port=5433, user='coxagent', dbname='coxagent')
     let leaks = scan(&[file(".cox-watchdog/state.py", body)]);
     assert_eq!(leaks.len(), 2, "one missing-env finding per key: {leaks:?}");
     assert!(
-        leaks.iter().all(|l| l.why.contains("never read from the environment")),
+        leaks
+            .iter()
+            .all(|l| l.why.contains("never read from the environment")),
         "{leaks:?}"
     );
     assert!(
