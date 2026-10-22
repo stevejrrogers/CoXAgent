@@ -24,100 +24,19 @@
 use std::collections::BTreeMap;
 
 // ---------------------------------------------------------------------------
-// The registries — the entire contract surface, named in one place
+// The registries — the entire contract surface, named in one place.
+//
+// SINGLE SOURCE OF TRUTH: these tables live in `contract_surface/mod.rs`,
+// shared verbatim with the CXA-B288 contract-docs generator so the guard and
+// the rendered documentation can never disagree (CXA-B288 AC: no duplicate
+// drift-prone lists).
 // ---------------------------------------------------------------------------
 
-/// One registered enum: every variant with the wire tag serde produces today.
-struct EnumContract {
-    ty: &'static str,
-    /// `(Rust variant name, wire tag)` — the full, exhaustive inventory.
-    variants: &'static [(&'static str, &'static str)],
-}
+mod contract_surface;
 
-const ENUM_SURFACE: &[EnumContract] = &[
-    EnumContract {
-        ty: "TicketType",
-        variants: &[("Feature", "feature"), ("Bug", "bug"), ("Chore", "chore")],
-    },
-    EnumContract {
-        ty: "Status",
-        variants: &[
-            ("Pending", "pending"),
-            ("InProgress", "in_progress"),
-            ("OnHold", "on_hold"),
-            ("Documented", "documented"),
-            ("Verified", "verified"),
-        ],
-    },
-    EnumContract {
-        ty: "Role",
-        variants: &[
-            ("Ba", "ba"),
-            ("Po", "po"),
-            ("Sa", "sa"),
-            ("Sm", "sm"),
-            ("DevBug", "dev_bug"),
-            ("DevFeature", "dev_feature"),
-            ("Reviewer", "reviewer"),
-            ("System", "system"),
-        ],
-    },
-    EnumContract {
-        ty: "Priority",
-        variants: &[("Low", "low"), ("Medium", "medium"), ("High", "high")],
-    },
-    EnumContract {
-        ty: "Complexity",
-        variants: &[("Small", "small"), ("Medium", "medium"), ("Large", "large")],
-    },
-    EnumContract {
-        ty: "TestCaseStatus",
-        variants: &[("Pending", "pending"), ("Passed", "passed"), ("Failed", "failed")],
-    },
-    EnumContract {
-        ty: "RecordKind",
-        variants: &[("Verdict", "verdict"), ("EvidenceRefresh", "evidence_refresh")],
-    },
-    EnumContract {
-        ty: "CoverageStatus",
-        variants: &[
-            ("Covered", "covered"),
-            ("PartiallyCovered", "partially_covered"),
-            ("NotTested", "not_tested"),
-        ],
-    },
-    EnumContract {
-        ty: "DebtSignalKind",
-        variants: &[
-            ("LintRegression", "lint_regression"),
-            ("DeadCodeSuspects", "dead_code_suspects"),
-            ("MissingModuleDoc", "missing_module_doc"),
-        ],
-    },
-    EnumContract {
-        ty: "GoalStatus",
-        variants: &[("Active", "active"), ("Retired", "retired")],
-    },
-];
-
-/// Types whose fields are NOT all `#[serde(default)]`: the map value is the
-/// exact list of fields a partial payload must carry. THE documented
-/// whitelist for invariant (a) — anything missing here makes `{}` fail.
-const REQUIRED_FIELD_WHITELIST: &[(&str, &[&str])] = &[
-    ("TestCase", &["description"]),
-    ("VerdictRecord", &["status"]), // `at`/kind/note/image all default
-    ("CoverageEntry", &["criterion", "status"]),
-    ("WipCheckpoint", &["ref_name", "sha", "note", "recorded_at"]),
-    ("TechnicalDesign", &["approach", "files", "api_contract", "data_changes", "test_plan"]),
-    ("UxDesign", &["user_flow", "screens", "component_states", "responsive_notes"]),
-    ("ArtifactVersion", &["project", "artifact", "version"]),
-];
-
-/// Types intentionally opting INTO strict decoding (`deny_unknown_fields`).
-/// Empty today: the repo-wide policy is tolerant loading. If you flip a DTO
-/// to strict, register it here so the guard proves the behaviour matches
-/// the declaration instead of trusting the attribute.
-const STRICT_UNKNOWN_KEY_TYPES: &[&str] = &[];
+use contract_surface::{
+    EnumContract, ENUM_SURFACE, REQUIRED_FIELD_WHITELIST, STRICT_UNKNOWN_KEY_TYPES,
+};
 
 // ---------------------------------------------------------------------------
 // Guard (c): enum wire-form consistency + exhaustive inventory — ONE scan
@@ -126,7 +45,9 @@ const STRICT_UNKNOWN_KEY_TYPES: &[&str] = &[];
 /// `snake_case` over ASCII identifiers: lowercase words joined by `_`.
 fn is_snake_case(tag: &str) -> bool {
     !tag.is_empty()
-        && tag.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        && tag
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
         && !tag.starts_with('_')
         && !tag.ends_with('_')
         && !tag.contains("__")
@@ -173,20 +94,30 @@ fn every_registered_enum_variant_inventory_is_exhaustive_against_today() {
         ("DebtSignalKind", 3),
         ("GoalStatus", 2),
     ];
-    let got: Vec<(String, usize)> =
-        ENUM_SURFACE.iter().map(|e| (e.ty.to_string(), e.variants.len())).collect();
+    let got: Vec<(String, usize)> = ENUM_SURFACE
+        .iter()
+        .map(|e| (e.ty.to_string(), e.variants.len()))
+        .collect();
     for (ty, want) in expected {
         let hit = got.iter().find(|(g, _)| g == *ty);
         assert_eq!(hit.map(|(_, n)| *n), Some(*want),
             "enum {ty}: variant inventory drifted — update ENUM_SURFACE (the contract doc) deliberately");
     }
-    assert_eq!(got.len(), expected.len(), "an enum was added or removed without registering it in ENUM_SURFACE");
+    assert_eq!(
+        got.len(),
+        expected.len(),
+        "an enum was added or removed without registering it in ENUM_SURFACE"
+    );
 }
 
 #[test]
 fn every_serialized_enum_variant_uses_snake_case_consistently() {
     let failures = enum_casing_and_uniqueness_failures(ENUM_SURFACE);
-    assert!(failures.is_empty(), "contract-guard violations:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "contract-guard violations:\n{}",
+        failures.join("\n")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -217,7 +148,11 @@ fn a_colliding_wire_tag_names_both_variants() {
     let failures = enum_casing_and_uniqueness_failures(&broken);
     assert_eq!(failures.len(), 1);
     assert!(failures[0].contains("GuardProbe2"), "{}", failures[0]);
-    assert!(failures[0].contains("Alpha") && failures[0].contains("Beta"), "{}", failures[0]);
+    assert!(
+        failures[0].contains("Alpha") && failures[0].contains("Beta"),
+        "{}",
+        failures[0]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -334,7 +269,11 @@ fn empty_object_payload_deserializes_exactly_where_whitelisted_or_fully_defaulte
             }
         }
     }
-    assert!(failures.is_empty(), "required-field guard:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "required-field guard:\n{}",
+        failures.join("\n")
+    );
 }
 
 #[test]
@@ -359,7 +298,9 @@ fn unknown_keys_are_tolerated_and_dropped_uniformly_except_declared_strict_types
         if p.covered_by_strict_list != STRICT_UNKNOWN_KEY_TYPES.contains(&p.ty) {
             failures.push(format!(
                 "type {}: strict-list membership mismatch (declared={}; registry={})",
-                p.ty, STRICT_UNKNOWN_KEY_TYPES.contains(&p.ty), p.covered_by_strict_list
+                p.ty,
+                STRICT_UNKNOWN_KEY_TYPES.contains(&p.ty),
+                p.covered_by_strict_list
             ));
             continue;
         }
@@ -376,7 +317,11 @@ fn unknown_keys_are_tolerated_and_dropped_uniformly_except_declared_strict_types
             )),
         }
     }
-    assert!(failures.is_empty(), "unknown-key policy guard:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "unknown-key policy guard:\n{}",
+        failures.join("\n")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -391,9 +336,15 @@ fn error_envelope_shape_matches_the_one_handler_set_serves_today() {
     // here is a breaking API change and must be deliberate.
     let envelope = serde_json::json!({ "error": "some message" });
     let obj = envelope.as_object().expect("envelope is an object");
-    assert_eq!(obj.len(), 1, "error envelope grew a second key — update clients + this guard together");
-    assert!(matches!(obj.get("error"), Some(serde_json::Value::String(_))),
-        "error envelope carries a non-string `error`");
+    assert_eq!(
+        obj.len(),
+        1,
+        "error envelope grew a second key — update clients + this guard together"
+    );
+    assert!(
+        matches!(obj.get("error"), Some(serde_json::Value::String(_))),
+        "error envelope carries a non-string `error`"
+    );
 
     // The version-tagged success envelope (`async fn health`, same file):
     // `{ "status": "ok", "version": <cargo pkg version> }`.
@@ -401,6 +352,11 @@ fn error_envelope_shape_matches_the_one_handler_set_serves_today() {
     let o = ok.as_object().unwrap();
     assert_eq!(o.len(), 2);
     assert_eq!(o.get("status").and_then(|s| s.as_str()), Some("ok"));
-    assert!(o.get("version").and_then(|v| v.as_str()).map(|v| v.split('.').count() == 3).unwrap_or(false),
-        "version tag is not a MAJOR.MINOR.PATCH string");
+    assert!(
+        o.get("version")
+            .and_then(|v| v.as_str())
+            .map(|v| v.split('.').count() == 3)
+            .unwrap_or(false),
+        "version tag is not a MAJOR.MINOR.PATCH string"
+    );
 }

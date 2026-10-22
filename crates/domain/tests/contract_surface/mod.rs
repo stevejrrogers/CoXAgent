@@ -51,11 +51,18 @@ pub const ENUM_SURFACE: &[EnumContract] = &[
     },
     EnumContract {
         ty: "TestCaseStatus",
-        variants: &[("Pending", "pending"), ("Passed", "passed"), ("Failed", "failed")],
+        variants: &[
+            ("Pending", "pending"),
+            ("Passed", "passed"),
+            ("Failed", "failed"),
+        ],
     },
     EnumContract {
         ty: "RecordKind",
-        variants: &[("Verdict", "verdict"), ("EvidenceRefresh", "evidence_refresh")],
+        variants: &[
+            ("Verdict", "verdict"),
+            ("EvidenceRefresh", "evidence_refresh"),
+        ],
     },
     EnumContract {
         ty: "CoverageStatus",
@@ -87,8 +94,25 @@ pub const REQUIRED_FIELD_WHITELIST: &[(&str, &[&str])] = &[
     ("VerdictRecord", &["status"]), // `at`/kind/note/image all default
     ("CoverageEntry", &["criterion", "status"]),
     ("WipCheckpoint", &["ref_name", "sha", "note", "recorded_at"]),
-    ("TechnicalDesign", &["approach", "files", "api_contract", "data_changes", "test_plan"]),
-    ("UxDesign", &["user_flow", "screens", "component_states", "responsive_notes"]),
+    (
+        "TechnicalDesign",
+        &[
+            "approach",
+            "files",
+            "api_contract",
+            "data_changes",
+            "test_plan",
+        ],
+    ),
+    (
+        "UxDesign",
+        &[
+            "user_flow",
+            "screens",
+            "component_states",
+            "responsive_notes",
+        ],
+    ),
     ("ArtifactVersion", &["project", "artifact", "version"]),
 ];
 
@@ -100,5 +124,7 @@ pub const STRICT_UNKNOWN_KEY_TYPES: &[&str] = &[];
 /// Golden wire fixtures checked in under [`fixtures`](../fixtures/) by part 1
 /// (CXA-B286), as `(type name, fixture path relative to crates/domain/tests)`.
 /// A type absent here simply documents "no golden fixture yet".
+/// Consumed only by the CXA-B288 docs generator (`contract_docs_b288`).
+#[allow(dead_code)]
 pub const GOLDEN_FIXTURES: &[(&str, &str)] =
     &[("ArtifactVersion", "fixtures/artifact_version_cxa_api.json")];
