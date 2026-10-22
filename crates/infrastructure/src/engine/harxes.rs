@@ -121,6 +121,7 @@ impl HarxesEngine {
         &self,
         work_dir: &Path,
         role: coxagent_domain::Role,
+        escalation_level: u8,
     ) -> Result<harxes_core::HarxesEngine, PortError> {
         // The default cap (40 iters / 1.5M cumulative tokens) is dominated by
         // RE-SENT INPUT, not thinking: measured runs carry 1k-10k reasoning
@@ -134,8 +135,12 @@ impl HarxesEngine {
             // ~10-20k tokens, so iterations — not tokens — became the
             // binding cap: runs died at 60 iters holding only ~1.1-1.5M of
             // the 4M budget. 100 x ~12k stays well inside it.
-            limits.max_iterations = 150;
-            limits.max_total_tokens = 5_000_000;
+            // SPOQ-style adaptive budget (2026-10): a ticket that already
+            // capped out gets a LARGER budget on its escalated retry — a
+            // flat cap re-ran the same 150 iterations into the same wall.
+            let esc = u64::from(escalation_level.min(3));
+            limits.max_iterations = 150 + 50 * usize::from(escalation_level.min(3));
+            limits.max_total_tokens = 5_000_000 + 1_500_000 * esc;
         }
         let cfg = EngineConfig {
             provider: self.provider_spec()?,
@@ -182,7 +187,8 @@ impl AgentEnginePort for HarxesEngine {
     }
 
     async fn run(&self, request: AgentRequest) -> Result<AgentOutcome, PortError> {
-        let engine = self.build_engine(&request.work_dir, request.role)?;
+        let engine =
+            self.build_engine(&request.work_dir, request.role, request.escalation_level)?;
         // Stream the work log where the dashboard's agent-log endpoint tails
         // it — an engine that only buffers into the outcome looks silent in
         // the live view even while it is plainly working (live.rs's warning).
@@ -207,79 +213,144 @@ impl AgentEnginePort for HarxesEngine {
                 format!("# {role} — harxes · {} — run start\n", self.model),
             );
         }
-        let handle = engine.run(RunRequest {
-            prompt: request.task_prompt.clone(),
-            system_prompt: Some(request.system_prompt.clone()),
-            history: Vec::new(),
-            timeout: Some(request.timeout),
-            model: None,
-            // v0.3.2: anchors the engine-side FileSystemPort (Read/Write/
-            // Glob/Grep walk from here, relative results) and is what the
-            // engine hands our ConfinedShell as `working_dir`. We inject
-            // shell (confined) but NOT fs, so the engine builds its rooted
-            // host FS automatically — exactly the supported combination.
-            working_dir: Some(request.work_dir.clone()),
-            // Spend deep thinking where it pays (design, code, verification)
-            // and stop the paperwork roles from ruminating a million tokens
-            // per run. Steve's rule: "cái nào cần suy nghĩ kỹ thì vẫn phải
-            // suy nghĩ kỹ" — engineering keeps High.
-            reasoning_effort: Some(effort_for(request.role)),
-        });
-        let (mut events, mut driver) = handle.split();
+        // Resume-on-cap (2026-10 world-scan lesson, dsh-style trajectory
+        // resume): a Guardrail stop used to throw the whole conversation away
+        // — the NEXT attempt re-explored from zero and routinely burned
+        // another 3-4M tokens reaching the same spot. harxes-core already
+        // supports continuing from a transcript (`RunRequest::history`), so a
+        // capped deep-work run gets ONE continuation that keeps everything it
+        // read and did. Conservative on purpose: one resume, High-effort
+        // roles only, history trimmed to bound the re-sent context.
+        let mut resume_history: Vec<harxes_core::Message> = Vec::new();
+        let mut run_prompt = request.task_prompt.clone();
+        let mut resumes_left = u8::from(matches!(effort_for(request.role), ReasoningEffort::High));
+        let mut spent_iterations = 0_usize;
+        let mut spent_input = 0_u64;
+        let mut spent_output = 0_u64;
+        loop {
+            let handle = engine.run(RunRequest {
+                prompt: run_prompt.clone(),
+                system_prompt: Some(request.system_prompt.clone()),
+                history: std::mem::take(&mut resume_history),
+                timeout: Some(request.timeout),
+                model: None,
+                // v0.3.2: anchors the engine-side FileSystemPort (Read/Write/
+                // Glob/Grep walk from here, relative results) and is what the
+                // engine hands our ConfinedShell as `working_dir`. We inject
+                // shell (confined) but NOT fs, so the engine builds its rooted
+                // host FS automatically — exactly the supported combination.
+                working_dir: Some(request.work_dir.clone()),
+                // Spend deep thinking where it pays (design, code, verification)
+                // and stop the paperwork roles from ruminating a million tokens
+                // per run. Steve's rule: "cái nào cần suy nghĩ kỹ thì vẫn phải
+                // suy nghĩ kỹ" — engineering keeps High.
+                reasoning_effort: Some(effort_for(request.role)),
+            });
+            let (mut events, mut driver) = handle.split();
 
-        // Drain the live event stream into the work-log trace while driving
-        // the run. Dropping `driver` (this future being cancelled from above)
-        // cancels the whole run — harxes-core's contract. Text/Reasoning
-        // events are STREAMING DELTAS (token fragments) — a coalescer buffers
-        // them into whole lines so the live log reads as prose, not one
-        // fragment per line.
-        let mut trace = String::new();
-        let mut co = Coalescer::default();
-        // Inactivity watchdog (CXA-B173/B174): four freezes in one day — the
-        // engine future goes quiet (no I/O in flight, thread dump shows zero
-        // harxes/reqwest frames) and nothing ever wakes it. B173 only armed
-        // until the FIRST event; freeze #4 emitted one Iteration beat and
-        // THEN died, sailing past it. Every event now re-arms the deadline:
-        // a healthy run emits something (a delta, a tool event, a Retry, an
-        // Iteration beat) far more often than every 5 minutes, so total
-        // silence for 300s at ANY point is a dead run — drop the driver
-        // (harxes cancels its children) and fail over with an infra-shaped
-        // error instead of hanging the slot for the reaper.
-        let silence_limit = std::time::Duration::from_secs(300);
-        let silence_deadline = tokio::time::sleep(silence_limit);
-        tokio::pin!(silence_deadline);
-        let outcome = loop {
-            tokio::select! {
-                ev = events.recv() => {
-                    if let Some(ev) = ev {
-                        silence_deadline
-                            .as_mut()
-                            .reset(tokio::time::Instant::now() + silence_limit);
-                        co.feed(&ev, live.as_deref(), &mut trace);
+            // Drain the live event stream into the work-log trace while driving
+            // the run. Dropping `driver` (this future being cancelled from above)
+            // cancels the whole run — harxes-core's contract. Text/Reasoning
+            // events are STREAMING DELTAS (token fragments) — a coalescer buffers
+            // them into whole lines so the live log reads as prose, not one
+            // fragment per line.
+            let mut trace = String::new();
+            let mut co = Coalescer::default();
+            // Inactivity watchdog (CXA-B173/B174): four freezes in one day — the
+            // engine future goes quiet (no I/O in flight, thread dump shows zero
+            // harxes/reqwest frames) and nothing ever wakes it. B173 only armed
+            // until the FIRST event; freeze #4 emitted one Iteration beat and
+            // THEN died, sailing past it. Every event now re-arms the deadline:
+            // a healthy run emits something (a delta, a tool event, a Retry, an
+            // Iteration beat) far more often than every 5 minutes, so total
+            // silence for 300s at ANY point is a dead run — drop the driver
+            // (harxes cancels its children) and fail over with an infra-shaped
+            // error instead of hanging the slot for the reaper.
+            let silence_limit = std::time::Duration::from_secs(300);
+            let silence_deadline = tokio::time::sleep(silence_limit);
+            tokio::pin!(silence_deadline);
+            let outcome = loop {
+                tokio::select! {
+                    ev = events.recv() => {
+                        if let Some(ev) = ev {
+                            silence_deadline
+                                .as_mut()
+                                .reset(tokio::time::Instant::now() + silence_limit);
+                            co.feed(&ev, live.as_deref(), &mut trace);
+                        }
                     }
-                }
-                () = &mut silence_deadline => {
-                    if let Some(p) = &live {
-                        append_live(p, "↻ run silent for 300s — cancelled, failing over");
+                    () = &mut silence_deadline => {
+                        if let Some(p) = &live {
+                            append_live(p, "↻ run silent for 300s — cancelled, failing over");
+                        }
+                        return Err(PortError::Backend(
+                            "harxes provider service unavailable: run went silent for 300s (engine stalled)".to_owned(),
+                        ));
                     }
-                    return Err(PortError::Backend(
-                        "harxes provider service unavailable: run went silent for 300s (engine stalled)".to_owned(),
-                    ));
+                    done = &mut driver => break done,
                 }
-                done = &mut driver => break done,
+            };
+            // Flush any events that raced the driver's completion.
+            while let Ok(ev) = events.try_recv() {
+                co.feed(&ev, live.as_deref(), &mut trace);
             }
-        };
-        // Flush any events that raced the driver's completion.
-        while let Ok(ev) = events.try_recv() {
-            co.feed(&ev, live.as_deref(), &mut trace);
-        }
-        co.flush(live.as_deref(), &mut trace);
+            co.flush(live.as_deref(), &mut trace);
 
-        match outcome {
-            Ok(out) => Ok(finish(out, trace, self)),
-            Err(e) => Err(PortError::Backend(render_engine_error(&e))),
+            match outcome {
+                Ok(mut out) => {
+                    if matches!(out.stop_reason, harxes_core::StopReason::Guardrail)
+                        && resumes_left > 0
+                    {
+                        resumes_left -= 1;
+                        spent_iterations += out.iterations;
+                        spent_input += out.input_tokens;
+                        spent_output += out.output_tokens;
+                        if let Some(p) = &live {
+                            append_live(
+                                p,
+                                "↻ hit the iteration/token cap — resuming the same \
+                             conversation once instead of restarting cold",
+                            );
+                        }
+                        resume_history = trim_history(out.transcript);
+                        RESUME_PROMPT.clone_into(&mut run_prompt);
+                        continue;
+                    }
+                    // Accounting covers the WHOLE logical run, resume included —
+                    // otherwise the cost tile undercounts exactly the expensive
+                    // runs this path exists for.
+                    out.iterations += spent_iterations;
+                    out.input_tokens += spent_input;
+                    out.output_tokens += spent_output;
+                    out.total_tokens += spent_input + spent_output;
+                    break Ok(finish(out, trace, self));
+                }
+                Err(e) => break Err(PortError::Backend(render_engine_error(&e))),
+            }
         }
     }
+}
+
+/// The continuation prompt a resumed (capped) run starts from: the transcript
+/// already carries the task and everything done so far.
+const RESUME_PROMPT: &str = "You hit the run's iteration/token budget and were \
+given one continuation. The conversation above is YOUR OWN prior work on this \
+task: do not re-read or re-plan what it already covers. Continue exactly where \
+it stops, finish the smallest shippable version of the task, and conclude.";
+
+/// Bound the re-sent context of a resumed run: keep the head (task framing)
+/// and the most recent turns, drop the middle. The counts are deliberately
+/// crude — the engine's own tool-output aging handles fine-grained bloat.
+fn trim_history<T>(mut transcript: Vec<T>) -> Vec<T> {
+    const HEAD: usize = 2;
+    const TAIL: usize = 60;
+    if transcript.len() <= HEAD + TAIL {
+        return transcript;
+    }
+    let tail = transcript.split_off(transcript.len() - TAIL);
+    transcript.truncate(HEAD);
+    transcript.extend(tail);
+    transcript
 }
 
 /// Map a completed run onto the port's outcome shape.
@@ -634,6 +705,35 @@ impl Drop for GroupGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trim_history_keeps_head_and_tail_only_past_the_bound() {
+        // Under the bound: untouched.
+        let short: Vec<u32> = (0..50).collect();
+        assert_eq!(trim_history(short.clone()), short);
+        // Over the bound: first 2 + last 60, order preserved.
+        let long: Vec<u32> = (0..200).collect();
+        let out = trim_history(long);
+        assert_eq!(out.len(), 62);
+        assert_eq!(&out[..2], &[0, 1]);
+        assert_eq!(out[2], 140);
+        assert_eq!(*out.last().unwrap(), 199);
+    }
+
+    #[test]
+    fn escalated_runs_get_larger_guardrail_budgets() {
+        // Mirror of build_engine's arithmetic — the cap must GROW with the
+        // escalation ladder instead of re-running into the same wall.
+        for (esc, iters, toks) in [
+            (0_u8, 150, 5_000_000),
+            (2, 250, 8_000_000),
+            (9, 300, 9_500_000),
+        ] {
+            let e = u64::from(esc.min(3));
+            assert_eq!(150 + 50 * usize::from(esc.min(3)), iters);
+            assert_eq!(5_000_000 + 1_500_000 * e, toks);
+        }
+    }
 
     #[test]
     fn provider_routing_follows_the_model_prefix() {
