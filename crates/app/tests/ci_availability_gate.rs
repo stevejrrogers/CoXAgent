@@ -77,10 +77,21 @@ const QUALITY_GATES: [(&str, &[&str]); 2] = [
 const GUARD_TESTS_JOB: &str = "guard-tests";
 
 /// The gate commands the guard job must run, as exact run-payload substrings.
-const GUARD_TESTS_STEPS: [&str; 2] = [
+const GUARD_TESTS_STEPS: [&str; 5] = [
     "cargo test -p coxagent-infrastructure --lib reclaimable",
     "cargo test -p coxagent-app --test deploy_smoke --test ci_availability_gate \
      --test test_env_guard_f326_gate",
+    // CXA-B225: the named guardrail suite is wired into the PR gate — this
+    // pin makes its removal a red wiring guard, not a silent unhooking.
+    // CXA-B187.2 extends the same gate with the batch-2 structural panel
+    // contracts (same presentation crate, same run command).
+    "cargo test -p coxagent-presentation --test guardrail_scaffold_b201 \
+     --test panel_structural_contracts_b187_2",
+    // CXA-B188: depth contracts + strict enforcement join the same job —
+    // the depth gates and the strict registry gate must never be unhooked
+    // from CI silently either.
+    "cargo test -p coxagent-presentation --test panel_depth_contracts_b188",
+    "cargo test -p coxagent-app --test guardrail_registry_gate --test depth_gate",
 ];
 
 /// The job that runs the `#[ignore]`d DSN-gated integration tests (F326) —
@@ -590,6 +601,11 @@ jobs:
     steps:
       - run: cargo test -p coxagent-infrastructure --lib reclaimable
       - run: cargo test -p coxagent-app --test deploy_smoke --test ci_availability_gate --test test_env_guard_f326_gate
+      - run: cargo test -p coxagent-presentation --test guardrail_scaffold_b201 --test panel_structural_contracts_b187_2
+      - name: Overview panel depth contracts + strict registry gate (CXA-B188)
+        run: cargo test -p coxagent-presentation --test panel_depth_contracts_b188
+      - name: Strict guardrail registry + depth ratchet gates (CXA-B188)
+        run: cargo test -p coxagent-app --test guardrail_registry_gate --test depth_gate
   integration:
     name: integration (ephemeral cxa_test postgres + redis)
     runs-on: ubuntu-latest

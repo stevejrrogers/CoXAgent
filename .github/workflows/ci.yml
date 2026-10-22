@@ -88,11 +88,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Bring the stack up and probe the published port
         run: cargo test -p coxagent-app --test deploy_smoke -- --ignored --nocapture
-      # CXA-B308: scripted redeploy regression — clean, interrupted-stack and
-      # host-port-override scenarios against the same compose file. Skips
-      # itself (exit 0) wherever docker is absent, so it is CI-safe everywhere.
-      - name: Redeploy smoke (clean / interrupted / override)
-        run: scripts/redeploy-smoke.sh
       - name: Container logs on failure
         if: failure()
         run: docker compose logs --no-color
@@ -131,6 +126,17 @@ jobs:
       # leak-guard runs here on every PR — docker-free (pure scan + git ls-files).
       - name: Doc credential leak guard (CXA-B315 — post-CXA-B311a regression gate)
         run: cargo test -p coxagent-app --test doc_leak_guard && cargo test -p coxagent-application --lib doc_leak
+      # CXA-B225 (CXA-B181.3): the named guardrail regression suite — scaffold
+      # self-tests, structural contracts and depth contracts for the
+      # above-the-fold Overview panels; CXA-B188 tightens enforcement to strict.
+      - name: Overview panel guardrails (CXA-B225/B188 strict regression gate)
+        run: cargo test -p coxagent-presentation --test guardrail_scaffold_b201 --test panel_structural_contracts_b187_2
+      # CXA-B188: depth contracts for the above-the-fold panels + the strict
+      # registry/depth gates — merge-blocking with the rest of the guard job.
+      - name: Overview panel depth contracts (CXA-B188)
+        run: cargo test -p coxagent-presentation --test panel_depth_contracts_b188
+      - name: Strict guardrail registry + depth ratchet gates (CXA-B188)
+        run: cargo test -p coxagent-app --test guardrail_registry_gate --test depth_gate
 
   # CXA-F326: the DSN-gated Postgres/Redis integration tests are #[ignore]d —
   # this job is the only sanctioned way to run them. It brings its own

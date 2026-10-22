@@ -20,51 +20,42 @@
 (function () {
   "use strict";
 
-  // Panel identity resolution goes THROUGH the Overview view-mesh
-  // (web/js/overview_vm.js, CXA-B232b): the mesh owns each panel's stable DOM
-  // mount and paint-site evidence as mirrored from the pure domain mapping
-  // (overview_panel_contract.rs); this module adds only the per-panel data
-  // dependency + empty-state hint that terminal states need. No dom id is
-  // restated here — mounts resolve via OvViewMesh.domId(), never inline.
-  function meshDom(panelKey) {
-    return window.OvViewMesh ? window.OvViewMesh.domId(panelKey) : null;
-  }
-
-  // Per-panel data dependency (mount comes from the view-mesh; dependency
-  // labels stay in sync with OVERVIEW_PANELS via the guard test).
+  // Panel identity + data dependency, mirroring OVERVIEW_PANELS in
+  // overview_panels.rs (dom_id + dependency.feeds, kept in sync by the guard
+  // test). `host` is the element the panel paints into.
   var PANELS = {
     drain: {
-      domId: meshDom("drain"),
+      domId: "ov-drain",
       dep: "open merge queue + refactor-goal flag",
       hint: "The drain banner appears while a refactor pause holds new work until the open green PRs merge.",
     },
     alerts: {
-      domId: meshDom("alerts"),
+      domId: "ov-alerts",
       dep: "1 Hz state snapshot: deploy, budget, tickets, reverted_work",
       hint: "Alerts appear when a deploy fails, the budget cap is hit or reverted work stacks up — nothing needs you right now.",
     },
     working: {
-      domId: meshDom("working"),
+      domId: "ov-working",
       dep: "activity trail + per-agent worker status",
       hint: "Busy agents appear here the moment they claim a ticket — start or resume a ticket and they show up.",
     },
     kpis: {
-      domId: meshDom("kpis"),
+      domId: "kpis",
       dep: "state history: activity, tickets, releases, cost (client-side day bucketing)",
       hint: "KPI tiles fill in from the hub's state history — the first snapshot lands within a minute of connect.",
     },
     health: {
-      domId: meshDom("health"),
+      domId: "ov-health",
       dep: "state snapshot: tickets, reviews, sprint commitments",
       hint: "Health cards fill in as reviews and sprint commitments are recorded in the snapshot.",
     },
     "recent-activity": {
-      domId: meshDom("recent-activity"),
+      domId: "ov-activity",
       dep: "activity trail (last 7 entries, newest first)",
       hint: "Agent actions appear here with the first step after connect.",
     },
     releases: {
-      domId: meshDom("releases"),
+      domId: "ov-changelog",
       dep: "deploy history (zero-token changelog)",
       hint: "No releases yet — the changelog fills from deploy history after the first ship.",
     },

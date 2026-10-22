@@ -1634,8 +1634,6 @@ mod tests {
         // CXA-F420a.2: two active services; a runner bound to "engine" must
         // skip the untagged ticket (it resolves to the FIRST service, "hub")
         // and work only the one tagged for it.
-        // Field-reassign-free (clippy::field_reassign_with_default), via the
-        // local `active` helper.
         let active = |name: &str| crate::config::ServiceConfig {
             name: name.to_owned(),
             repo: String::new(),
