@@ -868,7 +868,16 @@ pub(super) async fn syschat_topic_get_ep(
 /// author under one of these names — a leaked token could otherwise forge an
 /// approval card. Match is case-insensitive.
 const RESERVED_AUTHORS: [&str; 10] = [
-    "BA", "PO", "SM", "SA", "PD", "DEV-BUG", "DEV-FEATURE", "TEST", "DOCS", "SYSTEM",
+    "BA",
+    "PO",
+    "SM",
+    "SA",
+    "PD",
+    "DEV-BUG",
+    "DEV-FEATURE",
+    "TEST",
+    "DOCS",
+    "SYSTEM",
 ];
 
 /// Prefix a webhook-supplied author that collides with a reserved internal
