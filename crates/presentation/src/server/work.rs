@@ -559,6 +559,7 @@ pub(super) async fn approve_cost(
 pub(super) async fn edit_ticket(
     State(app): State<AppState>,
     Path((pid, id)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<EditReq>,
 ) -> axum::response::Response {
     let Some(p) = app.project(&pid).await else {
@@ -570,6 +571,16 @@ pub(super) async fn edit_ticket(
     let Ok(mut state) = p.store.load().await else {
         return internal_error("load failed");
     };
+    // CXA-F420f: a member scoped to specific services may not edit tickets
+    // outside them.
+    let tag = state
+        .ticket(&tid)
+        .and_then(|t| t.service_tag().map(ToOwned::to_owned));
+    if let Some(refusal) =
+        super::services::refuse_outside_member_scope(&app, &headers, &p, tag.as_deref()).await
+    {
+        return refusal;
+    }
     let Some(ticket) = state.ticket_mut(&tid) else {
         return (axum::http::StatusCode::NOT_FOUND, "no such ticket").into_response();
     };

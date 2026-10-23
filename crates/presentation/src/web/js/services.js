@@ -43,8 +43,59 @@ async function renderServicesPanel(){
         <span class="tooldim" style="font-weight:400">· untagged backlog that looks like it belongs to another service</span></div>
       <button class="gc-btn" onclick="loadRetagSuggestions()" style="align-self:flex-start"><i class="ti ti-radar-2"></i> Suggest</button>
       <div id="svc-retag"></div>
+    </div>
+    <div class="panel frm" style="margin-top:12px">
+      <div style="font-weight:700;margin-bottom:4px"><i class="ti ti-users" style="color:var(--accent2)"></i> Member service scope
+        <span class="tooldim" style="font-weight:400">· who works on which service — empty = all (CXA-F420f)</span></div>
+      <div id="svc-assign"></div>
     </div>`;
+  renderServiceAssignments(data.services||[]);
 }
+
+async function renderServiceAssignments(services){
+  const el=document.getElementById("svc-assign");if(!el)return;
+  let asg={},members=[];
+  try{const r=await fetch(api("/services/assignments"));if(r.ok)asg=(await r.json()).assignments||{};}catch(e){}
+  try{const r=await fetch(api("/members"));if(r.ok)members=(await r.json()).filter(m=>m.assigned);}catch(e){}
+  if(!members.length){el.innerHTML='<div class="tooldim">No project members (open mode, or none assigned) — scope applies only with accounts.</div>';return;}
+  const names=services.map(s=>s.name);
+  el.innerHTML=members.map(m=>{
+    const mine=asg[m.username]||[];
+    return `<div style="display:flex;align-items:center;gap:10px;font-size:12.5px;padding:3px 0;flex-wrap:wrap">
+      <b style="min-width:120px">${esc(m.username)}</b>
+      ${names.map(n=>`<label style="display:flex;align-items:center;gap:4px">
+        <input type="checkbox" data-u="${esc(m.username)}" data-s="${esc(n)}" ${mine.includes(n)?"checked":""}
+          onchange="saveServiceAssignment('${esc(m.username)}')"/> ${esc(n)}</label>`).join("")}
+      <span class="tooldim">${mine.length?``:`· all services`}</span></div>`;
+  }).join("");
+}
+
+async function saveServiceAssignment(user){
+  const picked=[...document.querySelectorAll(`#svc-assign input[data-u="${CSS.escape(user)}"]`)]
+    .filter(c=>c.checked).map(c=>c.dataset.s);
+  try{
+    const r=await fetch(api(`/services/assignments/${encodeURIComponent(user)}`),{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({services:picked})});
+    const b=await r.json().catch(()=>({}));
+    if(!r.ok){toasty(b.error||"save failed","err");}
+    else{toasty(`${user}: ${picked.length?picked.join(", "):"all services"}`);}
+  }catch(e){toasty("Network error","err");}
+}
+
+// Personal default lens (CXA-F420f): a scoped member's board opens on THEIR
+// services. Soft scope — one click on "show all" (or any chip) widens it.
+window.MYSVCS=window.MYSVCS||[];
+(async function initMyServiceScope(){
+  for(let i=0;i<50&&!(window.ME&&typeof api==="function");i++){await new Promise(r=>setTimeout(r,200));}
+  if(!window.ME||!ME.username)return;
+  try{
+    const r=await fetch(api("/services/assignments"));
+    if(!r.ok)return;
+    const asg=(await r.json()).assignments||{};
+    const mine=asg[ME.username]||[];
+    if(mine.length){window.MYSVCS=mine;if(typeof renderActive==="function")renderActive();}
+  }catch(e){}
+})();
+function toggleMyScope(){window.MYSVCS_OFF=!window.MYSVCS_OFF;renderActive();}
 
 async function loadRetagSuggestions(){
   const el=document.getElementById("svc-retag");

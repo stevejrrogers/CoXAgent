@@ -972,6 +972,14 @@ pub async fn serve_full(
             "/api/projects/:pid/services/retag",
             post(services::retag_apply_ep),
         )
+        .route(
+            "/api/projects/:pid/services/assignments",
+            get(services::service_assignments_ep),
+        )
+        .route(
+            "/api/projects/:pid/services/assignments/:username",
+            axum::routing::put(services::set_service_assignment_ep),
+        )
         .route("/api/projects/:pid/merge-sweep", post(merge_sweep_ep))
         .route(
             "/api/workspace",

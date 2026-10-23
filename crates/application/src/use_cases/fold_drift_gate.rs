@@ -99,9 +99,9 @@ fn route_hint(frozen: &[PanelInventoryEntry]) -> String {
     )
 }
 
-    /// Why a committed snapshot could not serve as a comparison base.
-    #[cfg(test)]
-    mod tests {
+/// Why a committed snapshot could not serve as a comparison base.
+#[cfg(test)]
+mod tests {
     use super::*;
     use crate::ports::outbound::fold_freeze_source::DeclaredPanel;
     use crate::use_cases::freeze_inventory;
