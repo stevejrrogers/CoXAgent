@@ -78,7 +78,7 @@ async function saveServiceAssignment(user){
     const b=await r.json().catch(()=>({}));
     if(!r.ok){toasty(b.error||"save failed","err");}
     else{toasty(`${user}: ${picked.length?picked.join(", "):"all services"}`);}
-  }catch(e){toasty("Network error","err");}
+  }catch(e){toasty(copyText("error.network",{where:"service assignment"}),"err");}
 }
 
 // Personal default lens (CXA-F420f): a scoped member's board opens on THEIR
