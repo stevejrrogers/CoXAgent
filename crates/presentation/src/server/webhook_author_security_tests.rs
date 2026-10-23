@@ -15,14 +15,30 @@ fn reserved_internal_identities_are_neutralized_case_insensitively() {
     assert_eq!(neutralize_reserved_author("sm"), "hook:sm");
     assert_eq!(neutralize_reserved_author("System"), "hook:System");
     // Every agent role label is reserved, not just the two gate senders.
-    for r in ["BA", "PO", "SA", "PD", "DEV-BUG", "DEV-FEATURE", "TEST", "DOCS"] {
+    for r in [
+        "BA",
+        "PO",
+        "SA",
+        "PD",
+        "DEV-BUG",
+        "DEV-FEATURE",
+        "TEST",
+        "DOCS",
+    ] {
         assert_eq!(neutralize_reserved_author(r), format!("hook:{r}"));
     }
 }
 
 #[test]
 fn ordinary_external_authors_pass_through_untouched() {
-    for name in ["GitHub", "ci-bot", "Grafana", "smith", "docs-team", "pd-review"] {
+    for name in [
+        "GitHub",
+        "ci-bot",
+        "Grafana",
+        "smith",
+        "docs-team",
+        "pd-review",
+    ] {
         assert_eq!(neutralize_reserved_author(name), name);
     }
 }
