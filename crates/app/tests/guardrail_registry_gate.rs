@@ -38,7 +38,12 @@ const INDEX_HTML: &str = "crates/presentation/src/web/index.html";
 /// (docs/CXA-B204-overview-kpi-panel-inventory.md §2). A layout change that
 /// drops or renames one fails check 1; a mount nobody registered fails too.
 const OVERVIEW_MOUNTS: &[&str] = &[
-    "ov-drain", "ov-alerts", "ov-working", "kpis", "ov-health", "ov-activity",
+    "ov-drain",
+    "ov-alerts",
+    "ov-working",
+    "kpis",
+    "ov-health",
+    "ov-activity",
 ];
 /// The test files that carry coverage, by kind.
 const STRUCTURAL_FILES: &[&str] = &[
@@ -94,10 +99,7 @@ fn parse_registered_panels(src: &str) -> Vec<RegisteredPanel> {
     // Only the real registry declarations count — `declared_panels` is the
     // declared set; every later `Panel::new(` in the file is a throwaway
     // panel built by a unit test and must never enter the coverage check.
-    let src = src
-        .split("fn declared_panels()")
-        .nth(1)
-        .unwrap_or(src);
+    let src = src.split("fn declared_panels()").nth(1).unwrap_or(src);
     let src = src.split("#[test]").next().unwrap_or(src);
     let mut out = Vec::new();
     let mut rest = src;
@@ -121,8 +123,8 @@ fn parse_registered_panels(src: &str) -> Vec<RegisteredPanel> {
 /// the six inventory mounts inside `#view-overview`, so the set stays the
 /// inventory's layout and nothing else.
 fn rendered_mount_ids(root: &Path) -> BTreeSet<String> {
-    let src = fs::read_to_string(root.join(INDEX_HTML))
-        .expect("the web shell must exist (fail closed)");
+    let src =
+        fs::read_to_string(root.join(INDEX_HTML)).expect("the web shell must exist (fail closed)");
     OVERVIEW_MOUNTS
         .iter()
         .filter(|m| src.contains(&format!("id=\"{m}\"")))
@@ -135,44 +137,40 @@ fn rendered_mount_ids(root: &Path) -> BTreeSet<String> {
 /// coverage file itself is missing → fail closed for EVERY panel it owned.
 fn coverage(root: &Path) -> (BTreeSet<String>, BTreeSet<String>) {
     let contains = |file: &str, needles: &[&str]| {
-        fs::read_to_string(root.join(file))
-            .is_ok_and(|src| needles.iter().any(|n| src.contains(n)))
+        fs::read_to_string(root.join(file)).is_ok_and(|src| needles.iter().any(|n| src.contains(n)))
     };
     let mut structural = BTreeSet::new();
     // The pilot KPI panel (scaffold exemplar) and batch 2's five panels —
     // identified by the contract names those files pin.
     let structural_rows: &[(&str, &str)] = &[
         ("kpis", "overview/kpi-tiles-carry-depth"),
-        (
-            "alerts",
-            "overview/alerts-strip-says-what-and-why",
-        ),
+        ("alerts", "overview/alerts-strip-says-what-and-why"),
         (
             "drain",
             "overview/drain-banner-names-the-hold-and-the-way-out",
         ),
         ("activity", "overview/activity-rows-carry-attribution"),
-        (
-            "working",
-            "overview/working-now-strip-lives-on-two-feeds",
-        ),
+        ("working", "overview/working-now-strip-lives-on-two-feeds"),
         (
             "health",
             "overview/health-grid-ships-six-attributed-metrics",
         ),
     ];
     for (panel, marker) in structural_rows {
-        if STRUCTURAL_FILES
-            .iter()
-            .any(|f| contains(f, &[*marker]))
-        {
+        if STRUCTURAL_FILES.iter().any(|f| contains(f, &[*marker])) {
             structural.insert((*panel).to_owned());
         }
     }
     let mut depth = BTreeSet::new();
     let depth_rows: &[(&str, &str)] = &[
-        ("kpis", "overview/kpis-numbers-carry-window-delta-zero-state"),
-        ("run-control", "overview/run-control-state-carries-attribution"),
+        (
+            "kpis",
+            "overview/kpis-numbers-carry-window-delta-zero-state",
+        ),
+        (
+            "run-control",
+            "overview/run-control-state-carries-attribution",
+        ),
         ("drain", "overview/drain-banner-names-why-and-the-way-out"),
     ];
     for (panel, marker) in depth_rows {
@@ -207,8 +205,7 @@ fn the_panel_registry_is_strictly_covered_and_layout_matched() {
     // row is a panel the UI renders but the guardrail dropped.
     let mut registered: BTreeSet<String> = structural.clone();
     registered.extend(depth.iter().cloned());
-    let grandfathered_names: BTreeSet<&str> =
-        GRANDFATHERED.iter().map(|(n, _)| *n).collect();
+    let grandfathered_names: BTreeSet<&str> = GRANDFATHERED.iter().map(|(n, _)| *n).collect();
 
     // 1. Registry-layout: every inventory mount must still map to a known
     //    panel; a layout change that drops or renames one fails here.
@@ -273,8 +270,7 @@ fn the_panel_registry_is_strictly_covered_and_layout_matched() {
     // A grandfather entry must still name a real panel — a registry name, a
     // coverage row, or a mounted id — the list may not drift into fiction.
     // Registry-only panels (no web mount) are exactly why the list exists.
-    let registry_names: BTreeSet<&str> =
-        panels.iter().map(|p| p.name.as_str()).collect();
+    let registry_names: BTreeSet<&str> = panels.iter().map(|p| p.name.as_str()).collect();
     for (name, _) in GRANDFATHERED {
         let known = registered.contains(*name)
             || registry_names.contains(name)

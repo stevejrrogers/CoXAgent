@@ -52,7 +52,14 @@ fn a_human_verdict_is_attributed_once_and_never_re_decided() {
     assert!(ev.decided_at.is_some(), "when");
     // an already-decided event is never re-decided
     assert!(!s.decide_revert("abc123", RevertDecision::Dismissed, "someone-else"));
-    assert_eq!(s.reverted_work.first().expect("event").decided_by.as_deref(), Some("operator"));
+    assert_eq!(
+        s.reverted_work
+            .first()
+            .expect("event")
+            .decided_by
+            .as_deref(),
+        Some("operator")
+    );
 }
 
 #[test]
@@ -69,7 +76,11 @@ fn deploy_history_is_append_only_and_window_scoped() {
     };
     assert_eq!(s.history.len(), 1);
     assert_eq!(s.history[0].at, "2026-09-06T10:00:00Z");
-    assert_eq!(s.history[0].ticket.to_string(), "CXA-F001", "attribution survives");
+    assert_eq!(
+        s.history[0].ticket.to_string(),
+        "CXA-F001",
+        "attribution survives"
+    );
 }
 
 fn feature() -> coxagent_domain::ticket::Ticket {

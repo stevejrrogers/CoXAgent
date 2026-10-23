@@ -42,14 +42,18 @@ fn zero_state_yields_named_empty_buckets_not_a_bare_zero() {
 #[test]
 fn deploys_bucket_by_utc_day_window_and_never_fabricate_a_day() {
     let mut s = ProjectState::default();
-    let t = |k: &str| coxagent_domain::ticket::Ticket::new(
-        coxagent_domain::ids::TicketId::new(k).expect("id"),
-        coxagent_domain::kinds::TicketType::Feature,
-        "t", "d",
-        coxagent_domain::kinds::Priority::Medium,
-        coxagent_domain::kinds::Complexity::Small,
-        false,
-    ).expect("ticket");
+    let t = |k: &str| {
+        coxagent_domain::ticket::Ticket::new(
+            coxagent_domain::ids::TicketId::new(k).expect("id"),
+            coxagent_domain::kinds::TicketType::Feature,
+            "t",
+            "d",
+            coxagent_domain::kinds::Priority::Medium,
+            coxagent_domain::kinds::Complexity::Small,
+            false,
+        )
+        .expect("ticket")
+    };
     s.tickets = vec![t("CXA-F001")];
     s.history = vec![
         deploy("2026-09-06T10:00:00Z", "CXA-F001"),
@@ -58,9 +62,17 @@ fn deploys_bucket_by_utc_day_window_and_never_fabricate_a_day() {
     ];
     let m = metrics::compute(&s);
     assert_eq!(m.releases, 3);
-    assert_eq!(m.deploys_by_day.len(), 2, "exactly the two days actually shipped");
+    assert_eq!(
+        m.deploys_by_day.len(),
+        2,
+        "exactly the two days actually shipped"
+    );
     for d in &m.deploys_by_day {
-        assert!(d.day.starts_with("2026-09-0"), "day is a UTC date window: {}", d.day);
+        assert!(
+            d.day.starts_with("2026-09-0"),
+            "day is a UTC date window: {}",
+            d.day
+        );
         assert!(d.count >= 1);
     }
     assert_eq!(m.deploys_by_day.iter().map(|d| d.count).sum::<usize>(), 3);
@@ -78,7 +90,10 @@ fn deploy_attribution_survives_the_projection() {
     assert_eq!(m.total_tickets, 1);
     assert_eq!(m.releases, s.history.len());
     assert_eq!(m.features_shipped, 1);
-    assert!(m.feature_ratio_pct <= 100, "a ratio is a percentage, never more");
+    assert!(
+        m.feature_ratio_pct <= 100,
+        "a ratio is a percentage, never more"
+    );
 }
 
 #[test]
@@ -92,7 +107,10 @@ fn compute_is_deterministic_and_counts_never_exceed_their_populations() {
     let b = metrics::compute(&s);
     assert_eq!(a, b, "pure projection");
     assert!(a.features_shipped <= a.total_tickets);
-    assert!(a.bugs_open + a.features_in_flight <= a.total_tickets + a.bugs_verified + a.features_shipped + 8);
+    assert!(
+        a.bugs_open + a.features_in_flight
+            <= a.total_tickets + a.bugs_verified + a.features_shipped + 8
+    );
 }
 
 fn deploy(at: &str, ticket: &str) -> coxagent_application::state::DeployRecord {
@@ -111,11 +129,27 @@ fn shipped_feature(id: &str) -> coxagent_domain::ticket::Ticket {
     let mut t = feature(id);
     t.set_technical_design(
         coxagent_domain::kinds::Role::Sa,
-        coxagent_domain::ticket::TechnicalDesign { approach: "a".into(), ..Default::default() },
-    ).expect("design");
-    t.transition_to(coxagent_domain::kinds::Role::Sa, coxagent_domain::kinds::Status::Ready).expect("ready");
-    t.transition_to(coxagent_domain::kinds::Role::DevFeature, coxagent_domain::kinds::Status::InProgress).expect("in progress");
-    t.transition_to(coxagent_domain::kinds::Role::DevFeature, coxagent_domain::kinds::Status::Done).expect("done");
+        coxagent_domain::ticket::TechnicalDesign {
+            approach: "a".into(),
+            ..Default::default()
+        },
+    )
+    .expect("design");
+    t.transition_to(
+        coxagent_domain::kinds::Role::Sa,
+        coxagent_domain::kinds::Status::Ready,
+    )
+    .expect("ready");
+    t.transition_to(
+        coxagent_domain::kinds::Role::DevFeature,
+        coxagent_domain::kinds::Status::InProgress,
+    )
+    .expect("in progress");
+    t.transition_to(
+        coxagent_domain::kinds::Role::DevFeature,
+        coxagent_domain::kinds::Status::Done,
+    )
+    .expect("done");
     t
 }
 
@@ -123,9 +157,11 @@ fn feature(id: &str) -> coxagent_domain::ticket::Ticket {
     coxagent_domain::ticket::Ticket::new(
         coxagent_domain::ids::TicketId::new(id).expect("id"),
         coxagent_domain::kinds::TicketType::Feature,
-        "t", "d",
+        "t",
+        "d",
         coxagent_domain::kinds::Priority::Medium,
         coxagent_domain::kinds::Complexity::Small,
         false,
-    ).expect("ticket")
+    )
+    .expect("ticket")
 }

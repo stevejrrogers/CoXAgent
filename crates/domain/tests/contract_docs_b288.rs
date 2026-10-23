@@ -21,12 +21,14 @@ mod contract_surface;
 
 use std::fmt::Write as _;
 
+use contract_surface::{
+    ENUM_SURFACE, GOLDEN_FIXTURES, REQUIRED_FIELD_WHITELIST, STRICT_UNKNOWN_KEY_TYPES,
+};
 use coxagent_domain::artifact::ArtifactVersion;
 use coxagent_domain::coverage::{CoverageEntry, CoverageStatus};
 use coxagent_domain::kinds::{Role, Status};
 use coxagent_domain::test_case::{RecordKind, TestCase};
 use coxagent_domain::wip_checkpoint::WipCheckpoint;
-use contract_surface::{ENUM_SURFACE, GOLDEN_FIXTURES, REQUIRED_FIELD_WHITELIST, STRICT_UNKNOWN_KEY_TYPES};
 
 /// The generated markdown, the ONLY place this module writes to disk.
 /// Lives next to its fixtures so a domain-crate test can write it in-tree
@@ -47,7 +49,12 @@ fn render_doc() -> String {
     d.push_str("## Enum wire forms\n\n");
     d.push_str("Every serialized enum variant uses lowercase `snake_case` tags; tags are unique within each enum. Wire-accurate as of the last regeneration.\n\n");
     for e in ENUM_SURFACE {
-        write!(d, "### `{}`\n\n| Rust variant | wire tag |\n|---|---|\n", e.ty).expect("write to String is infallible");
+        write!(
+            d,
+            "### `{}`\n\n| Rust variant | wire tag |\n|---|---|\n",
+            e.ty
+        )
+        .expect("write to String is infallible");
         for (variant, tag) in e.variants {
             writeln!(d, "| `{variant}` | `{tag}` |").expect("write to String is infallible");
         }
@@ -74,7 +81,11 @@ fn render_doc() -> String {
         writeln!(
             d,
             "| `{ty}` | {req} | {} |",
-            if strict { "refused (`deny_unknown_fields`)" } else { "tolerated, dropped" }
+            if strict {
+                "refused (`deny_unknown_fields`)"
+            } else {
+                "tolerated, dropped"
+            }
         )
         .expect("write to String is infallible");
     }
@@ -125,7 +136,10 @@ fn golden_artifact_version_wire_row_is_what_serde_produces() {
     let got = serde_json::to_value(&v).unwrap();
     assert_eq!(got.get("project").and_then(|p| p.as_str()), Some("cxa")); // matches the golden fixture
     for f in ["project", "artifact", "version"] {
-        assert!(got.get(f).is_some(), "`{f}` rendered missing from wire object");
+        assert!(
+            got.get(f).is_some(),
+            "`{f}` rendered missing from wire object"
+        );
     }
 }
 
@@ -168,6 +182,14 @@ fn golden_enum_tag_rows_are_what_serde_serializes() {
         .unwrap();
         assert_eq!(tag.as_str(), Some(wire), "{rust} renders as {wire}");
     }
-    assert_eq!(serde_json::to_value(Status::InProgress).unwrap().as_str(), Some("in_progress"));
-    assert_eq!(serde_json::to_value(RecordKind::EvidenceRefresh).unwrap().as_str(), Some("evidence_refresh"));
+    assert_eq!(
+        serde_json::to_value(Status::InProgress).unwrap().as_str(),
+        Some("in_progress")
+    );
+    assert_eq!(
+        serde_json::to_value(RecordKind::EvidenceRefresh)
+            .unwrap()
+            .as_str(),
+        Some("evidence_refresh")
+    );
 }

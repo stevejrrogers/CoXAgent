@@ -61,7 +61,9 @@ impl DriftFinding {
     /// The single human-readable line for this finding (no trailing newline).
     #[must_use = "gate output is built from these lines"]
     pub fn line(&self) -> String {
-        fn show(v: Option<&str>) -> &str { v.unwrap_or("(none)") }
+        fn show(v: Option<&str>) -> &str {
+            v.unwrap_or("(none)")
+        }
         match self.class {
             DriftClass::Missing => format!(
                 "MISSING  {}: expected {}, got {}",
@@ -146,7 +148,11 @@ pub fn panel_inventory_drift(
 
     // Removals & mutations walk the frozen order for determinism.
     for (fi, f) in frozen.iter().enumerate() {
-        match live.iter().enumerate().find(|(_, l)| l.panel_id == f.panel_id) {
+        match live
+            .iter()
+            .enumerate()
+            .find(|(_, l)| l.panel_id == f.panel_id)
+        {
             None => report.removed.push(DriftFinding {
                 class: DriftClass::Missing,
                 panel_id: f.panel_id.clone(),
@@ -254,13 +260,22 @@ mod tests {
         let r = panel_inventory_drift(&frozen, &live_mirror(&frozen));
         assert!(r.is_clean(), "equal inventories cannot drift");
         assert_eq!(r.total(), 0);
-        assert!(r.removed.is_empty() && r.added.is_empty() && r.moved.is_empty() && r.mutated.is_empty());
+        assert!(
+            r.removed.is_empty()
+                && r.added.is_empty()
+                && r.moved.is_empty()
+                && r.mutated.is_empty()
+        );
     }
 
     #[test]
     fn a_missing_frozen_panel_is_reported_with_its_expected_slot_and_no_actual() {
         let frozen = frozen_trio();
-        let live: Vec<_> = frozen.iter().filter(|e| e.panel_id != "kpis").cloned().collect();
+        let live: Vec<_> = frozen
+            .iter()
+            .filter(|e| e.panel_id != "kpis")
+            .cloned()
+            .collect();
         let r = panel_inventory_drift(&frozen, &live);
         assert_eq!(r.removed.len(), 1);
         let f = &r.removed[0];
@@ -361,7 +376,12 @@ mod tests {
         let mut live = live_mirror(&frozen);
         live.insert(0, entry("banner", 0, "top.js banner()", HASH_A));
         let r = panel_inventory_drift(&frozen, &live);
-        assert_eq!(r.moved.len(), 3, "all three survivors shifted one slot: {:?}", r.moved);
+        assert_eq!(
+            r.moved.len(),
+            3,
+            "all three survivors shifted one slot: {:?}",
+            r.moved
+        );
         assert_eq!(r.added.len(), 1);
         assert_eq!(r.added[0].panel_id, "banner");
     }
@@ -373,7 +393,7 @@ mod tests {
             entry("drain", 0, "shell2.js drainBanner()", HASH_A), // mutated component
             entry("kpis", 1, "kpis.js overviewKpis()", HASH_B),   // reordered (was slot 3)
             entry("guest", 2, "extra.js guest()", HASH_A),        // added
-            // "alerts" dropped → missing
+                                                                  // "alerts" dropped → missing
         ];
         let r = panel_inventory_drift(&frozen, &live);
         assert_eq!(r.removed.len(), 1);
@@ -502,23 +522,31 @@ mod fmt_tests {
         ];
         let out = render_drift_report(&panel_inventory_drift(&frozen, &live));
         assert!(out.contains("mutated"), "{out}");
-        assert!(out.contains("component_name — expected `core.js alertsHtml()`, got `charts.js alertsGraph()`"), "{out}");
-        assert!(out.contains("visibility_rules_hash — expected `77ee72e7d6fe454f`, got `deadbeef00000001`"), "{out}");
+        assert!(
+            out.contains(
+                "component_name — expected `core.js alertsHtml()`, got `charts.js alertsGraph()`"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "visibility_rules_hash — expected `77ee72e7d6fe454f`, got `deadbeef00000001`"
+            ),
+            "{out}"
+        );
     }
 
     #[test]
     fn pluralisation_and_line_per_finding_for_multi_drift() {
         let frozen = frozen_pair();
-        let live = vec![
-            PanelInventoryEntry::try_new(
-                "drain",
-                "#/overview",
-                0,
-                "other.js drained()",
-                "a93965831c534267",
-            )
-            .expect("fixture"),
-        ];
+        let live = vec![PanelInventoryEntry::try_new(
+            "drain",
+            "#/overview",
+            0,
+            "other.js drained()",
+            "a93965831c534267",
+        )
+        .expect("fixture")];
         let r = panel_inventory_drift(&frozen, &live);
         assert_eq!(r.total(), 2); // alerts missing, drain mutated (order holds)
         let out = render_drift_report(&r);

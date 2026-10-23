@@ -168,11 +168,17 @@ fn depth_contracts() -> Vec<PanelDepthContract> {
 
 /// The batch decision: every depth contract passes, or one failure naming
 /// each shallow panel. An empty batch is a failure, not a green light.
-fn check_depth_batch(contracts: &[PanelDepthContract], read: &dyn ReadRepoText) -> Result<(), String> {
+fn check_depth_batch(
+    contracts: &[PanelDepthContract],
+    read: &dyn ReadRepoText,
+) -> Result<(), String> {
     if contracts.is_empty() {
         return Err("no depth contracts registered — nothing is guarded".to_owned());
     }
-    let failed: Vec<String> = contracts.iter().filter_map(|c| c.check(read).err()).collect();
+    let failed: Vec<String> = contracts
+        .iter()
+        .filter_map(|c| c.check(read).err())
+        .collect();
     if failed.is_empty() {
         Ok(())
     } else {
@@ -245,9 +251,12 @@ fn an_empty_batch_is_a_failure_not_a_green_light() {
 #[test]
 fn a_number_that_lost_its_zero_state_hint_is_caught() {
     let repo = OverlaidRepo {
-        over: [(KPI_JS.to_owned(), "overviewKpiTile({label:\"x\",series:[1],go:nav()})".to_owned())]
-            .into_iter()
-            .collect(),
+        over: [(
+            KPI_JS.to_owned(),
+            "overviewKpiTile({label:\"x\",series:[1],go:nav()})".to_owned(),
+        )]
+        .into_iter()
+        .collect(),
         inner: Workspace { root: repo_root() },
     };
     let why = kpis_depth_contract()

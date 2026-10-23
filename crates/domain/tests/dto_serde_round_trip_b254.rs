@@ -24,7 +24,9 @@ use coxagent_domain::artifact::ArtifactVersion;
 use coxagent_domain::coverage::{CoverageEntry, CoverageStatus};
 use coxagent_domain::ids::{GoalId, TicketId};
 use coxagent_domain::kinds::{Complexity, Priority, Role, Status, TicketType};
-use coxagent_domain::test_case::{CaseEvidence, RecordKind, TestCase, TestCaseStatus, VerdictRecord};
+use coxagent_domain::test_case::{
+    CaseEvidence, RecordKind, TestCase, TestCaseStatus, VerdictRecord,
+};
 use coxagent_domain::ticket::{Design, TechnicalDesign, Ticket, UxDesign};
 use coxagent_domain::version::SemVer;
 use coxagent_domain::wip_checkpoint::WipCheckpoint;
@@ -129,11 +131,12 @@ fn artifact_version_survives_a_symmetric_json_round_trip() {
 fn artifact_version_keeps_the_checked_in_wire_keys() {
     let av = ArtifactVersion::new("cxa", "api", "0.1.0").expect("valid semver");
     let got = serde_json::to_value(&av).unwrap();
-    let golden: serde_json::Value = serde_json::from_str(include_str!(
-        "fixtures/artifact_version_cxa_api.json"
-    ))
-    .unwrap();
-    assert_eq!(got, golden, "ArtifactVersion wire shape drifted — update the golden deliberately, not silently");
+    let golden: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/artifact_version_cxa_api.json")).unwrap();
+    assert_eq!(
+        got, golden,
+        "ArtifactVersion wire shape drifted — update the golden deliberately, not silently"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -199,7 +202,8 @@ fn a_fully_populated_ticket() -> Ticket {
     )
     .expect("title is non-blank");
 
-    t.set_priority(Role::Po, Priority::Low).expect("PO may set priority");
+    t.set_priority(Role::Po, Priority::Low)
+        .expect("PO may set priority");
     t.set_technical_design(Role::Sa, a_technical_design())
         .expect("SA may attach design");
     t.set_acceptance_criteria(vec![
@@ -330,7 +334,10 @@ fn test_case_status_kinds_keep_their_snake_case_tags() {
         let back: TestCaseStatus = serde_json::from_value(serde_json::json!(wire)).unwrap();
         assert_eq!(back, s);
     }
-    for (wire, k) in [("verdict", RecordKind::Verdict), ("evidence_refresh", RecordKind::EvidenceRefresh)] {
+    for (wire, k) in [
+        ("verdict", RecordKind::Verdict),
+        ("evidence_refresh", RecordKind::EvidenceRefresh),
+    ] {
         assert_eq!(serde_json::to_value(k).unwrap(), serde_json::json!(wire));
         let back: RecordKind = serde_json::from_value(serde_json::json!(wire)).unwrap();
         assert_eq!(back, k);

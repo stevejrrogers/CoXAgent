@@ -43,6 +43,8 @@ pub use kv_doc::KvDocPort;
 pub use notify::{ChatNotifier, FanoutNotifier, NotifierPort, NotifyEvent, NullNotifier};
 pub use outbox::{MemoryOutboxStore, OutboxStorePort};
 pub use overview_inventory::{LivePanelInventory, OverviewInventoryPort};
+pub mod fold_drift_source;
+pub use fold_drift_source::FoldDriftSourcePort;
 pub use pr_report::{NullPrReporter, PrOpen, PrReporterPort, StorePrReporter};
 pub use probe::{ApiProbePort, ApiProof};
 pub use screenshot::ScreenshotPort;

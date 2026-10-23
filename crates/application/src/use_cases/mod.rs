@@ -65,6 +65,8 @@ pub use duplicate_radar::{
     find_cross_project_duplicates, pair_key, DuplicatePair, RadarTicket, TicketSnapshot,
 };
 pub use freeze_fold_inventory::{freeze_inventory, FrozenInventory, OVERVIEW_ROUTE};
+pub mod fold_drift_gate;
+pub use fold_drift_gate::{run_fold_drift_gate, FoldDriftVerdict, REFREEZE_COMMAND};
 pub use generate_docs::GenerateDocsUseCase;
 pub use global_search::{
     global_search, global_search_many, GroupedSearch, SearchGroup, SearchHit, SearchKind,

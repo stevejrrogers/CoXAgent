@@ -16,9 +16,9 @@
 #![allow(clippy::expect_used)]
 use coxagent_application::metrics_governance::{attention_summary, AttentionSummary};
 use coxagent_application::state::ProjectState;
-use coxagent_domain::kinds::{InterventionKind, Priority, TicketType};
 use coxagent_domain::ids::TicketId;
 use coxagent_domain::kinds::{Complexity, Role, Status};
+use coxagent_domain::kinds::{InterventionKind, Priority, TicketType};
 use coxagent_domain::ticket::{TechnicalDesign, Ticket};
 
 const ALL_KINDS: [(&str, InterventionKind); 7] = [
@@ -64,16 +64,23 @@ fn every_area_renders_the_full_kind_grid_so_the_ui_needs_no_null_guards() {
         let row = area(&sum, t).unwrap_or_else(|| panic!("area {} missing from grid", t.key()));
         for (kind_key, _) in ALL_KINDS {
             let cell = row.get(kind_key).copied().unwrap_or(0);
-            assert!(cell == 0 || cell >= 1, "kind {kind_key} count is a real number");
+            assert!(
+                cell == 0 || cell >= 1,
+                "kind {kind_key} count is a real number"
+            );
         }
     }
     assert_eq!(
-        area(&sum, TicketType::Bug).and_then(|r| r.get("verify_send_back")).copied(),
+        area(&sum, TicketType::Bug)
+            .and_then(|r| r.get("verify_send_back"))
+            .copied(),
         Some(1),
         "attribution: the send-back lands in the bug's row"
     );
     assert_eq!(
-        area(&sum, TicketType::Feature).and_then(|r| r.get("verify_pass")).copied(),
+        area(&sum, TicketType::Feature)
+            .and_then(|r| r.get("verify_pass"))
+            .copied(),
         Some(1),
         "attribution: the verify pass lands in the feature's row"
     );
@@ -87,7 +94,10 @@ fn an_unattributable_intervention_is_counted_visibly_not_dropped() {
     s.record_intervention(InterventionKind::CostApprove, "CXA-B999", "operator");
     let sum = attention_summary(&s, "2026-09-14");
     assert_eq!(sum.interventions_total, 1, "the record survived the ledger");
-    assert_eq!(sum.unattributed, 1, "and the panel can say WHY it is unattributed");
+    assert_eq!(
+        sum.unattributed, 1,
+        "and the panel can say WHY it is unattributed"
+    );
 }
 
 #[test]
@@ -99,7 +109,11 @@ fn the_window_day_shapes_the_summary_and_counts_never_shrink_the_grid() {
     s.record_intervention(InterventionKind::VerifyPass, "CXA-B001", "operator");
     let a = attention_summary(&s, "2026-09-14");
     let b = attention_summary(&s, "2026-09-14");
-    assert_eq!(a.attention_by_area.len(), b.attention_by_area.len(), "pure projection");
+    assert_eq!(
+        a.attention_by_area.len(),
+        b.attention_by_area.len(),
+        "pure projection"
+    );
     assert_eq!(a.attention_by_area, b.attention_by_area);
 }
 
@@ -129,7 +143,10 @@ fn feature(id: &str) -> Ticket {
     .expect("ticket");
     t.set_technical_design(
         Role::Sa,
-        TechnicalDesign { approach: "a".into(), ..TechnicalDesign::default() },
+        TechnicalDesign {
+            approach: "a".into(),
+            ..TechnicalDesign::default()
+        },
     )
     .expect("design");
     t.transition_to(Role::Sa, Status::Ready).expect("ready");
