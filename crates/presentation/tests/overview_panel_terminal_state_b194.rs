@@ -10,6 +10,10 @@
 //! server, no network. Retriability and the retry re-dispatch are covered
 //! against a stub fetch at the same boundary the browser uses.
 
+// Test scratch-parsing of shipped JS/HTML bytes: an `expect` here fails the
+// test loudly, which is exactly what a guardrail should do (repo convention).
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use coxagent_presentation::overview_panels;
 use std::process::Command;
 
@@ -19,11 +23,10 @@ fn node() -> Command {
 }
 
 fn run_node(script: &str) -> String {
-    let out = node()
-        .arg("-e")
-        .arg(script)
-        .output()
-        .unwrap_or_else(|e| panic!("node must be available to evaluate the wiring script: {e}"));
+    let out =
+        node().arg("-e").arg(script).output().unwrap_or_else(|e| {
+            panic!("node must be available to evaluate the wiring script: {e}")
+        });
     assert!(
         out.status.success(),
         "node evaluation failed:\nstdout: {}\nstderr: {}",
@@ -38,7 +41,12 @@ fn run_node(script: &str) -> String {
 fn eval_js(expr: &str) -> String {
     let wiring = include_str!("../src/web/js/overview_states.js");
     let shell = include_str!("../src/web/js/terminal_state.js");
-    let script = format!("const window=globalThis;\n{shell}\n{wiring}\n;console.log(({expr}));");
+    // The wiring resolves panel mounts through the Overview view-mesh
+    // (CXA-B232b), so the mesh must load before overview_states.js —
+    // mirroring index.html / APP_JS order.
+    let mesh = include_str!("../src/web/js/overview_vm.js");
+    let script =
+        format!("const window=globalThis;\n{shell}\n{mesh}\n{wiring}\n;console.log(({expr}));");
     run_node(&script)
 }
 
