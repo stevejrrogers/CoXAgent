@@ -1497,6 +1497,8 @@ mod avatar_media_security_tests;
 #[cfg(test)]
 mod cors_rate_limit_tests;
 #[cfg(test)]
+mod webhook_author_security_tests;
+#[cfg(test)]
 mod delete_project_tests;
 #[cfg(test)]
 mod pr_preview_tests;

@@ -862,6 +862,29 @@ pub(super) async fn syschat_topic_get_ep(
     Json(serde_json::json!({"topic": topic})).into_response()
 }
 
+/// Internal identities that carry authority in the feed: the agent roles and
+/// `SYSTEM`. The chat UI renders gate *action cards* for `SM`/`SYSTEM`
+/// senders, so a webhook poster (public, token-only) must never be able to
+/// author under one of these names — a leaked token could otherwise forge an
+/// approval card. Match is case-insensitive.
+const RESERVED_AUTHORS: [&str; 10] = [
+    "BA", "PO", "SM", "SA", "PD", "DEV-BUG", "DEV-FEATURE", "TEST", "DOCS", "SYSTEM",
+];
+
+/// Prefix a webhook-supplied author that collides with a reserved internal
+/// identity so it renders as the external sender it is (`hook:SM`), never as
+/// the real agent. Non-colliding names pass through untouched.
+pub(super) fn neutralize_reserved_author(author: &str) -> String {
+    if RESERVED_AUTHORS
+        .iter()
+        .any(|r| r.eq_ignore_ascii_case(author))
+    {
+        format!("hook:{author}")
+    } else {
+        author.to_owned()
+    }
+}
+
 /// Public webhook endpoint: an external system posts a message to a channel
 /// using only the secret token (no login). The token is the credential.
 pub(super) async fn syschat_hook_ep(
@@ -876,11 +899,11 @@ pub(super) async fn syschat_hook_ep(
     if text.is_empty() {
         return (StatusCode::BAD_REQUEST, "empty text").into_response();
     }
-    let author = if req.username.trim().is_empty() {
-        label
+    let author = neutralize_reserved_author(if req.username.trim().is_empty() {
+        &label
     } else {
-        req.username.trim().to_owned()
-    };
+        req.username.trim()
+    });
     let msg = {
         let mut sc = app.syschat.inner.lock().await;
         let id = sc.post(
