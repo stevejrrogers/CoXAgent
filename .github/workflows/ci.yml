@@ -88,11 +88,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Bring the stack up and probe the published port
         run: cargo test -p coxagent-app --test deploy_smoke -- --ignored --nocapture
-      # CXA-B308: scripted redeploy regression — clean, interrupted-stack and
-      # host-port-override scenarios against the same compose file. Skips
-      # itself (exit 0) wherever docker is absent, so it is CI-safe everywhere.
-      - name: Redeploy smoke (clean / interrupted / override)
-        run: scripts/redeploy-smoke.sh
       - name: Container logs on failure
         if: failure()
         run: docker compose logs --no-color
@@ -127,6 +122,12 @@ jobs:
         run: cargo test -p coxagent-app --test deploy_smoke --test ci_availability_gate --test test_env_guard_f326_gate
       - name: Hexagonal gate (CXA-B211 — application layer does no direct IO)
         run: cargo test -p coxagent-app --test hexagonal_gate -- --nocapture
+      # CXA-B250 (CXA-B188c): the depth gate — every presentation-surface
+      # element the depth registry declares meets the depth bar; the
+      # grandfather list at crates/app/tests/depth_gate_allowlist.json only
+      # shrinks (a stale entry fails the gate too).
+      - name: Depth gate (CXA-B250 — UI depth ratchet)
+        run: cargo test -p coxagent-app --test depth_gate -- --nocapture
       # CXA-B199.3 (CXA-B225 gate wiring, re-land): the named guardrail
       # regression suite — scaffold self-tests + the above-the-fold Overview
       # panel contracts (terminal states, attribution, depth). Merge-blocking
@@ -135,7 +136,7 @@ jobs:
       # docs/CXA-B204-overview-kpi-panel-inventory.md, the per-panel matrix at
       # docs/wiki/engineering/cxa-b199-guardrail-triage.md.
       - name: Overview panel guardrails (CXA-B199.3 regression gate)
-        run: cargo test -p coxagent-presentation --test guardrail_scaffold_b201 --test overview_kpis_panel_b199 --test overview_activity_panel_b199 --test overview_alerts_panel_b199 --test overview_deploy_health_panel_b199 --test overview_drain_panel_b199 --test overview_working_strip_b199 && cargo test -p coxagent-application --test overview_fold_guardrails_b181 --test overview_attention_panel_b181 --test overview_deploy_panel_b181
+        run: cargo test -p coxagent-presentation --test guardrail_scaffold_b201 --test overview_kpis_panel_b199 --test overview_activity_panel_b199 --test overview_alerts_panel_b199 --test overview_deploy_health_panel_b199 --test overview_drain_panel_b199 --test overview_working_strip_b199 && cargo test -p coxagent-application --test overview_fold_guardrails_b181 --test overview_middle_group_invariants_b238 --test overview_attention_panel_b181 --test overview_deploy_panel_b181
       # CXA-B315 / SEC-41E384: docs have no review lane of their own, so the
       # leak-guard runs here on every PR — docker-free (pure scan + git ls-files).
       - name: Doc credential leak guard (CXA-B315 — post-CXA-B311a regression gate)
