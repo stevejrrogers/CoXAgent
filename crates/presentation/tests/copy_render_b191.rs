@@ -64,7 +64,7 @@ fn parse_catalog(src: &str) -> Vec<Entry> {
     entries
 }
 
-/// Mirror of `window.copyText`: fills `{token}` from params; unknown tokens
+/// Mirror of `window.copyFor`: fills `{token}` from params; unknown tokens
 /// stay visible (never silently dropped); catalog miss renders `_copy.broken`.
 fn render(template: &str, params: &[(&str, &str)]) -> String {
     let mut out = template.to_string();
@@ -282,7 +282,7 @@ fn long_value_render_is_inert_text_not_markup() {
     // toastCopy/ellipsisCopy assign textContent (a text node), never
     // innerHTML — a hostile "value" must not be able to inject markup.
     assert!(
-        COPY_JS.contains("body.textContent = window.copyText("),
+        COPY_JS.contains("body.textContent = window.copyFor("),
         "toastCopy must insert the message as a text node"
     );
     assert!(

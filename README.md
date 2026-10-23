@@ -298,3 +298,37 @@ finds them and `docker compose -p <project> down -v` removes them.
 
 CI runs the same suites in the `integration` job; the fixture provisions the
 ephemeral pair per test, so the job exports no database env vars at all.
+
+## Pre-deploy container build gate (CXA-B313)
+
+Before pushing or deploying, prove the compose stack still builds:
+
+    scripts/docker-build-check.sh              # config check + cached build
+    scripts/docker-build-check.sh --no-cache   # cold build, what CI runs
+
+It runs `docker compose config -q` then `docker compose build`; on failure it
+prints the real tail of the build log to stdout (never a docker-desktop://
+dashboard link) and exits non-zero. A second consecutive run after an unrelated
+source edit finishes in minutes because dependency layers are cached — the
+Dockerfile copies manifests/lockfiles first and uses BuildKit cache mounts.
+Base images are pinned by digest; re-pin deliberately via the command noted at
+the top of `Dockerfile`.
+
+## Domain contract docs (CXA-B254)
+
+The wire surface of `coxagent-domain` — every documented enum's serialized
+tags, each DTO's required-vs-defaulted fields and unknown-key policy, and the
+golden fixtures that pin them — is rendered into a **generated** markdown page:
+[`crates/domain/docs/wiki/engineering/cxa-b254-contract-surface.md`](crates/domain/docs/wiki/engineering/cxa-b254-contract-surface.md).
+
+It comes from one single source of truth (`crates/domain/tests/contract_surface/mod.rs`),
+the same tables the CXA-B287 contract guards enforce, so the docs cannot drift
+from what the guards prove. When you change any domain DTO / enum / envelope:
+
+```sh
+cargo test -p coxagent-domain --test contract_docs_b288 write_contract_doc_file
+```
+
+then commit the regenerated file together with your DTO change. CI (and plain
+`cargo test -p coxagent-domain`) fails if the checked-in copy no longer matches
+what the generator would produce.

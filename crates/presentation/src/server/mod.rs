@@ -74,6 +74,7 @@ mod repro_url;
 mod requests;
 mod search;
 mod security;
+mod services;
 mod share_link;
 mod share_page;
 mod status;
@@ -156,6 +157,9 @@ const APP_JS: &[(&str, &str)] = &[
         "terminal_state.js",
         include_str!("../web/js/terminal_state.js"),
     ),
+    // View-mesh (CXA-B232b) — overview_states.js resolves panel mounts
+    // through window.OvViewMesh at runtime; loads first or panels don't mount.
+    ("overview_vm.js", include_str!("../web/js/overview_vm.js")),
     (
         "overview_states.js",
         include_str!("../web/js/overview_states.js"),
@@ -163,6 +167,9 @@ const APP_JS: &[(&str, &str)] = &[
     // Overview KPI tiles (CXA-F360) — sparkline/delta series helpers that
     // core.js's overview render calls at runtime; loads before core.js.
     ("kpis.js", include_str!("../web/js/kpis.js")),
+    // Copy catalog (CXA-B191) — shipped at last: it existed unloaded for
+    // weeks and two PRs tripped on calling it through a shadowed name.
+    ("copy.js", include_str!("../web/js/copy.js")),
     ("core.js", include_str!("../web/js/core.js")),
     ("manage.js", include_str!("../web/js/manage.js")),
     ("home.js", include_str!("../web/js/home.js")),
@@ -182,6 +189,9 @@ const APP_JS: &[(&str, &str)] = &[
         "approval_policy.js",
         include_str!("../web/js/approval_policy.js"),
     ),
+    // Add-repo wizard panel (CXA-F420b) — the Settings Services tab; loads
+    // before shell.js like every view helper.
+    ("services.js", include_str!("../web/js/services.js")),
     // Lesson efficacy panel (CXA-F306) — the Overview recurrence view; loads
     // before shell.js like every view helper.
     ("lessons.js", include_str!("../web/js/lessons.js")),
@@ -941,6 +951,35 @@ pub async fn serve_full(
         .route("/api/projects/:pid/sprint/:action", post(sprint_scope_ep))
         .route("/api/projects/:pid/digest", post(digest_ep))
         .route("/api/projects/:pid/deps/scan", post(deps::scan_ep))
+        // CXA-F420b: Add-repo wizard — list, scan/propose, add (probe-first).
+        .route(
+            "/api/projects/:pid/services",
+            get(services::list_services_ep).post(services::add_service_ep),
+        )
+        .route(
+            "/api/projects/:pid/services/scan",
+            post(services::scan_service_ep),
+        )
+        .route(
+            "/api/projects/:pid/services/:name/status",
+            post(services::set_service_status_ep),
+        )
+        .route(
+            "/api/projects/:pid/services/retag-suggestions",
+            get(services::retag_suggestions_ep),
+        )
+        .route(
+            "/api/projects/:pid/services/retag",
+            post(services::retag_apply_ep),
+        )
+        .route(
+            "/api/projects/:pid/services/assignments",
+            get(services::service_assignments_ep),
+        )
+        .route(
+            "/api/projects/:pid/services/assignments/:username",
+            axum::routing::put(services::set_service_assignment_ep),
+        )
         .route("/api/projects/:pid/merge-sweep", post(merge_sweep_ep))
         .route(
             "/api/workspace",
@@ -1457,6 +1496,8 @@ mod archive_tests;
 mod avatar_media_security_tests;
 #[cfg(test)]
 mod cors_rate_limit_tests;
+#[cfg(test)]
+mod webhook_author_security_tests;
 #[cfg(test)]
 mod delete_project_tests;
 #[cfg(test)]

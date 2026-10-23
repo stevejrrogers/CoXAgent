@@ -5,7 +5,9 @@
 
 pub mod archive_read;
 pub mod artifacts;
+pub mod attribution_invariants;
 pub mod auth;
+pub mod backlog_hygiene;
 pub mod backlog_import;
 pub mod backlog_scoping;
 pub mod bootstrap_lessons;
@@ -16,11 +18,13 @@ pub mod config_parse;
 pub mod conformance;
 pub mod dependency_radar;
 pub mod deps_scan;
+pub mod doc_leak_scan;
 pub mod engine_provenance;
 pub mod error;
 pub mod faults;
 pub mod fleet;
 pub mod forensics;
+pub mod guardrails;
 pub mod hub_lessons;
 pub mod lesson_efficacy;
 pub mod liveness;
@@ -40,7 +44,10 @@ pub mod prompts_resolve;
 pub mod release_candidates;
 pub mod repo_map;
 pub mod repro_url;
+pub mod security_sweep;
 pub mod selection;
+pub mod service_retag;
+pub mod service_scan;
 pub mod slot_collision_radar;
 pub mod sprint;
 pub mod state;
@@ -52,6 +59,8 @@ pub mod verify_cache;
 pub mod wiki_views;
 pub mod working_hours;
 
+#[cfg(test)]
+mod attribution_tests;
 #[cfg(test)]
 mod release_candidates_tdd_tests;
 

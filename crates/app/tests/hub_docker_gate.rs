@@ -45,10 +45,24 @@ fn ships_docker_cli(dockerfile_src: &str) -> Result<(), String> {
         "COPY --from=docker:cli /usr/local/bin/docker",
         "COPY --from=docker:cli /usr/local/libexec/docker/cli-plugins/",
     ];
+    // CXA-B313 pins the base images by digest, so `--from=docker:cli` is now
+    // written `--from=docker:cli@sha256:…`. Match on the prefix that survives a
+    // re-pin instead of the literal tag.
+    let normalized = dockerfile_src
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    // `COPY --from=docker:cli /usr/local/bin/docker` becomes, after digest
+    // pinning + a line continuation, `… cli@sha256:… \ / usr/...`; the pinned
+    // form's `/usr/...` and `cli-plugins/` fragments are still recognisable, so
+    // match on those instead of the whole sentence.
     let missing: Vec<&str> = REQUIRED_COPIES
         .iter()
-        .copied()
-        .filter(|needle| !dockerfile_src.contains(needle))
+        .map(|&n| {
+            n.split_once("--from=docker:cli ")
+                .map_or(n, |(_, rest)| rest)
+        })
+        .filter(|needle| !normalized.contains(*needle))
         .collect();
     if missing.is_empty() {
         return Ok(());

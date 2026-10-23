@@ -151,6 +151,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
         // Hoisted out of the task_prompt's format! args (clippy: format in
         // format args) — same single allocation the inner format! made.
         let backlog_and_surface = format!("{backlog_block}{surface_block}");
+        // CXA-F420b: a multi-service project tells the BA which services
+        // exist, so tickets mint with the right service_tag. Single-service
+        // projects render nothing — the prompt is unchanged.
+        let services_eff = self.config.effective_services("");
+        let services_block = prompts::services_block(&services_eff);
         let request = AgentRequest {
             role: Role::Ba,
             system_prompt: prompts::system_prompt(prompts::BA),
@@ -159,10 +164,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
                  here (same or similar title/scope):\n{}\n\nPropose only genuinely NEW features \
                  that are not already covered above. When the project already has code (see the \
                  repo map below), propose features that fit the existing stack and structure — \
-                 concrete, grounded in what's there, not generic.{}{}{}",
+                 concrete, grounded in what's there, not generic.{}{}{}{}",
                 self.context,
                 sprint_goal_block(&existing.sprint_goal),
                 backlog_and_surface,
+                services_block,
                 prompts::repo_map_block(self.files.as_deref(), &self.work_dir, true).await,
                 knowledge,
                 prompts::team_memory_block(&existing.decisions, &existing.lessons)
@@ -278,7 +284,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunBaUseCase<S, E> {
                     has_ui: p.has_ui,
                     acceptance_criteria: p.acceptance_criteria,
                     goal: None,
-                    service_tag: p.service_tag,
+                    // CXA-F420b: in a multi-service project an invented tag
+                    // ("backend", "web") matches no service and only adds
+                    // resolver noise — keep a tag solely when it names an
+                    // ACTIVE service. Single-service projects pass tags
+                    // through untouched (the pre-F420 shared-infra marker).
+                    service_tag: normalize_service_tag(p.service_tag, &services_eff),
                 })
                 .await?;
             created.push(id);
@@ -597,5 +608,61 @@ mod tests {
             }
             other => panic!("expected Corrupt error for blank stdout, got {other:?}"),
         }
+    }
+}
+
+/// Keep a BA-proposed `service_tag` only when it names an active service of a
+/// multi-service project (CXA-F420b); otherwise drop it so the resolver's
+/// untagged default applies cleanly. Single-service projects keep the tag
+/// verbatim — there the field is still the legacy shared-infra marker.
+fn normalize_service_tag(
+    tag: Option<String>,
+    services: &[crate::config::ServiceConfig],
+) -> Option<String> {
+    let active = services.iter().filter(|s| s.status == "active").count();
+    if active < 2 {
+        return tag;
+    }
+    let tag = tag?.trim().to_owned();
+    services
+        .iter()
+        .any(|s| s.status == "active" && s.name == tag)
+        .then_some(tag)
+}
+
+#[cfg(test)]
+mod service_tag_tests {
+    use super::normalize_service_tag;
+    use crate::config::ServiceConfig;
+
+    fn svc(name: &str) -> ServiceConfig {
+        ServiceConfig {
+            name: name.into(),
+            repo: String::new(),
+            work_dir: String::new(),
+            scopes: Vec::new(),
+            build_cmd: String::new(),
+            test_cmd: String::new(),
+            status: "active".into(),
+        }
+    }
+
+    #[test]
+    fn invented_tags_are_dropped_only_in_multi_service_projects() {
+        let multi = vec![svc("hub"), svc("harxes")];
+        // A real service name passes through (trimmed).
+        assert_eq!(
+            normalize_service_tag(Some(" harxes ".into()), &multi),
+            Some("harxes".into())
+        );
+        // An invented tag matches no service → dropped, resolver default wins.
+        assert_eq!(normalize_service_tag(Some("backend".into()), &multi), None);
+        assert_eq!(normalize_service_tag(None, &multi), None);
+        // Single-service project: legacy shared-infra markers pass verbatim.
+        let single = vec![svc("main")];
+        assert_eq!(
+            normalize_service_tag(Some("infra".into()), &single),
+            Some("infra".into())
+        );
     }
 }

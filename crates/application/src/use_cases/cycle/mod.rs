@@ -23,6 +23,7 @@ mod backlog;
 mod ceremonies;
 mod debt_sweep;
 mod escalation;
+mod hygiene;
 mod po_daily;
 mod pr_truth;
 mod preflight;
@@ -182,6 +183,9 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     /// Polled between phases: `true` = the user pressed Pause, stop starting
     /// new phases and end this cycle early. `None` (tests/headless) = never.
     pause_check: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// Service this runner's DEV legs are bound to (CXA-F420a.2); `None` =
+    /// single-service project, no filtering.
+    service: Option<String>,
     /// Whether this runner competes for the project leader lease (default
     /// true). Worker slots co-located with a primary runner set false — see
     /// the election comment in `run_cycle`.
@@ -249,6 +253,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             phase: None,
             reloader: None,
             pause_check: None,
+            service: None,
             leader_election: true,
             phase_track: Mutex::new((None, std::collections::BTreeMap::new())),
             worker: String::new(),
@@ -837,6 +842,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.ship_truth_sweep().await;
             self.pr_truth_sweep().await;
             self.po_daily_pass().await;
+            self.security_sweep_pass().await;
+            self.backlog_hygiene_pass().await;
+            self.lesson_to_gate_pass().await;
             // Stop starting, start finishing: review + merge the PR queue at
             // the TOP of the cycle. This used to run at the very end — after
             // codegraph, ceremonies and the (tens-of-minutes) dev phases — so

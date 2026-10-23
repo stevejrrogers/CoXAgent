@@ -66,6 +66,18 @@ pub(super) async fn takeover_ticket_ep(
         )
             .into_response();
     };
+    // CXA-F420f: service-scoped members only take over their own services.
+    {
+        let tag = p.store.load().await.ok().and_then(|s| {
+            s.ticket(&tid)
+                .and_then(|t| t.service_tag().map(ToOwned::to_owned))
+        });
+        if let Some(refusal) =
+            super::services::refuse_outside_member_scope(&app, &headers, &p, tag.as_deref()).await
+        {
+            return refusal;
+        }
+    }
     // Live fact from this hub's runner: only a RUNNING runner blocks a
     // takeover, and only when it holds this very ticket. The snapshot is read
     // once — mode and identity travel together into the atomic decision.

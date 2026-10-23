@@ -7,6 +7,10 @@ use crate::use_cases::merge_policy::{
     escalation_route, route_from_failures, EscalationRoute, MAX_TICKET_RESCUES,
 };
 
+/// A held bug that has failed this many times total stops being blindly
+/// auto-resumed and is surfaced for the SA/human instead (CXA-F432).
+const CHURN_ARREST: u32 = 6;
+
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Answer the questions agents asked each other. The BA answers what a
     /// requirement means; the SA reads the code and reports what the system
@@ -257,6 +261,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // caps — to the escalation ladder too. Resume any that still have
             // rescue budget; once the budget is spent they stay held for the
             // daily-recovery feature (CXA-F376) or a human.
+            // Churn arrest (CXA-F432): a held bug that keeps bouncing on a
+            // GATE (not a redesign) racks up fail_attempts WITHOUT redesigns,
+            // so the redesign-based budget above never stops it — B306/B307
+            // were resumed every cycle for hours going nowhere. A bug that has
+            // failed CHURN_ARREST+ times total is no longer blindly resumed;
+            // it stays held and is surfaced ONCE A DAY for the SA to split or a
+            // human to take, instead of silently burning cycles forever.
+            let fails = |id: &str| s.ticket_fail_attempts.get(id).copied().unwrap_or(0);
             let held_bugs: Vec<String> = s
                 .tickets
                 .iter()
@@ -264,6 +276,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     t.ticket_type() == coxagent_domain::ticket::TicketType::Bug
                         && t.status() == Status::OnHold
                         && !live_parents.contains(&t.id().to_string())
+                        && fails(t.id().as_str()) < CHURN_ARREST
                         && s.ticket_redesigns
                             .get(&t.id().to_string())
                             .copied()
@@ -272,6 +285,31 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 })
                 .map(|t| t.id().to_string())
                 .collect();
+            // Daily visibility for the arrested pile — never silent.
+            let arrested: Vec<String> = s
+                .tickets
+                .iter()
+                .filter(|t| {
+                    t.ticket_type() == coxagent_domain::ticket::TicketType::Bug
+                        && t.status() == Status::OnHold
+                        && fails(t.id().as_str()) >= CHURN_ARREST
+                })
+                .map(|t| format!("{} ({}x)", t.id(), fails(t.id().as_str())))
+                .collect();
+            let today = crate::state::now_rfc3339()[..10].to_owned();
+            if !arrested.is_empty() && s.daily_jobs.get("churn_arrest").map(String::as_str) != Some(today.as_str()) {
+                s.daily_jobs.insert("churn_arrest".to_owned(), today);
+                s.post_chat_in(
+                    "SM",
+                    &format!(
+                        "⛔ Churn arrest: {} bug(s) stuck past {CHURN_ARREST} attempts, no longer auto-resumed — SA please split or escalate: {}",
+                        arrested.len(),
+                        arrested.join(", ")
+                    ),
+                    crate::state::AGENTS_CHANNEL,
+                    Vec::new(),
+                );
+            }
             tracing::info!(
                 "sm_drive: {} committed, {} held bugs eligible",
                 committed.len(),
@@ -674,13 +712,31 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         }
         tracing::info!("oversize split: briefing SA to split {id}");
         self.report("SA", &format!("splitting oversize {id}"));
+        // CXA-F420c: in a multi-service project the SA must split ALONG the
+        // service boundary — producer first, consumer second, one service per
+        // subtask (spec R5/§5). Single-service projects render nothing.
+        let services = self.config.effective_services("");
+        let services_note = {
+            let block = crate::prompts::services_block(&services);
+            if block.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "{block}CROSS-SERVICE RULE: a subtask may touch ONE service only \
+                     (set its \"service_tag\"). If the work spans services, order the \
+                     chain along the dependency edge: the producer change (plus its \
+                     release/tag) FIRST, the consumer's pin bump + adaptation SECOND.\n"
+                )
+            }
+        };
         let brief = format!(
             "Ticket {id} (\"{title}\") died TWICE at the agent loop's iteration/token \
              cap — it does not fit one run and must be SPLIT, not re-approached. \
-             Failure log:\n{failures}\n\nReply with STRICT JSON only — an array of 2 \
+             Failure log:\n{failures}\n{services_note}\nReply with STRICT JSON only — an array of 2 \
              or 3 subtasks, each an object {{\"title\": string, \"description\": string \
              (what to build AND how to verify, self-contained), \
-             \"acceptance_criteria\": [string, ...], \"complexity\": \"small\"|\"medium\"}}. \
+             \"acceptance_criteria\": [string, ...], \"complexity\": \"small\"|\"medium\", \
+             \"service_tag\": string (optional — the service the subtask's code lives in)}}. \
              Order them so each builds on the previous. Each subtask must be \
              completable in ~50 loop iterations. No prose outside the JSON. \
              Do NOT run tools or explore the repository — reply IMMEDIATELY \
@@ -741,11 +797,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let vi = self.config.workflow.language.is_vi();
         let id_owned = id.to_owned();
         let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
-            let (ptype, parent_tid, parent_priority) = {
+            let (ptype, parent_tid, parent_priority, parent_service) = {
                 let Some(parent) = s.tickets.iter().find(|t| t.id().to_string() == id_owned) else {
                     return Ok(());
                 };
-                (parent.ticket_type(), parent.id().clone(), parent.priority())
+                (
+                    parent.ticket_type(),
+                    parent.id().clone(),
+                    parent.priority(),
+                    parent.service_tag().map(ToOwned::to_owned),
+                )
             };
             let mut prev: Option<coxagent_domain::TicketId> = None;
             let mut child_ids: Vec<String> = Vec::new();
@@ -771,6 +832,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 };
                 child.stamp_created_at(crate::state::now_rfc3339());
                 child.set_acceptance_criteria(sub.acceptance_criteria.clone());
+                // CXA-F420c: the subtask's own service wins; otherwise the
+                // child inherits the parent's tag (untagged = default service).
+                let tag = if sub.service_tag.trim().is_empty() {
+                    parent_service.clone()
+                } else {
+                    Some(sub.service_tag.trim().to_owned())
+                };
+                if let Some(tag) = tag {
+                    let _ = child.set_service_tag(coxagent_domain::Role::Sa, &tag);
+                }
                 let _ = child.set_parent(coxagent_domain::Role::Sa, parent_tid.clone());
                 if let Some(prev_id) = &prev {
                     let _ = child.add_dependency(coxagent_domain::Role::Sa, prev_id.clone());
@@ -827,6 +898,10 @@ struct ProposedSubtask {
     acceptance_criteria: Vec<String>,
     #[serde(default)]
     complexity: String,
+    /// Service this subtask's code lives in (CXA-F420c); "" = inherit the
+    /// parent's tag (and ultimately the project's default service).
+    #[serde(default)]
+    service_tag: String,
 }
 
 /// Parse the SA's reply into subtasks: strict JSON preferred, salvaged from

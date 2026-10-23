@@ -30,6 +30,30 @@ rm -f "$HERE/auth.json"
 rm -f "$HERE/sessions.json"
 mkdir -p "$STATE"
 cp -R "$HERE/fixtures/state/." "$STATE/"
+# Freshen the frozen fixture's clock-relative fields (CXA e2e rot fix): the
+# overview KPI tiles bucket the last 28 days from Date.now(), so a fixture
+# whose created_at/spend days are literal past dates goes all-zero-state the
+# moment real time walks past them — the overview-kpis spec was green when
+# written and rotted red weeks later with no code change. Rewriting the dates
+# RELATIVE to today at serve time keeps the spec's intent (In flight + Cost
+# charted, Shipped still zero-state because history stays empty) true forever.
+python3 - "$STATE/state.json" <<'FRESHEN'
+import json, sys
+from datetime import datetime, timedelta, timezone
+path = sys.argv[1]
+d = json.load(open(path))
+now = datetime.now(timezone.utc)
+iso = lambda days: (now - timedelta(days=days)).isoformat()
+day = lambda days: (now - timedelta(days=days)).date().isoformat()
+for i, t in enumerate(d.get("tickets", [])):
+    t["created_at"] = iso(1 + (i % 5))
+sh = d.get("spend_history") or []
+for i, e in enumerate(sh):
+    e["day"] = day(len(sh) - i)
+if "spend_day" in d or sh:
+    d["spend_day"] = day(0)
+json.dump(d, open(path, "w"), indent=1)
+FRESHEN
 BIN="$HERE/../target/debug/coxagent"
 [ -x "$BIN" ] || { echo "build first: cargo build --bin coxagent" >&2; exit 1; }
 # Keep the suite hermetic: a shell that exports the live hub's Postgres/Redis
