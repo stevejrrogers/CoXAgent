@@ -461,7 +461,11 @@ fn reverted_work_alert_action_carries_its_guardrail_decision_path() {
     assert!(s.decide_revert("abc123", RevertDecision::Approved, "steve"));
     // A second verdict cannot silently overwrite or clear the first one.
     assert!(!s.decide_revert("abc123", RevertDecision::Dismissed, "someone-else"));
-    let e = s.reverted_work.iter().find(|e| e.sha == "abc123").unwrap();
+    let e = s
+        .reverted_work
+        .iter()
+        .find(|e| e.sha == "abc123")
+        .expect("ledger entry for abc123");
     assert_eq!(e.decision, RevertDecision::Approved);
     assert_eq!(
         e.decided_by.as_deref(),
@@ -512,7 +516,11 @@ fn record_revert_dedupes_by_sha_even_when_redetected_with_a_new_decision() {
         1,
         "exactly one ledger entry per commit"
     );
-    let kept = s.reverted_work.iter().find(|e| e.sha == "abc123").unwrap();
+    let kept = s
+        .reverted_work
+        .iter()
+        .find(|e| e.sha == "abc123")
+        .expect("exactly one ledger entry for abc123");
     assert_eq!(kept.decision, RevertDecision::Pending);
     assert!(kept.decided_at.is_none());
 }
