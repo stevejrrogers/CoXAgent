@@ -27,6 +27,12 @@ struct TriageDecision {
     reason: String,
 }
 
+#[derive(serde::Deserialize)]
+struct GateIdea {
+    title: String,
+    description: String,
+}
+
 const MAX_AUTO_ACTIONS: usize = 30;
 const MAX_JUDGMENT_ITEMS: usize = 15;
 
@@ -299,4 +305,159 @@ fn status_key(s: coxagent_domain::Status) -> String {
         .ok()
         .and_then(|v| v.as_str().map(ToOwned::to_owned))
         .unwrap_or_default()
+}
+
+impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
+    /// Lesson→gate pass (CXA-F431): once a day, the SA looks at the week's
+    /// recurring failure clusters and lessons and proposes PERMANENT automated
+    /// gates — the move that turned the copyText shadowing regressions into
+    /// the web-bundle gate, done by the team instead of an outside reviewer.
+    /// At most two gate tickets a day, deduped by title against the backlog.
+    #[allow(clippy::too_many_lines)] // one pass, read top to bottom (house style)
+    pub(super) async fn lesson_to_gate_pass(&self) {
+        let Ok(state) = self.store.load().await else {
+            return;
+        };
+        let today = crate::state::now_rfc3339()[..10].to_owned();
+        if state.daily_jobs.get("lesson_to_gate") == Some(&today) {
+            return;
+        }
+        // Evidence: failure details that occurred on 2+ distinct tickets
+        // (same leading words), plus the newest recorded lessons.
+        let mut clusters: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for (tid, fails) in &state.ticket_failures {
+            for f in fails.iter().rev().take(1) {
+                let key: String = f
+                    .detail
+                    .split_whitespace()
+                    .take(8)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if key.len() >= 20 {
+                    clusters.entry(key).or_default().push(tid.clone());
+                }
+            }
+        }
+        let recurring: Vec<String> = clusters
+            .into_iter()
+            .filter(|(_, tids)| tids.len() >= 2)
+            .map(|(k, tids)| {
+                format!(
+                    "- \"{k}…\" hit {} tickets ({})",
+                    tids.len(),
+                    tids.join(", ")
+                )
+            })
+            .take(10)
+            .collect();
+        let lessons: Vec<String> = state.lessons.iter().rev().take(10).cloned().collect();
+        if recurring.is_empty() && lessons.is_empty() {
+            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+                s.daily_jobs
+                    .insert("lesson_to_gate".to_owned(), today.clone());
+                Ok(())
+            })
+            .await;
+            return;
+        }
+        self.report("SA", "lesson→gate (daily)");
+        let task = format!(
+            "You are the Solution Architect. Below are this project's RECURRING failure \
+             clusters and recent lessons. Propose at most TWO permanent automated GATES \
+             (a test, CI step, or check) that would make a recurrence IMPOSSIBLE instead \
+             of merely remembered — e.g. 'every web/js module must be registered in the \
+             bundle' became a one-test gate. Only propose a gate when the failure class \
+             is mechanical enough to check automatically; otherwise propose nothing.\n\n\
+             Recurring failures:\n{}\n\nRecent lessons:\n{}\n\nRespond with ONLY a JSON \
+             array (possibly empty): [{{\"title\": \"gate: …\", \"description\": \"what \
+             the gate checks + where it lives + acceptance criteria\"}}]",
+            if recurring.is_empty() {
+                "(none)".to_owned()
+            } else {
+                recurring.join("\n")
+            },
+            if lessons.is_empty() {
+                "(none)".to_owned()
+            } else {
+                lessons.join("\n")
+            }
+        );
+        let request = AgentRequest {
+            role: coxagent_domain::Role::Sa,
+            system_prompt: crate::prompts::system_prompt(crate::prompts::SA),
+            task_prompt: task,
+            work_dir: self.work_dir.clone(),
+            timeout: std::time::Duration::from_secs(600),
+            escalation_level: 0,
+            label: Some("lesson-to-gate".to_owned()),
+        };
+        let proposals: Vec<(String, String)> = match self.engine.run(request).await {
+            Ok(o) if o.succeeded() => {
+                let (Some(a), Some(b)) = (o.stdout.find('['), o.stdout.rfind(']')) else {
+                    return;
+                };
+                serde_json::from_str::<Vec<GateIdea>>(&o.stdout[a..=b])
+                    .map(|v| {
+                        v.into_iter()
+                            .take(2)
+                            .map(|g| (g.title, g.description))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+            _ => return,
+        };
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+            s.daily_jobs.insert("lesson_to_gate".to_owned(), today.clone());
+            let mut filed = 0usize;
+            for (title, description) in &proposals {
+                let t = title.trim();
+                if t.len() < 12
+                    || s.tickets
+                        .iter()
+                        .any(|x| x.title().eq_ignore_ascii_case(t))
+                {
+                    continue;
+                }
+                // Deterministic id from the title (sweep pattern): refiling
+                // the same proposal tomorrow dedupes by id as well as title.
+                let mut h: u32 = 2_166_136_261;
+                for b in t.bytes() {
+                    h ^= u32::from(b);
+                    h = h.wrapping_mul(16_777_619);
+                }
+                let Ok(id) =
+                    coxagent_domain::TicketId::new(format!("GATE-{:06X}", h & 0xFF_FFFF))
+                else {
+                    continue;
+                };
+                if s.tickets.iter().any(|x| x.id() == &id) {
+                    continue;
+                }
+                if let Ok(ticket) = coxagent_domain::Ticket::new(
+                    id,
+                    coxagent_domain::ticket::TicketType::Chore,
+                    t.to_owned(),
+                    format!("{description}\n\n(filed by the daily lesson→gate pass, CXA-F431)"),
+                    coxagent_domain::Priority::Medium,
+                    coxagent_domain::ticket::Complexity::Medium,
+                    false,
+                ) {
+                    s.tickets.push(ticket);
+                    filed += 1;
+                }
+            }
+            if filed > 0 {
+                s.post_chat_in(
+                    "SA",
+                    &format!("🚧 lesson→gate: filed {filed} gate ticket(s) from recurring failure clusters."),
+                    crate::state::AGENTS_CHANNEL,
+                    Vec::new(),
+                );
+            }
+            Ok(())
+        })
+        .await;
+    }
 }
