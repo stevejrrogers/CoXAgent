@@ -6,12 +6,14 @@
 pub mod artifact;
 pub mod coverage;
 pub mod debt;
+pub mod depth;
 pub mod error;
 pub mod events;
 pub mod goal;
 pub mod ids;
 pub mod kinds;
 pub mod overview_panel;
+pub mod overview_panel_contract;
 pub mod panel;
 /// Panel terminal-state contract (CXA-B192) — pure types + transition fn.
 pub mod panel_terminal_state;

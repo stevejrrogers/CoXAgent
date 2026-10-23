@@ -38,6 +38,7 @@ use time::OffsetDateTime;
 /// `#[non_exhaustive]` so new reasons are added deliberately, each with its
 /// own default fill-hint semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum EmptyReason {
     /// The source answered successfully with no content.
@@ -178,6 +179,7 @@ impl std::fmt::Display for PanelErrorCause {
 /// Deliberately NOT `#[non_exhaustive]`: consumers must handle every phase —
 /// that is the point of the contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Phase<D> {
     /// Initial phase — the panel has no content yet and is fetching.
     Skeleton,
@@ -236,6 +238,7 @@ impl<D> Phase<D> {
 /// phase without attribution must be unrepresentable — so the source enters
 /// the contract here, at the same door as the data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
 #[non_exhaustive]
 pub enum PanelEvent<D> {
     /// A fetch began (initial or explicit re-fetch). From a terminal phase
