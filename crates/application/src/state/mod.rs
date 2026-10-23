@@ -477,6 +477,10 @@ pub struct ProjectState {
     /// daily ceremony is not repeated every cycle.
     #[serde(default)]
     pub daily_jobs: std::collections::BTreeMap<String, String>,
+    /// Per-user service scope (CXA-F420f): username → services they work on.
+    /// Missing/empty = all services, so legacy projects change nothing.
+    #[serde(default)]
+    pub member_services: std::collections::BTreeMap<String, Vec<String>>,
     /// Whether the Ops/SRE monitor currently sees the deployed app as down —
     /// tracked so it files exactly one bug per outage and can announce recovery.
     #[serde(default)]
@@ -680,6 +684,7 @@ impl Default for ProjectState {
             questions: Vec::new(),
             engine_incidents: Vec::new(),
             daily_jobs: std::collections::BTreeMap::new(),
+            member_services: std::collections::BTreeMap::new(),
             ops_down: false,
             ops_down_streak: 0,
             spend_today_usd: 0.0,

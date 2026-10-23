@@ -216,6 +216,11 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/services/:name/status", &["post"]),
     route("/api/projects/:pid/services/retag-suggestions", &["get"]),
     route("/api/projects/:pid/services/retag", &["post"]),
+    route("/api/projects/:pid/services/assignments", &["get"]),
+    route(
+        "/api/projects/:pid/services/assignments/:username",
+        &["put"],
+    ),
     route("/api/projects/:pid/share-links", &["get", "post"]),
     route("/api/projects/:pid/share-links/:token", &["delete"]),
     route("/api/projects/:pid/sprint/:action", &["post"]),

@@ -647,7 +647,24 @@ function svcChip(t){if(!t.service_tag)return"";
   const on=SVCFILTER===t.service_tag;
   return `<span class="b" onclick="event.stopPropagation();toggleSvcFilter('${esc(t.service_tag)}')" style="cursor:pointer;background:color-mix(in srgb,var(--accent2) ${on?'30%':'13%'},transparent);color:var(--accent2)${on?';outline:1px solid var(--accent2)':''}" title="service ${esc(t.service_tag)} — click to ${on?'clear the':'filter the board by this'} service"><i class="ti ti-stack-2" style="font-size:10px"></i> ${esc(t.service_tag)}</span>`;}
 function toggleSvcFilter(n){SVCFILTER=SVCFILTER===n?"":n;renderActive();}
-function svcPass(t){return !SVCFILTER||t.service_tag===SVCFILTER;}
+function svcPass(t){
+  if(SVCFILTER)return t.service_tag===SVCFILTER;
+  // Personal soft scope (CXA-F420f): a member assigned to specific services
+  // opens on them; untagged tickets belong to the project's first service so
+  // they show only when that service is theirs. "show all" turns it off.
+  const mine=window.MYSVCS||[];
+  if(!mine.length||window.MYSVCS_OFF)return true;
+  const tag=t.service_tag||(window.DEFAULT_SERVICE||null);
+  return tag==null?true:mine.includes(tag);
+}
+function myScopeBanner(){
+  const mine=window.MYSVCS||[];
+  if(!mine.length)return"";
+  return `<div class="panel" style="margin-bottom:10px;display:flex;align-items:center;gap:8px;font-size:12.5px">
+    <i class="ti ti-stack-2" style="color:var(--accent2)"></i>
+    ${window.MYSVCS_OFF?`Showing ALL services`:`Showing your services: <b>${mine.map(esc).join(", ")}</b>`}
+    <button class="gc-btn" style="margin-left:auto" onclick="toggleMyScope()">${window.MYSVCS_OFF?"Back to my services":"Show all"}</button></div>`;
+}
 // Session-local set of parents whose subtask tree is unfolded on the board.
 window.SUBTREE_OPEN=window.SUBTREE_OPEN||new Set();
 function toggleSubtree(id){if(SUBTREE_OPEN.has(id))SUBTREE_OPEN.delete(id);else SUBTREE_OPEN.add(id);renderActive();}
@@ -940,7 +957,7 @@ function renderActive(){const s=STATE; if(!s.tickets&&!s.activity&&CUR==="overvi
     // One unified board: features + bugs share columns mapped by lifecycle stage.
     let all=(s.tickets||[]);if(BF!=="all")all=all.filter(t=>t.priority===BF);
     if(SF!=="all")all=all.filter(t=>t.status===SF);
-    document.getElementById("board-cols").innerHTML=UCOLS.map(c=>ucolumn(c,all)).join("")+archiveColumnHtml();
+    document.getElementById("board-cols").innerHTML=myScopeBanner()+UCOLS.map(c=>ucolumn(c,all)).join("")+archiveColumnHtml();
     renderRevertedWork(s);
     renderSprintPanel(s);
     renderBacklogPanel(s);
