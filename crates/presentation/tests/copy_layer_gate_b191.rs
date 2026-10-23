@@ -788,21 +788,22 @@ fn copy_layer_assets_are_served_and_load_before_their_consumers() {
             .unwrap_or_else(|| panic!("{consumer} must be registered in APP_JS"));
         assert!(
             pos_copy < pos,
-            "copy.js must load BEFORE {consumer} so window.copyText exists at consumer load time"
+            "copy.js must load BEFORE {consumer} so window.copyFor exists at consumer load time"
         );
     }
     let copy_js =
         std::fs::read_to_string(repo_root().join("crates/presentation/src/web/js/copy.js"))
             .unwrap_or_else(|e| panic!("read copy.js: {e}"));
-    // Named copyFor, NOT copyText: three clipboard helpers declare
+    // Renamed to copyFor by #782: three clipboard helpers already declare
     // `function copyText` in this shared classic-script scope (chat.js x2,
-    // shell.js); the catalog resolver must not be shadowed by them.
+    // shell.js); the catalog MUST NOT be reachable through that shadowed name.
     assert!(
-        // Named copyFor, NOT copyText: three clipboard helpers declare
-        // `function copyText` in this shared classic-script scope (chat.js x2,
-        // shell.js); the catalog resolver must not be shadowed by them.
         copy_js.contains("window.copyFor = function"),
-        "copy.js must expose window.copyFor"
+        "copy.js must expose window.copyFor (NOT copyText — see #782)"
+    );
+    assert!(
+        !copy_js.contains("window.copyText ="),
+        "copy.js must NOT re-introduce window.copyText (clipboard-helper shadowing — see #782)"
     );
 }
 
