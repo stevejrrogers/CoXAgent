@@ -68,9 +68,10 @@ except Exception:
 PY
 )
 if [ -n "$PW" ]; then
-  cur=$(docker exec cxa-backend-redis-1 redis-cli -a "$PW" --no-auth-warning GET "cox:cxa:desired:$HOST_ID" 2>/dev/null || true)
+  # REDISCLI_AUTH keeps the password out of argv (ps) — never pass -a.
+  cur=$(docker exec -e REDISCLI_AUTH="$PW" cxa-backend-redis-1 redis-cli --no-auth-warning GET "cox:cxa:desired:$HOST_ID" 2>/dev/null || true)
   if [ "$cur" != "running" ]; then
-    docker exec cxa-backend-redis-1 redis-cli -a "$PW" --no-auth-warning SET "cox:cxa:desired:$HOST_ID" running >/dev/null 2>&1 \
+    docker exec -e REDISCLI_AUTH="$PW" cxa-backend-redis-1 redis-cli --no-auth-warning SET "cox:cxa:desired:$HOST_ID" running >/dev/null 2>&1 \
       && log "restored redis desired=running (was '${cur:-unreachable}')"
   fi
 fi
