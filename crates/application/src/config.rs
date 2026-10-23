@@ -1068,6 +1068,7 @@ pub struct Config {
 /// and gating. A legacy single-repo project is one implicit service — see
 /// [`Config::effective_services`] (rule R1 of the spec: migration is silent).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ServiceConfig {
     /// Unique name within the project; the value tickets carry in
     /// `service_tag` (R2).
@@ -1092,6 +1093,22 @@ pub struct ServiceConfig {
     /// Only `active` services receive tickets and worktrees.
     #[serde(default = "default_service_status")]
     pub status: String,
+}
+
+impl Default for ServiceConfig {
+    /// The zero service is NOT a valid ticket target — `name` must be set by
+    /// the caller; the serde container default keeps document round-trips.
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            repo: String::new(),
+            work_dir: String::new(),
+            scopes: Vec::new(),
+            build_cmd: String::new(),
+            test_cmd: String::new(),
+            status: default_service_status(),
+        }
+    }
 }
 
 fn default_service_status() -> String {

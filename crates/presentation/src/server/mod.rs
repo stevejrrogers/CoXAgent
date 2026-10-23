@@ -157,6 +157,9 @@ const APP_JS: &[(&str, &str)] = &[
         "terminal_state.js",
         include_str!("../web/js/terminal_state.js"),
     ),
+    // View-mesh (CXA-B232b) — overview_states.js resolves panel mounts
+    // through window.OvViewMesh at runtime; loads first or panels don't mount.
+    ("overview_vm.js", include_str!("../web/js/overview_vm.js")),
     (
         "overview_states.js",
         include_str!("../web/js/overview_states.js"),
@@ -164,6 +167,9 @@ const APP_JS: &[(&str, &str)] = &[
     // Overview KPI tiles (CXA-F360) — sparkline/delta series helpers that
     // core.js's overview render calls at runtime; loads before core.js.
     ("kpis.js", include_str!("../web/js/kpis.js")),
+    // Copy catalog (CXA-B191) — shipped at last: it existed unloaded for
+    // weeks and two PRs tripped on calling it through a shadowed name.
+    ("copy.js", include_str!("../web/js/copy.js")),
     ("core.js", include_str!("../web/js/core.js")),
     ("manage.js", include_str!("../web/js/manage.js")),
     ("home.js", include_str!("../web/js/home.js")),

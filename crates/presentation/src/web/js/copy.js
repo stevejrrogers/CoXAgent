@@ -37,7 +37,11 @@ window.COPY_SKELETON_KINDS = ["generic", "river", "inbox", "team"];
 // Resolve a catalog key: catalog text, then visible broken marker — never a
 // silent empty string. Fills every {token} present in params; an unfilled
 // token stays visible so the guards (and eyes) catch it.
-window.copyText = function(key, params){
+// Named copyFor, NOT copyText: three clipboard helpers already declare
+// `function copyText` in this one shared classic-script scope (chat.js x2,
+// shell.js), and two PRs (#780, #781) shipped silent-toast regressions by
+// calling the catalog through the shadowed name.
+window.copyFor = function(key, params){
   const entry = window.CXACOPY[key];
   if(!entry || typeof entry.text !== "function") return "_copy.broken";
   let out;
@@ -56,7 +60,7 @@ window.skeletonFor = function(kind, where){
   el.className = "skel";
   el.setAttribute("data-copy-kind", String(kind));
   el.setAttribute("data-copy-where", String(where || "unattributed"));
-  el.textContent = window.copyText("loading." + (window.COPY_SKELETON_KINDS.indexOf(kind) >= 0 ? kind : "generic"));
+  el.textContent = window.copyFor("loading." + (window.COPY_SKELETON_KINDS.indexOf(kind) >= 0 ? kind : "generic"));
   return el;
 };
 
@@ -72,7 +76,7 @@ window.toastCopy = function(key, params, opts){
   if(o.where) t.setAttribute("data-copy-where", String(o.where));
   const body = document.createElement("div");
   body.className = "t-msg";
-  body.textContent = window.copyText(key, params); // text node — long/adversarial values are inert
+  body.textContent = window.copyFor(key, params); // text node — long/adversarial values are inert
   t.appendChild(body);
   (host || document.body).appendChild(t);
   setTimeout(function(){ if(t.parentNode) t.parentNode.removeChild(t); }, 6000);
@@ -83,7 +87,7 @@ window.toastCopy = function(key, params, opts){
 // resolved text and MUST carry the full string as title + aria-label, so
 // truncation never hides information from keyboard or screen-reader users.
 window.ellipsisCopy = function(key, params, where){
-  const full = window.copyText(key, params);
+  const full = window.copyFor(key, params);
   const s = document.createElement("span");
   s.className = "tof";
   s.style.cssText = "display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis";

@@ -60,10 +60,16 @@ fn run_node(script: &str) -> String {
 
 const WIRING: &str = include_str!("../src/web/js/overview_states.js");
 
+/// The Overview view-mesh (CXA-B232b): since CXA-B289 the wiring resolves every
+/// panel mount through `OvViewMesh.domId()`, never an inline dom id, so the
+/// mesh must load BEFORE the wiring — mirroring index.html / APP_JS order (the
+/// B194 harness does the same).
+const MESH: &str = include_str!("../src/web/js/overview_vm.js");
+
 /// Evaluate the wiring's pure parts (no document, no TerminalState needed to
 /// read the manifest mirror) and print the last expression.
 fn eval_js(expr: &str) -> String {
-    let script = format!("const window=globalThis;\n{WIRING}\n;console.log(({expr}));");
+    let script = format!("const window=globalThis;\n{MESH}\n{WIRING}\n;console.log(({expr}));");
     run_node(&script)
 }
 
