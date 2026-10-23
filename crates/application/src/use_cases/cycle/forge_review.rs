@@ -60,6 +60,34 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // whether the *other* PR (not this loop's current) can actually land.
         let open_mergeable: std::collections::HashMap<u64, bool> =
             prs.iter().map(|p| (p.number, p.mergeable)).collect();
+        // Host-log heartbeat: the SA's per-PR verdicts go to the activity feed
+        // (log_git) + Review tab, never to hub.log — so an operator watching
+        // the host could not tell the review lane was alive and working. Emit
+        // one hub.log line naming the open queue into base, deduped
+        // process-globally so an UNCHANGED queue does not reprint every 90s
+        // pass (which would be pure noise over a multi-hour stuck queue). It
+        // reprints only when a PR enters or leaves the queue.
+        {
+            static LAST: std::sync::OnceLock<std::sync::Mutex<String>> = std::sync::OnceLock::new();
+            let mut into_base: Vec<u64> =
+                prs.iter().filter(|p| p.base == target).map(|p| p.number).collect();
+            into_base.sort_unstable();
+            let summary = into_base
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let cell = LAST.get_or_init(|| std::sync::Mutex::new(String::new()));
+            if let Ok(mut last) = cell.lock() {
+                if *last != summary {
+                    tracing::info!(
+                        "review lane: {} open PR(s) into {target} [{summary}]",
+                        into_base.len()
+                    );
+                    *last = summary;
+                }
+            }
+        }
         for pr in prs.into_iter().rev().take(batch) {
             // Only review PRs into the configured target branch; leave PRs aimed
             // elsewhere (e.g. an integration → main promotion) to humans.
