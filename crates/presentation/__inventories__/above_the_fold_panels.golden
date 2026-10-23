@@ -1,0 +1,10 @@
+// GOLDEN SNAPSHOT — frozen above-the-fold Overview panel inventory (CXA-B281.a).
+// Generated: untimestamped-local-run by `cargo run -p coxagent-app --bin freeze_fold_inventory`. Do not edit the data lines by hand; regenerate and commit the whole file.
+// One canonical JSON record per line, keyed by order_index; shape defined by coxagent_domain::PanelInventoryEntry.
+{"component_name":"shell.js drainBanner() @ ov-drain","order_index":0,"panel_id":"drain","route":"#/overview","visibility_rules_hash":"a93965831c534267"}
+{"component_name":"core.js alertsHtml() via renderActive() @ ov-alerts","order_index":1,"panel_id":"alerts","route":"#/overview","visibility_rules_hash":"8f0d7ccb237177ae"}
+{"component_name":"core.js renderOvWorking() @ ov-working","order_index":2,"panel_id":"working","route":"#/overview","visibility_rules_hash":"77ee72e7d6fe454f"}
+{"component_name":"kpis.js overviewKpis() @ kpis","order_index":3,"panel_id":"kpis","route":"#/overview","visibility_rules_hash":"f308bfc546490854"}
+{"component_name":"chat.js renderHealth() @ ov-health","order_index":4,"panel_id":"health","route":"#/overview","visibility_rules_hash":"f308bfc546490854"}
+{"component_name":"core.js renderActive() activity branch @ ov-activity","order_index":5,"panel_id":"recent-activity","route":"#/overview","visibility_rules_hash":"77ee72e7d6fe454f"}
+{"component_name":"core.js renderActive() releases branch @ ov-changelog","order_index":6,"panel_id":"releases","route":"#/overview","visibility_rules_hash":"77ee72e7d6fe454f"}

@@ -12,6 +12,7 @@ pub mod conformance_check;
 pub mod coverage;
 pub mod cycle;
 pub mod duplicate_radar;
+pub mod freeze_fold_inventory;
 pub mod generate_docs;
 pub mod global_search;
 pub mod json_repair;
@@ -63,6 +64,9 @@ pub use cycle::{CycleReport, RunCycleUseCase};
 pub use duplicate_radar::{
     find_cross_project_duplicates, pair_key, DuplicatePair, RadarTicket, TicketSnapshot,
 };
+pub use freeze_fold_inventory::{freeze_inventory, FrozenInventory, OVERVIEW_ROUTE};
+pub mod fold_drift_gate;
+pub use fold_drift_gate::{run_fold_drift_gate, FoldDriftVerdict, REFREEZE_COMMAND};
 pub use generate_docs::GenerateDocsUseCase;
 pub use global_search::{
     global_search, global_search_many, GroupedSearch, SearchGroup, SearchHit, SearchKind,

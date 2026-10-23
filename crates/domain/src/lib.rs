@@ -15,6 +15,9 @@ pub mod kinds;
 pub mod overview_panel;
 pub mod overview_panel_contract;
 pub mod panel;
+/// Panel-inventory drift (CXA-B301) — pure frozen-vs-live diff + report.
+pub mod panel_drift;
+pub mod panel_inventory_entry;
 /// Panel terminal-state contract (CXA-B192) — pure types + transition fn.
 pub mod panel_terminal_state;
 /// Per-panel terminal-state contract core (CXA-B252) — pure value types.
@@ -33,6 +36,8 @@ pub use events::{DesignPart, DomainEvent, EventKind};
 pub use goal::{Goal, GoalStatus};
 pub use ids::{GoalId, TicketId, WorkerId};
 pub use overview_panel::OverviewPanelId;
+pub use panel_drift::{panel_inventory_drift, render_drift_report, DriftFinding, DriftReport};
+pub use panel_inventory_entry::{fnv1a_64_hex, PanelInventoryEntry};
 // Value objects (kind/priority/sizing/status/role) come from `kinds`; the
 // aggregate and its design structs come from `ticket`.
 pub use kinds::{Complexity, InterventionKind, Priority, Role, Status, TicketType};

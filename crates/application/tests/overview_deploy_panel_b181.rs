@@ -71,11 +71,7 @@ fn a_human_verdict_is_attributed_once_and_never_re_decided() {
         "when"
     );
     // an already-decided event is never re-decided
-    assert!(!s.decide_revert(
-        "abc123",
-        RevertDecision::Dismissed,
-        "someone-else"
-    ));
+    assert!(!s.decide_revert("abc123", RevertDecision::Dismissed, "someone-else"));
     let decided_by_after: Vec<_> = s
         .reverted_work
         .iter()
