@@ -186,6 +186,7 @@ impl AgentEnginePort for HarxesEngine {
         crate::proc::sandbox_status(self.sandbox)
     }
 
+    #[allow(clippy::too_many_lines)] // one run: launch, drive the event stream, watchdog, resume
     async fn run(&self, request: AgentRequest) -> Result<AgentOutcome, PortError> {
         let engine =
             self.build_engine(&request.work_dir, request.role, request.escalation_level)?;
@@ -266,25 +267,48 @@ impl AgentEnginePort for HarxesEngine {
             // silence for 300s at ANY point is a dead run — drop the driver
             // (harxes cancels its children) and fail over with an infra-shaped
             // error instead of hanging the slot for the reaper.
+            // A tighter CONNECT deadline covers the phase before the first
+            // event: a run that emits nothing at all — not a delta, not an
+            // Iteration beat, not a Retry — has not connected (the provider
+            // connect-hang; runs froze pre-first-event for minutes). That
+            // deserves a far shorter window than steady-state silence, AND a
+            // failover-shaped error ("connection timed out" matches
+            // `failover::is_transient`) so the chain tries the NEXT engine
+            // immediately instead of the whole run-silence window elapsing on a
+            // run that never started. Once the first event lands the stream is
+            // alive, so the longer `silence_limit` takes over (a legitimate
+            // long tool call can be quiet for minutes), with its original
+            // provider-down semantics preserved.
+            let connect_limit = std::time::Duration::from_secs(90);
             let silence_limit = std::time::Duration::from_secs(300);
-            let silence_deadline = tokio::time::sleep(silence_limit);
-            tokio::pin!(silence_deadline);
+            let mut seen_event = false;
+            let deadline = tokio::time::sleep(connect_limit);
+            tokio::pin!(deadline);
             let outcome = loop {
                 tokio::select! {
                     ev = events.recv() => {
                         if let Some(ev) = ev {
-                            silence_deadline
+                            seen_event = true;
+                            deadline
                                 .as_mut()
                                 .reset(tokio::time::Instant::now() + silence_limit);
                             co.feed(&ev, live.as_deref(), &mut trace);
                         }
                     }
-                    () = &mut silence_deadline => {
+                    () = &mut deadline => {
+                        if seen_event {
+                            if let Some(p) = &live {
+                                append_live(p, "↻ run silent for 300s — cancelled, failing over");
+                            }
+                            return Err(PortError::Backend(
+                                "harxes provider service unavailable: run went silent for 300s (engine stalled)".to_owned(),
+                            ));
+                        }
                         if let Some(p) = &live {
-                            append_live(p, "↻ run silent for 300s — cancelled, failing over");
+                            append_live(p, "↻ no first event within 90s — connection timed out, failing over");
                         }
                         return Err(PortError::Backend(
-                            "harxes provider service unavailable: run went silent for 300s (engine stalled)".to_owned(),
+                            "harxes provider unreachable: no first event within 90s — connection timed out (engine stalled)".to_owned(),
                         ));
                     }
                     done = &mut driver => break done,
