@@ -82,6 +82,7 @@ mod store_rpc;
 mod transcripts;
 mod tunecockpit;
 mod user_keys;
+pub mod wire_registry;
 mod work;
 
 use alerts::*;
@@ -1497,8 +1498,6 @@ mod avatar_media_security_tests;
 #[cfg(test)]
 mod cors_rate_limit_tests;
 #[cfg(test)]
-mod webhook_author_security_tests;
-#[cfg(test)]
 mod delete_project_tests;
 #[cfg(test)]
 mod pr_preview_tests;
@@ -1524,3 +1523,5 @@ mod store_rpc_stale_write_tests;
 mod store_rpc_test_support;
 #[cfg(test)]
 mod ui_contrast_tests;
+#[cfg(test)]
+mod webhook_author_security_tests;
