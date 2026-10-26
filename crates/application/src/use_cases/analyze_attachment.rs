@@ -82,8 +82,19 @@ impl<S: StateStorePort + ?Sized, E: AgentEnginePort + ?Sized> AnalyzeAttachmentU
             escalation_level: 0,
             label: None,
         };
-        let outcome = self.engine.run(request).await?;
+        let outcome = match self.engine.run(request).await {
+            Ok(o) => o,
+            Err(e) => {
+                // Engine unreachable/erroring (provider flap, opencode crash).
+                // Never leave the teammate staring at a frozen thread — post a
+                // short, honest fallback so the conversation visibly resolves,
+                // then surface the error upstream for the warn log.
+                self.post("SA", ATTACHMENT_FALLBACK, ticket).await;
+                return Err(e.into());
+            }
+        };
         if !outcome.succeeded() {
+            self.post("SA", ATTACHMENT_FALLBACK, ticket).await;
             return Err(PortError::Backend(format!(
                 "attachment analysis failed: {}",
                 outcome.failure_detail()
@@ -142,6 +153,12 @@ fn compose_task(author: &str, body: &str, asked: bool, readable: &[&ReadableAtta
     )
 }
 
+/// Posted when the engine can't read the attachment (provider down, CLI crash).
+/// Keeps the thread alive with honest feedback instead of silence.
+const ATTACHMENT_FALLBACK: &str = "I got your attachment but couldn't read it just now — \
+    the engine is temporarily unavailable. Could you describe what's in it, or re-post in a \
+    moment and I'll take a look?";
+
 const SYSTEM_PROMPT: &str = "You are SA (Solution Architect) on an autonomous software team, \
     reviewing something a teammate shared in the Discussion channel. Speak plainly in the first \
     person, like a real teammate. You have a file-reading tool that can open and view images and \
@@ -194,5 +211,100 @@ mod tests {
         assert!(!looks_like_question("here's the latest mock"));
         assert!(!looks_like_question(""));
         assert!(!looks_like_question("new design attached"));
+    }
+
+    use super::{AnalyzeAttachmentUseCase, ReadableAttachment, ATTACHMENT_FALLBACK};
+    use crate::error::PortError;
+    use crate::ports::outbound::{
+        AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus, StateStorePort,
+    };
+    use crate::state::ProjectState;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct MemStore {
+        state: Mutex<ProjectState>,
+    }
+    #[async_trait::async_trait]
+    impl StateStorePort for MemStore {
+        async fn load(&self) -> Result<ProjectState, PortError> {
+            Ok(self.state.lock().expect("lock").clone())
+        }
+        async fn save(&self, s: &ProjectState) -> Result<(), PortError> {
+            *self.state.lock().expect("lock") = s.clone();
+            Ok(())
+        }
+    }
+
+    /// An engine that errors like a flapping provider / crashed CLI.
+    struct DeadEngine;
+    #[async_trait::async_trait]
+    impl AgentEnginePort for DeadEngine {
+        fn id(&self) -> &'static str {
+            "dead"
+        }
+        async fn run(&self, _r: AgentRequest) -> Result<AgentOutcome, PortError> {
+            Err(PortError::Backend("opencode UnknownError".to_owned()))
+        }
+    }
+
+    /// An engine that "runs" but reports a non-success outcome.
+    struct FailedEngine;
+    #[async_trait::async_trait]
+    impl AgentEnginePort for FailedEngine {
+        fn id(&self) -> &'static str {
+            "failed"
+        }
+        async fn run(&self, _r: AgentRequest) -> Result<AgentOutcome, PortError> {
+            Ok(AgentOutcome {
+                stdout: String::new(),
+                stderr: "boom".to_owned(),
+                exit_code: Some(1),
+                usage: None,
+                trace: String::new(),
+                session_id: None,
+                sandbox: SandboxStatus::default(),
+                engine: String::new(),
+                model: String::new(),
+                attempts: Vec::new(),
+            })
+        }
+    }
+
+    fn one_image(dir: &std::path::Path) -> Vec<ReadableAttachment> {
+        let path = dir.join("shot.png");
+        std::fs::write(&path, b"\x89PNG\r\n").expect("write png");
+        vec![ReadableAttachment {
+            name: "shot.png".to_owned(),
+            mime: "image/png".to_owned(),
+            path,
+        }]
+    }
+
+    /// The core fix: when the engine can't read the attachment, the thread must
+    /// not freeze — a fallback SA reply is posted so the user sees feedback.
+    async fn assert_posts_fallback<E: AgentEnginePort + 'static>(engine: E) {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let store = Arc::new(MemStore::default());
+        let uc = AnalyzeAttachmentUseCase::new(Arc::clone(&store), Arc::new(engine), tmp.path().into());
+        let atts = one_image(tmp.path());
+
+        let res = uc.execute("root", "sao cái này ko work?", None, &atts).await;
+        assert!(res.is_err(), "engine failure still surfaces an error upstream");
+
+        let state = store.load().await.expect("load");
+        let posted = state.comments.last().expect("a fallback reply was posted");
+        assert_eq!(posted.author, "SA");
+        assert_eq!(posted.body, ATTACHMENT_FALLBACK);
+    }
+
+    #[tokio::test]
+    async fn posts_fallback_when_engine_is_unreachable() {
+        assert_posts_fallback(DeadEngine).await;
+    }
+
+    #[tokio::test]
+    async fn posts_fallback_when_engine_returns_failure_outcome() {
+        assert_posts_fallback(FailedEngine).await;
     }
 }
