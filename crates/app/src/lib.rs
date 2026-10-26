@@ -106,7 +106,16 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             Ok(render_report(&state))
         }
         Command::Discover => Ok(render_discovery()),
-        Command::Doctor => Ok(render_doctor()),
+        Command::Doctor => {
+            // Advisory report, but exit nonzero on a BLOCKING failure so a
+            // deploy/install script can gate on `coxagent doctor` (0 = ready or
+            // degraded-with-warnings, 2 = blocking issue). It never changes
+            // anything — print the checklist, flush, then set the exit code.
+            let (report, ready) = render_doctor();
+            print!("{report}");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            std::process::exit(if ready { 0 } else { 2 });
+        }
         Command::Probe { hub, project } => run_probe(&hub, &project).await,
         Command::Onboard {
             name,
@@ -325,7 +334,7 @@ mod doctor_tests {
         // Host-agnostic: engine/tooling presence varies per machine, so assert
         // the report's shape, not its contents — every run must produce the
         // three sections and exactly one VERDICT line, and never panic.
-        let out = render_doctor();
+        let (out, ready) = render_doctor();
         assert!(out.contains("Engines (PATH):"), "missing Engines section:\n{out}");
         assert!(out.contains("Tooling ("), "missing Tooling section:\n{out}");
         assert!(out.contains("Sandbox:"), "missing Sandbox section:\n{out}");
@@ -339,6 +348,9 @@ mod doctor_tests {
             out.contains("VERDICT: READY") || out.contains("VERDICT: NOT READY"),
             "unrecognized verdict:\n{out}"
         );
+        // `ready` must agree with the verdict text: NOT READY <=> !ready, and a
+        // warnings-only "READY (degraded)" still counts as ready (exit 0).
+        assert_eq!(ready, !out.contains("VERDICT: NOT READY"), "ready flag disagrees with verdict:\n{out}");
     }
 }
 
@@ -2516,7 +2528,11 @@ fn render_discovery() -> String {
 /// binary is missing, `gh` absent so PRs never open, `docker` absent so the
 /// backend never boots). It runs nothing, opens no network, and reads no
 /// secrets — safe to run before a deploy or when something looks wedged.
-fn render_doctor() -> String {
+///
+/// Returns `(report, ready)` where `ready` is false only when a BLOCKING
+/// (FAIL) check tripped; warnings keep `ready` true. The caller turns `ready`
+/// into the process exit code so `coxagent doctor` can gate a deploy script.
+fn render_doctor() -> (String, bool) {
     use coxagent_infrastructure::engine::discover_tooling;
     let mut out = String::from("CoXAgent doctor — can this machine run the hub?\n\n");
     let mut fail = 0u32;
@@ -2590,7 +2606,7 @@ fn render_doctor() -> String {
         "\nVERDICT: READY — all checks passed.\n".to_owned()
     };
     out.push_str(&verdict);
-    out
+    (out, fail == 0)
 }
 
 /// Real-server regression coverage for the bug caught in review: `/api/mcp`
