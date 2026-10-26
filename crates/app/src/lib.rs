@@ -106,6 +106,7 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             Ok(render_report(&state))
         }
         Command::Discover => Ok(render_discovery()),
+        Command::Doctor => Ok(render_doctor()),
         Command::Probe { hub, project } => run_probe(&hub, &project).await,
         Command::Onboard {
             name,
@@ -314,6 +315,32 @@ const SHIM_CMDS: &[&str] = &[
 /// of truth instead of being re-implemented in shell. Only these pay the extra
 /// process; every other shim keeps the plain pipeline.
 const EXACT_AWARE_CMDS: &[&str] = &["git"];
+
+#[cfg(test)]
+mod doctor_tests {
+    use super::render_doctor;
+
+    #[test]
+    fn doctor_renders_all_sections_and_a_verdict_without_panicking() {
+        // Host-agnostic: engine/tooling presence varies per machine, so assert
+        // the report's shape, not its contents — every run must produce the
+        // three sections and exactly one VERDICT line, and never panic.
+        let out = render_doctor();
+        assert!(out.contains("Engines (PATH):"), "missing Engines section:\n{out}");
+        assert!(out.contains("Tooling ("), "missing Tooling section:\n{out}");
+        assert!(out.contains("Sandbox:"), "missing Sandbox section:\n{out}");
+        assert_eq!(
+            out.matches("VERDICT:").count(),
+            1,
+            "expected exactly one verdict line:\n{out}"
+        );
+        // The verdict is one of the three known outcomes.
+        assert!(
+            out.contains("VERDICT: READY") || out.contains("VERDICT: NOT READY"),
+            "unrecognized verdict:\n{out}"
+        );
+    }
+}
 
 #[cfg(test)]
 mod project_id_tests {
@@ -2477,6 +2504,92 @@ fn render_discovery() -> String {
     for d in found {
         let _ = writeln!(out, "  {:<10} {}", d.kind.as_binary(), d.path.display());
     }
+    out
+}
+
+/// Read-only preflight (`coxagent doctor`): does this machine have what the hub
+/// needs to actually RUN — an agent engine, the git/gh/docker tooling the flow
+/// calls, and a sandbox backend — rendered as a PASS/WARN/FAIL checklist.
+///
+/// The failures this catches are exactly the ones that otherwise surface only
+/// as opaque per-run errors in the hub log (no engine on PATH, a fallback whose
+/// binary is missing, `gh` absent so PRs never open, `docker` absent so the
+/// backend never boots). It runs nothing, opens no network, and reads no
+/// secrets — safe to run before a deploy or when something looks wedged.
+fn render_doctor() -> String {
+    use coxagent_infrastructure::engine::discover_tooling;
+    let mut out = String::from("CoXAgent doctor — can this machine run the hub?\n\n");
+    let mut fail = 0u32;
+    let mut warn = 0u32;
+
+    // Engines: at least one agent CLI (or the in-process Harxes) must be
+    // reachable, or the hub has nothing to run and every cycle fails.
+    let engines = discover();
+    out.push_str("Engines (PATH):\n");
+    if engines.is_empty() {
+        fail += 1;
+        out.push_str(
+            "  [FAIL] no agent engine on PATH — the hub cannot run any role. Install one \
+             (opencode/claude/...) or ensure the harxes engine binary is reachable.\n",
+        );
+    } else {
+        for d in &engines {
+            let _ = writeln!(out, "  [PASS] {:<10} {}", d.kind.as_binary(), d.path.display());
+        }
+    }
+
+    // Tooling the flow calls directly: git is load-bearing (branch/commit);
+    // gh/glab open PRs; docker boots the backend; bwrap confines sandboxed
+    // writes on Linux. Missing git is a FAIL; the rest are WARN (the hub
+    // degrades — no PRs / no backend / unsandboxed — but still boots).
+    let tooling = discover_tooling();
+    let _ = writeln!(out, "\nTooling ({}):", tooling.os);
+    for t in &tooling.tools {
+        if t.present {
+            let _ = writeln!(out, "  [PASS] {:<7} {}", t.name, t.path);
+        } else if t.name == "git" {
+            fail += 1;
+            let _ = writeln!(
+                out,
+                "  [FAIL] {:<7} missing — {} — install: {}",
+                t.name, t.purpose, t.install
+            );
+        } else {
+            warn += 1;
+            let _ = writeln!(
+                out,
+                "  [WARN] {:<7} missing — {} — install: {}",
+                t.name, t.purpose, t.install
+            );
+        }
+    }
+
+    // Sandbox backend: only relevant when workflow.sandbox is on, so its
+    // absence is a WARN (agents then run unsandboxed), never a hard FAIL.
+    let sandbox = coxagent_infrastructure::proc::sandbox_status(true);
+    out.push_str("\nSandbox:\n");
+    match sandbox {
+        SandboxStatus::Unavailable(why) | SandboxStatus::Denied(why) => {
+            warn += 1;
+            let _ = writeln!(
+                out,
+                "  [WARN] no sandbox backend ({why}) — agents run unsandboxed when \
+                 workflow.sandbox is on",
+            );
+        }
+        other => {
+            let _ = writeln!(out, "  [PASS] sandbox backend ok ({other:?})");
+        }
+    }
+
+    let verdict = if fail > 0 {
+        format!("\nVERDICT: NOT READY — {fail} blocking issue(s), {warn} warning(s).\n")
+    } else if warn > 0 {
+        format!("\nVERDICT: READY (degraded) — 0 blocking, {warn} warning(s).\n")
+    } else {
+        "\nVERDICT: READY — all checks passed.\n".to_owned()
+    };
+    out.push_str(&verdict);
     out
 }
 
