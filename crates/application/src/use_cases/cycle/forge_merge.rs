@@ -819,11 +819,104 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         Err("GitHub still reports the branch conflicted after the fix".to_owned())
     }
 
+    /// CONFLICT LIVELOCK guard. A PR that stays unmergeable past the stale
+    /// window despite the per-cycle auto-rebase is stuck in a loop: the rebase
+    /// keeps moving its head (so the request-changes staleness check, which
+    /// keys on an UNCHANGED head, never fires) yet the conflict never clears.
+    /// Give it one rescue, then close so the ticket is redone on a fresh
+    /// branch instead of squatting the review lane forever. (Observed: #802
+    /// sat DIRTY for 3 days with 8 futile "merge main" commits, re-logged
+    /// every cycle, never caught by any existing sweep.) Keyed on absolute age
+    /// — the one signal the head-churn can't mask.
+    ///
+    /// Returns `true` when it took ownership of the PR (the caller should skip
+    /// its other stale-PR handling for this cycle).
+    async fn sweep_conflict_livelock(
+        &self,
+        pr: &crate::ports::outbound::PullRequest,
+        stale_secs: u64,
+        state: &crate::state::ProjectState,
+    ) -> bool {
+        let Some(forge) = &self.forge else { return false };
+        if pr.mergeable {
+            return false;
+        }
+        let age = super::seconds_since(&pr.created).unwrap_or(0);
+        if age < stale_secs {
+            return false;
+        }
+        // Never auto-close work a human is deliberately sitting on (a large
+        // diff) — same gate the request-changes path uses.
+        if let Ok(diff) = forge.pr_diff(pr.number).await {
+            if crate::use_cases::merge_policy::needs_human_eyes(
+                &diff,
+                self.config.git.max_changed_lines,
+            )
+            .is_some()
+            {
+                return true;
+            }
+        }
+        let key = format!("conflict:{}", pr.number);
+        let struck = state.pr_rescue_attempts.get(&key).copied().unwrap_or(0);
+        if struck == 0 {
+            self.log_git(&format!(
+                "stale sweep: PR #{} unmergeable {}d — forcing one rescue",
+                pr.number,
+                age / 86_400
+            ))
+            .await;
+            self.sa_rescue_pr(pr).await;
+            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                s.pr_rescue_attempts.insert(key.clone(), 1);
+                Ok(())
+            })
+            .await;
+            return true;
+        }
+        let note = format!(
+            "Closing: this branch has been unmergeable for {}d and one rescue attempt did not \
+             clear the conflict. The review lane cannot land it and the per-cycle auto-rebase \
+             only churns it. The work is NOT lost — reopen from the ticket ({}) on a fresh \
+             branch off current main.",
+            age / 86_400,
+            pr.title
+        );
+        let _ = forge.comment_pr(pr.number, &note).await;
+        if forge.close_pr(pr.number).await.is_ok() {
+            self.announce_pr_close(
+                pr.number,
+                &pr.title,
+                &format!(
+                    "unmergeable {}d, rescue did not clear it; ticket returns to the queue",
+                    age / 86_400
+                ),
+            )
+            .await;
+            self.log_git(&format!(
+                "stale sweep: closed PR #{} — unmergeable {}d after one rescue",
+                pr.number,
+                age / 86_400
+            ))
+            .await;
+            let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+                s.seen_closed_prs.insert(pr.number);
+                s.pr_rescue_attempts.remove(&key);
+                Ok(())
+            })
+            .await;
+        }
+        true
+    }
+
     /// Stale-PR policy: a PR that got request-changes, then sat for
     /// `workflow.pr_stale_days` with an UNCHANGED head, gets one forced
     /// rescue attempt; if the head still does not move by the next sweep it
     /// is closed with a comment pointing back at the ticket — an abandoned
-    /// branch must not squat the queue (five did, for a day).
+    /// branch must not squat the queue (five did, for a day). A PR that is
+    /// merely unmergeable (never reviewed) is caught by
+    /// [`Self::sweep_conflict_livelock`], run first for each PR below.
+    #[allow(clippy::too_many_lines)] // one linear policy sweep; splitting hurts readability
     pub(super) async fn sweep_stale_prs(&self) {
         let Some(forge) = &self.forge else { return };
         let Ok(prs) = forge.list_open_prs().await else {
@@ -835,6 +928,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let reviews = self.reporter().fetch_reviews().await;
         let stale_secs = self.config.workflow.pr_stale_days() * 86_400;
         for pr in prs {
+            // A PR stuck unmergeable past the stale window is handled here
+            // (livelock between auto-rebase and the conflict); if it took the
+            // PR, skip the request-changes path for this cycle.
+            if self.sweep_conflict_livelock(&pr, stale_secs, &state).await {
+                continue;
+            }
             let Some(review) = reviews
                 .iter()
                 .find(|r| r.number == pr.number && r.decision == "request_changes")
