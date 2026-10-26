@@ -12,6 +12,7 @@ pub mod conformance_check;
 pub mod coverage;
 pub mod cycle;
 pub mod duplicate_radar;
+pub mod freeze_fold_inventory;
 pub mod generate_docs;
 pub mod global_search;
 pub mod json_repair;
@@ -19,6 +20,7 @@ pub mod list_panels;
 pub mod manual_rollback;
 pub mod merge_policy;
 pub mod merge_sweep;
+pub mod overview_contracts;
 pub mod question_batching;
 pub mod readiness_preflight;
 pub mod recover;
@@ -62,6 +64,9 @@ pub use cycle::{CycleReport, RunCycleUseCase};
 pub use duplicate_radar::{
     find_cross_project_duplicates, pair_key, DuplicatePair, RadarTicket, TicketSnapshot,
 };
+pub use freeze_fold_inventory::{freeze_inventory, FrozenInventory, OVERVIEW_ROUTE};
+pub mod fold_drift_gate;
+pub use fold_drift_gate::{run_fold_drift_gate, FoldDriftVerdict, REFREEZE_COMMAND};
 pub use generate_docs::GenerateDocsUseCase;
 pub use global_search::{
     global_search, global_search_many, GroupedSearch, SearchGroup, SearchHit, SearchKind,
@@ -75,6 +80,9 @@ pub use merge_policy::{
     MAX_TICKET_RESCUES,
 };
 pub use merge_sweep::{merge_sweep, SweepOutcome};
+pub use overview_contracts::{
+    all_overview_contracts, overview_contracts, OverviewContractRow, OverviewContracts,
+};
 pub use question_batching::{flush_batches, select_deferred, should_defer};
 pub use readiness_preflight::{
     run_preflight, PreflightItem, PreflightProbe, PreflightReport, PreflightSnapshot,

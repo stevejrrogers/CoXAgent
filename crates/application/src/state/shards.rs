@@ -242,6 +242,10 @@ pub struct GovernanceShard {
     pub ask_again_shapes: Vec<String>,
     pub governance_interventions: Vec<InterventionRecord>,
     pub drift_alerts: Vec<DriftAlert>,
+    /// Per-user service scope (CXA-F420f): which of the project's services a
+    /// member works on. Missing/empty = every service (legacy projects and
+    /// full-project members never change behavior).
+    pub member_services: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// The Ops shard (`state/ops.rs`): deploys, rollbacks, incidents, queued
@@ -455,6 +459,7 @@ impl ProjectState {
             bug_snapshots,
             governance_interventions,
             drift_alerts,
+            member_services,
             liveness,
         } = self;
         ShardedState {
@@ -545,6 +550,7 @@ impl ProjectState {
                 ask_again_shapes,
                 governance_interventions,
                 drift_alerts,
+                member_services,
             },
             ops: OpsShard {
                 history,
@@ -667,6 +673,7 @@ impl ProjectState {
             ask_again_shapes,
             governance_interventions,
             drift_alerts,
+            member_services,
         } = governance_shard;
         let OpsShard {
             history,
@@ -763,6 +770,7 @@ impl ProjectState {
             questions,
             engine_incidents,
             daily_jobs,
+            member_services,
             ops_down,
             workspace_run,
             ops_down_streak,

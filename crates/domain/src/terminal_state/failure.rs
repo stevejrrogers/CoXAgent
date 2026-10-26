@@ -15,7 +15,7 @@
 ///
 /// `#[non_exhaustive]` so new reasons are added deliberately, each with its
 /// own default fill-hint semantics (the B192 [`FillHint`] pattern).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum FailureReason {
     /// The panel's data source answered successfully with no content.
@@ -66,7 +66,7 @@ impl std::fmt::Display for FailureReason {
 /// Construct through [`FillHint::new`] (refuses blanks) or
 /// [`FillHint::for_reason`] (the reason's own default hint). A skipped state
 /// without a usable hint is unrepresentable.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct FillHint(String);
 
 impl FillHint {

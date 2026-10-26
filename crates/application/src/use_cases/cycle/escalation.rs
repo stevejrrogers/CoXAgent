@@ -7,6 +7,10 @@ use crate::use_cases::merge_policy::{
     escalation_route, route_from_failures, EscalationRoute, MAX_TICKET_RESCUES,
 };
 
+/// A held bug that has failed this many times total stops being blindly
+/// auto-resumed and is surfaced for the SA/human instead (CXA-F432).
+const CHURN_ARREST: u32 = 6;
+
 impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Answer the questions agents asked each other. The BA answers what a
     /// requirement means; the SA reads the code and reports what the system
@@ -257,6 +261,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // caps — to the escalation ladder too. Resume any that still have
             // rescue budget; once the budget is spent they stay held for the
             // daily-recovery feature (CXA-F376) or a human.
+            // Churn arrest (CXA-F432): a held bug that keeps bouncing on a
+            // GATE (not a redesign) racks up fail_attempts WITHOUT redesigns,
+            // so the redesign-based budget above never stops it — B306/B307
+            // were resumed every cycle for hours going nowhere. A bug that has
+            // failed CHURN_ARREST+ times total is no longer blindly resumed;
+            // it stays held and is surfaced ONCE A DAY for the SA to split or a
+            // human to take, instead of silently burning cycles forever.
+            let fails = |id: &str| s.ticket_fail_attempts.get(id).copied().unwrap_or(0);
             let held_bugs: Vec<String> = s
                 .tickets
                 .iter()
@@ -264,6 +276,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     t.ticket_type() == coxagent_domain::ticket::TicketType::Bug
                         && t.status() == Status::OnHold
                         && !live_parents.contains(&t.id().to_string())
+                        && fails(t.id().as_str()) < CHURN_ARREST
                         && s.ticket_redesigns
                             .get(&t.id().to_string())
                             .copied()
@@ -272,6 +285,31 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 })
                 .map(|t| t.id().to_string())
                 .collect();
+            // Daily visibility for the arrested pile — never silent.
+            let arrested: Vec<String> = s
+                .tickets
+                .iter()
+                .filter(|t| {
+                    t.ticket_type() == coxagent_domain::ticket::TicketType::Bug
+                        && t.status() == Status::OnHold
+                        && fails(t.id().as_str()) >= CHURN_ARREST
+                })
+                .map(|t| format!("{} ({}x)", t.id(), fails(t.id().as_str())))
+                .collect();
+            let today = crate::state::now_rfc3339()[..10].to_owned();
+            if !arrested.is_empty() && s.daily_jobs.get("churn_arrest").map(String::as_str) != Some(today.as_str()) {
+                s.daily_jobs.insert("churn_arrest".to_owned(), today);
+                s.post_chat_in(
+                    "SM",
+                    &format!(
+                        "⛔ Churn arrest: {} bug(s) stuck past {CHURN_ARREST} attempts, no longer auto-resumed — SA please split or escalate: {}",
+                        arrested.len(),
+                        arrested.join(", ")
+                    ),
+                    crate::state::AGENTS_CHANNEL,
+                    Vec::new(),
+                );
+            }
             tracing::info!(
                 "sm_drive: {} committed, {} held bugs eligible",
                 committed.len(),

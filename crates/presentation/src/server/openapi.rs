@@ -216,6 +216,11 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/services/:name/status", &["post"]),
     route("/api/projects/:pid/services/retag-suggestions", &["get"]),
     route("/api/projects/:pid/services/retag", &["post"]),
+    route("/api/projects/:pid/services/assignments", &["get"]),
+    route(
+        "/api/projects/:pid/services/assignments/:username",
+        &["put"],
+    ),
     route("/api/projects/:pid/share-links", &["get", "post"]),
     route("/api/projects/:pid/share-links/:token", &["delete"]),
     route("/api/projects/:pid/sprint/:action", &["post"]),
@@ -457,9 +462,22 @@ fn security_for(path: &str) -> SecurityLevel {
     if path.starts_with("/api/auth/users")
         || path.starts_with("/api/auth/tokens")
         || path.contains("/share-links")
+        // Manage/review write surfaces: delegate to auth.rs's own classifiers
+        // so the published contract mirrors real enforcement and cannot drift
+        // from it again. The OpenAPI tier is per-path, so a management surface
+        // is Admin wholesale (as `/api/auth/users` already is) — never
+        // under-reporting the privilege a write needs. This branch was blind to
+        // the service endpoints after #798 made them admin-only (RCE/authz
+        // fix): an SDK generated from the spec would have shown a member-tier
+        // token as able to POST services, then hit 401 at runtime.
+        || super::auth::is_service_mgmt_path(path)
+        || super::auth::is_store_rpc_path(path)
+        || super::auth::is_pr_review_path(path)
+        || path == "/api/pr-report"
     {
-        // Share-link management is an admin surface: the handlers enforce
-        // manage rights on top of auth_mw's membership gate (CXA-F069).
+        // Admin/lead-gated surfaces: user & token administration (CXA-F069
+        // share-link management too), service management (#798), the raw store
+        // RPC + pr-report runner surfaces, and PR review actions.
         return SecurityLevel::Admin;
     }
     SecurityLevel::Authenticated
@@ -641,5 +659,37 @@ mod tests {
         let spec = tagged("/api/projects/:pid/metrics/summary");
         let op = operation(&spec, "get");
         assert_eq!(op["tags"], json!(["Projects"]));
+    }
+
+    #[test]
+    fn manage_and_review_surfaces_are_documented_as_admin() {
+        // Regression lock for the #798 class: the published security tier must
+        // mirror auth_mw's real enforcement. These paths are manage/review
+        // gated in `auth::write_gate_ok`; the spec must not under-report them
+        // as merely Authenticated (an SDK would then think a member token can
+        // call them, then hit 401). Delegating to auth.rs's own classifiers
+        // keeps the two in lockstep — this test fails if that link is cut.
+        for path in [
+            "/api/projects/demo/services",
+            "/api/projects/demo/services/scan",
+            "/api/projects/demo/services/web/status",
+            "/api/projects/demo/store",
+            "/api/pr-report",
+            "/api/projects/demo/prs/7/merge",
+            "/api/auth/users",
+            "/api/auth/tokens",
+        ] {
+            assert_eq!(
+                security_for(path),
+                SecurityLevel::Admin,
+                "{path} is manage/review-gated in auth_mw but documented below Admin"
+            );
+        }
+        // And an ordinary member-writable surface stays Authenticated — the
+        // fix must not over-reach into every project path.
+        assert_eq!(
+            security_for("/api/projects/demo/ticket/CXA-F001/priority"),
+            SecurityLevel::Authenticated
+        );
     }
 }

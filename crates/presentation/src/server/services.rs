@@ -518,3 +518,127 @@ pub(super) async fn retag_apply_ep(
     }
     Json(serde_json::json!({ "applied": applied, "refused": refused })).into_response()
 }
+
+/// GET `/api/projects/:pid/services/assignments` — the per-user service scope
+/// map (CXA-F420f). Missing/empty entry = the member works on every service.
+pub(super) async fn service_assignments_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let Ok(state) = p.store.load().await else {
+        return internal_error("state unavailable");
+    };
+    Json(serde_json::json!({ "assignments": state.member_services })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct AssignServicesReq {
+    /// The services this member works on; empty clears the scope (= all).
+    pub(super) services: Vec<String>,
+}
+
+/// PUT `/api/projects/:pid/services/assignments/:username` — set one member's
+/// service scope. Admin/lead only (the shared write gate), names validated
+/// against the project's services, empty list clears back to "all".
+pub(super) async fn set_service_assignment_ep(
+    State(app): State<AppState>,
+    Path((pid, username)): Path<(String, String)>,
+    Json(req): Json<AssignServicesReq>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let cfg = read_project_config(&p.config_path);
+    let known: Vec<String> = cfg
+        .effective_services(&p.work_dir.to_string_lossy())
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
+    let mut services: Vec<String> = req
+        .services
+        .iter()
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    services.sort();
+    services.dedup();
+    if let Some(bad) = services.iter().find(|s| !known.contains(s)) {
+        return bad_request_error(&format!("unknown service '{bad}'"));
+    }
+    let user = username.trim().to_owned();
+    let svc2 = services.clone();
+    let res = coxagent_application::ports::outbound::mutate_state(p.store.as_ref(), move |s| {
+        if svc2.is_empty() {
+            s.member_services.remove(&user);
+        } else {
+            s.member_services.insert(user.clone(), svc2.clone());
+        }
+        Ok(())
+    })
+    .await;
+    match res {
+        Ok(()) => {
+            Json(serde_json::json!({ "ok": true, "username": username, "services": services }))
+                .into_response()
+        }
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+/// Whether `username` may act on a ticket carrying `service_tag` under this
+/// project's scope map: no entry (or empty) = full project; an untagged
+/// ticket resolves to the FIRST active service, same rule the runners use.
+/// Endpoint guard: refuse a ticket write when the signed-in member's service
+/// scope excludes the ticket's service. Open mode (no auth) and unscoped
+/// members pass untouched; a refusal names the service so the UI can say why.
+pub(super) async fn refuse_outside_member_scope(
+    app: &AppState,
+    headers: &axum::http::HeaderMap,
+    p: &crate::server::ProjectHandle,
+    service_tag: Option<&str>,
+) -> Option<axum::response::Response> {
+    app.auth.as_ref()?; // open/local mode — no identities to scope
+    let username = resolve_username(app, headers).await;
+    let Ok(state) = p.store.load().await else {
+        return None; // scope is a courtesy gate — never block on a load fault
+    };
+    state.member_services.get(&username)?;
+    let cfg = read_project_config(&p.config_path);
+    let services = cfg.effective_services(&p.work_dir.to_string_lossy());
+    if member_may_touch(&state, &services, &username, service_tag) {
+        return None;
+    }
+    let svc = coxagent_application::config::Config::resolve_service(&services, service_tag)
+        .map_or_else(|| "?".to_owned(), |s| s.name.clone());
+    Some(
+        (
+            StatusCode::FORBIDDEN,
+            format!(
+                "ticket belongs to service '{svc}', outside {username}'s assigned services                  (Settings → Services → assignments)"
+            ),
+        )
+            .into_response(),
+    )
+}
+
+pub(super) fn member_may_touch(
+    state: &coxagent_application::ProjectState,
+    services: &[coxagent_application::config::ServiceConfig],
+    username: &str,
+    service_tag: Option<&str>,
+) -> bool {
+    let Some(mine) = state.member_services.get(username) else {
+        return true;
+    };
+    if mine.is_empty() {
+        return true;
+    }
+    let Some(svc) = coxagent_application::config::Config::resolve_service(services, service_tag)
+    else {
+        return true; // no active services — nothing to scope by
+    };
+    mine.iter().any(|s| s == &svc.name)
+}

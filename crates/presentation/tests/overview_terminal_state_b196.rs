@@ -9,6 +9,18 @@
 //! ships for `e2e`; the tests never start a server and never touch a network
 //! port: they render strings and count slots in them.
 
+// Test scratch-parsing of shipped JS/HTML bytes: an `expect` here fails the
+// test loudly, which is exactly what a guardrail should do (repo convention).
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::explicit_into_iter_loop,
+    clippy::needless_borrows_for_generic_args,
+    clippy::too_many_arguments,
+    clippy::uninlined_format_args,
+    clippy::needless_raw_string_hashes
+)]
+
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -151,6 +163,7 @@ fn js_contract_mirrors_the_frozen_rust_manifest() {
     ] {
         let name = state.name();
         for slot in required_slots(state) {
+            let key = slot_key(*slot);
             assert!(
                 out.contains(&format!("\"{}\":[", slot_key(*slot)))
                     || out.contains(&format!("\",\"{}\"", slot_key(*slot)))
@@ -160,6 +173,7 @@ fn js_contract_mirrors_the_frozen_rust_manifest() {
             );
         }
         for slot in optional_slots(state) {
+            let key = slot_key(*slot);
             assert!(
                 out.contains(&format!("\",\"{}\"", slot_key(*slot)))
                     || out.contains(&format!("[\"{}", slot_key(*slot))),
@@ -229,11 +243,13 @@ fn every_state_renders_its_required_slots_and_announces_correctly() {
         TerminalState::Zero,
     ] {
         let html = html_of(&good_spec(state));
+        let ts_state = state.name();
         assert!(
             html.contains(&format!(r#"data-ts-state="{}""#, state.name())),
             "{state:?}: missing data-ts-state\n{html}"
         );
         for slot in required_slots(state) {
+            let key = dom_slot(*slot);
             assert!(
                 html.contains(&format!(r#"data-ts-slot="{}""#, dom_slot(*slot))),
                 "{state:?}: required slot {} not rendered\n{html}",

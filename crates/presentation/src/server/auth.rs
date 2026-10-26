@@ -144,7 +144,26 @@ pub(super) fn write_gate_ok(role: coxagent_application::auth::AuthRole, path: &s
     if is_store_rpc_path(path) || path == "/api/pr-report" {
         return role.can_manage();
     }
+    // Service management (CXA-F420b/e/f) is admin/lead only, like project
+    // Settings — these writes CLONE arbitrary git URLs and RUN a probe's
+    // build/test commands (`sh -c`) on the host, flip service lifecycle, and
+    // set per-member service scope. Ordinary write rights here would be
+    // remote code execution + an authorization change for any member-tier
+    // account (SECURITY: found in the 2026-10-23 review of the F420 surface).
+    if is_service_mgmt_path(path) {
+        return role.can_manage();
+    }
     role.can_write()
+}
+
+/// A project service-management write: `/api/projects/<pid>/services` and any
+/// subpath (scan, retag, assignments, lifecycle status). Gated to manage.
+pub(super) fn is_service_mgmt_path(path: &str) -> bool {
+    path.strip_prefix("/api/projects/")
+        .and_then(|rest| rest.split_once('/'))
+        .is_some_and(|(pid, tail)| {
+            !pid.is_empty() && (tail == "services" || tail.starts_with("services/"))
+        })
 }
 
 /// The runner store RPC: `/api/projects/<pid>/store` exactly — one path
