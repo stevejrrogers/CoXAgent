@@ -1529,6 +1529,24 @@ fn build_failover(
         sandbox,
     )?];
     for fb in fallbacks {
+        // A configured CLI fallback whose binary is not installed is a DEAD
+        // leg: `from_choice` succeeds (binary resolution is deferred to spawn),
+        // so it silently joins the chain and then fails `spawn <engine>: No
+        // such file or directory` on EVERY run — polluting the log and counting
+        // toward the "infrastructure appears DOWN" pause when the primary flaps.
+        // Drop it at build time with one warning. In-process engines (Harxes,
+        // Scripted) spawn no binary, so they are never filtered this way.
+        if fb.engine.spawns_binary()
+            && coxagent_infrastructure::engine::registry::resolve_binary(fb.engine.as_binary())
+                .is_none()
+        {
+            tracing::warn!(
+                "skipping fallback engine {:?}: binary '{}' not found on PATH",
+                fb.engine,
+                fb.engine.as_binary()
+            );
+            continue;
+        }
         match AnyEngine::from_choice(fb, mcp.cloned()) {
             Ok(e) => engines.push(e),
             Err(e) => tracing::warn!("skipping fallback engine {:?}: {e}", fb.engine),
