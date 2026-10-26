@@ -335,6 +335,29 @@ pub fn dev_feature_paused(state: &ProjectState, bug_slot_worked: bool) -> bool {
     (state.tuning.bugs_first || burn_mode_holds(state)) && bug_slot_worked
 }
 
+/// Did the bug slot do REAL fixing work this cycle? A not-reproducible close
+/// (the ticket transitioned to [`Status::Rejected`] with zero code change)
+/// spends the slot but ships no fix, so it must NOT count as work that holds
+/// the feature brake — otherwise an endless supply of phantom "not-repro"
+/// bugs starves features forever (observed: cycles doing nothing but "closed
+/// not-reproducible" while DEV-FEATURE stayed "paused by self-tuning"). A real
+/// fix and a rejection both stay in history, so a ticket that cannot be found
+/// is the rare evicted case — treated as real work to preserve prior
+/// behaviour there.
+#[must_use]
+pub fn bug_slot_did_real_work(bug_fixed: Option<&TicketId>, state: &ProjectState) -> bool {
+    match bug_fixed {
+        // `map_or(true, …)`: a ticket we can't find defaults to real work
+        // (the rare evicted case). MSRV 1.80 — no `is_none_or`.
+        Some(id) => state
+            .tickets
+            .iter()
+            .find(|t| t.id() == id)
+            .map_or(true, |t| t.status() != Status::Rejected),
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -726,6 +749,32 @@ mod tests {
             tickets: bugs.iter().map(|id| open_bug(id)).collect(),
             ..ProjectState::default()
         }
+    }
+
+    #[test]
+    fn phantom_not_reproducible_close_does_not_count_as_bug_slot_work() {
+        // The feature-starvation fix: a bug the slot closed as not-reproducible
+        // (Rejected, no code change) must not read as real work, or an endless
+        // supply of phantom bugs pauses DEV-FEATURE forever.
+        let real = open_bug("B-REAL");
+        let mut phantom = open_bug("B-PHANTOM");
+        phantom
+            .transition_to(Role::System, Status::Rejected)
+            .expect("not-repro close");
+        let state = ProjectState {
+            tickets: vec![real.clone(), phantom.clone()],
+            ..ProjectState::default()
+        };
+
+        // No bug touched → no work.
+        assert!(!bug_slot_did_real_work(None, &state));
+        // A real, non-rejected close → real work (holds the brake).
+        assert!(bug_slot_did_real_work(Some(real.id()), &state));
+        // A not-reproducible rejection → NOT work (never holds the brake).
+        assert!(!bug_slot_did_real_work(Some(phantom.id()), &state));
+        // An evicted ticket we can't find → preserve prior behaviour (work).
+        let gone = TicketId::new("B-GONE").expect("id");
+        assert!(bug_slot_did_real_work(Some(&gone), &state));
     }
 
     #[test]
