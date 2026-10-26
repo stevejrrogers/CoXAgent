@@ -59,9 +59,11 @@ fn run_js(scenario: &str) -> String {
         std::process::id(),
         RUN.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("scratch dir: {e}"));
+    std::fs::create_dir_all(&dir)
+        .unwrap_or_else(|e| panic!("failed to create scratch dir {}: {e}", dir.display()));
     let module = dir.join("terminal_state.js");
-    std::fs::write(&module, MODULE).unwrap_or_else(|e| panic!("write module: {e}"));
+    std::fs::write(&module, MODULE)
+        .unwrap_or_else(|e| panic!("failed to write terminal_state.js module: {e}"));
     // Shim first (window/document must exist before the IIFE assigns into
     // window and before paint injects styles), then the module, then scenario.
     let main = dir.join("scenario.js");
@@ -72,11 +74,11 @@ fn run_js(scenario: &str) -> String {
             module.display().to_string().replace('\\', "/")
         ),
     )
-    .unwrap_or_else(|e| panic!("write scenario: {e}"));
+    .unwrap_or_else(|e| panic!("failed to write scenario file: {e}"));
     let out = Command::new("node")
         .arg(&main)
         .output()
-        .unwrap_or_else(|e| panic!("node runtime (same one the e2e/ stack uses): {e}"));
+        .unwrap_or_else(|e| panic!("node runtime missing (same one the e2e/ stack uses): {e}"));
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         out.status.success(),
@@ -130,10 +132,10 @@ fn the_module_is_served_by_the_router_and_loaded_by_the_shell() {
     );
     let core = INDEX_HTML
         .find(r#"src="/assets/js/core.js""#)
-        .unwrap_or_else(|| panic!("core.js script tag in:\n{INDEX_HTML}"));
+        .unwrap_or_else(|| panic!("index.html must reference the core.js script tag"));
     let ts = INDEX_HTML
         .find(r#"src="/assets/js/terminal_state.js""#)
-        .unwrap_or_else(|| panic!("terminal_state.js script tag in:\n{INDEX_HTML}"));
+        .unwrap_or_else(|| panic!("index.html must reference the terminal_state.js script tag"));
     assert!(ts < core, "terminal_state.js must load before core.js");
 }
 
@@ -161,19 +163,20 @@ fn js_contract_mirrors_the_frozen_rust_manifest() {
     ] {
         let name = state.name();
         for slot in required_slots(state) {
-            let key = slot_key(*slot);
             assert!(
-                out.contains(&format!("\"{key}\":["))
-                    || out.contains(&format!("\",\"{key}\""))
-                    || out.contains(&format!("[\"{key}")),
-                "JS REQUIRED[{name}] missing Rust-required slot {key}:\n{out}"
+                out.contains(&format!("\"{}\":[", slot_key(*slot)))
+                    || out.contains(&format!("\",\"{}\"", slot_key(*slot)))
+                    || out.contains(&format!("[\"{}", slot_key(*slot))),
+                "JS REQUIRED[{name}] missing Rust-required slot {}:\n{out}",
+                slot_key(*slot)
             );
         }
         for slot in optional_slots(state) {
-            let key = slot_key(*slot);
             assert!(
-                out.contains(&format!("\",\"{key}\"")) || out.contains(&format!("[\"{key}")),
-                "JS OPTIONAL[{name}] missing Rust-optional slot {key}:\n{out}"
+                out.contains(&format!("\",\"{}\"", slot_key(*slot)))
+                    || out.contains(&format!("[\"{}", slot_key(*slot))),
+                "JS OPTIONAL[{name}] missing Rust-optional slot {}:\n{out}",
+                slot_key(*slot)
             );
         }
         let expect_role = if state.requires_reason() {
@@ -238,16 +241,15 @@ fn every_state_renders_its_required_slots_and_announces_correctly() {
         TerminalState::Zero,
     ] {
         let html = html_of(&good_spec(state));
-        let ts_state = state.name();
         assert!(
-            html.contains(&format!(r#"data-ts-state="{ts_state}""#)),
+            html.contains(&format!(r#"data-ts-state="{}""#, state.name())),
             "{state:?}: missing data-ts-state\n{html}"
         );
         for slot in required_slots(state) {
-            let key = dom_slot(*slot);
             assert!(
-                html.contains(&format!(r#"data-ts-slot="{key}""#)),
-                "{state:?}: required slot {key} not rendered\n{html}"
+                html.contains(&format!(r#"data-ts-slot="{}""#, dom_slot(*slot))),
+                "{state:?}: required slot {} not rendered\n{html}",
+                slot_key(*slot)
             );
         }
         let want_role = if state.requires_reason() {
@@ -446,17 +448,19 @@ fn all_html_is_escaped_including_panel_id() {
 
 #[test]
 fn every_manifest_panel_state_combination_renders_with_its_dom_id() {
-    // The panel list is the contract manifest itself: every (panel, state)
-    // pair below must render with its DOM id.
-    for p in panel(OverviewPanelId::Drain)
-        .into_iter()
-        .chain(panel(OverviewPanelId::Alerts))
-        .chain(panel(OverviewPanelId::Working))
-        .chain(panel(OverviewPanelId::Kpis))
-        .chain(panel(OverviewPanelId::Health))
-        .chain(panel(OverviewPanelId::RecentActivity))
-        .chain(panel(OverviewPanelId::Releases))
-    {
+    let panels = [
+        OverviewPanelId::Drain,
+        OverviewPanelId::Alerts,
+        OverviewPanelId::Working,
+        OverviewPanelId::Kpis,
+        OverviewPanelId::Health,
+        OverviewPanelId::RecentActivity,
+        OverviewPanelId::Releases,
+    ];
+    for id in panels {
+        let Some(p) = panel(id) else {
+            panic!("manifest is missing panel {id:?}");
+        };
         for state in p.states {
             let spec = match state {
                 TerminalState::Ready => format!(
