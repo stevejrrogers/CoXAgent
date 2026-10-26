@@ -49,6 +49,17 @@ impl EngineKind {
         }
     }
 
+    /// Whether this engine runs by spawning an external CLI binary (named by
+    /// [`as_binary`](Self::as_binary) on `PATH`) rather than in-process. The
+    /// in-process engines — Harxes (`harxes-core`) and Scripted — have no
+    /// binary to find, so callers must NOT treat a missing `as_binary()` name
+    /// as "not installed" for them. Used to drop a CLI fallback whose binary is
+    /// absent from the failover chain instead of letting it fail on every spawn.
+    #[must_use]
+    pub fn spawns_binary(self) -> bool {
+        !matches!(self, EngineKind::Harxes | EngineKind::Scripted)
+    }
+
     /// All known engines, for discovery.
     #[must_use]
     pub fn all() -> &'static [EngineKind] {
@@ -1160,6 +1171,25 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spawns_binary_is_true_for_cli_engines_and_false_for_in_process() {
+        // The six CLI engines run by spawning a binary on PATH, so a missing
+        // binary means "not installed" (drop it from failover). Harxes and
+        // Scripted run in-process — they must never be treated as missing.
+        for k in [
+            EngineKind::Opencode,
+            EngineKind::Claude,
+            EngineKind::Hermes,
+            EngineKind::Gemini,
+            EngineKind::Codex,
+            EngineKind::Copilot,
+        ] {
+            assert!(k.spawns_binary(), "{k:?} should spawn a binary");
+        }
+        assert!(!EngineKind::Harxes.spawns_binary());
+        assert!(!EngineKind::Scripted.spawns_binary());
+    }
 
     #[test]
     fn legacy_document_is_one_implicit_active_service() {
