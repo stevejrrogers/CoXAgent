@@ -477,6 +477,54 @@ async fn require_ci_off_reviews_and_merges_despite_failing_ci() {
 }
 
 #[tokio::test]
+async fn conflicted_pr_past_stale_window_gets_one_rescue_then_closes() {
+    // The #802 livelock: a PR that stays unmergeable past the stale window —
+    // the per-cycle auto-rebase keeps churning its head so the request-changes
+    // staleness check never fires, yet the conflict never clears. It must get
+    // one rescue, then be closed so the ticket is redone on a fresh branch,
+    // not squat the review lane forever.
+    let forge = Arc::new(SpyForge {
+        ci: "pending".to_owned(),
+        mergeable: false,
+        created: Some("2020-01-01T00:00:00Z".to_owned()), // well past pr_stale_days
+        ..Default::default()
+    });
+    let uc = review_uc(Arc::clone(&forge), "approve", false);
+    // First sweep: one forced rescue, not yet closed.
+    uc.sweep_stale_prs().await;
+    assert!(
+        forge.closed.lock().expect("lock").is_empty(),
+        "first sweep rescues, it does not close"
+    );
+    // Second sweep: the conflict persisted → close it.
+    uc.sweep_stale_prs().await;
+    assert_eq!(
+        *forge.closed.lock().expect("lock"),
+        vec![7],
+        "a conflict unresolved past the stale window after one rescue is closed"
+    );
+}
+
+#[tokio::test]
+async fn freshly_conflicted_pr_within_stale_window_is_left_alone() {
+    // A newly-opened PR that is merely unmergeable (base moved under it) is
+    // NOT the livelock — the auto-rebase gets a fair chance. No age → no sweep.
+    let forge = Arc::new(SpyForge {
+        ci: "pending".to_owned(),
+        mergeable: false,
+        created: None, // unknown/zero age — inside the stale window
+        ..Default::default()
+    });
+    let uc = review_uc(Arc::clone(&forge), "approve", false);
+    uc.sweep_stale_prs().await;
+    uc.sweep_stale_prs().await;
+    assert!(
+        forge.closed.lock().expect("lock").is_empty(),
+        "a fresh conflicted PR must not be closed by the livelock guard"
+    );
+}
+
+#[tokio::test]
 async fn sa_merges_on_approve_but_only_when_auto_merge() {
     // auto_merge off → never merges even with an approve verdict.
     let forge = Arc::new(SpyForge {
