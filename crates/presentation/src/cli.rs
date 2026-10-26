@@ -22,6 +22,11 @@ pub enum Command {
     Report,
     /// List agent engine CLIs detected on this machine's PATH.
     Discover,
+    /// Read-only preflight: report whether this machine can actually run the
+    /// hub — at least one agent engine on PATH, the git/gh/docker tooling the
+    /// flow needs, and a sandbox backend — as a PASS/WARN/FAIL checklist.
+    /// Runs nothing and touches no state or secrets; safe before a deploy.
+    Doctor,
     /// Detect this machine's agent engine CLIs and report them to a hub, so its
     /// dashboard shows them even before any runner cycle starts.
     Probe {
