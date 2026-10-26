@@ -391,7 +391,17 @@ impl GitPort for SystemGit {
 
     async fn worktree_add(&self, work_dir: &Path, path: &Path, sha: &str) -> Result<(), PortError> {
         let path = path.to_string_lossy();
-        git(work_dir, &["worktree", "add", "--detach", &path, sha])
+        // A slot worktree's directory can vanish out-of-band — the disk janitor
+        // reclaims an idle slot, or a crash leaves it half-written — while git's
+        // registration for that path lingers. The next boot then re-materialises
+        // the SAME slot path and plain `worktree add` aborts with
+        // `fatal: '<path>' is a missing but already registered worktree`,
+        // wedging the worker before its first cycle. Prune dead registrations
+        // first (drops entries whose dir is gone), then `--force` so a live-but-
+        // stale registration for this exact path is overwritten rather than
+        // fatal. Prune is best-effort; the add is what must succeed.
+        let _ = git(work_dir, &["worktree", "prune"]).await;
+        git(work_dir, &["worktree", "add", "--detach", "--force", &path, sha])
             .await
             .map(|_| ())
     }
@@ -823,6 +833,38 @@ mod tests {
             .await
             .unwrap();
         assert!(rollback_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn worktree_add_recovers_from_a_stale_registration_whose_dir_was_reclaimed() {
+        // Reproduces the recurring boot wedge: a slot worktree's directory is
+        // deleted out-of-band (disk janitor reclaims it) but git still has the
+        // path registered. Re-materialising the SAME path must succeed, not
+        // abort with `fatal: ... missing but already registered worktree`.
+        let tmp = tempfile::tempdir().unwrap();
+        let g = SystemGit::new();
+        init_repo(tmp.path()).await;
+        fs::write(tmp.path().join("a.txt"), "v1").unwrap();
+        g.commit_all(tmp.path(), "feat: v1", &author())
+            .await
+            .unwrap();
+        let sha = g.head_sha(tmp.path()).await.unwrap();
+
+        let slot_dir = tmp.path().parent().unwrap().join(format!(
+            "{}-slot-1",
+            tmp.path().file_name().unwrap().to_string_lossy()
+        ));
+        g.worktree_add(tmp.path(), &slot_dir, &sha).await.unwrap();
+
+        // Reclaim the directory WITHOUT telling git — the registration lingers.
+        fs::remove_dir_all(&slot_dir).unwrap();
+
+        // Re-adding the same path used to fail; now it recovers cleanly.
+        g.worktree_add(tmp.path(), &slot_dir, &sha)
+            .await
+            .expect("worktree_add must recover from a stale registration");
+        assert!(slot_dir.exists());
+        assert_eq!(fs::read_to_string(slot_dir.join("a.txt")).unwrap(), "v1");
     }
 
     #[tokio::test]
