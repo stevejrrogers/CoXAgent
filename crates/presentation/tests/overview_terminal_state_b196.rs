@@ -163,7 +163,6 @@ fn js_contract_mirrors_the_frozen_rust_manifest() {
     ] {
         let name = state.name();
         for slot in required_slots(state) {
-            let key = slot_key(*slot);
             assert!(
                 out.contains(&format!("\"{}\":[", slot_key(*slot)))
                     || out.contains(&format!("\",\"{}\"", slot_key(*slot)))
@@ -173,7 +172,6 @@ fn js_contract_mirrors_the_frozen_rust_manifest() {
             );
         }
         for slot in optional_slots(state) {
-            let key = slot_key(*slot);
             assert!(
                 out.contains(&format!("\",\"{}\"", slot_key(*slot)))
                     || out.contains(&format!("[\"{}", slot_key(*slot))),
@@ -243,13 +241,11 @@ fn every_state_renders_its_required_slots_and_announces_correctly() {
         TerminalState::Zero,
     ] {
         let html = html_of(&good_spec(state));
-        let ts_state = state.name();
         assert!(
             html.contains(&format!(r#"data-ts-state="{}""#, state.name())),
             "{state:?}: missing data-ts-state\n{html}"
         );
         for slot in required_slots(state) {
-            let key = dom_slot(*slot);
             assert!(
                 html.contains(&format!(r#"data-ts-slot="{}""#, dom_slot(*slot))),
                 "{state:?}: required slot {} not rendered\n{html}",
