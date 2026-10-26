@@ -16,9 +16,13 @@ import json, os, subprocess, time, datetime, re
 import psycopg2
 import redis
 
+# Credentials are NEVER inlined here (CXA-B031 hygiene): read them from the
+# environment — export PG_PASSWORD / REDIS_PASSWORD from the sanctioned secret
+# source before running (the project's out-of-tree deploy-secrets store,
+# $COXAGENT_DEPLOY_SECRETS_DIR, or your shell profile/secrets manager).
 PG = dict(host='127.0.0.1', port=5433, user='coxagent',
-          password='Wks8skU0OuCmbmid1CHHfhCpKxnHF9yu', dbname='coxagent')
-REDIS_URL = 'redis://:HQz6hXCfw6dAJ3nQF5cQQTaan3HnZeZi@127.0.0.1:6379/0'
+          password=os.environ.get('PG_PASSWORD', ''), dbname='coxagent')
+REDIS_URL = 'redis://:%s@127.0.0.1:6379/0' % os.environ.get('REDIS_PASSWORD', '')
 WORKER_KEY = 'cox:cxa:worker:root@Lutons-MacBook-Pro.local'
 ALERTS_LOG = '/tmp/cox_alerts.log'
 WATCH_OUT = '/tmp/cox_watch2.out'
