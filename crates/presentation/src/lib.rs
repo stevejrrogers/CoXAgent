@@ -7,6 +7,7 @@
 
 pub mod cli;
 pub mod deploy_terminal_state;
+pub mod depth_registry;
 pub mod fold_freeze_adapter;
 pub mod middleware;
 pub mod overview_panels;
