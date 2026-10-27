@@ -12,14 +12,21 @@
 //! application (the hexagonal gate forbids it there).
 
 use std::path::{Component, Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
+
+/// Max bytes of command output fed back to the model (each of stdout/stderr),
+/// so a chatty build cannot blow up the context.
+const RUN_OUTPUT_CAP: usize = 8192;
 
 /// One action the model asked for. The vocabulary is deliberately tiny — enough
-/// to inspect and edit a workspace, plus `Done` to end the loop.
+/// to inspect and edit a workspace, run a check, plus `Done` to end the loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolCall {
     ReadFile { path: String },
     WriteFile { path: String, content: String },
     ListDir { path: String },
+    Run { cmd: String },
     Done { summary: String },
 }
 
@@ -86,6 +93,7 @@ pub fn tool_call_from_json(v: &serde_json::Value) -> Option<ToolCall> {
         "list_dir" => Some(ToolCall::ListDir {
             path: s("path").unwrap_or_else(|| ".".to_owned()),
         }),
+        "run" => Some(ToolCall::Run { cmd: s("cmd")? }),
         "done" => Some(ToolCall::Done {
             summary: s("summary").unwrap_or_default(),
         }),
@@ -192,8 +200,62 @@ pub fn apply_tool(work_dir: &Path, call: &ToolCall) -> ToolResult {
             },
             Err(e) => ToolResult::err(e),
         },
+        // Run is side-effecting and needs a timeout, so the loop routes it to
+        // the async `run_command` instead of this sync path.
+        ToolCall::Run { .. } => ToolResult::err("run is executed by the loop, not apply_tool"),
         ToolCall::Done { summary } => ToolResult::ok(summary.clone()),
     }
+}
+
+/// Execute a `run` tool: `sh -c <cmd>` in `work_dir` with a hard `timeout`,
+/// capturing stdout+stderr (each capped) and the exit status. Never panics; a
+/// spawn failure or timeout is a failed [`ToolResult`], not an error return.
+///
+/// Unsandboxed by design: the `http` tool loop runs commands directly (unlike
+/// the seatbelt/bwrap confinement the CLI engines apply), so an operator opts
+/// into it by assigning `http` to a coding role. The hub already executes
+/// agent-authored code, so this is not a new trust boundary — but `cwd` is
+/// pinned to `work_dir`.
+pub(super) async fn run_command(work_dir: &Path, cmd: &str, timeout: Duration) -> ToolResult {
+    use tokio::process::Command;
+    let child = Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .current_dir(work_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn();
+    let child = match child {
+        Ok(c) => c,
+        Err(e) => return ToolResult::err(format!("run: spawn `{cmd}`: {e}")),
+    };
+    let out = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => return ToolResult::err(format!("run: `{cmd}`: {e}")),
+        Err(_) => {
+            // kill_on_drop reaps the child when the future is dropped here.
+            return ToolResult::err(format!("run: `{cmd}` timed out after {}s", timeout.as_secs()));
+        }
+    };
+    let cap = |bytes: &[u8]| -> String {
+        let s = String::from_utf8_lossy(bytes);
+        if s.len() > RUN_OUTPUT_CAP {
+            // Char-safe: take whole chars up to the cap, never split a boundary.
+            let head: String = s.chars().take(RUN_OUTPUT_CAP).collect();
+            format!("{head}\n…(truncated)")
+        } else {
+            s.into_owned()
+        }
+    };
+    let code = out.status.code().unwrap_or(-1);
+    let body = format!(
+        "exit: {code}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        cap(&out.stdout),
+        cap(&out.stderr)
+    );
+    ToolResult { ok: out.status.success(), content: body }
 }
 
 #[cfg(test)]
@@ -268,6 +330,35 @@ mod tests {
         assert_eq!(l.content, "hello.txt");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_the_run_tool() {
+        let r = tool_call_from_json(&serde_json::json!({"tool":"run","cmd":"cargo test"}));
+        assert_eq!(r, Some(ToolCall::Run { cmd: "cargo test".to_owned() }));
+        // Missing cmd is not a valid run.
+        assert_eq!(tool_call_from_json(&serde_json::json!({"tool":"run"})), None);
+    }
+
+    #[tokio::test]
+    async fn run_command_captures_stdout_and_exit() {
+        let dir = std::env::temp_dir();
+        let ok = run_command(&dir, "echo hello", Duration::from_secs(10)).await;
+        assert!(ok.ok, "{ok:?}");
+        assert!(ok.content.contains("hello"), "{}", ok.content);
+        assert!(ok.content.contains("exit: 0"), "{}", ok.content);
+
+        let bad = run_command(&dir, "exit 3", Duration::from_secs(10)).await;
+        assert!(!bad.ok);
+        assert!(bad.content.contains("exit: 3"), "{}", bad.content);
+    }
+
+    #[tokio::test]
+    async fn run_command_enforces_the_timeout() {
+        let dir = std::env::temp_dir();
+        let slow = run_command(&dir, "sleep 5", Duration::from_millis(300)).await;
+        assert!(!slow.ok);
+        assert!(slow.content.contains("timed out"), "{}", slow.content);
     }
 
     #[test]
