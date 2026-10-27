@@ -25,6 +25,9 @@ const RUN_OUTPUT_CAP: usize = 8192;
 pub enum ToolCall {
     ReadFile { path: String },
     WriteFile { path: String, content: String },
+    /// Surgical edit: replace the unique occurrence of `find` with `replace` in
+    /// an existing file (so large files are edited without a full rewrite).
+    PatchFile { path: String, find: String, replace: String },
     ListDir { path: String },
     Run { cmd: String },
     Done { summary: String },
@@ -92,6 +95,11 @@ pub fn tool_call_from_json(v: &serde_json::Value) -> Option<ToolCall> {
         }),
         "list_dir" => Some(ToolCall::ListDir {
             path: s("path").unwrap_or_else(|| ".".to_owned()),
+        }),
+        "patch_file" => Some(ToolCall::PatchFile {
+            path: s("path")?,
+            find: s("find")?,
+            replace: s("replace").unwrap_or_default(),
         }),
         "run" => Some(ToolCall::Run { cmd: s("cmd")? }),
         "done" => Some(ToolCall::Done {
@@ -177,6 +185,30 @@ pub fn apply_tool(work_dir: &Path, call: &ToolCall) -> ToolResult {
                     Err(e) => ToolResult::err(format!("write {path}: {e}")),
                 }
             }
+            Err(e) => ToolResult::err(e),
+        },
+        ToolCall::PatchFile { path, find, replace } => match safe_join(work_dir, path) {
+            Ok(p) => match std::fs::read_to_string(&p) {
+                Ok(text) => {
+                    let n = text.matches(find.as_str()).count();
+                    if n == 0 {
+                        ToolResult::err(format!(
+                            "patch {path}: `find` text not present — read the file and copy it exactly"
+                        ))
+                    } else if n > 1 {
+                        ToolResult::err(format!(
+                            "patch {path}: `find` matches {n} places — add surrounding context to make it unique"
+                        ))
+                    } else {
+                        let updated = text.replacen(find.as_str(), replace, 1);
+                        match std::fs::write(&p, &updated) {
+                            Ok(()) => ToolResult::ok(format!("patched {path}")),
+                            Err(e) => ToolResult::err(format!("patch write {path}: {e}")),
+                        }
+                    }
+                }
+                Err(e) => ToolResult::err(format!("patch read {path}: {e}")),
+            },
             Err(e) => ToolResult::err(e),
         },
         ToolCall::ListDir { path } => match safe_join(work_dir, path) {
@@ -329,6 +361,70 @@ mod tests {
         assert!(l.ok);
         assert_eq!(l.content, "hello.txt");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_the_patch_tool() {
+        let r = tool_call_from_json(&serde_json::json!(
+            {"tool":"patch_file","path":"a.rs","find":"old","replace":"new"}
+        ));
+        assert_eq!(
+            r,
+            Some(ToolCall::PatchFile {
+                path: "a.rs".to_owned(),
+                find: "old".to_owned(),
+                replace: "new".to_owned(),
+            })
+        );
+        // find is required; missing it is not a valid patch.
+        assert_eq!(
+            tool_call_from_json(&serde_json::json!({"tool":"patch_file","path":"a"})),
+            None
+        );
+    }
+
+    #[test]
+    fn patch_replaces_a_unique_occurrence() {
+        let dir = std::env::temp_dir().join(format!("cox-patch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f.rs"), "let x = 1;\nlet y = 2;\n").unwrap();
+
+        let ok = apply_tool(&dir, &ToolCall::PatchFile {
+            path: "f.rs".to_owned(),
+            find: "let y = 2;".to_owned(),
+            replace: "let y = 42;".to_owned(),
+        });
+        assert!(ok.ok, "{ok:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.rs")).unwrap(),
+            "let x = 1;\nlet y = 42;\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn patch_refuses_missing_or_ambiguous_find() {
+        let dir = std::env::temp_dir().join(format!("cox-patch-amb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f.rs"), "a\na\n").unwrap();
+
+        let missing = apply_tool(&dir, &ToolCall::PatchFile {
+            path: "f.rs".to_owned(),
+            find: "zzz".to_owned(),
+            replace: "q".to_owned(),
+        });
+        assert!(!missing.ok && missing.content.contains("not present"), "{missing:?}");
+
+        let ambiguous = apply_tool(&dir, &ToolCall::PatchFile {
+            path: "f.rs".to_owned(),
+            find: "a".to_owned(),
+            replace: "b".to_owned(),
+        });
+        assert!(!ambiguous.ok && ambiguous.content.contains("matches 2"), "{ambiguous:?}");
+        // Unchanged after a refused patch.
+        assert_eq!(std::fs::read_to_string(dir.join("f.rs")).unwrap(), "a\na\n");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
