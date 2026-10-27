@@ -109,6 +109,7 @@ pub struct WorkShard {
     pub tuning_history: Vec<TuningAuditEntry>,
     pub ticket_evidence: std::collections::BTreeMap<String, Vec<Evidence>>,
     pub ticket_step_provenance: std::collections::BTreeMap<String, Vec<StepProvenance>>,
+    pub ticket_charges: std::collections::BTreeMap<String, Vec<MeteredCharge>>,
     pub repro_urls: std::collections::BTreeMap<String, String>,
     pub queue_recovery: bool,
     pub last_memory_hygiene_day: String,
@@ -179,6 +180,7 @@ impl Default for WorkShard {
             tuning_history: Vec::new(),
             ticket_evidence: std::collections::BTreeMap::new(),
             ticket_step_provenance: std::collections::BTreeMap::new(),
+            ticket_charges: std::collections::BTreeMap::new(),
             repro_urls: std::collections::BTreeMap::new(),
             queue_recovery: false,
             last_memory_hygiene_day: String::new(),
@@ -424,6 +426,7 @@ impl ProjectState {
             tuning_history,
             ticket_evidence,
             ticket_step_provenance,
+            ticket_charges,
             repro_urls,
             queue_recovery,
             last_memory_hygiene_day,
@@ -503,6 +506,7 @@ impl ProjectState {
                 tuning_history,
                 ticket_evidence,
                 ticket_step_provenance,
+                ticket_charges,
                 repro_urls,
                 queue_recovery,
                 last_memory_hygiene_day,
@@ -626,6 +630,7 @@ impl ProjectState {
             tuning_history,
             ticket_evidence,
             ticket_step_provenance,
+            ticket_charges,
             repro_urls,
             queue_recovery,
             last_memory_hygiene_day,
@@ -752,6 +757,7 @@ impl ProjectState {
             tuning_history,
             ticket_evidence,
             ticket_step_provenance,
+            ticket_charges,
             repro_urls,
             queue_recovery,
             last_memory_hygiene_day,
@@ -1092,6 +1098,16 @@ mod shard_tests {
         );
         s.ticket_step_provenance
             .insert("CXA-F293".to_owned(), vec![StepProvenance::default()]);
+        s.ticket_charges.insert(
+            "CXA-F293".to_owned(),
+            vec![MeteredCharge {
+                ticket: Some("CXA-F293".to_owned()),
+                role: "DEV-FEATURE".to_owned(),
+                engine: "codex".to_owned(),
+                cost_usd: 0.42,
+                infra_fault: false,
+            }],
+        );
         s.repro_urls
             .insert("CXA-F293".to_owned(), "http://127.0.0.1:8101/".to_owned());
         s.queue_recovery = true;

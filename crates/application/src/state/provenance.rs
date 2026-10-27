@@ -48,7 +48,75 @@ pub struct MeteredStep {
 /// the oldest evict, so a long-lived ticket cannot grow state without end.
 pub const MAX_STEP_PROVENANCE: usize = 12;
 
+/// One run's DOLLAR delta captured by the `MeteringEngine`, waiting in the
+/// spend meter for the cycle's `drain_meter` fold into per-ticket cost
+/// attribution (CXA-B328). Parallel to [`MeteredStep`] — same
+/// since-last-drain lifecycle, dropped identically when unlabeled — but it
+/// names money instead of engines. Zero-usage runs still record an entry — a
+/// zero-cost run is visible, not invisible. A run that died on an engine/infra
+/// fault (`crate::faults::is_infra_fault`) carries `infra_fault = true`: its
+/// (partial, pre-crash) dollars belong to infra, excluded from the ticket's
+/// work figure at read time — never silently dropped as "not the ticket's
+/// fault" (the house rule).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MeteredCharge {
+    /// Run label — the ticket id, or `None` for non-ticket runs (ceremonies,
+    /// session resumes): those are dropped at the fold like their provenance
+    /// peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
+    /// Dashboard role label of the run.
+    pub role: String,
+    /// Engine that executed (empty ⇒ "unknown" at fold time).
+    #[serde(default)]
+    pub engine: String,
+    /// Dollars this run consumed (0.0 when the engine reports nothing).
+    #[serde(default)]
+    pub cost_usd: f64,
+    /// The run died on an engine/infra fault — charged to infra, excluded
+    /// from the ticket's work figure.
+    #[serde(default)]
+    pub infra_fault: bool,
+}
+
+/// Bounded per ticket (same rationale as [`MAX_STEP_PROVENANCE`]): the most
+/// recent charges survive; a hot ticket cannot grow state without end.
+pub const MAX_TICKET_CHARGES: usize = 12;
+
 impl ProjectState {
+    /// Charge one run's dollar delta to its ticket's bounded ledger — called
+    /// ONLY by the cycle's `drain_meter` fold, the single writer.
+    pub fn record_ticket_charge(&mut self, ticket: &str, charge: MeteredCharge) {
+        let log = self.ticket_charges.entry(ticket.to_owned()).or_default();
+        log.push(charge);
+        let overflow = log.len().saturating_sub(MAX_TICKET_CHARGES);
+        if overflow > 0 {
+            log.drain(0..overflow);
+        }
+    }
+
+    /// The ticket's charge ledger, chronological (oldest first), EXCLUDING
+    /// infra-fault charges — they belong to infra because an engine/infra
+    /// fault is not the ticket's fault (house rule). Empty — never a guess —
+    /// for tickets with no completed runs.
+    #[must_use]
+    pub fn ticket_charges_excluding_infra(&self, ticket: &str) -> Vec<&MeteredCharge> {
+        self.ticket_charges
+            .get(ticket)
+            .map(|log| log.iter().filter(|c| !c.infra_fault).collect())
+            .unwrap_or_default()
+    }
+
+    /// Total dollars charged to the ticket across completed (non-infra-fault)
+    /// runs.
+    #[must_use]
+    pub fn ticket_cost_usd(&self, ticket: &str) -> f64 {
+        self.ticket_charges_excluding_infra(ticket)
+            .iter()
+            .map(|c| c.cost_usd)
+            .sum()
+    }
+
     /// Append one step's provenance to its ticket's bounded log — oldest
     /// first, newest kept. Called by the cycle's meter fold (`drain_meter`),
     /// the single writer of this record.
@@ -110,6 +178,66 @@ mod tests {
         assert!(
             s.step_provenance("CXA-OTHER").is_empty(),
             "an untouched ticket reads as empty, never a guess"
+        );
+    }
+
+    fn charge(usd: f64) -> MeteredCharge {
+        MeteredCharge {
+            ticket: Some("CXA-B1".to_owned()),
+            role: "DEV-FEATURE".to_owned(),
+            engine: "claude".to_owned(),
+            cost_usd: usd,
+            infra_fault: false,
+        }
+    }
+
+    /// CXA-B328 regression: drain_meter folds every run's dollar delta into
+    /// the per-ticket ledger — zero-cost runs included (a zero-usage run is
+    /// visible, not invisible), and an engine/infra-fault run still leaves its
+    /// entry so nothing vanishes.
+    #[test]
+    fn charges_are_recorded_per_ticket_including_zero_cost_runs() {
+        let mut s = ProjectState::default();
+        s.record_ticket_charge("CXA-B1", charge(0.20));
+        s.record_ticket_charge("CXA-B1", charge(0.0));
+        assert_eq!(s.ticket_charges["CXA-B1"].len(), 2);
+        assert_eq!(s.step_provenance("CXA-B1").len(), 0, "independent ledger");
+    }
+
+    /// The work figure excludes infra-fault dollars without dropping them:
+    /// they stay in the raw ledger (`ticket_charges`), only the read view
+    /// filters — money that exists is never silently discarded.
+    #[test]
+    fn infra_fault_dollars_stay_in_the_ledger_but_leave_the_work_figure() {
+        let mut s = ProjectState::default();
+        s.record_ticket_charge("CXA-B1", charge(0.30));
+        s.record_ticket_charge(
+            "CXA-B1",
+            MeteredCharge {
+                cost_usd: 0.70,
+                infra_fault: true,
+                ..charge(0.0)
+            },
+        );
+        assert!((s.ticket_cost_usd("CXA-B1") - 0.30).abs() < 1e-9);
+        assert_eq!(s.ticket_charges["CXA-B1"].len(), 2);
+    }
+
+    /// Bounded like provenance: at [`MAX_TICKET_CHARGES`] entries the oldest
+    /// evict; a hot ticket cannot grow state without end.
+    #[test]
+    fn charges_are_bounded_per_ticket_evicting_the_oldest() {
+        let mut s = ProjectState::default();
+        for i in 0..(MAX_TICKET_CHARGES + 3) {
+            #[allow(clippy::cast_precision_loss)]
+            let usd = i as f64;
+            s.record_ticket_charge("CXA-B1", charge(usd));
+        }
+        let log = &s.ticket_charges["CXA-B1"];
+        assert_eq!(log.len(), MAX_TICKET_CHARGES);
+        assert!(
+            (log[0].cost_usd - 3.0).abs() < 1e-9,
+            "the three oldest evicted"
         );
     }
 }

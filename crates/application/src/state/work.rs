@@ -66,6 +66,15 @@ pub struct Spend {
     /// boundary, so persisted spend snapshots never carry these.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub step_provenance: Vec<MeteredStep>,
+    /// Per-run DOLLAR deltas captured by the `MeteringEngine` since the last
+    /// drain (CXA-B328), folded into `ProjectState.ticket_charges` by the
+    /// cycle's `drain_meter`. Same since-last-drain lifecycle as
+    /// [`Spend::step_provenance`] — persisted spend snapshots never carry it.
+    /// One charge per RUN (zero-usage runs included): a run that died on an
+    /// engine/infra fault still counts its entry with `infra_fault = true`,
+    /// because a fault is not the ticket's fault but its money is real.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub charges: Vec<MeteredCharge>,
 }
 
 impl Spend {

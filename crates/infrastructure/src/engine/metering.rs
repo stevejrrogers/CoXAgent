@@ -8,7 +8,7 @@ use coxagent_application::engine_provenance::{model_id, role_label};
 use coxagent_application::ports::outbound::{
     AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus,
 };
-use coxagent_application::state::{EngineAttempt, MeteredStep, Spend, StepProvenance};
+use coxagent_application::state::{EngineAttempt, MeteredCharge, MeteredStep, Spend, StepProvenance};
 use coxagent_application::PortError;
 use std::sync::{Arc, Mutex};
 
@@ -43,6 +43,7 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
         // provenance record needs the ticket label and the dashboard role.
         let label = request.label.clone();
         let dash_role = role_label(&request.role);
+        let charge_role = dash_role.clone();
         let escalation = request.escalation_level;
         // Measure the prompt we SEND per role (chars ≈ tokens/3.5): prompt
         // trimming without this number is guesswork — it names which role's
@@ -75,7 +76,7 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
         if !outcome.succeeded() {
             action.push_str(" — failed");
         }
-        self.record_provenance(label, dash_role, &action, &outcome);
+        self.record_provenance(label.clone(), dash_role.clone(), &action, &outcome);
         if let Some(u) = outcome.usage {
             if let Ok(mut m) = self.meter.lock() {
                 m.total_cost_usd += u.cost_usd;
@@ -87,6 +88,10 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
                 *m.runs_by_role.entry(role).or_default() += 1;
             }
         }
+        // Per-run dollar charge (CXA-B328): every run leaves its money trail,
+        // even when the engine reports no usage — a zero-cost run is visible,
+        // not invisible.
+        self.record_charge(label, charge_role, &outcome);
         self.record_sandbox(outcome.sandbox);
         Ok(outcome)
     }
@@ -124,6 +129,7 @@ impl<E: AgentEnginePort> AgentEnginePort for MeteringEngine<E> {
                 *m.runs_by_role.entry("resume".to_owned()).or_default() += 1;
             }
         }
+        self.record_charge(None, role_label(&role), &outcome);
         self.record_sandbox(outcome.sandbox);
         Ok(outcome)
     }
@@ -198,6 +204,30 @@ impl<E: AgentEnginePort> MeteringEngine<E> {
             },
         });
     }
+
+    /// Record one run's DOLLAR delta into the meter (CXA-B328). One charge
+    /// per run, unconditionally — a zero-usage run records 0.0 so nothing is
+    /// invisible, and an engine/infra-fault death (`is_infra_fault`) is
+    /// flagged so the fold can keep its partial money out of the ticket's
+    /// work figure (a fault is never charged to the ticket — house rule).
+    fn record_charge(&self, ticket: Option<String>, role: String, outcome: &AgentOutcome) {
+        let Ok(mut m) = self.meter.lock() else {
+            return;
+        };
+        let engine = if outcome.engine.is_empty() {
+            self.inner.id().to_owned()
+        } else {
+            outcome.engine.clone()
+        };
+        m.charges.push(MeteredCharge {
+            ticket,
+            role,
+            engine,
+            cost_usd: outcome.usage.as_ref().map_or(0.0, |u| u.cost_usd),
+            infra_fault: !outcome.succeeded()
+                && coxagent_application::faults::is_infra_fault(&outcome.stderr),
+        });
+    }
 }
 
 fn role_key(role: coxagent_domain::Role) -> String {
@@ -268,6 +298,27 @@ mod tests {
         assert!((m.total_cost_usd - 0.30).abs() < 1e-9);
         assert!((m.by_role["dev_feature"] - 0.20).abs() < 1e-9);
         assert!((m.by_role["docs"] - 0.10).abs() < 1e-9);
+    }
+
+    /// CXA-B328: every run leaves a per-run dollar charge in the meter, even
+    /// when the engine reports no usage — zero-cost runs are visible, not
+    /// invisible; an unlabeled run charges `ticket: None` and survives the
+    /// drain fold's drop rule in its own bucket, like provenance peers.
+    #[tokio::test]
+    async fn every_run_records_a_per_run_dollar_charge_even_without_usage() {
+        let meter: Meter = Arc::new(Mutex::new(Spend::default()));
+        let eng = MeteringEngine::new(Priced(0.10), Arc::clone(&meter));
+        eng.run(req(Role::DevFeature)).await.unwrap();
+        let m = meter.lock().unwrap();
+        assert_eq!(m.charges.len(), 1);
+        let c = &m.charges[0];
+        assert!(
+            c.ticket.is_none(),
+            "the fixture request is unlabeled — the charge follows it"
+        );
+        assert!((c.cost_usd - 0.10).abs() < 1e-9);
+        assert!(!c.infra_fault);
+        assert!(!c.engine.is_empty());
     }
 
     /// One engine that always reports the confinement it is told to.

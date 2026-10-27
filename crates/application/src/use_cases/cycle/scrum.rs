@@ -240,6 +240,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         state.record_step_provenance(&ticket, ms.step);
                     }
                 }
+                // Per-run dollar charges (CXA-B328): folded into each ticket's
+                // bounded ledger instead of being silently discarded. Same
+                // unlabeled-run rule as provenance — non-ticket runs carry no
+                // ticket and are dropped from per-ticket attribution.
+                for charge in std::mem::take(&mut m.charges) {
+                    if let Some(ticket) = charge.ticket.clone() {
+                        state.record_ticket_charge(&ticket, charge);
+                    }
+                }
                 // Attribute this cycle's spend to the operator that ran it, so
                 // each user's token usage is measurable in a shared project.
                 if !self.worker.is_empty() {

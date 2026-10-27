@@ -397,6 +397,14 @@ pub struct ProjectState {
     /// load to an empty map — no migration, no schema bump.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub ticket_step_provenance: std::collections::BTreeMap<String, Vec<StepProvenance>>,
+    /// Per-run DOLLAR charges per ticket (CXA-B328, bounded per ticket — see
+    /// [`provenance`]): every metered run's cost delta, folded here by the
+    /// cycle's `drain_meter` fold instead of being silently discarded each
+    /// cycle. serde-defaulted (the `ticket_failures` additive precedent) so
+    /// pre-change snapshots load to an empty map — no migration, no schema
+    /// bump.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub ticket_charges: std::collections::BTreeMap<String, Vec<MeteredCharge>>,
     /// Resolved live reproduction URL per shipped ticket (CXA-F246): ticket id
     /// → the `http://127.0.0.1:{host_port}/` link the evidence-capture funnel
     /// recorded when it collected the ticket's DoD evidence, so every verify
@@ -672,6 +680,7 @@ impl Default for ProjectState {
             tuning_history: Vec::new(),
             ticket_evidence: std::collections::BTreeMap::new(),
             ticket_step_provenance: std::collections::BTreeMap::new(),
+            ticket_charges: std::collections::BTreeMap::new(),
             repro_urls: std::collections::BTreeMap::new(),
             drain_notice_sprint: 0,
             ticket_fail_attempts: std::collections::BTreeMap::new(),
