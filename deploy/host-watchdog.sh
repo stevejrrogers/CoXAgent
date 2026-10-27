@@ -29,6 +29,10 @@ DOWN_DEBOUNCE_SECS="${COXAGENT_WATCHDOG_DOWN_DEBOUNCE_SECS:-15}"
 OPENCODE_JSONC="$HOME/.config/opencode/opencode.jsonc"
 COORD="$HOME/CoXAgent/coordination.json"
 HOST_ID="root@$(hostname)"
+REPO="${COXAGENT_REPO:-$HOME/Projects/CoXAgent}"
+BUILD_SCRIPT="$REPO/scripts/build-macos-app.sh"
+REBUILD_LOCK="$HOME/CoXAgent/.watchdog-rebuild.lock"
+REBUILD_STALE_SECS="${COXAGENT_WATCHDOG_REBUILD_STALE_SECS:-2400}"   # 40 min
 
 log(){ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*" >>"$WD_LOG"; }
 
@@ -90,6 +94,43 @@ chat_notice(){
     -d "{\"body\":\"$1\"}" >/dev/null 2>&1 || true
 }
 
+# The app bundle itself can vanish — a cargo clean, a wiped desktop/build, an
+# interrupted deploy. When it does, `open "$APP"` is a silent no-op, yet the
+# old code logged "relaunched" either way, so the watchdog looped for 30+ min
+# claiming success while the hub stayed dead (observed 2026-10-27, bundle gone
+# → ~6 false relaunches). Treat a missing bundle as its own outage class: it
+# cannot be launched, so (a) never report a relaunch we did not do, and (b)
+# self-heal by rebuilding from the repo — but only from a reproducible source
+# (clean tree on a named ref, same hygiene deploy-cxa.sh enforces), guarded by
+# a lock so 5-minute passes do not stack builds or open a half-assembled app.
+# Returns 0 only when the bundle is present AND safe to open right now.
+ensure_app_bundle(){
+  [ -e "$APP" ] && [ ! -e "$REBUILD_LOCK" ] && return 0
+  if [ -e "$REBUILD_LOCK" ]; then
+    local lage; lage=$(( $(date +%s) - $(stat -f %m "$REBUILD_LOCK" 2>/dev/null || echo 0) ))
+    if [ "$lage" -lt "$REBUILD_STALE_SECS" ]; then
+      log "app bundle rebuild already in progress (${lage}s) — deferring relaunch"
+      return 1
+    fi
+    log "stale rebuild lock (${lage}s) — clearing"
+    rm -f "$REBUILD_LOCK"
+    [ -e "$APP" ] && return 0
+  fi
+  log "CANNOT RELAUNCH: app bundle $APP is missing"
+  if [ ! -x "$BUILD_SCRIPT" ]; then
+    log "  no build script at $BUILD_SCRIPT — manual rebuild required"; return 1
+  fi
+  if ! git -C "$REPO" symbolic-ref --quiet --short HEAD >/dev/null 2>&1 \
+     || [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then
+    log "  repo not on a clean named ref — refusing auto-rebuild (fix the tree, then it self-heals)"
+    return 1
+  fi
+  : >"$REBUILD_LOCK"
+  log "  self-heal: rebuilding bundle from $(git -C "$REPO" rev-parse --short HEAD 2>/dev/null) in background (lock held until done)"
+  nohup bash -c "bash '$BUILD_SCRIPT' >>'$WD_LOG.rebuild' 2>&1; rm -f '$REBUILD_LOCK'" >/dev/null 2>&1 &
+  return 1
+}
+
 # --- Outage detection --------------------------------------------------------
 
 # 0. Hub reachable at all?
@@ -111,11 +152,19 @@ case "$health" in
     log "HARD-DOWN: cox-server process absent + health unreachable (debounced ${DOWN_DEBOUNCE_SECS}s) — restoring env/redis and relaunching"
     restore_env
     restore_redis
+    if ! ensure_app_bundle; then
+      log "hard-down unresolved this pass (bundle unavailable) — will retry next pass"
+      exit 0
+    fi
     # Process is confirmed gone, so no quit/pkill — just launch it.
     open "$APP"
     wait_health
-    log "relaunched after hard-down (health: $(curl -s -m 3 http://127.0.0.1:$PORT/api/health || echo unreachable))"
-    chat_notice "🐕 host-watchdog: hub process was gone (hard-down) — envs/redis checked, app relaunched."
+    h=$(curl -s -m 3 "http://127.0.0.1:$PORT/api/health" || echo unreachable)
+    log "relaunched after hard-down (health: $h)"
+    case "$h" in
+      *'"ok"'*) chat_notice "🐕 host-watchdog: hub process was gone (hard-down) — envs/redis checked, app relaunched." ;;
+      *) log "relaunch did NOT restore health — bundle present but hub not serving; escalating for next pass" ;;
+    esac
     exit 0;;
 esac
 
@@ -131,6 +180,13 @@ log "WEDGE SUSPECTED: health ok but hub.log silent for ${age}s — running playb
 # CLASS A — IDLE-WEDGE: restore envs + redis, then full restart.
 restore_env
 restore_redis
+
+# Confirm we can actually relaunch BEFORE we kill the (wedged but serving) hub.
+# A wedged hub that still answers health beats a dead one we cannot bring back.
+if ! ensure_app_bundle; then
+  log "idle-wedge: bundle unavailable — leaving the current hub untouched, will retry next pass"
+  exit 0
+fi
 
 # Restart the app (quit → force-kill stragglers → open → wait for health).
 osascript -e 'quit app "CoXAgent"' >/dev/null 2>&1
