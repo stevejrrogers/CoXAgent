@@ -112,6 +112,12 @@ pub(crate) async fn run_backup(
             );
         }
     }
+    // Dump the authoritative Postgres databases (state + accounts) — the file
+    // archive above cannot capture them. Best-effort; never fails the backup.
+    let retention = scheduled_backup_setting(hub_dir).map_or(DEFAULT_RETENTION, |s| s.retention);
+    for line in dump_databases(hub_dir, retention).await {
+        let _ = writeln!(summary, "{line}");
+    }
     for w in external_backend_warnings() {
         let _ = writeln!(summary, "not captured (externally backed): {w}");
     }
@@ -261,6 +267,94 @@ pub(crate) fn backups_dir(hub_dir: &Path) -> PathBuf {
     hub_dir.join("backups")
 }
 
+/// A DSN for `coord_key` (coordination.json) or `env_key` (process env, the
+/// form a booted hub exposes), whichever is present. Env wins — it is the live
+/// value the hub actually connected with.
+fn dsn_for(hub_dir: &Path, coord_key: &str, env_key: &str) -> Option<String> {
+    if let Ok(v) = std::env::var(env_key) {
+        if !v.trim().is_empty() {
+            return Some(v);
+        }
+    }
+    let text = std::fs::read_to_string(hub_dir.join("coordination.json")).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    json.get(coord_key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .map(ToOwned::to_owned)
+}
+
+/// Keep only the newest `keep` `<label>-*.dump` files in `dir`; returns how
+/// many were removed. Names embed a UTC stamp, so lexicographic sort is
+/// chronological (mirrors `prune_archives`).
+fn prune_db_dumps(dir: &Path, label: &str, keep: usize) -> usize {
+    let prefix = format!("{label}-");
+    let mut dumps: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    let name_ok = p
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with(&prefix));
+                    let ext_ok = p
+                        .extension()
+                        .is_some_and(|e| e.eq_ignore_ascii_case("dump"));
+                    name_ok && ext_ok
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    dumps.sort();
+    let excess = dumps.len().saturating_sub(keep);
+    for old in &dumps[..excess] {
+        let _ = std::fs::remove_file(old);
+    }
+    excess
+}
+
+/// Dump the authoritative Postgres databases (state + accounts) alongside the
+/// file archive — the archive cannot capture Postgres. Best-effort: a missing
+/// dump tool degrades to a logged skip and never fails the file backup.
+/// Returns summary lines for the backup report.
+async fn dump_databases(hub_dir: &Path, retention: usize) -> Vec<String> {
+    use coxagent_infrastructure::db_dump::{pg_dump, DumpStatus};
+    let container = std::env::var("COXAGENT_DB_CONTAINER")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "cxa-backend-db-1".to_owned());
+    let db_dir = backups_dir(hub_dir).join("db");
+    let stamp = path_stamp(&coxagent_application::state::now_rfc3339());
+    let mut out = Vec::new();
+    for (label, coord_key, env_key) in [
+        ("state", "db_dsn", "COXAGENT_DB_DSN"),
+        ("auth", "auth_dsn", "COXAGENT_AUTH_DSN"),
+    ] {
+        let Some(dsn) = dsn_for(hub_dir, coord_key, env_key) else {
+            continue;
+        };
+        let path = db_dir.join(format!("{label}-{stamp}.dump"));
+        match pg_dump(&dsn, &path, Some(&container)).await {
+            Ok(DumpStatus::Dumped(p)) => {
+                out.push(format!("dumped {label} database -> {}", p.display()));
+                let pruned = prune_db_dumps(&db_dir, label, retention);
+                if pruned > 0 {
+                    out.push(format!(
+                        "pruned {pruned} old {label} dump(s) (retention: newest {retention})"
+                    ));
+                }
+            }
+            Ok(DumpStatus::Skipped(why)) => {
+                out.push(format!("{label} database NOT dumped: {why} — run pg_dump manually"));
+            }
+            Err(e) => out.push(format!("{label} database dump FAILED: {e}")),
+        }
+    }
+    out
+}
+
 /// The default archive path: `<hub-dir>/backups/coxagent-backup-<UTC
 /// timestamp>.hubarchive.json`.
 #[must_use]
@@ -312,18 +406,8 @@ pub(crate) fn prune_archives(dir: &Path, keep: usize) -> usize {
 fn external_backend_warnings() -> Vec<String> {
     let configured = |key: &str| std::env::var(key).is_ok_and(|v| !v.trim().is_empty());
     let mut out = Vec::new();
-    if configured("COXAGENT_DB_DSN") {
-        out.push(
-            "project state in Postgres (COXAGENT_DB_DSN) — back the database up with pg_dump"
-                .to_owned(),
-        );
-    }
-    if configured("COXAGENT_AUTH_DSN") {
-        out.push(
-            "accounts/tokens in Postgres (COXAGENT_AUTH_DSN) — back the database up with pg_dump"
-                .to_owned(),
-        );
-    }
+    // NB: COXAGENT_DB_DSN / COXAGENT_AUTH_DSN (Postgres) are no longer warned
+    // about here — `dump_databases` now pg_dumps them into backups/db/.
     if configured("COXAGENT_REDIS_URL") {
         out.push("ephemeral leases in Redis (COXAGENT_REDIS_URL) — TTL data, safe to lose, but it is not in this archive".to_owned());
     }
