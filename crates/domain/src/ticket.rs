@@ -627,6 +627,45 @@ impl Ticket {
         Ok(())
     }
 
+    /// Repair a BUG stranded in a feature-only status.
+    ///
+    /// The bug transition table (see `transitions`) has NO edge into `Pending`,
+    /// `Ready`, `Done` or `Documented` — those are feature/chore states. A bug
+    /// that nonetheless reaches one (a bad import, a ticket re-typed to Bug, a
+    /// row predating the current rules) is unreachable by every bug transition
+    /// AND claimed by no dispatcher: the bug lane pulls `Open` bugs and the
+    /// feature lane pulls features, so a `Ready` bug strands forever and — if
+    /// it is sprint-committed — deadlocks the whole sprint (observed live
+    /// 2026-10-27: CXA-B159/B160/B161 `Ready`, sprint #656 frozen). Reset it to
+    /// `Open` so the bug lane can pick it up. System-only like
+    /// [`Self::release_claim`], and a no-op on every legal state, so it is safe
+    /// to run each cycle.
+    ///
+    /// Returns whether a repair was made.
+    ///
+    /// # Errors
+    /// - [`DomainError::FieldNotPermitted`] if `actor` is not `System`.
+    pub fn reclaim_misfiled(&mut self, actor: Role) -> Result<bool, DomainError> {
+        if actor != Role::System {
+            return Err(DomainError::FieldNotPermitted {
+                role: actor,
+                field: "status",
+            });
+        }
+        let misfiled = self.kind == TicketType::Bug
+            && matches!(
+                self.status,
+                Status::Pending | Status::Ready | Status::Done | Status::Documented
+            );
+        if !misfiled {
+            return Ok(false);
+        }
+        self.status = Status::Open;
+        self.claimed_by = None;
+        self.claimed_at = None;
+        Ok(true)
+    }
+
     /// Atomically swap the holder of an existing `InProgress` claim (CXA-F283):
     /// a person taking over work a crashed run left behind. Like
     /// [`Ticket::release_claim`] this is `System`-only bookkeeping — the API
@@ -722,6 +761,56 @@ mod tests {
         )
         .expect("bug");
         assert_eq!(bug.status(), Status::Open);
+    }
+
+    fn bug(id: &str) -> Ticket {
+        Ticket::new(
+            TicketId::new(id).expect("id"),
+            TicketType::Bug,
+            "A bug",
+            "",
+            Priority::High,
+            Complexity::Small,
+            false,
+        )
+        .expect("bug")
+    }
+
+    #[test]
+    fn reclaim_misfiled_resets_a_ready_bug_to_open() {
+        let mut b = bug("B-1");
+        // Force the illegal state the transition table can never produce, the
+        // way a bad import / re-typed ticket did live.
+        b.status = Status::Ready;
+        assert_eq!(b.reclaim_misfiled(Role::System), Ok(true));
+        assert_eq!(b.status(), Status::Open);
+        // Idempotent: a now-legal Open bug is left alone.
+        assert_eq!(b.reclaim_misfiled(Role::System), Ok(false));
+        assert_eq!(b.status(), Status::Open);
+    }
+
+    #[test]
+    fn reclaim_misfiled_leaves_legal_bug_and_feature_states_untouched() {
+        // Verified is a LEGAL bug state — never reclaimed.
+        let mut v = bug("B-2");
+        v.status = Status::Verified;
+        assert_eq!(v.reclaim_misfiled(Role::System), Ok(false));
+        assert_eq!(v.status(), Status::Verified);
+        // A feature in Ready is correct — never touched.
+        let mut f = feature(false);
+        f.set_technical_design(Role::Sa, TechnicalDesign::default())
+            .expect("design");
+        f.transition_to(Role::Sa, Status::Ready).expect("ready");
+        assert_eq!(f.reclaim_misfiled(Role::System), Ok(false));
+        assert_eq!(f.status(), Status::Ready);
+    }
+
+    #[test]
+    fn reclaim_misfiled_is_system_only() {
+        let mut b = bug("B-3");
+        b.status = Status::Ready;
+        assert!(b.reclaim_misfiled(Role::DevBug).is_err());
+        assert_eq!(b.status(), Status::Ready, "a non-System actor changes nothing");
     }
 
     #[test]

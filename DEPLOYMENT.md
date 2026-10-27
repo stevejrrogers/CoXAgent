@@ -51,7 +51,11 @@ CLIs (claude/opencode) and their logins live on operator machines, so run
 a CLI.
 
 - TLS terminates at Caddy; the app adds `Secure` to session cookies
-  automatically behind it.
+  automatically behind it. **`DOMAIN` must be set** in `.env`: Caddy then
+  provisions a certificate automatically and serves HTTPS on 443. With `DOMAIN`
+  unset the front door falls back to plain HTTP on `:80` — local development
+  only; never expose the hub on a network without `DOMAIN`, or session bearer
+  tokens travel in clear text.
 - Backups: hub documents snapshot nightly to the app volume under
   `backups/YYYY-MM-DD/` (14-day retention). Restore = stop app, copy a
   snapshot's JSON over the corresponding app_kv docs (or re-import via psql),

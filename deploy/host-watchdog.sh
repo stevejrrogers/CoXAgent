@@ -20,15 +20,35 @@
 # Every action is appended to $WD_LOG and posted to the hub chat once it is
 # back, so nothing happens silently.
 set -u
+# launchd runs this agent with a minimal PATH that omits Homebrew and Docker's
+# CLI dir, so the `docker exec` calls (redis desired-key restore, the
+# in_progress busy-guard) were silently "command not found". Prepend the usual
+# locations so docker is found under launchd.
+export PATH="/opt/homebrew/bin:/usr/local/bin:/Applications/Docker.app/Contents/Resources/bin:$PATH"
 HUB_LOG="${COXAGENT_HUB_LOG:-$HOME/CoXAgent/hub.log}"
 WD_LOG="${COXAGENT_WATCHDOG_LOG:-$HOME/CoXAgent/watchdog.log}"
 APP="${COXAGENT_APP:-$HOME/Projects/CoXAgent/desktop/build/CoXAgent.app}"
 PORT="${COXAGENT_PORT:-4000}"
-SILENT_SECS="${COXAGENT_WATCHDOG_SILENT_SECS:-2100}"   # 35 min
+# 90 min. The idle-wedge signal is hub.log mtime, but a single long agent run
+# (harxes world-scan / resume-on-cap, which can run 30-40 min emitting nothing)
+# looks identical to silence — at 35 min the watchdog RESTARTED a hub that was
+# busy mid-run, killing the in-flight DEV work and bouncing its ticket back to
+# open (observed 2026-10-27 11:36Z: "silent for 2247s" → restart → in_progress
+# 3→0, fixed flat). 90 min clears every legitimate run; a true env/redis wedge
+# still recovers (just later), and a vanished PROCESS is still caught fast by
+# the hard-down path above. PROPER follow-up: expose a worker-heartbeat /
+# cycle-progress signal via /api/ready and key the wedge check on THAT instead
+# of raw log mtime, so a busy hub is never mistaken for a wedged one.
+SILENT_SECS="${COXAGENT_WATCHDOG_SILENT_SECS:-5400}"   # 90 min
 DOWN_DEBOUNCE_SECS="${COXAGENT_WATCHDOG_DOWN_DEBOUNCE_SECS:-15}"
 OPENCODE_JSONC="$HOME/.config/opencode/opencode.jsonc"
 COORD="$HOME/CoXAgent/coordination.json"
 HOST_ID="root@$(hostname)"
+REPO="${COXAGENT_REPO:-$HOME/Projects/CoXAgent}"
+BUILD_SCRIPT="$REPO/scripts/build-macos-app.sh"
+REBUILD_LOCK="$HOME/CoXAgent/.watchdog-rebuild.lock"
+REBUILD_STALE_SECS="${COXAGENT_WATCHDOG_REBUILD_STALE_SECS:-2400}"   # 40 min
+DB_CONTAINER="${COXAGENT_DB_CONTAINER:-cxa-backend-db-1}"
 
 log(){ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*" >>"$WD_LOG"; }
 
@@ -74,6 +94,36 @@ PY
     && log "restored redis desired=running (was '${cur:-unreachable}')"
 }
 
+# Best-effort count of tickets an agent is actively working (status
+# in_progress) across projects, read straight from Postgres. Tells a BUSY hub
+# (a long agent run logs nothing for many minutes) from a genuinely wedged one,
+# so the idle-wedge restart never kills in-flight DEV work. Any failure (no
+# docker, no DB container, unparseable DSN) echoes 0 → the caller falls back to
+# the plain silence-threshold decision, so this only ever ADDS safety. The
+# password travels via PGPASSWORD env, never argv.
+hub_is_working(){
+  local creds user pw db n
+  creds=$(/usr/bin/python3 - "$COORD" <<'PY'
+import json, re, sys
+try:
+    dsn = json.load(open(sys.argv[1])).get("db_dsn", "")
+    m = re.match(r'^\w+://([^:]+):([^@]+)@[^/]+/([^?]+)', dsn)
+    print(f"{m.group(1)}\t{m.group(2)}\t{m.group(3)}" if m else "")
+except Exception:
+    print("")
+PY
+)
+  [ -n "$creds" ] || { echo 0; return; }
+  user=$(printf '%s' "$creds" | cut -f1)
+  pw=$(printf '%s' "$creds" | cut -f2)
+  db=$(printf '%s' "$creds" | cut -f3)
+  n=$(docker exec -e PGPASSWORD="$pw" "$DB_CONTAINER" \
+        psql -U "$user" -d "$db" -tAc \
+        "select count(*) from project_state, jsonb_array_elements(data->'tickets') t where t->>'status'='in_progress'" \
+        2>/dev/null | tr -dc '0-9')
+  echo "${n:-0}"
+}
+
 # Wait up to ~90s for the hub to answer health after a (re)launch.
 wait_health(){
   local n=0
@@ -88,6 +138,43 @@ chat_notice(){
   curl -s -m 5 -X POST "http://127.0.0.1:$PORT/api/chat/send" \
     -H 'Content-Type: application/json' \
     -d "{\"body\":\"$1\"}" >/dev/null 2>&1 || true
+}
+
+# The app bundle itself can vanish — a cargo clean, a wiped desktop/build, an
+# interrupted deploy. When it does, `open "$APP"` is a silent no-op, yet the
+# old code logged "relaunched" either way, so the watchdog looped for 30+ min
+# claiming success while the hub stayed dead (observed 2026-10-27, bundle gone
+# → ~6 false relaunches). Treat a missing bundle as its own outage class: it
+# cannot be launched, so (a) never report a relaunch we did not do, and (b)
+# self-heal by rebuilding from the repo — but only from a reproducible source
+# (clean tree on a named ref, same hygiene deploy-cxa.sh enforces), guarded by
+# a lock so 5-minute passes do not stack builds or open a half-assembled app.
+# Returns 0 only when the bundle is present AND safe to open right now.
+ensure_app_bundle(){
+  [ -e "$APP" ] && [ ! -e "$REBUILD_LOCK" ] && return 0
+  if [ -e "$REBUILD_LOCK" ]; then
+    local lage; lage=$(( $(date +%s) - $(stat -f %m "$REBUILD_LOCK" 2>/dev/null || echo 0) ))
+    if [ "$lage" -lt "$REBUILD_STALE_SECS" ]; then
+      log "app bundle rebuild already in progress (${lage}s) — deferring relaunch"
+      return 1
+    fi
+    log "stale rebuild lock (${lage}s) — clearing"
+    rm -f "$REBUILD_LOCK"
+    [ -e "$APP" ] && return 0
+  fi
+  log "CANNOT RELAUNCH: app bundle $APP is missing"
+  if [ ! -x "$BUILD_SCRIPT" ]; then
+    log "  no build script at $BUILD_SCRIPT — manual rebuild required"; return 1
+  fi
+  if ! git -C "$REPO" symbolic-ref --quiet --short HEAD >/dev/null 2>&1 \
+     || [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then
+    log "  repo not on a clean named ref — refusing auto-rebuild (fix the tree, then it self-heals)"
+    return 1
+  fi
+  : >"$REBUILD_LOCK"
+  log "  self-heal: rebuilding bundle from $(git -C "$REPO" rev-parse --short HEAD 2>/dev/null) in background (lock held until done)"
+  nohup bash -c "bash '$BUILD_SCRIPT' >>'$WD_LOG.rebuild' 2>&1; rm -f '$REBUILD_LOCK'" >/dev/null 2>&1 &
+  return 1
 }
 
 # --- Outage detection --------------------------------------------------------
@@ -111,11 +198,19 @@ case "$health" in
     log "HARD-DOWN: cox-server process absent + health unreachable (debounced ${DOWN_DEBOUNCE_SECS}s) — restoring env/redis and relaunching"
     restore_env
     restore_redis
+    if ! ensure_app_bundle; then
+      log "hard-down unresolved this pass (bundle unavailable) — will retry next pass"
+      exit 0
+    fi
     # Process is confirmed gone, so no quit/pkill — just launch it.
     open "$APP"
     wait_health
-    log "relaunched after hard-down (health: $(curl -s -m 3 http://127.0.0.1:$PORT/api/health || echo unreachable))"
-    chat_notice "🐕 host-watchdog: hub process was gone (hard-down) — envs/redis checked, app relaunched."
+    h=$(curl -s -m 3 "http://127.0.0.1:$PORT/api/health" || echo unreachable)
+    log "relaunched after hard-down (health: $h)"
+    case "$h" in
+      *'"ok"'*) chat_notice "🐕 host-watchdog: hub process was gone (hard-down) — envs/redis checked, app relaunched." ;;
+      *) log "relaunch did NOT restore health — bundle present but hub not serving; escalating for next pass" ;;
+    esac
     exit 0;;
 esac
 
@@ -126,11 +221,33 @@ mtime=$(stat -f %m "$HUB_LOG" 2>/dev/null || echo "$now")
 age=$(( now - mtime ))
 [ "$age" -lt "$SILENT_SECS" ] && exit 0
 
+# A long agent run logs nothing for many minutes and looks identical to
+# silence. If the hub is POSITIVELY still working (a ticket is in_progress) and
+# the silence is not yet absurd, DEFER — restarting would kill the in-flight
+# DEV run and bounce its ticket back to open (observed 2026-10-27 11:36Z).
+# Bounded at 2× the threshold so a genuinely stuck claim still gets the hub
+# restarted eventually; an unknown count (0) falls through to the restart, so
+# wedge detection is preserved when the DB itself is the problem.
+if [ "$age" -lt "$(( SILENT_SECS * 2 ))" ]; then
+  working=$(hub_is_working)
+  if [ "${working:-0}" -gt 0 ] 2>/dev/null; then
+    log "idle-wedge DEFERRED: hub.log silent ${age}s but ${working} ticket(s) in_progress — a busy agent run, not a wedge"
+    exit 0
+  fi
+fi
+
 log "WEDGE SUSPECTED: health ok but hub.log silent for ${age}s — running playbook"
 
 # CLASS A — IDLE-WEDGE: restore envs + redis, then full restart.
 restore_env
 restore_redis
+
+# Confirm we can actually relaunch BEFORE we kill the (wedged but serving) hub.
+# A wedged hub that still answers health beats a dead one we cannot bring back.
+if ! ensure_app_bundle; then
+  log "idle-wedge: bundle unavailable — leaving the current hub untouched, will retry next pass"
+  exit 0
+fi
 
 # Restart the app (quit → force-kill stragglers → open → wait for health).
 osascript -e 'quit app "CoXAgent"' >/dev/null 2>&1
