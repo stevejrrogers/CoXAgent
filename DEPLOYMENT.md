@@ -164,8 +164,10 @@ How it runs, by role:
   chat completion — the reply is the result.
 - **Coding roles** (DEV-BUG/DEV-FEATURE) get an agentic **tool loop**: the model
   inspects and edits the workspace through `read_file` / `list_dir` /
-  `write_file` / `run` / `done`, up to 12 turns, with every file path confined
-  to the workspace (absolute paths and `..` are rejected). `run` executes a
+  `write_file` / `patch_file` / `run` / `done`, up to 12 turns, with every file
+  path confined to the workspace (absolute paths and `..` are rejected).
+  `patch_file` replaces a unique `find` string with `replace` for surgical edits
+  to large files (full-file `write_file` is still available). `run` executes a
   shell command in the workspace (build/tests) with a 120 s timeout and capped
   output, so the model can verify its own change before finishing. It writes
   **full-file** content, so it is best suited to focused, few-file edits; for
