@@ -136,6 +136,34 @@ Chart layout mirrors the target architecture:
 | `COXAGENT_ADMIN_USER/PASSWORD` | First-run Super Admin bootstrap |
 | `COXAGENT_OPERATOR` | Headless runner identity (`name@host` attribution) |
 | `COXAGENT_OIDC_*` | Optional SSO — see below (all unset ⇒ SSO off, password login only) |
+| `COXAGENT_LLM_BASE_URL` / `COXAGENT_LLM_API_KEY` | Endpoint + key for the `http` engine — see *Agent engines* |
+
+## Agent engines
+
+Each role runs on an **engine**, chosen in `coxagent.json`'s `engine` block (a
+`default` plus `per_role` overrides) or from the dashboard — expensive models
+for DEV/SA, cheap ones for BA/DOCS. Most engines wrap a vendor CLI the runner
+node must carry (`claude`, `opencode`, `gemini`, `codex`, `copilot`); `harxes`
+is in-process.
+
+**`http` — any OpenAI-compatible gateway (no CLI).** Set a role's engine to
+`"http"` and its `model` to the gateway's model id; point the hub at the
+endpoint with `COXAGENT_LLM_BASE_URL` (default `https://api.openai.com/v1`) and
+`COXAGENT_LLM_API_KEY`. It calls `POST {base}/chat/completions` (key via
+`Authorization: Bearer`), so it works with OpenAI, Azure OpenAI, vLLM, LiteLLM,
+OpenRouter, a local llama.cpp server, or any compatible proxy — no vendor binary
+on the host.
+
+```json
+{ "engine": { "per_role": { "ba": { "engine": "http", "model": "gpt-4o-mini" } } } }
+```
+
+Scope: `http` is a **text-completion** engine today — ideal for the
+text-producing roles (BA/PO/SM/SA planning, chat replies, review, docs). It does
+not yet read or edit files, so a coding role (DEV-BUG/DEV-FEATURE) assigned to it
+returns prose and leaves the tree unchanged — the cycle sees no diff and the
+ticket does not progress (a visible no-op, never a bad merge). Use a CLI engine
+or `harxes` for coding roles until the `http` file-editing tool loop lands.
 
 ## SSO / OIDC (optional)
 
