@@ -465,7 +465,7 @@ fn reverted_work_alert_action_carries_its_guardrail_decision_path() {
         .reverted_work
         .iter()
         .find(|e| e.sha == "abc123")
-        .expect("the recorded revert stays in the ledger");
+        .expect("the adjudicated revert event stays in the ledger");
     assert_eq!(e.decision, RevertDecision::Approved);
     assert_eq!(
         e.decided_by.as_deref(),
@@ -520,7 +520,7 @@ fn record_revert_dedupes_by_sha_even_when_redetected_with_a_new_decision() {
         .reverted_work
         .iter()
         .find(|e| e.sha == "abc123")
-        .expect("the first recorded revert is kept");
+        .expect("the single deduped revert event stays in the ledger");
     assert_eq!(kept.decision, RevertDecision::Pending);
     assert!(kept.decided_at.is_none());
 }

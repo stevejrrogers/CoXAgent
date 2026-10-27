@@ -1086,7 +1086,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 .await;
             }
         }
-        let bug_slot_worked = report.bug_fixed.is_some();
+        // Count the slot as worked only when a REAL fix landed — a
+        // not-reproducible close ships no code and must not hold the feature
+        // lane (see `bug_slot_did_real_work`). No state loaded → fall back to
+        // the old presence signal.
+        let bug_slot_worked = brake_state.as_ref().map_or_else(
+            || report.bug_fixed.is_some(),
+            |s| crate::selection::bug_slot_did_real_work(report.bug_fixed.as_ref(), s),
+        );
         if reactive_brake && bug_slot_worked {
             report
                 .errors
