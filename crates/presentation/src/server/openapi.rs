@@ -111,6 +111,7 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/health", &["get"]),
     route("/api/ready", &["get"]),
     route("/api/auth/oidc/login", &["get"]),
+    route("/api/auth/oidc/callback", &["get"]),
     route("/api/manage/overview", &["get"]),
     route("/api/manage/spaces/:sid", &["get"]),
     route("/api/mcp", &["post"]),
@@ -455,6 +456,7 @@ fn security_for(path: &str) -> SecurityLevel {
     if matches!(
         path,
         "/api/health" | "/api/ready" | "/api/openapi.json" | "/api/auth/login" | "/api/auth/oidc/login"
+        | "/api/auth/oidc/callback"
     ) || path.starts_with("/s/")
     {
         // /s/:token (CXA-F069): the unguessable share token IS the credential,
