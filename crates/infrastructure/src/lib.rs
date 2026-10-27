@@ -10,6 +10,7 @@ pub mod audit_sink;
 pub mod auth;
 pub mod backup_archive;
 pub mod cleanup;
+pub mod db_dump;
 pub mod deploy;
 pub mod deps_discovery;
 pub mod docs_store;
