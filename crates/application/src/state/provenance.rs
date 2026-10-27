@@ -44,6 +44,34 @@ pub struct MeteredStep {
     pub step: StepProvenance,
 }
 
+/// One metered run's DOLLAR charge, carried beside [`MeteredStep`] so
+/// `drain_meter` can attribute actual cost to the ticket whose label the
+/// request bore (CXA-F377). A `$0` charge (engine reported no usage) still
+/// counts its run — a zero-usage run is visible, not invisible. A run that
+/// died on an engine/infra fault (see `faults::is_infra_fault`) carries
+/// `infra_fault = true`: its (partial, pre-crash) dollars are charged to
+/// infra — excluded from the ticket's work figure at read time, never
+/// silently dropped. Labeled `#[serde(default)]` end-to-end like every other
+/// additive money field.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeteredCharge {
+    /// Request label — the ticket id (`None` = maintenance/unlabeled run ⇒
+    /// unattributed bucket, flagged, never dropped).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
+    /// Dashboard role label of the run.
+    pub role: String,
+    /// Engine that executed (empty ⇒ "unknown" at fold time).
+    #[serde(default)]
+    pub engine: String,
+    /// Dollars this run consumed (0.0 when the engine reports nothing).
+    #[serde(default)]
+    pub cost_usd: f64,
+    /// Engine/infra-side death — charge excluded from the work figure.
+    #[serde(default)]
+    pub infra_fault: bool,
+}
+
 /// Bounded per ticket (the `add_evidence` pattern): the newest steps stay,
 /// the oldest evict, so a long-lived ticket cannot grow state without end.
 pub const MAX_STEP_PROVENANCE: usize = 12;

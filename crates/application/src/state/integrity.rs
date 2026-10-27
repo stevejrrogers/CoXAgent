@@ -42,6 +42,10 @@ pub const CYCLE_COUNTER_REGRESSION: &str = "cycle_counter_regression";
 pub const DEPLOY_INDEX_REGRESSION: &str = "deploy_index_regression";
 /// Rule id: a spend aggregate is negative — money can only accumulate.
 pub const NEGATIVE_SPEND: &str = "negative_spend";
+/// CXA-F377: sum(per-ticket rollups) + unattributed must equal
+/// `Spend.total_cost_usd` — attribution is recorded exactly where spend
+/// becomes durable, so any drift is a corrupted write.
+pub const TICKET_SPEND_MISMATCH: &str = "ticket_spend_mismatch";
 
 /// One structural-integrity finding. `ticket_id` is the ticket a finding is
 /// about (the dangling key for reference rules, the duplicated id for
@@ -331,6 +335,27 @@ fn audit_spend(state: &ProjectState) -> Vec<IntegrityFinding> {
             NEGATIVE_SPEND,
             None,
             "negative per-role or per-operator spend".to_owned(),
+        ));
+    }
+    // CXA-F377: every metered dollar must land in exactly one bucket — a
+    // ticket's rollup, the unattributed (maintenance/no-label) bucket, or it
+    // is drift between attribution and the durable total.
+    let attributed: f64 = state
+        .ticket_spend
+        .values()
+        .map(|r| r.total_usd)
+        .sum::<f64>()
+        + state.ticket_spend_unattributed.total_usd;
+    let mismatch = (attributed - state.spend.total_cost_usd).abs() > 1e-6;
+    if mismatch {
+        findings.push(IntegrityFinding::new(
+            TICKET_SPEND_MISMATCH,
+            None,
+            format!(
+                "per-ticket attribution {attributed:.6} does not sum to \
+                 spend.total_cost_usd {:.6}",
+                state.spend.total_cost_usd
+            ),
         ));
     }
     findings

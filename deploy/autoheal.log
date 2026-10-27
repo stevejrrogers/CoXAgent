@@ -1,1 +1,141 @@
 2026-08-13 07:11:32 autoheal watchdog started (pid 8038)
+2026-10-27 17:29:20 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 17:29:20 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 17:29:20 ERROR: compose up failed — will retry
+2026-10-27 17:29:51 WARN: DB/Redis still down after restart
+2026-10-27 17:31:11 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 17:31:11 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 17:31:11 ERROR: compose up failed — will retry
+2026-10-27 17:31:41 WARN: DB/Redis still down after restart
+2026-10-27 17:33:02 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 17:33:02 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 17:33:02 ERROR: compose up failed — will retry
+2026-10-27 17:33:32 WARN: DB/Redis still down after restart
+2026-10-27 17:34:52 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 17:34:52 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 17:34:52 ERROR: compose up failed — will retry
+2026-10-27 17:35:22 WARN: DB/Redis still down after restart
+2026-10-27 17:36:43 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 17:36:43 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 17:36:43 ERROR: compose up failed — will retry
+2026-10-27 17:37:13 WARN: DB/Redis still down after restart
+2026-10-27 17:38:33 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 17:38:35 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 17:38:35 ERROR: compose up failed — will retry
+2026-10-27 17:39:06 WARN: DB/Redis still down after restart
+2026-10-27 17:40:26 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 17:40:26 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 17:40:26 ERROR: compose up failed — will retry
+2026-10-27 17:40:56 WARN: DB/Redis still down after restart
+2026-10-27 17:42:17 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 17:42:17 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 17:42:17 ERROR: compose up failed — will retry
+2026-10-27 17:42:47 WARN: DB/Redis still down after restart
+2026-10-27 17:44:08 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 17:44:08 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 17:44:08 ERROR: compose up failed — will retry
+2026-10-27 17:44:38 WARN: DB/Redis still down after restart
+2026-10-27 17:45:58 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 17:45:58 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 17:45:58 ERROR: compose up failed — will retry
+2026-10-27 17:46:28 WARN: DB/Redis still down after restart
+2026-10-27 17:47:49 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 17:47:49 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 17:47:49 ERROR: compose up failed — will retry
+2026-10-27 17:48:19 WARN: DB/Redis still down after restart
+2026-10-27 17:49:40 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 17:49:40 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 17:49:40 ERROR: compose up failed — will retry
+2026-10-27 17:50:10 WARN: DB/Redis still down after restart
+2026-10-27 17:51:31 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 17:51:31 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 17:51:31 ERROR: compose up failed — will retry
+2026-10-27 17:52:01 WARN: DB/Redis still down after restart
+2026-10-27 17:53:21 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 17:53:21 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 17:53:21 ERROR: compose up failed — will retry
+2026-10-27 17:53:51 WARN: DB/Redis still down after restart
+2026-10-27 17:55:12 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 17:55:12 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 17:55:12 ERROR: compose up failed — will retry
+2026-10-27 17:55:42 WARN: DB/Redis still down after restart
+2026-10-27 17:57:02 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 17:57:02 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 17:57:02 ERROR: compose up failed — will retry
+2026-10-27 17:57:33 WARN: DB/Redis still down after restart
+2026-10-27 17:58:53 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 17:58:53 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 17:58:53 ERROR: compose up failed — will retry
+2026-10-27 17:59:23 WARN: DB/Redis still down after restart
+2026-10-27 18:00:43 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 18:00:44 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 18:00:44 ERROR: compose up failed — will retry
+2026-10-27 18:01:14 WARN: DB/Redis still down after restart
+2026-10-27 18:02:34 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 18:02:34 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 18:02:34 ERROR: compose up failed — will retry
+2026-10-27 18:03:04 WARN: DB/Redis still down after restart
+2026-10-27 18:04:25 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 18:04:25 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 18:04:25 ERROR: compose up failed — will retry
+2026-10-27 18:04:55 WARN: DB/Redis still down after restart
+2026-10-27 18:06:15 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 18:06:15 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 18:06:15 ERROR: compose up failed — will retry
+2026-10-27 18:06:46 WARN: DB/Redis still down after restart
+2026-10-27 18:08:06 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 18:08:06 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 18:08:07 ERROR: compose up failed — will retry
+2026-10-27 18:08:37 WARN: DB/Redis still down after restart
+2026-10-27 18:09:57 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 18:09:57 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 18:09:57 ERROR: compose up failed — will retry
+2026-10-27 18:10:27 WARN: DB/Redis still down after restart
+2026-10-27 18:11:48 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 18:11:48 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 18:11:48 ERROR: compose up failed — will retry
+2026-10-27 18:12:18 WARN: DB/Redis still down after restart
+2026-10-27 18:13:38 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 18:13:38 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 18:13:38 ERROR: compose up failed — will retry
+2026-10-27 18:14:08 WARN: DB/Redis still down after restart
+2026-10-27 18:15:29 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 18:15:29 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 18:15:29 ERROR: compose up failed — will retry
+2026-10-27 18:15:59 WARN: DB/Redis still down after restart
+2026-10-27 18:17:20 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 18:17:20 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 18:17:20 ERROR: compose up failed — will retry
+2026-10-27 18:17:50 WARN: DB/Redis still down after restart
+2026-10-27 18:19:10 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 18:19:10 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 18:19:10 ERROR: compose up failed — will retry
+2026-10-27 18:19:41 WARN: DB/Redis still down after restart
+2026-10-27 18:21:01 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 18:21:01 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 18:21:01 ERROR: compose up failed — will retry
+2026-10-27 18:21:31 WARN: DB/Redis still down after restart
+2026-10-27 18:22:52 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 18:22:52 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 18:22:52 ERROR: compose up failed — will retry
+2026-10-27 18:23:22 WARN: DB/Redis still down after restart
+2026-10-27 18:24:42 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 18:24:42 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 18:24:42 ERROR: compose up failed — will retry
+2026-10-27 18:25:12 WARN: DB/Redis still down after restart
+2026-10-27 18:26:33 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 18:26:33 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 18:26:33 ERROR: compose up failed — will retry
+2026-10-27 18:27:03 WARN: DB/Redis still down after restart
+2026-10-27 18:28:23 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 18:28:23 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 18:28:23 ERROR: compose up failed — will retry
+2026-10-27 18:28:54 WARN: DB/Redis still down after restart
+2026-10-27 18:30:14 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 18:30:14 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 18:30:14 ERROR: compose up failed — will retry
+2026-10-27 18:30:44 WARN: DB/Redis still down after restart
+2026-10-27 18:32:05 ALERT: DB/Redis unresponsive on 3 consecutive checks — restarting stack
+2026-10-27 18:32:05 WARN: graceful stop timed out or failed — continuing to up -d anyway
+2026-10-27 18:32:05 ERROR: compose up failed — will retry
+2026-10-27 18:32:35 WARN: DB/Redis still down after restart

@@ -134,6 +134,9 @@ pub fn field_permitted(actor: Role, field: &str) -> bool {
         // service boundary is an architecture decision, and each minted
         // subtask carries the service its code lives in.
         "service_tag" => matches!(actor, Role::Ba | Role::Po | Role::User | Role::Sa),
+        // Cost governance (CXA-F377): only the human owner side sets a
+        // ticket's own budget line — agents never author their own budget.
+        "budget_usd" => matches!(actor, Role::Po | Role::User),
         // SA owns technical design and dependency graph — parent links are
         // part of that graph (an oversize ticket split into subtasks).
         "design.technical" | "depends_on" | "parent_id" => actor == Role::Sa,

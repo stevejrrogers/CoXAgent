@@ -66,6 +66,13 @@ pub struct Spend {
     /// boundary, so persisted spend snapshots never carry these.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub step_provenance: Vec<MeteredStep>,
+    /// Per-run DOLLAR deltas for CXA-F377 ticket attribution (parallel to
+    /// `step_provenance`, same drain/reset lifecycle): one entry per run with
+    /// its label/engine/role/infra-flag, folded into
+    /// `ProjectState.ticket_spend` by `drain_meter`. Never persisted — it
+    /// resets exactly where spend becomes durable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub charges: Vec<crate::provenance::MeteredCharge>,
 }
 
 impl Spend {

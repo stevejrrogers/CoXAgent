@@ -397,6 +397,23 @@ pub struct ProjectState {
     /// load to an empty map — no migration, no schema bump.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub ticket_step_provenance: std::collections::BTreeMap<String, Vec<StepProvenance>>,
+    /// Per-ticket ACTUAL engine-spend rollups (CXA-F377): ticket id → cost /
+    /// by-engine / by-role / runs fold of every metered run whose request
+    /// label is that ticket. Maintained in `drain_meter`, exactly where spend
+    /// becomes durable, so it cannot drift from `Spend.total_cost_usd`
+    /// (integrity enforces sum + unattributed == total). serde-defaulted like
+    /// `ticket_failures`: pre-change snapshots load empty; attribution
+    /// accrues from the first post-upgrade run — documented honestly rather
+    /// than backfilled.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub ticket_spend:
+        std::collections::BTreeMap<String, crate::ticket_spend::TicketSpendRollup>,
+    /// Metered runs with NO ticket label (maintenance phases: debt sweep,
+    /// grooming, ops) — flagged and counted here, never silently dropped into
+    /// a random ticket row. Mirrors broken-project handling; part of the same
+    /// integrity invariant as `ticket_spend`.
+    #[serde(default)]
+    pub ticket_spend_unattributed: crate::ticket_spend::TicketSpendRollup,
     /// Resolved live reproduction URL per shipped ticket (CXA-F246): ticket id
     /// → the `http://127.0.0.1:{host_port}/` link the evidence-capture funnel
     /// recorded when it collected the ticket's DoD evidence, so every verify
@@ -672,6 +689,9 @@ impl Default for ProjectState {
             tuning_history: Vec::new(),
             ticket_evidence: std::collections::BTreeMap::new(),
             ticket_step_provenance: std::collections::BTreeMap::new(),
+            ticket_spend: std::collections::BTreeMap::new(),
+            ticket_spend_unattributed:
+                crate::ticket_spend::TicketSpendRollup::default(),
             repro_urls: std::collections::BTreeMap::new(),
             drain_notice_sprint: 0,
             ticket_fail_attempts: std::collections::BTreeMap::new(),

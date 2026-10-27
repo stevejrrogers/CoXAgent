@@ -48,7 +48,7 @@ pub struct Design {
 
 /// The ticket aggregate root. Fields are private; all access is via methods so
 /// no code path can produce an inconsistent ticket.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Ticket {
     id: TicketId,
     #[serde(rename = "type")]
@@ -112,6 +112,14 @@ pub struct Ticket {
     /// with `serde(default)` so pre-F253 tickets load clean.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     service_tag: Option<String>,
+    /// Optional per-ticket spend budget in USD (CXA-F377): the line actual
+    /// engine cost is flagged against. `None` means no explicit line — at
+    /// flag time the flag logic inherits the project's `approve_over_usd`
+    /// instead ("no line set" still means no flag when that is absent too).
+    /// Guarded mutation via [`Ticket::set_budget_usd`]; persisted with
+    /// `serde(default)` so pre-F377 tickets load clean.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    budget_usd: Option<f64>,
 }
 
 impl Ticket {
@@ -158,6 +166,7 @@ impl Ticket {
             created_at: None,
             wip_checkpoints: Vec::new(),
             service_tag: None,
+            budget_usd: None,
         })
     }
 
@@ -209,6 +218,45 @@ impl Ticket {
         }
         self.goal_id = Some(goal_id);
         Ok(())
+    }
+
+    /// Set the ticket's own spend budget line (CXA-F377). Guarded by the
+    /// field-permission table: only PO/User may author a budget — agents
+    /// never write their own cost ceiling. `None` clears the explicit line
+    /// so flag-time inheritance from the project applies again.
+    ///
+    /// # Errors
+    /// Returns [`DomainError::FieldNotPermitted`] when `actor` may not edit
+    /// the budget field, and [`DomainError::Empty`] when the value is a
+    /// negative or non-finite amount — `$0` is legal (hard stop), a negative
+    /// one is nonsense.
+    pub fn set_budget_usd(
+        &mut self,
+        actor: Role,
+        budget_usd: Option<f64>,
+    ) -> Result<(), DomainError> {
+        if !field_permitted(actor, "budget_usd") {
+            return Err(DomainError::FieldNotPermitted {
+                role: actor,
+                field: "budget_usd",
+            });
+        }
+        if let Some(v) = budget_usd {
+            if !(v.is_finite() && v >= 0.0) {
+                return Err(DomainError::Empty {
+                    field: "budget_usd",
+                });
+            }
+        }
+        self.budget_usd = budget_usd;
+        Ok(())
+    }
+
+    /// The ticket's explicit budget line, when the PO set one (`None` =
+    /// inherit the project's `approve_over_usd` at flag time).
+    #[must_use]
+    pub fn budget_usd(&self) -> Option<f64> {
+        self.budget_usd
     }
 
     /// The bounded-context service tag the BA stamped at filing, or `None`

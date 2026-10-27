@@ -51,6 +51,7 @@ pub mod service_scan;
 pub mod slot_collision_radar;
 pub mod sprint;
 pub mod state;
+pub mod ticket_spend;
 pub mod system_chat;
 pub mod tokens;
 pub mod ts;

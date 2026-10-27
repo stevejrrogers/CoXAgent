@@ -109,6 +109,24 @@ pub struct WorkShard {
     pub tuning_history: Vec<TuningAuditEntry>,
     pub ticket_evidence: std::collections::BTreeMap<String, Vec<Evidence>>,
     pub ticket_step_provenance: std::collections::BTreeMap<String, Vec<StepProvenance>>,
+    /// Per-ticket ACTUAL engine-spend rollups (CXA-F377): ticket id → the
+    /// cost/role/engine/runs fold of every metered run whose request label is
+    /// that ticket. Maintained where spend becomes durable (`drain_meter`) so
+    /// it cannot drift from `Spend.total_cost_usd` — integrity enforces
+    /// sum(rollups) + unattributed == total. serde-defaulted additive like
+    /// `ticket_failures`: pre-change snapshots load empty; attribution
+    /// accrues from the first post-upgrade run, documented honestly rather
+    /// than backfilled.
+    #[serde(default)]
+    pub ticket_spend:
+        std::collections::BTreeMap<String, crate::ticket_spend::TicketSpendRollup>,
+    /// Metered runs whose request carried NO ticket label — maintenance-phase
+    /// work (debt sweep, grooming, ops) or legacy unlabeled runs. Flagged and
+    /// counted here, never silently dropped into a random ticket's row
+    /// (mirror of broken-project handling); folds into the same integrity
+    /// invariant as `ticket_spend`.
+    #[serde(default)]
+    pub ticket_spend_unattributed: crate::ticket_spend::TicketSpendRollup,
     pub repro_urls: std::collections::BTreeMap<String, String>,
     pub queue_recovery: bool,
     pub last_memory_hygiene_day: String,
@@ -179,6 +197,9 @@ impl Default for WorkShard {
             tuning_history: Vec::new(),
             ticket_evidence: std::collections::BTreeMap::new(),
             ticket_step_provenance: std::collections::BTreeMap::new(),
+            ticket_spend: std::collections::BTreeMap::new(),
+            ticket_spend_unattributed:
+                crate::ticket_spend::TicketSpendRollup::default(),
             repro_urls: std::collections::BTreeMap::new(),
             queue_recovery: false,
             last_memory_hygiene_day: String::new(),
@@ -424,6 +445,8 @@ impl ProjectState {
             tuning_history,
             ticket_evidence,
             ticket_step_provenance,
+            ticket_spend,
+            ticket_spend_unattributed,
             repro_urls,
             queue_recovery,
             last_memory_hygiene_day,
@@ -503,6 +526,8 @@ impl ProjectState {
                 tuning_history,
                 ticket_evidence,
                 ticket_step_provenance,
+                ticket_spend,
+                ticket_spend_unattributed,
                 repro_urls,
                 queue_recovery,
                 last_memory_hygiene_day,
@@ -626,6 +651,8 @@ impl ProjectState {
             tuning_history,
             ticket_evidence,
             ticket_step_provenance,
+            ticket_spend,
+            ticket_spend_unattributed,
             repro_urls,
             queue_recovery,
             last_memory_hygiene_day,
@@ -752,6 +779,8 @@ impl ProjectState {
             tuning_history,
             ticket_evidence,
             ticket_step_provenance,
+            ticket_spend,
+            ticket_spend_unattributed,
             repro_urls,
             queue_recovery,
             last_memory_hygiene_day,

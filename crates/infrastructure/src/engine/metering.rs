@@ -8,7 +8,9 @@ use coxagent_application::engine_provenance::{model_id, role_label};
 use coxagent_application::ports::outbound::{
     AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus,
 };
-use coxagent_application::state::{EngineAttempt, MeteredStep, Spend, StepProvenance};
+use coxagent_application::state::{
+    EngineAttempt, MeteredCharge, MeteredStep, Spend, StepProvenance,
+};
 use coxagent_application::PortError;
 use std::sync::{Arc, Mutex};
 

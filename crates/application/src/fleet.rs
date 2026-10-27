@@ -29,6 +29,9 @@ pub enum CapStatus {
     Over,
 }
 
+/// Default warn band used by every cap panel (80% of the line).
+pub const DEFAULT_WARN_PCT: f64 = 0.8;
+
 /// One project's spend slice, as the cockpit's input snapshot. Broken
 /// registrations (`broken = true`) carry zero spend — they are kept in the
 /// snapshot so the aggregate can FLAG the under-count instead of silently
