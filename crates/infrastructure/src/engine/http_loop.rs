@@ -26,6 +26,9 @@ Available tools:\n\
 - read_file {path}: return the file's text.\n\
 - list_dir {path}: list a directory (\".\" for the workspace root).\n\
 - write_file {path, content}: create/overwrite a file with the FULL new content.\n\
+- patch_file {path, find, replace}: replace the UNIQUE occurrence of `find` with \
+`replace` in an existing file — prefer this for edits to large files. `find` \
+must match exactly and appear once; add surrounding lines to disambiguate.\n\
 - run {cmd}: run a shell command in the workspace (e.g. build or tests) and see \
 its output + exit code; use it to verify your change.\n\
 - done {summary}: finish, summarising what you changed.\n\
@@ -121,7 +124,7 @@ where
             ToolCall::Run { cmd } => run_command(work_dir, cmd, RUN_TIMEOUT).await,
             other => apply_tool(work_dir, other),
         };
-        if matches!(call, ToolCall::WriteFile { .. }) && result.ok {
+        if matches!(call, ToolCall::WriteFile { .. } | ToolCall::PatchFile { .. }) && result.ok {
             wrote_any = true;
         }
         let _ = writeln!(
