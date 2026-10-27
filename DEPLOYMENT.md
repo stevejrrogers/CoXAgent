@@ -158,12 +158,17 @@ on the host.
 { "engine": { "per_role": { "ba": { "engine": "http", "model": "gpt-4o-mini" } } } }
 ```
 
-Scope: `http` is a **text-completion** engine today — ideal for the
-text-producing roles (BA/PO/SM/SA planning, chat replies, review, docs). It does
-not yet read or edit files, so a coding role (DEV-BUG/DEV-FEATURE) assigned to it
-returns prose and leaves the tree unchanged — the cycle sees no diff and the
-ticket does not progress (a visible no-op, never a bad merge). Use a CLI engine
-or `harxes` for coding roles until the `http` file-editing tool loop lands.
+How it runs, by role:
+
+- **Text roles** (BA/PO/SM/SA planning, chat replies, review, docs) get a single
+  chat completion — the reply is the result.
+- **Coding roles** (DEV-BUG/DEV-FEATURE) get an agentic **tool loop**: the model
+  inspects and edits the workspace through `read_file` / `list_dir` /
+  `write_file` / `done`, up to 12 turns, with every path confined to the
+  workspace (absolute paths and `..` are rejected). It writes **full-file**
+  content, so it is best suited to focused, few-file edits; for large multi-file
+  refactors a CLI engine (`claude`/`opencode`) or `harxes` is still the stronger
+  choice. The run's transcript is kept in the activity trace.
 
 ## SSO / OIDC (optional)
 
