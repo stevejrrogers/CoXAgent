@@ -158,6 +158,14 @@ pub enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Security-audit trail tools.
+    Audit {
+        #[command(subcommand)]
+        action: AuditAction,
+        /// Hub directory holding coordination.json (for the DB DSN).
+        #[arg(long, default_value = ".", global = true)]
+        hub_dir: PathBuf,
+    },
     /// Query the code knowledge graph (for agents + humans): symbol search,
     /// impact/references, callers, and file dependencies.
     Codegraph {
@@ -168,6 +176,15 @@ pub enum Command {
         #[arg(long, default_value = ".", global = true)]
         work_dir: PathBuf,
     },
+}
+
+/// Security-audit subcommands.
+#[derive(Subcommand, Debug)]
+pub enum AuditAction {
+    /// Verify the tamper-evidence hash chain of the persisted audit trail and
+    /// print whether it is intact. Exits non-zero if a row was edited, deleted,
+    /// reordered, or truncated out of band — cron/CI can alarm on that.
+    Verify,
 }
 
 /// Code-graph query subcommands.
