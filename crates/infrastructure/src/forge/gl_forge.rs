@@ -5,7 +5,7 @@
 //! [`PullRequest`] shape the dashboard already speaks.
 
 use async_trait::async_trait;
-use coxagent_application::ports::outbound::{ForgePort, PullRequest};
+use coxagent_application::ports::outbound::{ForgePort, IssueDraft, PullRequest};
 use coxagent_application::PortError;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -40,6 +40,20 @@ impl GlForge {
 
     async fn glab(&self, args: &[&str]) -> Result<String, PortError> {
         glab(&self.host, &self.work_dir, args).await
+    }
+
+    /// Shared issue lister for the open/closed variants. `state` is the glab
+    /// state flag (`--opened` / `--closed`).
+    async fn issues(&self, state: &str, limit: usize) -> Result<Vec<IssueDraft>, PortError> {
+        let per_page = limit.to_string();
+        let json = self
+            .glab(&[
+                "issue", "list", "-R", &self.repo, state, "-P", &per_page, "-F", "json",
+            ])
+            .await?;
+        let raws: Vec<RawIssue> = serde_json::from_str(&json)
+            .map_err(|e| PortError::Backend(format!("glab issue list parse: {e}")))?;
+        Ok(raws.into_iter().map(Into::into).collect())
     }
 }
 
@@ -115,6 +129,32 @@ fn ci_from_pipeline(mr: &RawMr) -> String {
         Some("success" | "passed") => "passing".to_owned(),
         Some("failed" | "canceled" | "cancelled") => "failing".to_owned(),
         _ => "pending".to_owned(), // running / pending / created / manual / scheduled
+    }
+}
+
+/// One issue from `glab issue list -F json` (the GitLab API issue object).
+#[derive(serde::Deserialize)]
+struct RawIssue {
+    iid: u64,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    labels: Vec<serde_json::Value>,
+    #[serde(default)]
+    web_url: String,
+}
+
+impl From<RawIssue> for IssueDraft {
+    fn from(i: RawIssue) -> Self {
+        IssueDraft {
+            number: i.iid,
+            title: i.title,
+            body: i.description,
+            labels: super::label_names(&i.labels),
+            url: i.web_url,
+        }
     }
 }
 
@@ -203,6 +243,53 @@ impl ForgePort for GlForge {
             .await
             .map(|_| ())
     }
+
+    async fn recently_merged(&self) -> Result<Vec<(u64, String)>, PortError> {
+        let json = self
+            .glab(&[
+                "mr", "list", "-R", &self.repo, "--merged", "-P", "30", "-F", "json",
+            ])
+            .await?;
+        let raws: Vec<RawMr> = serde_json::from_str(&json)
+            .map_err(|e| PortError::Backend(format!("glab merged list parse: {e}")))?;
+        Ok(raws.into_iter().map(|m| (m.iid, m.source_branch)).collect())
+    }
+
+    async fn closed_unmerged(&self) -> Result<Vec<(u64, String)>, PortError> {
+        // GitLab keeps `merged` and `closed` as distinct states (unlike GitHub,
+        // which lumps merged PRs under "closed"), so `--closed` is already the
+        // unmerged-closed set — no mergedAt filter needed.
+        let json = self
+            .glab(&[
+                "mr", "list", "-R", &self.repo, "--closed", "-P", "50", "-F", "json",
+            ])
+            .await?;
+        let raws: Vec<RawMr> = serde_json::from_str(&json)
+            .map_err(|e| PortError::Backend(format!("glab closed list parse: {e}")))?;
+        Ok(raws.into_iter().map(|m| (m.iid, m.source_branch)).collect())
+    }
+
+    async fn comment_pr(&self, number: u64, body: &str) -> Result<(), PortError> {
+        let n = number.to_string();
+        self.glab(&["mr", "note", &n, "-R", &self.repo, "-m", body])
+            .await
+            .map(|_| ())
+    }
+
+    async fn list_open_issues(&self, limit: usize) -> Result<Vec<IssueDraft>, PortError> {
+        self.issues("--opened", limit).await
+    }
+
+    async fn list_closed_issues(&self, limit: usize) -> Result<Vec<IssueDraft>, PortError> {
+        self.issues("--closed", limit).await
+    }
+
+    // `pr_feedback` is intentionally left as the trait default (empty) for now:
+    // GitLab's review model is discussion threads + approval rules, not
+    // GitHub's CHANGES_REQUESTED review verb, so a faithful "unaddressed change
+    // request since the last push" mapping needs the discussions API and is a
+    // separate slice. Returning empty keeps the review loop correct (no false
+    // feedback) rather than guessing.
 }
 
 #[cfg(test)]
@@ -225,6 +312,43 @@ mod tests {
         assert_eq!(pr.author, "coxagent-bot");
         assert_eq!(pr.ci, "passing");
         assert!(pr.mergeable);
+    }
+
+    #[test]
+    fn maps_gitlab_issue_json_to_issue_draft() {
+        let json = r#"{
+            "iid": 7, "title": "Login is slow", "description": "p99 2s",
+            "labels": ["bug", "priority:high"],
+            "web_url": "https://gitlab.com/g/p/-/issues/7"
+        }"#;
+        let raw: RawIssue = serde_json::from_str(json).unwrap();
+        let d: IssueDraft = raw.into();
+        assert_eq!(d.number, 7);
+        assert_eq!(d.title, "Login is slow");
+        assert_eq!(d.body, "p99 2s");
+        assert_eq!(d.labels, vec!["bug".to_owned(), "priority:high".to_owned()]);
+        assert_eq!(d.url, "https://gitlab.com/g/p/-/issues/7");
+    }
+
+    #[test]
+    fn issue_labels_accept_object_shape_too() {
+        // GitLab API label details can arrive as objects with a `name` field.
+        let json = r#"{"iid": 8, "title": "x", "labels": [{"name": "bug"}]}"#;
+        let raw: RawIssue = serde_json::from_str(json).unwrap();
+        let d: IssueDraft = raw.into();
+        assert_eq!(d.labels, vec!["bug".to_owned()]);
+    }
+
+    #[test]
+    fn merged_list_maps_to_number_and_branch() {
+        let json = r#"[
+            {"iid": 3, "source_branch": "feat/A"},
+            {"iid": 4, "source_branch": "fix/B"}
+        ]"#;
+        let raws: Vec<RawMr> = serde_json::from_str(json).unwrap();
+        let pairs: Vec<(u64, String)> =
+            raws.into_iter().map(|m| (m.iid, m.source_branch)).collect();
+        assert_eq!(pairs, vec![(3, "feat/A".to_owned()), (4, "fix/B".to_owned())]);
     }
 
     #[test]
