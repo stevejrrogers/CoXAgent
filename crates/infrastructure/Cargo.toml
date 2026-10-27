@@ -5,8 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# harxes-core is a PRIVATE SSH git dependency (Harxes.git). Gating it behind a
+# default-on feature keeps the live build unchanged while letting an external
+# operator build without deploy-key access via `--no-default-features`:
+#   cargo build -p coxagent-infrastructure --no-default-features
+# compiles the whole crate with the embedded Harxes engine adapter cfg'd out.
+default = ["harxes"]
+harxes = ["dep:harxes-core"]
+
 [dependencies]
-harxes-core = { git = "ssh://git@github.com/stevejrrogers/Harxes.git", tag = "v0.4.8" }
+harxes-core = { git = "ssh://git@github.com/stevejrrogers/Harxes.git", tag = "v0.4.8", optional = true }
 coxagent-domain.workspace = true
 coxagent-application.workspace = true
 serde.workspace = true
