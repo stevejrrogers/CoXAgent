@@ -407,22 +407,33 @@ async fn the_mongo_env_contract_the_archive_must_match_answers_none_without_a_ur
     }
 }
 
-/// AC4's "compiles unconditionally": the mongodb dependency is a plain
-/// workspace dependency of the adapter's crate — no feature gate may hide
-/// the adapter (a cfg-gated build_archive_store would silently drop the cold
-/// store from default builds).
+/// AC4's "compiles unconditionally": the mongodb dependency is a plain,
+/// non-optional workspace dependency of the adapter's crate — no feature
+/// gate may hide the adapter (a cfg-gated build_archive_store would silently
+/// drop the cold store from default builds). Other private deps may carry
+/// their own gates (harxes-core needs one for deploy-key-less builds, #838),
+/// but none of them may ever name mongodb.
 #[test]
 fn the_mongodb_dependency_is_not_hidden_behind_a_feature_gate() {
     let cargo = flat(&read("crates/infrastructure/Cargo.toml"));
     assert!(
-        cargo.contains("mongodb.workspace=true"),
-        "the adapter's crate must depend on mongodb unconditionally"
+        cargo.contains("mongodb.workspace=true")
+            && !cargo.contains("mongodb.workspace=true,optional=true")
+            && !cargo.contains("mongodb={"),
+        "the adapter's crate must depend on mongodb unconditionally — never \
+         `optional = true` (AC4)"
     );
-    assert!(
-        !cargo.contains("[features]"),
-        "no [features] section may gate the mongo stack — the wiring must \
-         compile unconditionally (AC4)"
-    );
+    if let Some((_, rest)) = cargo.split_once("[features]") {
+        let features = rest
+            .split("[dependencies]")
+            .next()
+            .expect("`[dependencies]` closes the `[features]` section");
+        assert!(
+            !features.contains("mongodb"),
+            "no feature entry may name mongodb — the mongo stack must compile \
+             unconditionally, outside every gate (AC4); got [features]:{features}"
+        );
+    }
 }
 
 // --- red guards: the missing behaviour, pinned where it must be declared -----
