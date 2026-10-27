@@ -9,7 +9,12 @@ use std::path::Path;
 
 use serde_json::json;
 
-use super::http_tools::{apply_tool, tool_call_from_content, ToolCall};
+use std::time::Duration;
+
+use super::http_tools::{apply_tool, run_command, tool_call_from_content, ToolCall};
+
+/// Hard per-command timeout for the `run` tool.
+const RUN_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// System-prompt addendum that teaches the model the tool protocol. Appended to
 /// the role's own system prompt.
@@ -21,10 +26,12 @@ Available tools:\n\
 - read_file {path}: return the file's text.\n\
 - list_dir {path}: list a directory (\".\" for the workspace root).\n\
 - write_file {path, content}: create/overwrite a file with the FULL new content.\n\
+- run {cmd}: run a shell command in the workspace (e.g. build or tests) and see \
+its output + exit code; use it to verify your change.\n\
 - done {summary}: finish, summarising what you changed.\n\
 Paths are relative to the workspace; `..` and absolute paths are rejected. \
 Inspect before you edit, make the smallest change that implements the task, \
-then call done.";
+run the build/tests to check it, then call done.";
 
 /// One model turn's reply, as the injected chat callback returns it.
 pub(super) struct TurnReply {
@@ -110,7 +117,10 @@ where
             };
         }
 
-        let result = apply_tool(work_dir, &call);
+        let result = match &call {
+            ToolCall::Run { cmd } => run_command(work_dir, cmd, RUN_TIMEOUT).await,
+            other => apply_tool(work_dir, other),
+        };
         if matches!(call, ToolCall::WriteFile { .. }) && result.ok {
             wrote_any = true;
         }
@@ -204,6 +214,27 @@ mod tests {
         assert!(!out.done);
         assert!(!out.wrote_any);
         assert!(out.summary.contains("cap"), "{}", out.summary);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn loop_runs_a_command_and_feeds_the_output_back() {
+        let dir = std::env::temp_dir().join(format!("cox-http-loop-run-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = run_tool_loop(
+            scripted(vec![
+                "```json\n{\"tool\": \"run\", \"cmd\": \"echo built-ok\"}\n```",
+                "```json\n{\"tool\": \"done\", \"summary\": \"verified\"}\n```",
+            ]),
+            &dir,
+            "s",
+            "t",
+            12,
+        )
+        .await;
+        assert!(out.done);
+        assert!(out.transcript.contains("built-ok"), "{}", out.transcript);
+        assert!(out.transcript.contains("[tool ok]"), "{}", out.transcript);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
