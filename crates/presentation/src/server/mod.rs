@@ -714,6 +714,7 @@ pub async fn serve_full(
             get(|| async { ([("content-type", "font/woff2")], TABLER_WOFF2) }),
         )
         .route("/api/health", get(health))
+        .route("/api/ready", get(ready))
         .route("/api/openapi.json", get(openapi_ep))
         .route("/api/mcp", post(mcp_ep))
         .route("/api/app/latest", get(app_latest_ep))
@@ -1305,6 +1306,56 @@ async fn index() -> impl IntoResponse {
 
 async fn health() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION") }))
+}
+
+/// Readiness probe — unlike `/api/health` (a static `{status:ok}` stub that
+/// cannot tell a wedged hub from a healthy one), this actually TOUCHES the
+/// primary state backend with a bounded `current_version` query, so a hung or
+/// unreachable Postgres surfaces as `503` and the host-watchdog can act on a
+/// real signal instead of guessing a wedge from log-file mtime. Public and
+/// unauthenticated like `/api/health`; it discloses only up-vs-degraded (never
+/// the backend error, which could leak connection details), logging the detail
+/// server-side instead.
+async fn ready(State(state): State<AppState>) -> impl IntoResponse {
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+    // The system-chat store (Postgres when configured) is the always-present
+    // shared backend; a bounded read of a sentinel key exercises the live
+    // connection without touching real data. With no shared store (local-file
+    // fallback) there is no backend to be unready about → ready.
+    let Some(store) = state.syschat.store.clone() else {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "ready",
+                "version": env!("CARGO_PKG_VERSION"),
+                "backend": "file"
+            })),
+        )
+            .into_response();
+    };
+    let degraded = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({ "status": "degraded" })),
+    );
+    match tokio::time::timeout(PROBE_TIMEOUT, store.load("__readiness_probe__")).await {
+        Ok(Ok(_)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "ready",
+                "version": env!("CARGO_PKG_VERSION"),
+                "backend": "db"
+            })),
+        )
+            .into_response(),
+        Ok(Err(e)) => {
+            tracing::warn!("readiness: system-chat store probe failed: {e}");
+            degraded.into_response()
+        }
+        Err(_) => {
+            tracing::warn!("readiness: system-chat store probe timed out after {PROBE_TIMEOUT:?}");
+            degraded.into_response()
+        }
+    }
 }
 
 /// Run `bin args...` (no stdin), returning `(success, combined stdout+stderr)`.
