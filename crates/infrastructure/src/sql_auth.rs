@@ -601,6 +601,40 @@ impl AuthPort for SqlAuthService {
         }
     }
 
+    /// Passwordless session mint for SSO/OIDC — the IdP has already vouched for
+    /// the identity, so this mirrors `login`'s session persistence (no
+    /// credential check) for an existing user. `None` when the user is unknown.
+    async fn issue_session(&self, username: &str) -> Option<String> {
+        let client = self.client().await.ok()?;
+        let row = client
+            .query_opt(
+                "SELECT role FROM auth_users WHERE username = $1",
+                &[&username],
+            )
+            .await
+            .ok()
+            .flatten()?;
+        let role = role_from(&row.get::<_, String>(0));
+        let token = mint_token();
+        let at = now_rfc3339();
+        let projects = self.load_user_projects(username).await;
+        self.persist_session(&token, username, role, &at).await;
+        let session = Session {
+            user: AuthUser {
+                username: username.to_owned(),
+                name: String::new(),
+                email: String::new(),
+                role,
+                projects,
+            },
+            expires: Instant::now() + SESSION_TTL,
+            label: String::new(),
+            at,
+        };
+        self.sessions.lock().ok()?.insert(token.clone(), session);
+        Some(token)
+    }
+
     async fn attach_device(&self, token: &str, device: &str) {
         if let Ok(mut s) = self.sessions.lock() {
             if let Some(sess) = s.get_mut(token) {
