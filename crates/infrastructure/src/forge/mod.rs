@@ -3,6 +3,7 @@
 pub mod gh_api_forge;
 pub mod gh_forge;
 pub mod gl_forge;
+mod gl_types;
 
 pub use gh_api_forge::GhApiForge;
 pub use gh_forge::{parse_issue_json, GhForge};
