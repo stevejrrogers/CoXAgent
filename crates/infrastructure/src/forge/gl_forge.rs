@@ -5,7 +5,7 @@
 //! [`PullRequest`] shape the dashboard already speaks.
 
 use async_trait::async_trait;
-use coxagent_application::ports::outbound::{ForgePort, IssueDraft, PullRequest};
+use coxagent_application::ports::outbound::{ForgePort, IssueDraft, PrFeedback, PullRequest};
 use coxagent_application::PortError;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -130,6 +130,61 @@ fn ci_from_pipeline(mr: &RawMr) -> String {
         Some("failed" | "canceled" | "cancelled") => "failing".to_owned(),
         _ => "pending".to_owned(), // running / pending / created / manual / scheduled
     }
+}
+
+/// A note inside a merge-request discussion (`.../discussions` API).
+#[derive(serde::Deserialize)]
+struct RawNote {
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    author: RawAuthor,
+    #[serde(default)]
+    created_at: String,
+    /// Only review-thread notes are resolvable; plain comments and system
+    /// notes (branch pushed, assigned, …) are not.
+    #[serde(default)]
+    resolvable: bool,
+    #[serde(default)]
+    resolved: bool,
+    #[serde(default)]
+    system: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct RawDiscussion {
+    #[serde(default)]
+    notes: Vec<RawNote>,
+}
+
+/// Map GitLab MR discussions to outstanding review feedback: the first note of
+/// every thread that is resolvable, not resolved, and not a system note — i.e.
+/// a human review comment still awaiting a fix. GitLab's `resolved` flag is a
+/// truer "already addressed" signal than GitHub's commit-time heuristic, so
+/// there is no need to compare against the last push.
+fn feedback_from_discussions(json: &str) -> Result<Vec<PrFeedback>, PortError> {
+    let discussions: Vec<RawDiscussion> = serde_json::from_str(json)
+        .map_err(|e| PortError::Backend(format!("glab discussions parse: {e}")))?;
+    Ok(discussions
+        .into_iter()
+        .filter_map(|d| {
+            d.notes
+                .into_iter()
+                .find(|n| n.resolvable && !n.resolved && !n.system && !n.body.trim().is_empty())
+                .map(|n| PrFeedback {
+                    author: n.author.username,
+                    body: n.body,
+                    at: n.created_at,
+                })
+        })
+        .collect())
+}
+
+/// The `:id` path segment for a `group/name` repo in a `glab api` URL — the
+/// GitLab API takes the project path URL-encoded (only `/` needs escaping in a
+/// `group/subgroup/name` path).
+fn encoded_project(repo: &str) -> String {
+    repo.replace('/', "%2F")
 }
 
 /// One issue from `glab issue list -F json` (the GitLab API issue object).
@@ -284,12 +339,17 @@ impl ForgePort for GlForge {
         self.issues("--closed", limit).await
     }
 
-    // `pr_feedback` is intentionally left as the trait default (empty) for now:
-    // GitLab's review model is discussion threads + approval rules, not
-    // GitHub's CHANGES_REQUESTED review verb, so a faithful "unaddressed change
-    // request since the last push" mapping needs the discussions API and is a
-    // separate slice. Returning empty keeps the review loop correct (no false
-    // feedback) rather than guessing.
+    async fn pr_feedback(&self, number: u64) -> Result<Vec<PrFeedback>, PortError> {
+        // GitLab has no CHANGES_REQUESTED review verb; its equivalent is an
+        // unresolved resolvable discussion thread. Pull the MR's discussions and
+        // surface each still-open review thread as feedback to address.
+        let path = format!(
+            "projects/{}/merge_requests/{number}/discussions?per_page=100",
+            encoded_project(&self.repo)
+        );
+        let json = self.glab(&["api", &path]).await?;
+        feedback_from_discussions(&json)
+    }
 }
 
 #[cfg(test)]
@@ -337,6 +397,42 @@ mod tests {
         let raw: RawIssue = serde_json::from_str(json).unwrap();
         let d: IssueDraft = raw.into();
         assert_eq!(d.labels, vec!["bug".to_owned()]);
+    }
+
+    #[test]
+    fn feedback_surfaces_only_unresolved_review_threads() {
+        // One open review thread, one resolved, one plain comment, one system
+        // note — only the first is outstanding feedback.
+        let json = r#"[
+          {"notes": [{"body": "fix the null deref", "author": {"username": "rev"},
+                      "created_at": "2026-07-14T10:00:00Z",
+                      "resolvable": true, "resolved": false, "system": false}]},
+          {"notes": [{"body": "ok now", "author": {"username": "rev"},
+                      "created_at": "2026-07-14T11:00:00Z",
+                      "resolvable": true, "resolved": true, "system": false}]},
+          {"notes": [{"body": "nice work", "author": {"username": "rev"},
+                      "created_at": "2026-07-14T12:00:00Z",
+                      "resolvable": false, "resolved": false, "system": false}]},
+          {"notes": [{"body": "changed target branch", "author": {"username": "system"},
+                      "created_at": "2026-07-14T13:00:00Z",
+                      "resolvable": true, "resolved": false, "system": true}]}
+        ]"#;
+        let fb = feedback_from_discussions(json).unwrap();
+        assert_eq!(fb.len(), 1);
+        assert_eq!(fb[0].author, "rev");
+        assert_eq!(fb[0].body, "fix the null deref");
+        assert_eq!(fb[0].at, "2026-07-14T10:00:00Z");
+    }
+
+    #[test]
+    fn empty_discussions_yield_no_feedback() {
+        assert!(feedback_from_discussions("[]").unwrap().is_empty());
+    }
+
+    #[test]
+    fn project_path_is_url_encoded_for_the_api() {
+        assert_eq!(encoded_project("group/sub/name"), "group%2Fsub%2Fname");
+        assert_eq!(encoded_project("flat"), "flat");
     }
 
     #[test]
