@@ -43,6 +43,7 @@ REPO="${COXAGENT_REPO:-$HOME/Projects/CoXAgent}"
 BUILD_SCRIPT="$REPO/scripts/build-macos-app.sh"
 REBUILD_LOCK="$HOME/CoXAgent/.watchdog-rebuild.lock"
 REBUILD_STALE_SECS="${COXAGENT_WATCHDOG_REBUILD_STALE_SECS:-2400}"   # 40 min
+DB_CONTAINER="${COXAGENT_DB_CONTAINER:-cxa-backend-db-1}"
 
 log(){ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*" >>"$WD_LOG"; }
 
@@ -86,6 +87,36 @@ PY
   [ "$cur" = "running" ] && return 0
   docker exec -e REDISCLI_AUTH="$pw" cxa-backend-redis-1 redis-cli --no-auth-warning SET "cox:cxa:desired:$HOST_ID" running >/dev/null 2>&1 \
     && log "restored redis desired=running (was '${cur:-unreachable}')"
+}
+
+# Best-effort count of tickets an agent is actively working (status
+# in_progress) across projects, read straight from Postgres. Tells a BUSY hub
+# (a long agent run logs nothing for many minutes) from a genuinely wedged one,
+# so the idle-wedge restart never kills in-flight DEV work. Any failure (no
+# docker, no DB container, unparseable DSN) echoes 0 → the caller falls back to
+# the plain silence-threshold decision, so this only ever ADDS safety. The
+# password travels via PGPASSWORD env, never argv.
+hub_is_working(){
+  local creds user pw db n
+  creds=$(/usr/bin/python3 - "$COORD" <<'PY'
+import json, re, sys
+try:
+    dsn = json.load(open(sys.argv[1])).get("db_dsn", "")
+    m = re.match(r'^\w+://([^:]+):([^@]+)@[^/]+/([^?]+)', dsn)
+    print(f"{m.group(1)}\t{m.group(2)}\t{m.group(3)}" if m else "")
+except Exception:
+    print("")
+PY
+)
+  [ -n "$creds" ] || { echo 0; return; }
+  user=$(printf '%s' "$creds" | cut -f1)
+  pw=$(printf '%s' "$creds" | cut -f2)
+  db=$(printf '%s' "$creds" | cut -f3)
+  n=$(docker exec -e PGPASSWORD="$pw" "$DB_CONTAINER" \
+        psql -U "$user" -d "$db" -tAc \
+        "select count(*) from project_state, jsonb_array_elements(data->'tickets') t where t->>'status'='in_progress'" \
+        2>/dev/null | tr -dc '0-9')
+  echo "${n:-0}"
 }
 
 # Wait up to ~90s for the hub to answer health after a (re)launch.
@@ -184,6 +215,21 @@ now=$(date +%s)
 mtime=$(stat -f %m "$HUB_LOG" 2>/dev/null || echo "$now")
 age=$(( now - mtime ))
 [ "$age" -lt "$SILENT_SECS" ] && exit 0
+
+# A long agent run logs nothing for many minutes and looks identical to
+# silence. If the hub is POSITIVELY still working (a ticket is in_progress) and
+# the silence is not yet absurd, DEFER — restarting would kill the in-flight
+# DEV run and bounce its ticket back to open (observed 2026-10-27 11:36Z).
+# Bounded at 2× the threshold so a genuinely stuck claim still gets the hub
+# restarted eventually; an unknown count (0) falls through to the restart, so
+# wedge detection is preserved when the DB itself is the problem.
+if [ "$age" -lt "$(( SILENT_SECS * 2 ))" ]; then
+  working=$(hub_is_working)
+  if [ "${working:-0}" -gt 0 ] 2>/dev/null; then
+    log "idle-wedge DEFERRED: hub.log silent ${age}s but ${working} ticket(s) in_progress — a busy agent run, not a wedge"
+    exit 0
+  fi
+fi
 
 log "WEDGE SUSPECTED: health ok but hub.log silent for ${age}s — running playbook"
 
