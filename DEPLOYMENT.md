@@ -135,6 +135,39 @@ Chart layout mirrors the target architecture:
 | `COXAGENT_MONGO_URL/DB` | Docs store (optional) |
 | `COXAGENT_ADMIN_USER/PASSWORD` | First-run Super Admin bootstrap |
 | `COXAGENT_OPERATOR` | Headless runner identity (`name@host` attribution) |
+| `COXAGENT_OIDC_*` | Optional SSO — see below (all unset ⇒ SSO off, password login only) |
+
+## SSO / OIDC (optional)
+
+CoXAgent speaks standard OpenID Connect (authorization-code + PKCE). It is
+**off by default**: with none of the variables below set, `/api/auth/oidc/login`
+and `/api/auth/oidc/callback` return `404` and only password login is offered,
+so an existing deployment is unchanged until an operator turns SSO on.
+
+| Var | Required | Purpose |
+|---|---|---|
+| `COXAGENT_OIDC_ISSUER` | yes | IdP issuer URL; endpoints + JWKS are auto-discovered from `<issuer>/.well-known/openid-configuration` |
+| `COXAGENT_OIDC_CLIENT_ID` | yes | OAuth client id registered with the IdP |
+| `COXAGENT_OIDC_CLIENT_SECRET` | yes | OAuth client secret (keep it in `.env`, never commit) |
+| `COXAGENT_OIDC_REDIRECT_URI` | yes | Must exactly match the IdP registration, e.g. `https://<domain>/api/auth/oidc/callback` |
+| `COXAGENT_OIDC_GROUP_CLAIM` | no | id-token claim carrying group names (default `groups`) |
+
+Setting all four required vars enables SSO. Point your IdP's redirect/callback
+at `…/api/auth/oidc/callback` and send users to `…/api/auth/oidc/login`.
+
+**Flow.** `login` mints `state`/`nonce`/PKCE and redirects to the IdP;
+`callback` validates the one-time `state` (unknown or older than 10 min ⇒ `400`),
+exchanges the code with the PKCE verifier, and verifies the id-token signature
+(RS256 against the IdP JWKS) plus `iss`/`aud`/`exp`/`nbf`/`nonce` — any failure
+⇒ `401`. On success the user is provisioned/refreshed just-in-time and a normal
+hub session cookie is issued.
+
+**Role mapping.** The user's role comes from the group claim: each group label
+is matched leniently (case- and punctuation-insensitive, e.g. `tech.lead` →
+TechLead, `Super Admin` → Super) against the hub role names, and the
+**most-privileged** matching group wins. A user with no recognised group gets
+`Viewer` (least privilege). Username is the id-token `email`, falling back to
+`sub`.
 
 ## MCP (connect agents & IDE clients)
 
