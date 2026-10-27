@@ -15,6 +15,11 @@
 # team, so a single transient blip (a slow pg_isready, a GC pause) must never
 # trigger a restart.
 set -u
+# launchd (KeepAlive, install-autoheal.sh) runs us with a minimal PATH that
+# omits Homebrew and Docker's CLI dir, so bare `docker` was "command not found"
+# and the stack-restart silently no-op'd (observed 2026-10-27). Prepend the
+# usual locations so `docker` is found however we are launched.
+export PATH="/opt/homebrew/bin:/usr/local/bin:/Applications/Docker.app/Contents/Resources/bin:$PATH"
 
 DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$DEPLOY_DIR/.env"
