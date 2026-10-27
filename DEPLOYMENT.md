@@ -219,6 +219,50 @@ env vars above. Split deployments require Redis (`cox:events`) and an LB that
 sends `/…/ws`, `/…/events`, `/…/terminal` to realtime pods — everything else to
 gateway pods. Start with `cox-all`; split only when load asks for it.
 
+## High availability & failover
+
+CoXAgent runs active/standby with **no manual failover step** — the mechanics
+are already in the product; this is how to deploy and reason about them.
+
+**State is external.** Postgres holds the authoritative project state, accounts,
+and audit trail; Redis holds coordination + the `cox:events` bus; S3/Mongo hold
+blobs/docs. No node holds authoritative state, so **any node can be lost without
+data loss** (RPO 0 for committed state — back Postgres up per *Local backing
+services* above; Redis is TTL data, safe to lose).
+
+**Control plane is stateless — scale it horizontally.** Run two or more full
+nodes (`cox-all`, or the split role binaries) against the *same* managed
+Postgres + Redis, behind a load balancer health-checking `GET /api/ready` (live
+readiness) / `GET /api/health`. Standby nodes serve reads immediately; there is
+no cold spare to promote. `hub.replicas > 1` is valid only with the Redis bus
+(the Helm chart enforces this), since cross-node events flow over `cox:events`.
+
+**Single-writer ceremonies use a Redis lease — automatic, split-brain-free.**
+Work that must happen exactly once (advancing the project cycle counter,
+scrum/BA ceremonies) is gated by an atomic, single-winner leader lease at
+`cox:<project>:leader` with a **90 s TTL**. Exactly one node holds it at a time;
+if that node dies, the lease expires and another node acquires it on its next
+cycle — **leader failover within ~90 s**, no coordination service beyond Redis,
+no split brain (the lease is a compare-and-set, not an advisory flag).
+
+**Per-ticket work distributes across runner nodes** via stage leases
+(`cox:<project>:stage:<ticket>:<stage>`, **30 min TTL**): multiple runners pick
+up different tickets without collision, and a crashed runner's in-flight ticket
+is reclaimed when its stage lease expires (or sooner — a restarting hub runs
+orphaned-claim recovery). The live roster is worker-presence keys (10 min TTL).
+
+**Per-node self-healing** (single-box deployments) is covered by the
+host-watchdog (every 5 min) + autoheal LaunchAgents — see *Local backing
+services* and `deploy/install-*.sh`. In a multi-node cluster the LB + lease
+handle node loss; the watchdog is belt-and-suspenders for a box that stays up
+but wedges.
+
+**Recovery objectives**: leader failover ≤ 90 s; in-flight ticket reclaim
+≤ 30 min (usually seconds, on hub restart); reads stay available as long as one
+node + Postgres + Redis are up. Runner nodes additionally need their engine CLIs
+(`claude`/`opencode`), git and the docker CLI on-image — set `runner.enabled`
+per node so only equipped nodes run the execution plane.
+
 ## Upgrade & rollback
 
 - The hub is safe to restart at any time: sessions persist, runners re-attach,
