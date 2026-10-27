@@ -24,7 +24,17 @@ HUB_LOG="${COXAGENT_HUB_LOG:-$HOME/CoXAgent/hub.log}"
 WD_LOG="${COXAGENT_WATCHDOG_LOG:-$HOME/CoXAgent/watchdog.log}"
 APP="${COXAGENT_APP:-$HOME/Projects/CoXAgent/desktop/build/CoXAgent.app}"
 PORT="${COXAGENT_PORT:-4000}"
-SILENT_SECS="${COXAGENT_WATCHDOG_SILENT_SECS:-2100}"   # 35 min
+# 90 min. The idle-wedge signal is hub.log mtime, but a single long agent run
+# (harxes world-scan / resume-on-cap, which can run 30-40 min emitting nothing)
+# looks identical to silence — at 35 min the watchdog RESTARTED a hub that was
+# busy mid-run, killing the in-flight DEV work and bouncing its ticket back to
+# open (observed 2026-10-27 11:36Z: "silent for 2247s" → restart → in_progress
+# 3→0, fixed flat). 90 min clears every legitimate run; a true env/redis wedge
+# still recovers (just later), and a vanished PROCESS is still caught fast by
+# the hard-down path above. PROPER follow-up: expose a worker-heartbeat /
+# cycle-progress signal via /api/ready and key the wedge check on THAT instead
+# of raw log mtime, so a busy hub is never mistaken for a wedged one.
+SILENT_SECS="${COXAGENT_WATCHDOG_SILENT_SECS:-5400}"   # 90 min
 DOWN_DEBOUNCE_SECS="${COXAGENT_WATCHDOG_DOWN_DEBOUNCE_SECS:-15}"
 OPENCODE_JSONC="$HOME/.config/opencode/opencode.jsonc"
 COORD="$HOME/CoXAgent/coordination.json"
