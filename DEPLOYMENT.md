@@ -164,11 +164,20 @@ How it runs, by role:
   chat completion — the reply is the result.
 - **Coding roles** (DEV-BUG/DEV-FEATURE) get an agentic **tool loop**: the model
   inspects and edits the workspace through `read_file` / `list_dir` /
-  `write_file` / `done`, up to 12 turns, with every path confined to the
-  workspace (absolute paths and `..` are rejected). It writes **full-file**
-  content, so it is best suited to focused, few-file edits; for large multi-file
-  refactors a CLI engine (`claude`/`opencode`) or `harxes` is still the stronger
-  choice. The run's transcript is kept in the activity trace.
+  `write_file` / `run` / `done`, up to 12 turns, with every file path confined
+  to the workspace (absolute paths and `..` are rejected). `run` executes a
+  shell command in the workspace (build/tests) with a 120 s timeout and capped
+  output, so the model can verify its own change before finishing. It writes
+  **full-file** content, so it is best suited to focused, few-file edits; for
+  large multi-file refactors a CLI engine (`claude`/`opencode`) or `harxes` is
+  still the stronger choice. The run's transcript is kept in the activity trace.
+
+  **Safety note**: unlike the CLI engines (which can apply a seatbelt/bwrap
+  sandbox), the `http` loop runs `write_file`/`run` **unsandboxed** — commands
+  execute directly with the workspace as cwd. Assigning `http` to a coding role
+  is the opt-in; run it where executing agent-authored code is already expected
+  (the runner node), not against a trusted checkout you would not hand to any
+  other coding engine.
 
 ## SSO / OIDC (optional)
 
