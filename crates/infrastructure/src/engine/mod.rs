@@ -8,6 +8,7 @@ pub mod failover;
 pub mod harxes;
 pub mod hermes;
 pub mod http_engine;
+pub mod http_tools;
 pub(crate) mod live;
 pub mod metering;
 pub mod mock;
