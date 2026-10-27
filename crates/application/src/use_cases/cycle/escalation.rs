@@ -359,6 +359,39 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         .await;
     }
 
+    /// Repair any BUG stranded in a feature-only status (`Ready`/`Pending`/
+    /// `Done`/`Documented`) by resetting it to `Open` — see
+    /// [`coxagent_domain::Ticket::reclaim_misfiled`]. Such a bug is reachable
+    /// by no dispatcher (the bug lane pulls `Open`, the feature lane pulls
+    /// features), so once it is sprint-committed the sprint can never complete
+    /// and the whole team freezes (observed live 2026-10-27: CXA-B159/B160/B161
+    /// `Ready` in sprint #656, zero dispatch for hours). Runs every cycle;
+    /// cheap — a no-op unless a misfiled bug exists. `mutate_state` reloads and
+    /// re-applies on a concurrent-writer conflict, so the repair is not lost to
+    /// the race that abandoned other lanes.
+    pub(super) async fn reclaim_misfiled_bugs(&self) {
+        let mut reclaimed: Vec<String> = Vec::new();
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            reclaimed.clear(); // FnMut re-runs on conflict — count one attempt only
+            for t in &mut s.tickets {
+                if t.reclaim_misfiled(coxagent_domain::Role::System)
+                    .unwrap_or(false)
+                {
+                    reclaimed.push(t.id().to_string());
+                }
+            }
+            Ok(())
+        })
+        .await;
+        if !reclaimed.is_empty() {
+            tracing::warn!(
+                "reclaimed {} bug(s) stranded in a feature-only status → Open: {}",
+                reclaimed.len(),
+                reclaimed.join(", ")
+            );
+        }
+    }
+
     pub(super) async fn sm_unpark_tickets(&self) {
         let candidates: Vec<(String, String)> = {
             let Ok(state) = self.store.load().await else {
