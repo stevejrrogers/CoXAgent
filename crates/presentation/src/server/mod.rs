@@ -717,6 +717,7 @@ pub async fn serve_full(
         .route("/api/health", get(health))
         .route("/api/ready", get(ready))
         .route("/api/auth/oidc/login", get(oidc_routes::oidc_login))
+        .route("/api/auth/oidc/callback", get(oidc_routes::oidc_callback))
         .route("/api/openapi.json", get(openapi_ep))
         .route("/api/mcp", post(mcp_ep))
         .route("/api/app/latest", get(app_latest_ep))
