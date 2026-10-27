@@ -10,8 +10,10 @@
 //! [`verify_id_token`] is pure given the keys, so the security-critical path is
 //! unit-tested end to end with a real RS256 vector.
 
-use base64::decode_config;
+use base64::{decode_config, encode_config};
+use ring::rand::{SecureRandom, SystemRandom};
 use ring::signature::{RsaPublicKeyComponents, RSA_PKCS1_2048_8192_SHA256};
+use ring::digest;
 use serde::Deserialize;
 
 use coxagent_application::oidc::OidcConfig;
@@ -44,6 +46,18 @@ struct Jwks {
 #[derive(Deserialize)]
 struct Discovery {
     jwks_uri: String,
+    #[serde(default)]
+    authorization_endpoint: String,
+    #[serde(default)]
+    token_endpoint: String,
+}
+
+/// The IdP endpoints the login flow needs, from the discovery document.
+#[derive(Debug, Clone)]
+pub struct OidcEndpoints {
+    pub authorization_endpoint: String,
+    pub token_endpoint: String,
+    pub jwks_uri: String,
 }
 
 fn b64u(s: &str) -> Result<Vec<u8>, String> {
@@ -198,6 +212,103 @@ pub async fn fetch_jwks(issuer: &str) -> Result<Vec<Jwk>, String> {
     Ok(jwks.keys)
 }
 
+/// Fetch the IdP's authorize/token/jwks endpoints from its discovery document.
+///
+/// # Errors
+/// A string when the HTTP fetch or JSON parse fails.
+pub async fn fetch_endpoints(issuer: &str) -> Result<OidcEndpoints, String> {
+    let disco_url = format!(
+        "{}/.well-known/openid-configuration",
+        issuer.trim_end_matches('/')
+    );
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("oidc http client: {e}"))?;
+    let disco: Discovery = client
+        .get(&disco_url)
+        .send()
+        .await
+        .map_err(|e| format!("oidc discovery: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("oidc discovery json: {e}"))?;
+    Ok(OidcEndpoints {
+        authorization_endpoint: disco.authorization_endpoint,
+        token_endpoint: disco.token_endpoint,
+        jwks_uri: disco.jwks_uri,
+    })
+}
+
+/// A URL-safe random token (256 bits, base64url) for `state`, `nonce`, and the
+/// PKCE verifier.
+///
+/// # Errors
+/// A string if the system RNG fails (effectively never).
+pub fn random_token() -> Result<String, String> {
+    let mut buf = [0u8; 32];
+    SystemRandom::new()
+        .fill(&mut buf)
+        .map_err(|_| "oidc: system RNG failure".to_owned())?;
+    Ok(encode_config(buf, base64::URL_SAFE_NO_PAD))
+}
+
+/// The PKCE S256 code challenge for a verifier: base64url(SHA256(verifier)).
+#[must_use]
+pub fn pkce_challenge(verifier: &str) -> String {
+    let d = digest::digest(&digest::SHA256, verifier.as_bytes());
+    encode_config(d.as_ref(), base64::URL_SAFE_NO_PAD)
+}
+
+/// Percent-encode a query-parameter value (RFC 3986 unreserved pass through).
+fn pct(s: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                let _ = write!(out, "%{b:02X}");
+            }
+        }
+    }
+    out
+}
+
+/// Build the IdP authorization-code + PKCE redirect URL.
+#[must_use]
+pub fn authorize_url(
+    authorization_endpoint: &str,
+    cfg: &OidcConfig,
+    state: &str,
+    nonce: &str,
+    code_challenge: &str,
+) -> String {
+    let params = [
+        ("response_type", "code"),
+        ("client_id", cfg.client_id.as_str()),
+        ("redirect_uri", cfg.redirect_uri.as_str()),
+        ("scope", "openid email profile groups"),
+        ("state", state),
+        ("nonce", nonce),
+        ("code_challenge", code_challenge),
+        ("code_challenge_method", "S256"),
+    ];
+    let qs = params
+        .iter()
+        .map(|(k, v)| format!("{k}={}", pct(v)))
+        .collect::<Vec<_>>()
+        .join("&");
+    let sep = if authorization_endpoint.contains('?') {
+        "&"
+    } else {
+        "?"
+    };
+    format!("{authorization_endpoint}{sep}{qs}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,5 +412,49 @@ mod tests {
             verify_id_token(TOKEN, &cfg(), &other, NOW, None).unwrap_err(),
             "id-token: no matching JWKS key"
         );
+    }
+
+    #[test]
+    fn pkce_challenge_matches_the_rfc7636_vector() {
+        // RFC 7636 Appendix B.
+        assert_eq!(
+            pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+    }
+
+    #[test]
+    fn random_token_is_unique_and_url_safe() {
+        let a = random_token().unwrap();
+        let b = random_token().unwrap();
+        assert_ne!(a, b);
+        // base64url(32 bytes) with no padding = 43 chars, all URL-safe.
+        assert_eq!(a.len(), 43);
+        assert!(a.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'));
+    }
+
+    #[test]
+    fn authorize_url_carries_the_pkce_and_oidc_params() {
+        let url = authorize_url(
+            "https://idp.test/authorize",
+            &cfg(),
+            "state123",
+            "nonce123",
+            "chal123",
+        );
+        assert!(url.starts_with("https://idp.test/authorize?"));
+        assert!(url.contains("response_type=code"));
+        assert!(url.contains("client_id=client123"));
+        assert!(url.contains("code_challenge=chal123"));
+        assert!(url.contains("code_challenge_method=S256"));
+        assert!(url.contains("state=state123"));
+        // redirect_uri is percent-encoded (its ':' and '/').
+        assert!(url.contains("redirect_uri=https%3A%2F%2Fhub.test%2Fcb"));
+    }
+
+    #[test]
+    fn authorize_url_appends_with_ampersand_when_endpoint_has_a_query() {
+        let url = authorize_url("https://idp.test/authorize?foo=1", &cfg(), "s", "n", "c");
+        assert!(url.contains("/authorize?foo=1&response_type=code"));
     }
 }
