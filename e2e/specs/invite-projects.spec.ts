@@ -65,10 +65,28 @@ test('the chip checkbox is a styled form control matching the dialog fields', as
   const { picker } = await openInvite(page);
 
   const boxes = picker.locator('.uprojchk input[type="checkbox"]');
-  test.skip((await boxes.count()) === 0, 'no projects exist — chip row shows hint text instead');
 
-  const box = boxes.first();
-  // AC2: normalised, bordered square tick box — the unstyled native look
+  if ((await boxes.count()) > 0) {
+    await assertChipCheckbox(boxes.first());
+  } else {
+    // Empty registry still runs a real gate: the chip row shows plain hint
+    // text — no dot, no empty checkbox shell ever renders.
+    const html = await picker.innerHTML();
+    expect(html).not.toContain('sdot');
+    expect(html).not.toMatch(/<input[^>]*type="checkbox"/); // no empty tick shells
+    await expect(picker.locator('.usub')).toContainText(/No projects/i);
+  }
+
+  await assertNoConsoleErrors(errors);
+});
+
+/** AC2: the chip checkbox is a styled form control matching the dialog fields.
+ *  Runs only when the registry is non-empty; the console gate stays with the
+ *  calling test so both branches report against it. */
+async function assertChipCheckbox(
+  box: ReturnType<import('@playwright/test').Locator['first']>,
+) {
+  // Normalised, bordered square tick box — the unstyled native look
   // (default ~13px auto control, device-default chrome, no border token) is gone.
   const s = await box.evaluate((el) => {
     const c = getComputedStyle(el);
@@ -87,6 +105,4 @@ test('the chip checkbox is a styled form control matching the dialog fields', as
     el.closest('.uprojchk')!.classList.contains('uprojchk')
     && getComputedStyle(el.parentElement!).borderColor !== 'rgb(0, 0, 0)');
   expect(tinted).toBe(true);
-
-  await assertNoConsoleErrors(errors);
 });
