@@ -1,19 +1,27 @@
-//! Logical Postgres backups for the hub's databases.
+//! Logical database backups for the hub's external stores.
 //!
 //! `coxagent backup` archives the file-backed stores, but the AUTHORITATIVE
-//! data — project state, accounts — lives in Postgres, which that archive
-//! cannot capture (it only printed a "run pg_dump yourself" warning). This
-//! module dumps each configured DSN so one backup run protects the databases
-//! too. It tries a host `pg_dump` first (the standard product posture — the
-//! operator installs postgresql-client), then falls back to a `docker exec`
-//! into the DB container so a containerized deployment with no host client is
-//! still protected. If neither is available the caller gets a `Skipped` reason
-//! to log — a missing dump tool is never a hard failure of the whole backup.
+//! data — project state, accounts (Postgres), and wiki/docs pages (MongoDB) —
+//! lives in databases that archive cannot capture (it only printed a "run the
+//! dump tool yourself" warning). This module dumps each configured store so one
+//! backup run protects the databases too. Each dumper tries a host tool first
+//! (the standard product posture — the operator installs the client), then
+//! falls back to a `docker exec` into the store's container so a containerized
+//! deployment with no host client is still protected. If neither is available
+//! the caller gets a `Skipped` reason to log — a missing dump tool is never a
+//! hard failure of the whole backup.
 //!
-//! Secrets: the password reaches the child only through the `PGPASSWORD` env
-//! var — never on argv (which `ps` exposes). For `docker exec` that means
-//! `-e PGPASSWORD` with NO `=value` (docker forwards it from our environment).
-//! Dumps use pg_dump's custom format (`-Fc`), restorable with `pg_restore`.
+//! Secrets, Postgres: the password reaches the child only through the
+//! `PGPASSWORD` env var — never on argv (which `ps` exposes). For `docker exec`
+//! that means `-e PGPASSWORD` with NO `=value` (docker forwards it from our
+//! environment). Dumps use pg_dump's custom format (`-Fc`), restorable with
+//! `pg_restore`.
+//!
+//! Secrets, Mongo: `mongodump` has no `PGPASSWORD` equivalent, so when the URI
+//! carries a password the host path hands it to the child through a 0600
+//! `--config` file and puts the password-stripped URI on argv. Dumps use
+//! mongodump's gzipped `--archive` format, restorable with `mongorestore
+//! --gzip --archive=<file>`.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -148,6 +156,120 @@ pub async fn pg_dump(dsn: &str, out: &Path, container: Option<&str>) -> Result<D
     ))
 }
 
+/// The password from a `mongodb://user:pass@host/…` URI, if one is present and
+/// non-empty. `None` for an auth-less URI (`mongodb://host:port`).
+#[must_use]
+pub fn mongo_uri_password(uri: &str) -> Option<String> {
+    let after = uri.split("://").nth(1)?;
+    let (userinfo, _) = after.split_once('@')?;
+    let (_, pass) = userinfo.split_once(':')?;
+    (!pass.is_empty()).then(|| pass.to_owned())
+}
+
+/// Is a host `mongodump` on PATH?
+async fn host_mongodump_available() -> bool {
+    Command::new("mongodump")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .is_ok_and(|s| s.success())
+}
+
+/// Dump the Mongo database at `uri` to `out` as a gzipped `mongodump` archive.
+/// Host `mongodump` first, then `docker exec` into `container` if given.
+///
+/// # Errors
+/// Only when a dump path WAS available but the dump itself failed. A total
+/// absence of any dump path, or an unparseable URI, is `Ok(Skipped(..))`.
+pub async fn mongo_dump(
+    uri: &str,
+    out: &Path,
+    container: Option<&str>,
+) -> Result<DumpStatus, String> {
+    if uri.split("://").nth(1).is_none() {
+        return Ok(DumpStatus::Skipped("unparseable Mongo URI".to_owned()));
+    }
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+
+    // Path 1 — host mongodump. Keep any password off argv via a 0600 --config
+    // file; an auth-less URI needs none and goes straight on --uri.
+    if host_mongodump_available().await {
+        let mut cmd = Command::new("mongodump");
+        let cfg_guard = if let Some(pw) = mongo_uri_password(uri) {
+            let cfg = out.with_extension("dumpcfg");
+            write_mongo_config(&cfg, &pw)?;
+            cmd.arg(format!("--uri={}", strip_password(uri)));
+            cmd.arg(format!("--config={}", cfg.display()));
+            Some(cfg)
+        } else {
+            cmd.arg(format!("--uri={uri}"));
+            None
+        };
+        let status = cmd
+            .arg(format!("--archive={}", out.display()))
+            .arg("--gzip")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+        if let Some(cfg) = cfg_guard {
+            let _ = std::fs::remove_file(cfg); // the password must not linger on disk
+        }
+        let status = status.map_err(|e| format!("host mongodump: {e}"))?;
+        return if status.success() {
+            Ok(DumpStatus::Dumped(out.to_path_buf()))
+        } else {
+            let _ = std::fs::remove_file(out);
+            Err(format!("host mongodump exited {status}"))
+        };
+    }
+
+    // Path 2 — docker exec; mongodump writes the archive to stdout, captured
+    // into the host file. A host --config file is unreachable from inside the
+    // container, so the URI (auth-less in the standard local deployment) goes
+    // on argv, exposed only to processes within that container.
+    if let Some(c) = container {
+        let file =
+            std::fs::File::create(out).map_err(|e| format!("create {}: {e}", out.display()))?;
+        let status = Command::new("docker")
+            .args(["exec", c, "mongodump", &format!("--uri={uri}"), "--archive", "--gzip"])
+            .stdout(Stdio::from(file))
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .map_err(|e| format!("docker exec mongodump: {e}"))?;
+        return if status.success() {
+            Ok(DumpStatus::Dumped(out.to_path_buf()))
+        } else {
+            let _ = std::fs::remove_file(out);
+            Err(format!("docker exec mongodump exited {status}"))
+        };
+    }
+
+    Ok(DumpStatus::Skipped(
+        "no host mongodump and no Mongo container configured".to_owned(),
+    ))
+}
+
+/// Write a 0600 mongodump `--config` file carrying just the password (its only
+/// officially supported field), so the secret never touches argv.
+fn write_mongo_config(path: &Path, password: &str) -> Result<(), String> {
+    // Single-quote and escape for YAML; mongodump reads `password: <value>`.
+    let escaped = password.replace('\'', "''");
+    std::fs::write(path, format!("password: '{escaped}'\n"))
+        .map_err(|e| format!("write mongo config {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,6 +309,33 @@ mod tests {
         // An unparseable DSN can never dump → Skipped, never Err.
         let out = std::env::temp_dir().join("cox-db-dump-probe.dump");
         let st = pg_dump("garbage", &out, None).await.unwrap();
+        assert!(matches!(st, DumpStatus::Skipped(_)));
+    }
+
+    #[test]
+    fn mongo_password_only_when_present() {
+        assert_eq!(
+            mongo_uri_password("mongodb://u:s3cr3t@127.0.0.1:27017/db"),
+            Some("s3cr3t".to_owned())
+        );
+        // Auth-less local URI — the common case — has no password.
+        assert_eq!(mongo_uri_password("mongodb://127.0.0.1:27017"), None);
+        // Username but empty password is not a password.
+        assert_eq!(mongo_uri_password("mongodb://u:@host/db"), None);
+    }
+
+    #[test]
+    fn strip_password_handles_a_mongo_uri() {
+        assert_eq!(
+            strip_password("mongodb://u:p@127.0.0.1:27017/db"),
+            "mongodb://u@127.0.0.1:27017/db"
+        );
+    }
+
+    #[tokio::test]
+    async fn mongo_dump_skips_an_unparseable_uri() {
+        let out = std::env::temp_dir().join("cox-mongo-dump-probe.dump");
+        let st = mongo_dump("garbage", &out, None).await.unwrap();
         assert!(matches!(st, DumpStatus::Skipped(_)));
     }
 }
