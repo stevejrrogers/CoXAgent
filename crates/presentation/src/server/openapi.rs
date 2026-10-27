@@ -63,6 +63,7 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/app/download/:file", &["get"]),
     route("/api/app/latest", &["get"]),
     route("/api/audit-log", &["get"]),
+    route("/api/audit-log/verify", &["get"]),
     route("/api/auth/2fa/disable", &["post"]),
     route("/api/auth/2fa/enable", &["post"]),
     route("/api/auth/2fa/enroll", &["post"]),

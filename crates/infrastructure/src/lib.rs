@@ -6,6 +6,7 @@
 
 pub mod archive_memory;
 pub mod archive_mongo;
+pub mod audit_chain;
 pub mod audit_sink;
 pub mod auth;
 pub mod backup_archive;
