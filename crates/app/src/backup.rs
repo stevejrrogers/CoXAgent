@@ -352,6 +352,31 @@ async fn dump_databases(hub_dir: &Path, retention: usize) -> Vec<String> {
             Err(e) => out.push(format!("{label} database dump FAILED: {e}")),
         }
     }
+
+    // MongoDB (wiki/docs pages) — optional store, dumped only when configured.
+    if let Some(uri) = dsn_for(hub_dir, "mongo_url", "COXAGENT_MONGO_URL") {
+        use coxagent_infrastructure::db_dump::mongo_dump;
+        let mongo_container = std::env::var("COXAGENT_MONGO_CONTAINER")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "coxagent-mongo".to_owned());
+        let path = db_dir.join(format!("mongo-{stamp}.dump"));
+        match mongo_dump(&uri, &path, Some(&mongo_container)).await {
+            Ok(DumpStatus::Dumped(p)) => {
+                out.push(format!("dumped mongo database -> {}", p.display()));
+                let pruned = prune_db_dumps(&db_dir, "mongo", retention);
+                if pruned > 0 {
+                    out.push(format!(
+                        "pruned {pruned} old mongo dump(s) (retention: newest {retention})"
+                    ));
+                }
+            }
+            Ok(DumpStatus::Skipped(why)) => {
+                out.push(format!("mongo database NOT dumped: {why} — run mongodump manually"));
+            }
+            Err(e) => out.push(format!("mongo database dump FAILED: {e}")),
+        }
+    }
     out
 }
 
@@ -406,16 +431,11 @@ pub(crate) fn prune_archives(dir: &Path, keep: usize) -> usize {
 fn external_backend_warnings() -> Vec<String> {
     let configured = |key: &str| std::env::var(key).is_ok_and(|v| !v.trim().is_empty());
     let mut out = Vec::new();
-    // NB: COXAGENT_DB_DSN / COXAGENT_AUTH_DSN (Postgres) are no longer warned
-    // about here — `dump_databases` now pg_dumps them into backups/db/.
+    // NB: COXAGENT_DB_DSN / COXAGENT_AUTH_DSN (Postgres) and COXAGENT_MONGO_URL
+    // (Mongo) are no longer warned about here — `dump_databases` now dumps them
+    // into backups/db/ with pg_dump / mongodump.
     if configured("COXAGENT_REDIS_URL") {
         out.push("ephemeral leases in Redis (COXAGENT_REDIS_URL) — TTL data, safe to lose, but it is not in this archive".to_owned());
-    }
-    if configured("COXAGENT_MONGO_URL") {
-        out.push(
-            "wiki pages in MongoDB (COXAGENT_MONGO_URL) — back the database up with mongodump"
-                .to_owned(),
-        );
     }
     if configured("COXAGENT_REMOTE_STORE_URL") {
         out.push("project state behind a REST gateway (COXAGENT_REMOTE_STORE_URL) — back the gateway's own store up".to_owned());
