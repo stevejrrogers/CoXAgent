@@ -594,6 +594,7 @@ version = "2.23.0"
 dependencies = [
  "argon2",
  "async-trait",
+ "base64 0.13.1",
  "coxagent-application",
  "coxagent-domain",
  "deadpool-postgres",
@@ -605,6 +606,7 @@ dependencies = [
  "rand 0.8.7",
  "redis",
  "reqwest",
+ "ring",
  "rustls 0.23.42",
  "rustls-pemfile 2.2.0",
  "serde",

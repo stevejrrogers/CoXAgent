@@ -408,21 +408,51 @@ async fn the_mongo_env_contract_the_archive_must_match_answers_none_without_a_ur
 }
 
 /// AC4's "compiles unconditionally": the mongodb dependency is a plain
-/// workspace dependency of the adapter's crate — no feature gate may hide
-/// the adapter (a cfg-gated build_archive_store would silently drop the cold
-/// store from default builds).
+/// workspace dependency of the adapter's crate — nothing may gate the mongo
+/// stack (a cfg-gated build_archive_store would silently drop the cold store
+/// from default builds). Since #838 the crate DOES carry a legitimate
+/// `[features]` section (the private harxes-core git dep), so the guard pins
+/// exactly what AC4 states rather than banning the section wholesale:
+/// mongodb stays unconditional (never `optional`) and no feature ever
+/// references it.
 #[test]
 fn the_mongodb_dependency_is_not_hidden_behind_a_feature_gate() {
     let cargo = flat(&read("crates/infrastructure/Cargo.toml"));
     assert!(
-        cargo.contains("mongodb.workspace=true"),
+        cargo.contains(MONGODB_DECL),
         "the adapter's crate must depend on mongodb unconditionally"
     );
+    // Scan FORWARD from the needle only: the rest of mongodb's own entry (up
+    // to the next section header) must not flip it to optional. Backwards
+    // scanning would wrongly attribute other dependencies' flags (e.g. the
+    // gated harxes-core above), which are legitimately allowed.
+    let at = cargo.find(MONGODB_DECL).unwrap();
+    let tail = &cargo[at + MONGODB_DECL.len()..];
+    let entry = &tail[..tail.find('[').unwrap_or(tail.len())];
     assert!(
-        !cargo.contains("[features]"),
-        "no [features] section may gate the mongo stack — the wiring must \
+        !entry.contains("optional=true"),
+        "mongodb must not be an optional dependency — the wiring must \
          compile unconditionally (AC4)"
     );
+    if let Some(features) = features_section(&cargo) {
+        assert!(
+            !features.contains("mongodb"),
+            "no feature may reference mongodb — the wiring must compile \
+             unconditionally (AC4); harxes-style gates stay allowed"
+        );
+    }
+}
+
+const MONGODB_DECL: &str = "mongodb.workspace=true";
+
+/// The flattened text between `[features]` and the next section header, if a
+/// `[features]` section exists at all.
+fn features_section(flat_cargo: &str) -> Option<&str> {
+    const HEADER: &str = "[features]";
+    let start = flat_cargo.find(HEADER)?;
+    let rest = &flat_cargo[start + HEADER.len()..];
+    let end = rest.find('[').unwrap_or(rest.len());
+    Some(&rest[..end])
 }
 
 // --- red guards: the missing behaviour, pinned where it must be declared -----
