@@ -6,10 +6,12 @@
 
 pub mod archive_memory;
 pub mod archive_mongo;
+pub mod audit_chain;
 pub mod audit_sink;
 pub mod auth;
 pub mod backup_archive;
 pub mod cleanup;
+pub mod db_dump;
 pub mod deploy;
 pub mod deps_discovery;
 pub mod docs_store;
@@ -18,6 +20,7 @@ pub mod forge;
 pub mod git;
 pub mod kv_doc;
 pub mod notifier;
+pub mod oidc_auth;
 pub mod outbox;
 mod pg;
 pub mod pr_report;

@@ -135,6 +135,83 @@ Chart layout mirrors the target architecture:
 | `COXAGENT_MONGO_URL/DB` | Docs store (optional) |
 | `COXAGENT_ADMIN_USER/PASSWORD` | First-run Super Admin bootstrap |
 | `COXAGENT_OPERATOR` | Headless runner identity (`name@host` attribution) |
+| `COXAGENT_OIDC_*` | Optional SSO — see below (all unset ⇒ SSO off, password login only) |
+| `COXAGENT_LLM_BASE_URL` / `COXAGENT_LLM_API_KEY` | Endpoint + key for the `http` engine — see *Agent engines* |
+
+## Agent engines
+
+Each role runs on an **engine**, chosen in `coxagent.json`'s `engine` block (a
+`default` plus `per_role` overrides) or from the dashboard — expensive models
+for DEV/SA, cheap ones for BA/DOCS. Most engines wrap a vendor CLI the runner
+node must carry (`claude`, `opencode`, `gemini`, `codex`, `copilot`); `harxes`
+is in-process.
+
+**`http` — any OpenAI-compatible gateway (no CLI).** Set a role's engine to
+`"http"` and its `model` to the gateway's model id; point the hub at the
+endpoint with `COXAGENT_LLM_BASE_URL` (default `https://api.openai.com/v1`) and
+`COXAGENT_LLM_API_KEY`. It calls `POST {base}/chat/completions` (key via
+`Authorization: Bearer`), so it works with OpenAI, Azure OpenAI, vLLM, LiteLLM,
+OpenRouter, a local llama.cpp server, or any compatible proxy — no vendor binary
+on the host.
+
+```json
+{ "engine": { "per_role": { "ba": { "engine": "http", "model": "gpt-4o-mini" } } } }
+```
+
+How it runs, by role:
+
+- **Text roles** (BA/PO/SM/SA planning, chat replies, review, docs) get a single
+  chat completion — the reply is the result.
+- **Coding roles** (DEV-BUG/DEV-FEATURE) get an agentic **tool loop**: the model
+  inspects and edits the workspace through `read_file` / `list_dir` /
+  `write_file` / `patch_file` / `run` / `done`, up to 12 turns, with every file
+  path confined to the workspace (absolute paths and `..` are rejected).
+  `patch_file` replaces a unique `find` string with `replace` for surgical edits
+  to large files (full-file `write_file` is still available). `run` executes a
+  shell command in the workspace (build/tests) with a 120 s timeout and capped
+  output, so the model can verify its own change before finishing. It writes
+  **full-file** content, so it is best suited to focused, few-file edits; for
+  large multi-file refactors a CLI engine (`claude`/`opencode`) or `harxes` is
+  still the stronger choice. The run's transcript is kept in the activity trace.
+
+  **Safety note**: unlike the CLI engines (which can apply a seatbelt/bwrap
+  sandbox), the `http` loop runs `write_file`/`run` **unsandboxed** — commands
+  execute directly with the workspace as cwd. Assigning `http` to a coding role
+  is the opt-in; run it where executing agent-authored code is already expected
+  (the runner node), not against a trusted checkout you would not hand to any
+  other coding engine.
+
+## SSO / OIDC (optional)
+
+CoXAgent speaks standard OpenID Connect (authorization-code + PKCE). It is
+**off by default**: with none of the variables below set, `/api/auth/oidc/login`
+and `/api/auth/oidc/callback` return `404` and only password login is offered,
+so an existing deployment is unchanged until an operator turns SSO on.
+
+| Var | Required | Purpose |
+|---|---|---|
+| `COXAGENT_OIDC_ISSUER` | yes | IdP issuer URL; endpoints + JWKS are auto-discovered from `<issuer>/.well-known/openid-configuration` |
+| `COXAGENT_OIDC_CLIENT_ID` | yes | OAuth client id registered with the IdP |
+| `COXAGENT_OIDC_CLIENT_SECRET` | yes | OAuth client secret (keep it in `.env`, never commit) |
+| `COXAGENT_OIDC_REDIRECT_URI` | yes | Must exactly match the IdP registration, e.g. `https://<domain>/api/auth/oidc/callback` |
+| `COXAGENT_OIDC_GROUP_CLAIM` | no | id-token claim carrying group names (default `groups`) |
+
+Setting all four required vars enables SSO. Point your IdP's redirect/callback
+at `…/api/auth/oidc/callback` and send users to `…/api/auth/oidc/login`.
+
+**Flow.** `login` mints `state`/`nonce`/PKCE and redirects to the IdP;
+`callback` validates the one-time `state` (unknown or older than 10 min ⇒ `400`),
+exchanges the code with the PKCE verifier, and verifies the id-token signature
+(RS256 against the IdP JWKS) plus `iss`/`aud`/`exp`/`nbf`/`nonce` — any failure
+⇒ `401`. On success the user is provisioned/refreshed just-in-time and a normal
+hub session cookie is issued.
+
+**Role mapping.** The user's role comes from the group claim: each group label
+is matched leniently (case- and punctuation-insensitive, e.g. `tech.lead` →
+TechLead, `Super Admin` → Super) against the hub role names, and the
+**most-privileged** matching group wins. A user with no recognised group gets
+`Viewer` (least privilege). Username is the id-token `email`, falling back to
+`sub`.
 
 ## MCP (connect agents & IDE clients)
 
@@ -185,6 +262,50 @@ Config is env-only for the role binaries: `COXAGENT_REGISTRY` (default
 env vars above. Split deployments require Redis (`cox:events`) and an LB that
 sends `/…/ws`, `/…/events`, `/…/terminal` to realtime pods — everything else to
 gateway pods. Start with `cox-all`; split only when load asks for it.
+
+## High availability & failover
+
+CoXAgent runs active/standby with **no manual failover step** — the mechanics
+are already in the product; this is how to deploy and reason about them.
+
+**State is external.** Postgres holds the authoritative project state, accounts,
+and audit trail; Redis holds coordination + the `cox:events` bus; S3/Mongo hold
+blobs/docs. No node holds authoritative state, so **any node can be lost without
+data loss** (RPO 0 for committed state — back Postgres up per *Local backing
+services* above; Redis is TTL data, safe to lose).
+
+**Control plane is stateless — scale it horizontally.** Run two or more full
+nodes (`cox-all`, or the split role binaries) against the *same* managed
+Postgres + Redis, behind a load balancer health-checking `GET /api/ready` (live
+readiness) / `GET /api/health`. Standby nodes serve reads immediately; there is
+no cold spare to promote. `hub.replicas > 1` is valid only with the Redis bus
+(the Helm chart enforces this), since cross-node events flow over `cox:events`.
+
+**Single-writer ceremonies use a Redis lease — automatic, split-brain-free.**
+Work that must happen exactly once (advancing the project cycle counter,
+scrum/BA ceremonies) is gated by an atomic, single-winner leader lease at
+`cox:<project>:leader` with a **90 s TTL**. Exactly one node holds it at a time;
+if that node dies, the lease expires and another node acquires it on its next
+cycle — **leader failover within ~90 s**, no coordination service beyond Redis,
+no split brain (the lease is a compare-and-set, not an advisory flag).
+
+**Per-ticket work distributes across runner nodes** via stage leases
+(`cox:<project>:stage:<ticket>:<stage>`, **30 min TTL**): multiple runners pick
+up different tickets without collision, and a crashed runner's in-flight ticket
+is reclaimed when its stage lease expires (or sooner — a restarting hub runs
+orphaned-claim recovery). The live roster is worker-presence keys (10 min TTL).
+
+**Per-node self-healing** (single-box deployments) is covered by the
+host-watchdog (every 5 min) + autoheal LaunchAgents — see *Local backing
+services* and `deploy/install-*.sh`. In a multi-node cluster the LB + lease
+handle node loss; the watchdog is belt-and-suspenders for a box that stays up
+but wedges.
+
+**Recovery objectives**: leader failover ≤ 90 s; in-flight ticket reclaim
+≤ 30 min (usually seconds, on hub restart); reads stay available as long as one
+node + Postgres + Redis are up. Runner nodes additionally need their engine CLIs
+(`claude`/`opencode`), git and the docker CLI on-image — set `runner.enabled`
+per node so only equipped nodes run the execution plane.
 
 ## Upgrade & rollback
 

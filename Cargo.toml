@@ -16,7 +16,7 @@ members = [
 exclude = ["desktop/coxagent-desktop"]
 
 [workspace.package]
-version = "2.23.0"
+version = "2.24.0"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT"
@@ -26,8 +26,8 @@ repository = "https://github.com/org/coxagent"
 # Internal crates
 coxagent-domain = { path = "crates/domain" }
 coxagent-application = { path = "crates/application" }
-coxagent-infrastructure = { path = "crates/infrastructure" }
-coxagent-presentation = { path = "crates/presentation" }
+coxagent-infrastructure = { path = "crates/infrastructure", default-features = false }
+coxagent-presentation = { path = "crates/presentation", default-features = false }
 
 # External
 serde = { version = "1", features = ["derive"] }
