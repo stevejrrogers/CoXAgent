@@ -51,9 +51,19 @@ services:
     image: redis:7-alpine
     ports:
       - "127.0.0.1:6379:6379"
+    # AOF persistence: Redis previously ran `--save "" --appendonly no`, so a
+    # container/Docker restart wiped EVERY key — including the no-TTL
+    # control key `cox:cxa:desired:<operator>` that says the team may run. Losing
+    # it silently paused the whole team until the host-watchdog noticed the wedge
+    # and restored it (observed 2026-10-27 19:27). `--appendonly yes` on a
+    # persisted volume makes the key (and anything else) survive a restart, so
+    # the wedge cannot recur. The ephemeral leases also persist but carry TTLs,
+    # so a stale leader/stage lease just expires within its TTL after a restart.
     command:
-      ["redis-server", "--save", "", "--appendonly", "no",
+      ["redis-server", "--appendonly", "yes",
        "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD is required — copy .env.example to .env and fill it in}"]
+    volumes:
+      - cxa_redis_data:/data
     restart: unless-stopped
 
 volumes:
@@ -61,3 +71,5 @@ volumes:
   source_cxa_data:
     external:
       name: coxagent_db
+  # Redis AOF store so control state (the `desired` key) survives a restart.
+  cxa_redis_data:
