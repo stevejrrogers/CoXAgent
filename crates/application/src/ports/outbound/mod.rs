@@ -3,6 +3,7 @@
 pub mod archive;
 pub mod audit;
 pub mod backup;
+pub mod daily_recovery;
 pub mod deploy;
 pub mod deps;
 pub mod doc_store;
