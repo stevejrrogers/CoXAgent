@@ -23,7 +23,7 @@ pub mod storage;
 pub mod workspace;
 
 pub use archive::ArchiveStorePort;
-pub use audit::{AuditPort, AuditRecord};
+pub use audit::{AuditPort, AuditRecord, AuditVerification};
 pub use backup::{
     archive_sha256, hex_decode, hex_encode, is_safe_archive_path, sha256_hex, validate_archive,
     ArchiveFile, ArchiveManifest, ArchiveRoot, BackupArchivePort, SecretChoice, WorkspaceArchive,

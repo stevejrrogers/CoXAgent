@@ -7,6 +7,9 @@ pub mod failover;
 #[cfg(feature = "harxes")]
 pub mod harxes;
 pub mod hermes;
+pub mod http_engine;
+pub mod http_loop;
+pub mod http_tools;
 pub(crate) mod live;
 pub mod metering;
 pub mod mock;
@@ -23,6 +26,7 @@ pub use failover::{is_quota_wall, FailoverEngine, ALL_EXHAUSTED};
 #[cfg(feature = "harxes")]
 pub use harxes::HarxesEngine;
 pub use hermes::HermesEngine;
+pub use http_engine::HttpEngine;
 pub use metering::{Meter, MeteringEngine};
 pub use mock::MockEngine;
 pub use opencode::OpencodeEngine;

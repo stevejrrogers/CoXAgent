@@ -769,6 +769,7 @@ pub async fn serve_full(
             post(reset_password_ep),
         )
         .route("/api/audit-log", get(audit_log_ep))
+        .route("/api/audit-log/verify", get(manage::audit_verify_ep))
         .route("/api/people-analytics", get(people_analytics_ep))
         .route("/api/projects/:pid/workspace", get(workspace_ep))
         .route("/api/projects/:pid/file", get(file_ep))
