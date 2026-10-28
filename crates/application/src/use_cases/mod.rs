@@ -18,6 +18,7 @@ pub mod global_search;
 pub mod json_repair;
 pub mod list_panels;
 pub mod manual_rollback;
+pub mod merge_gate;
 pub mod merge_policy;
 pub mod merge_sweep;
 pub mod overview_contracts;
@@ -73,6 +74,7 @@ pub use global_search::{
     MAX_PER_KIND, MAX_QUERY_LEN, MAX_TOTAL, MIN_QUERY_LEN,
 };
 pub use json_repair::repair_json;
+pub use merge_gate::{clamp_lease_ttl, decide as merge_lock_decision, MergeDecision};
 pub use list_panels::{list_panels, PanelSlotFilter};
 pub use manual_rollback::{known_good_target, ManualRollbackInput, RollbackOutcome};
 pub use merge_policy::{
