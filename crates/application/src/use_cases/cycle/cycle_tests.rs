@@ -3223,6 +3223,67 @@ async fn provenance_folds_per_ticket_and_drops_unlabeled_runs() {
     );
 }
 
+/// CXA-B328/CXA-B337 regression: the same meter fold also drains every
+/// labeled run's DOLLAR charge into its ticket's bounded ledger — the whole
+/// point of the field — instead of letting the charges silently vanish at
+/// the end of each cycle. Unlabeled runs (ceremonies, resumes) are dropped
+/// from per-ticket attribution exactly like their provenance peers, and the
+/// meter's delta is fully consumed.
+#[tokio::test]
+async fn charges_fold_per_ticket_and_drain_out_of_the_meter() {
+    use crate::state::MeteredCharge;
+    let store = Arc::new(MemStore::default());
+    let meter = Arc::new(Mutex::new(Spend::default()));
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(RoleAwareEngine),
+        Config::default(),
+        PathBuf::from("/tmp/proj-charges-drain"),
+        "goal".to_owned(),
+    )
+    .with_meter(Arc::clone(&meter));
+
+    let charge = |ticket: Option<String>, usd: f64| MeteredCharge {
+        ticket,
+        role: "DEV-BUG".to_owned(),
+        engine: "claude".to_owned(),
+        cost_usd: usd,
+        infra_fault: false,
+    };
+    meter.lock().expect("lock").charges = vec![
+        charge(Some("CXC-F001".to_owned()), 0.20),
+        // A zero-cost run is visible, not invisible...
+        charge(Some("CXC-F001".to_owned()), 0.0),
+        // ...and a ceremony/resume run has no ticket to attribute.
+        charge(None, 0.05),
+    ];
+
+    Box::pin(uc.run_cycle(1)).await;
+
+    let s = store.load().await.expect("load");
+    let log = &s.ticket_charges["CXC-F001"];
+    assert_eq!(log.len(), 2, "both labeled runs land on their ticket");
+    assert!((log[0].cost_usd - 0.20).abs() < 1e-9);
+    assert_eq!(log[0].role, "DEV-BUG");
+    assert!((log[1].cost_usd).abs() < 1e-9, "zero-cost runs survive");
+    assert!(
+        (s.ticket_cost_usd("CXC-F001") - 0.20).abs() < 1e-9,
+        "the work figure sums the folded charges"
+    );
+    assert!(
+        !s.ticket_charges
+            .values()
+            .flatten()
+            .any(|c| c.ticket.is_none()),
+        "an unlabeled run is dropped from per-ticket attribution"
+    );
+    assert!(
+        meter.lock().expect("lock").charges.is_empty(),
+        "the fold drains the meter's charge delta like every other counter — \
+         the CXA-B328 bug was exactly these dollars never draining"
+    );
+}
+
 /// AC: only crossing 100% still triggers the existing hard stop — spend
 /// jumping straight past 80% to (or over) the cap in one cycle must still
 /// raise the 80% warning (before the pause) AND pause the loop.
