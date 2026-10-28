@@ -153,7 +153,6 @@ pub const WIRE_REGISTRY: &[WireSurface] = &[
     wire_dto!(UserKey => "user_keys.rs", &[Direction::Inbound, Direction::Outbound]),
     wire_dto!(UserKeyView => "user_keys.rs", &[Direction::Outbound]),
     wire_dto!(UserKeysDoc => "user_keys.rs", &[Direction::Inbound, Direction::Outbound]),
-    wire_dto!(VersionRow => "prompts_ledger.rs", &[Direction::Outbound]),
     wire_dto!(WebhookReq => "requests.rs", &[Direction::Inbound]),
     wire_dto!(WikiSearchParams => "docs.rs", &[Direction::Inbound]),
     wire_dto!(WorkspaceDoc => "hub_docs.rs", &[Direction::Inbound, Direction::Outbound]),
