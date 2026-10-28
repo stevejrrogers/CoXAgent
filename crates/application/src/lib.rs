@@ -27,6 +27,7 @@ pub mod fleet;
 pub mod forensics;
 pub mod guardrails;
 pub mod hub_lessons;
+pub mod gate_feed;
 pub mod lesson_efficacy;
 pub mod liveness;
 pub mod metrics;
