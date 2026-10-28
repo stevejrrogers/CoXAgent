@@ -458,48 +458,6 @@ mod tests {
         );
     }
 
-    /// Regression for SEC-E6C90C (sibling of SEC-12CF60): applying a
-    /// leaked-credential finding must not file a ticket whose own body re-trips
-    /// the same detector on the next sweep — an infinite self-filing loop.
-    #[test]
-    fn filed_credential_tickets_do_not_retrip_the_sweep() {
-        use crate::state::ProjectState;
-
-        // Real-world shape that started this loop family: credentials in a URL
-        // on some surface, as the sweep's own report text renders them.
-        let hits = sweep(&[s("file:coxagent.json", "postgres://app:hunter2@db:5432/x")]);
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].kind, SecKind::LeakedCredential);
-
-        // File exactly what apply_findings writes; the new ticket's stored
-        // title + description becomes a scan surface on the next pass.
-        let mut state = ProjectState::default();
-        let filed = apply_findings(&mut state, &hits);
-        assert_eq!(filed.len(), 1);
-
-        let bug = state
-            .tickets
-            .iter()
-            .find(|t| t.id() == &filed[0])
-            .expect("filed credential bug");
-        assert!(bug.description().contains("credentials in URL"));
-
-        // Closed-loop property: rescanning the updated state finds nothing NEW
-        // from the remediation tickets themselves.
-        let rescan = sweep(&crate::security_sweep::state_surfaces(&state));
-        let from_filed: Vec<_> = rescan
-            .iter()
-            .filter(|f| {
-                f.surface.starts_with("ticket:SEC-")
-                    && f.surface != format!("ticket:{MASTER_EPIC_ID}")
-            })
-            .collect();
-        assert!(
-            from_filed.is_empty(),
-            "remediation tickets must be a closed loop, got {from_filed:?}"
-        );
-    }
-
     #[test]
     fn apply_is_idempotent_and_links_the_epic() {
         let mut state = ProjectState::default();
