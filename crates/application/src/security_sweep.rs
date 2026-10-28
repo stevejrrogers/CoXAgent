@@ -431,10 +431,7 @@ mod tests {
 
         // Real-world shape that started this loop family: credentials in a URL
         // on some surface, as the sweep's own report text renders them.
-        let hits = sweep(&[s(
-            "file:coxagent.json",
-            "postgres://app:hunter2@db:5432/x",
-        )]);
+        let hits = sweep(&[s("file:coxagent.json", "postgres://app:hunter2@db:5432/x")]);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].kind, SecKind::LeakedCredential);
 
@@ -456,7 +453,10 @@ mod tests {
         let rescan = sweep(&crate::security_sweep::state_surfaces(&state));
         let from_filed: Vec<_> = rescan
             .iter()
-            .filter(|f| f.surface.starts_with("ticket:SEC-") && f.surface != format!("ticket:{MASTER_EPIC_ID}"))
+            .filter(|f| {
+                f.surface.starts_with("ticket:SEC-")
+                    && f.surface != format!("ticket:{MASTER_EPIC_ID}")
+            })
             .collect();
         assert!(
             from_filed.is_empty(),

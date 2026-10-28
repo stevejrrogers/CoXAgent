@@ -875,6 +875,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // SM dispatch FIRST (agents resolve), then report what remains.
             // Boxed: the escalation ladder holds a failure log across its awaits,
             // and inlining it here pushes the whole cycle future over 16KB.
+            // Repair misfiled bugs (a BUG stranded in a feature-only status is
+            // dispatchable by no one and deadlocks a sprint that committed it)
+            // BEFORE the SM drive, so a reclaimed bug is immediately eligible.
+            self.reclaim_misfiled_bugs().await;
             Box::pin(self.sm_unpark_tickets()).await;
             self.sm_drive_sprint_flow().await;
             self.impediment_watch().await;

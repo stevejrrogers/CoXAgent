@@ -30,10 +30,12 @@
 //! an explicit `sslmode=require` (which then fails loudly at connect, exactly
 //! as it does today).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
-use deadpool_postgres::{Config, Pool, Runtime, SslMode};
+use deadpool_postgres::{Config, Pool, PoolConfig, Runtime, SslMode};
 use percent_encoding::percent_decode_str;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::CryptoProvider;
@@ -82,10 +84,57 @@ struct TlsPlan {
 /// a libpq-defined value, or a configured `sslrootcert` bundle is unreadable
 /// or contains no certificates — a verify DSN must fail the boot, not quietly
 /// come up plaintext or unverifiable.
+/// Max connections per DSN pool. Before the per-DSN cache below, every
+/// per-project `SqlStateStore::connect` built its OWN pool against the same
+/// DSN, so live connections grew as `projects × deadpool-default (num_cpus×4)`
+/// and a few dozen projects exhausted Postgres `max_connections`. One shared,
+/// capped pool per DSN makes the ceiling `distinct-DSNs × max_size`,
+/// independent of project count. Tunable via `COXAGENT_PG_POOL_MAX`.
+fn pool_max_size() -> usize {
+    std::env::var("COXAGENT_PG_POOL_MAX")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| {
+            let cpus = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
+            (cpus * 4).max(16)
+        })
+}
+
+/// How long a caller waits for a free connection before failing fast instead
+/// of hanging forever when the pool is saturated. Tunable via
+/// `COXAGENT_PG_POOL_WAIT_SECS`.
+fn pool_wait_secs() -> u64 {
+    std::env::var("COXAGENT_PG_POOL_WAIT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(10)
+}
+
+/// Process-wide cache of built pools, keyed by the exact DSN (which also fully
+/// determines the TLS plan). A `deadpool` `Pool` is an `Arc` inside, so clones
+/// share one connection set — this is what collapses N per-project pools into
+/// one per DSN.
+fn pool_cache() -> &'static Mutex<HashMap<String, Pool>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Pool>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 #[allow(clippy::unused_async)] // design-pinned async surface; stays await-compatible
 pub(crate) async fn pool(dsn: &str, label: &'static str) -> Result<Pool, String> {
+    // Reuse an already-built pool for this DSN so every project/store shares
+    // one capped connection set rather than minting its own.
+    if let Some(existing) = pool_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(dsn) {
+        return Ok(existing.clone());
+    }
     let plan = tls_plan(dsn).map_err(|e| format!("{label} pool: {e}"))?;
     let mut cfg = Config::new();
+    cfg.pool = Some({
+        let mut pc = PoolConfig::new(pool_max_size());
+        pc.timeouts.wait = Some(Duration::from_secs(pool_wait_secs()));
+        pc
+    });
     if dsn.contains('?') {
         // URL form: tokio-postgres must never see the TLS params — it rejects
         // verify-* sslmode values outright and errors on the unknown
@@ -116,11 +165,15 @@ pub(crate) async fn pool(dsn: &str, label: &'static str) -> Result<Pool, String>
         // parse, so the DSN's own sslmode (if any) still governs at connect.
         cfg.url = Some(dsn.to_owned());
     }
-    match connector(&plan).map_err(|e| format!("{label} pool: {e}"))? {
+    let built = match connector(&plan).map_err(|e| format!("{label} pool: {e}"))? {
         Connector::Plain => cfg.create_pool(Some(Runtime::Tokio1), NoTls),
         Connector::Rustls(make) => cfg.create_pool(Some(Runtime::Tokio1), make),
     }
-    .map_err(|e| format!("{label} pool: {e}"))
+    .map_err(|e| format!("{label} pool: {e}"))?;
+    // Cache under the DSN; if another caller raced us to build the same DSN,
+    // keep the stored pool so everyone shares a single connection set.
+    let mut cache = pool_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    Ok(cache.entry(dsn.to_owned()).or_insert(built).clone())
 }
 
 /// Pure: parse `sslmode` / `sslrootcert` out of a URL-form DSN's query string.
@@ -461,6 +514,23 @@ mod tests {
         pool("postgres://u:p@127.0.0.1:1/db?sslmode=disable", "test")
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pools_are_shared_per_dsn_and_capped() {
+        // A unique DSN so the shared cache can't collide with another test.
+        let dsn = "postgres://u:p@127.0.0.1:1/share_cap_probe?sslmode=disable";
+        let a = pool(dsn, "test").await.unwrap();
+        let b = pool(dsn, "test").await.unwrap();
+        // Two calls for one DSN hand back the same (capped) pool, not two.
+        assert_eq!(a.status().max_size, pool_max_size());
+        assert_eq!(a.status().max_size, b.status().max_size);
+    }
+
+    #[test]
+    fn pool_caps_come_from_env_with_safe_defaults() {
+        assert!(pool_max_size() >= 16, "default cap must be a sane floor");
+        assert!(pool_wait_secs() > 0, "wait timeout must be positive");
     }
 
     #[tokio::test]
