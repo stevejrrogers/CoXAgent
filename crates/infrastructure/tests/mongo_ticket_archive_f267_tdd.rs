@@ -407,14 +407,14 @@ async fn the_mongo_env_contract_the_archive_must_match_answers_none_without_a_ur
     }
 }
 
-/// AC4's "compiles unconditionally": the mongodb dependency is a plain,
+/// AC4's "compiles unconditionally": the mongodb dependency is a plain
 /// non-optional workspace dependency of the adapter's crate, named by NO
 /// feature — no feature gate may hide the adapter (a cfg-gated
 /// build_archive_store would silently drop the cold store from default
-/// builds). A `[features]` section itself is legitimate here (commit 37c27872
-/// gates the PRIVATE harxes-core ssh dep behind a default-on feature so an
-/// external operator can build with --no-default-features); what AC4 forbids
-/// is mongodb hidden behind it.
+/// builds). A `[features]` section itself is legitimate here (since #838 /
+/// commit 37c27872 the PRIVATE harxes-core ssh dep sits behind a default-on
+/// feature so an external operator can build with --no-default-features);
+/// what AC4 forbids is mongodb hidden behind it.
 #[test]
 fn the_mongodb_dependency_is_not_hidden_behind_a_feature_gate() {
     let cargo = read("crates/infrastructure/Cargo.toml");
@@ -422,19 +422,24 @@ fn the_mongodb_dependency_is_not_hidden_behind_a_feature_gate() {
 
     // The mongo stack ships in every build: a plain, non-optional dependency.
     assert!(
-        f.contains("mongodb.workspace=true"),
+        f.contains(MONGODB_DECL),
         "the adapter's crate must depend on mongodb unconditionally"
     );
+    // Scan FORWARD from the needle only: the rest of mongodb's own entry (up
+    // to the next section header) must not flip it to optional. A centered
+    // window scanning BACKWARDS would wrongly attribute other dependencies'
+    // flags (e.g. the gated harxes-core above), which are legitimately allowed.
+    let at = f.find(MONGODB_DECL).unwrap();
+    let tail = &f[at + MONGODB_DECL.len()..];
+    let entry = &tail[..tail.find('[').unwrap_or(tail.len())];
     assert!(
-        !near(&f, "mongodb.workspace=true", 200)
-            .iter()
-            .any(|w| w.contains("optional")),
-        "the mongodb dependency must not be `optional = true` — a gate hiding \
-         the cold store would silently drop it from default builds (AC4)"
+        !entry.contains("optional=true"),
+        "mongodb must not be an optional dependency — the wiring must \
+         compile unconditionally (AC4)"
     );
 
     // And no [features] entry names it. Scan line-wise on the comment-stripped
-    // manifest (this very doc comment mentions mongodb — prose must never leak
+    // manifest (even this doc comment mentions mongodb — prose must never leak
     // into the scan), from the [features] header to the next table header.
     // A flat `windows()` scan can't be used here: its WINDOW reaches past the
     // short [features] table into [dependencies], where mongodb legitimately
@@ -458,6 +463,8 @@ fn the_mongodb_dependency_is_not_hidden_behind_a_feature_gate() {
         );
     }
 }
+
+const MONGODB_DECL: &str = "mongodb.workspace=true";
 
 // --- red guards: the missing behaviour, pinned where it must be declared -----
 
