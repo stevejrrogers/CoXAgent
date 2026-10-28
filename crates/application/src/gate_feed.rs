@@ -44,8 +44,11 @@ impl FeedFault {
     #[must_use]
     pub fn classify(msg: &str) -> Self {
         let m = msg.to_ascii_lowercase();
-        if m.contains("rate limit") || m.contains("rate-limit") || m.contains("429")
-            || m.contains("secondary rate") || m.contains("api rate")
+        if m.contains("rate limit")
+            || m.contains("rate-limit")
+            || m.contains("429")
+            || m.contains("secondary rate")
+            || m.contains("api rate")
         {
             FeedFault::RateLimited
         } else {
@@ -165,7 +168,13 @@ const HISTORY_CAP: usize = 50;
 impl GateFeedMonitor {
     /// Record one evaluation and return its verdict. Suspension flips on at
     /// the second consecutive block and clears on the first good read.
-    pub fn record(&mut self, outcome: Result<(), &str>, cached_at: Option<u64>, now_epoch: u64, window_hours: u64) -> Verdict {
+    pub fn record(
+        &mut self,
+        outcome: Result<(), &str>,
+        cached_at: Option<u64>,
+        now_epoch: u64,
+        window_hours: u64,
+    ) -> Verdict {
         let v = evaluate(outcome, cached_at, now_epoch, window_hours);
         match &v {
             Verdict::Graded | Verdict::GradedStale { .. } => {
@@ -175,12 +184,18 @@ impl GateFeedMonitor {
             }
             Verdict::Blocked { .. } => {
                 self.consecutive_blocks += 1;
-                if self.consecutive_blocks >= BLOCKS_BEFORE_SUSPENSION && self.suspended_since_epoch.is_none() {
+                if self.consecutive_blocks >= BLOCKS_BEFORE_SUSPENSION
+                    && self.suspended_since_epoch.is_none()
+                {
                     self.suspended_since_epoch = Some(now_epoch);
                 }
             }
         }
-        self.history.push(VerdictRecord { verdict: v.clone(), at: rfc3339(now_epoch), at_epoch: now_epoch });
+        self.history.push(VerdictRecord {
+            verdict: v.clone(),
+            at: rfc3339(now_epoch),
+            at_epoch: now_epoch,
+        });
         if self.history.len() > HISTORY_CAP {
             self.history.remove(0);
         }
@@ -191,7 +206,9 @@ impl GateFeedMonitor {
     /// repair — after two consecutive blocks, or any time suspended.
     #[must_use]
     pub fn plan_first_action(&self) -> Option<&'static str> {
-        if self.suspended_since_epoch.is_some() || self.consecutive_blocks >= BLOCKS_BEFORE_SUSPENSION {
+        if self.suspended_since_epoch.is_some()
+            || self.consecutive_blocks >= BLOCKS_BEFORE_SUSPENSION
+        {
             Some("restore the forge evidence feed")
         } else {
             None
@@ -201,7 +218,8 @@ impl GateFeedMonitor {
     /// Age of the newest usable evidence in hours (for UI attribution).
     #[must_use]
     pub fn evidence_age_hours(&self, now_epoch: u64) -> Option<u64> {
-        self.last_success_epoch.map(|t| now_epoch.saturating_sub(t) / 3600)
+        self.last_success_epoch
+            .map(|t| now_epoch.saturating_sub(t) / 3600)
     }
 
     /// AC5-exclusion: scores recorded while this gate was blocked (or had
@@ -225,7 +243,11 @@ impl GateFeedMonitor {
 pub fn rfc3339(epoch: u64) -> String {
     let days = epoch / 86_400;
     let secs_of_day = epoch % 86_400;
-    let (h, m, s) = (secs_of_day / 3600, (secs_of_day % 3600) / 60, secs_of_day % 60);
+    let (h, m, s) = (
+        secs_of_day / 3600,
+        (secs_of_day % 3600) / 60,
+        secs_of_day % 60,
+    );
     // Civil-from-days (Howard Hinnant's algorithm) — pure, no leap table.
     let z = i64::try_from(days).unwrap_or(0) + 719_468;
     let era = z.div_euclid(146_097);
@@ -243,7 +265,10 @@ pub fn rfc3339(epoch: u64) -> String {
 /// Current epoch seconds — the ONE clock read, at the call boundary.
 #[must_use]
 pub fn now_epoch() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO).as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs()
 }
 
 #[cfg(test)]
@@ -255,7 +280,12 @@ mod tests {
 
     #[test]
     fn ac1_unreachable_feed_blocks_with_named_reason_and_class() {
-        let v = evaluate(Err("gh pr list failed: dial tcp: connection refused"), None, NOW, 24);
+        let v = evaluate(
+            Err("gh pr list failed: dial tcp: connection refused"),
+            None,
+            NOW,
+            24,
+        );
         assert_eq!(
             v.render(),
             "blocked: delivery history unreachable (unreachable) — unblocked by restoring the forge feed"
@@ -264,9 +294,18 @@ mod tests {
 
     #[test]
     fn ac1_rate_limited_is_classified_not_generic() {
-        assert_eq!(FeedFault::classify("gh api failed: 429 too many requests"), FeedFault::RateLimited);
-        assert_eq!(FeedFault::classify("gh api failed: API rate limit exceeded"), FeedFault::RateLimited);
-        assert_eq!(FeedFault::classify("dial tcp: lookup github.com: no such host"), FeedFault::Unreachable);
+        assert_eq!(
+            FeedFault::classify("gh api failed: 429 too many requests"),
+            FeedFault::RateLimited
+        );
+        assert_eq!(
+            FeedFault::classify("gh api failed: API rate limit exceeded"),
+            FeedFault::RateLimited
+        );
+        assert_eq!(
+            FeedFault::classify("dial tcp: lookup github.com: no such host"),
+            FeedFault::Unreachable
+        );
     }
 
     #[test]
@@ -289,27 +328,47 @@ mod tests {
         let mut m = GateFeedMonitor::default();
         let first = m.record(Err("down"), None, NOW, 24);
         assert!(first.is_blocked());
-        assert_eq!(m.plan_first_action(), None, "one block warns, does not suspend");
+        assert_eq!(
+            m.plan_first_action(),
+            None,
+            "one block warns, does not suspend"
+        );
         let second = m.record(Err("down again"), None, NOW + 60, 24);
         assert!(second.is_blocked());
-        assert_eq!(m.plan_first_action(), Some("restore the forge evidence feed"));
+        assert_eq!(
+            m.plan_first_action(),
+            Some("restore the forge evidence feed")
+        );
         assert_eq!(m.suspended_since_epoch, Some(NOW + 60));
     }
 
     #[test]
     fn ac4_cached_evidence_inside_window_grades_with_age_stamp() {
-        let v = evaluate(Err("rate limited: secondary rate limit hit"), Some(NOW - 5 * 3600), NOW, 24);
+        let v = evaluate(
+            Err("rate limited: secondary rate limit hit"),
+            Some(NOW - 5 * 3600),
+            NOW,
+            24,
+        );
         assert_eq!(v, Verdict::GradedStale { age_hours: 5 });
         assert!(v.render().contains("evidence age: 5h"));
         // Outside the window the same cache stops being trustworthy.
-        let old = evaluate(Err("rate limited: secondary rate limit hit"), Some(NOW - 30 * 3600), NOW, 24);
+        let old = evaluate(
+            Err("rate limited: secondary rate limit hit"),
+            Some(NOW - 30 * 3600),
+            NOW,
+            24,
+        );
         assert!(old.is_blocked());
     }
 
     #[test]
     fn ac4_freshness_window_is_configurable() {
         let v = evaluate(Err("connection refused"), Some(NOW - 30 * 3600), NOW, 48);
-        assert!(!v.is_blocked(), "a wider window keeps 30h-old evidence gradable");
+        assert!(
+            !v.is_blocked(),
+            "a wider window keeps 30h-old evidence gradable"
+        );
         assert_eq!(v, Verdict::GradedStale { age_hours: 30 });
     }
 
@@ -320,13 +379,19 @@ mod tests {
         let _ = m.record(Err("down"), None, NOW + 60, 24);
         let ok = m.record(Ok(()), None, NOW + 120, 24);
         assert_eq!(ok, Verdict::Graded);
-        assert_eq!(m.consecutive_blocks, 0, "a good read auto-clears suspension");
+        assert_eq!(
+            m.consecutive_blocks, 0,
+            "a good read auto-clears suspension"
+        );
         assert_eq!(m.suspended_since_epoch, None);
         // Transition pair, oldest→newest, both stamped.
         let hist = &m.history;
         assert!(matches!(hist[0].verdict, Verdict::Blocked { .. }));
         assert_eq!(hist[0].at_epoch, NOW);
-        assert!(matches!(hist[1].verdict, Verdict::Blocked { .. }), "second block suspends");
+        assert!(
+            matches!(hist[1].verdict, Verdict::Blocked { .. }),
+            "second block suspends"
+        );
         assert_eq!(hist[2].verdict, Verdict::Graded);
         assert_eq!(hist[2].at_epoch, NOW + 120);
     }
@@ -337,9 +402,18 @@ mod tests {
         let _ = m.record(Ok(()), None, NOW - 10_000, 24); // healthy era
         let _ = m.record(Err("down"), None, NOW, 24);
         let _ = m.record(Err("down"), None, NOW + 60, 24); // suspended since NOW+60
-        assert!(!m.excludes_score_at(NOW - 5_000), "healthy-era scores stay useful");
-        assert!(m.excludes_score_at(NOW + 70), "scores cut while suspended are excluded");
-        assert!(!m.excludes_score_at(NOW - 20_000), "pre-suspension history untouched");
+        assert!(
+            !m.excludes_score_at(NOW - 5_000),
+            "healthy-era scores stay useful"
+        );
+        assert!(
+            m.excludes_score_at(NOW + 70),
+            "scores cut while suspended are excluded"
+        );
+        assert!(
+            !m.excludes_score_at(NOW - 20_000),
+            "pre-suspension history untouched"
+        );
     }
 
     #[test]
