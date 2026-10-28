@@ -11,6 +11,7 @@ pub mod claims;
 pub mod conformance_check;
 pub mod coverage;
 pub mod cycle;
+pub mod daily_recovery;
 pub mod duplicate_radar;
 pub mod freeze_fold_inventory;
 pub mod generate_docs;
@@ -67,6 +68,10 @@ pub use duplicate_radar::{
 };
 pub use freeze_fold_inventory::{freeze_inventory, FrozenInventory, OVERVIEW_ROUTE};
 pub mod fold_drift_gate;
+pub use daily_recovery::{
+    daily_recovery_plan, recovery_eligibility, RecoveryBlock, RecoveryPlan, RecoverySnapshot,
+    RecoveryVerdict, DAILY_RECOVERY_FLOOR, SWEEP_ACTOR,
+};
 pub use fold_drift_gate::{run_fold_drift_gate, FoldDriftVerdict, REFREEZE_COMMAND};
 pub use generate_docs::GenerateDocsUseCase;
 pub use global_search::{
@@ -74,9 +79,9 @@ pub use global_search::{
     MAX_PER_KIND, MAX_QUERY_LEN, MAX_TOTAL, MIN_QUERY_LEN,
 };
 pub use json_repair::repair_json;
-pub use merge_gate::{clamp_lease_ttl, decide as merge_lock_decision, MergeDecision};
 pub use list_panels::{list_panels, PanelSlotFilter};
 pub use manual_rollback::{known_good_target, ManualRollbackInput, RollbackOutcome};
+pub use merge_gate::{clamp_lease_ttl, decide as merge_lock_decision, MergeDecision};
 pub use merge_policy::{
     competing_pr, escalation_route, needs_human_eyes, route_from_failures, EscalationRoute,
     MAX_TICKET_RESCUES,
