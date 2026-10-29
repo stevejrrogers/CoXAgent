@@ -1,0 +1,10 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+princeton-nlp/SWE-bench_Verified: running 20 instance(s)
+[1/20] astropy__astropy-12907: already predicted — skip
+[2/20] astropy__astropy-13033: already predicted — skip
+[3/20] astropy__astropy-13236: already predicted — skip
+[4/20] astropy__astropy-13398: 2976B patch in 5.6m · 'stropy/coordinates/builtin_frames/intermediate_rotation_transforms.py\x1b[0m\nGood. Now `cirs_to_itrs`:\x1b[36m⏺\x1b[0m \x1b[1mEdit\x1b['
+[5/20] astropy__astropy-13453: 0B patch in 6.9m · 'ate/tmp/claude-501/-Users-luton-Projects-CoXAgent/ecb4c356-76f2-47a3-8b02-23274d19a3a8/scra…\x1b[0m\n\x1b[36m⏺\x1b[0m \x1b[1mBash\x1b[0m'
+[6/20] astropy__astropy-13579: 0B patch in 4.2m · '.py build…\x1b[0m\n\x1b[36m⏺\x1b[0m \x1b[1mBash\x1b[0m \x1b[2mCFLAGS="-Wno-incompatible-function-pointer-types" /private/tmp/astro-venv2/bi'
+[7/20] astropy__astropy-13977: 0B patch in 6.0m · '36m⏺\x1b[0m \x1b[1mBash\x1b[0m \x1b[2mcd "/private/tmp/claude-501/-Users-luton-Projects-CoXAgent/ecb4c356-76f2-47a3-8b02-23274d19a3a'
+[8/20] astropy__astropy-14096: 0B patch in 7.8m · '0m \x1b[1mBash\x1b[0m \x1b[2m./.venv-test/bin/python setup.py build_ext --inplace -j 4 2>&1 | tail -5\x1b[0m\n\x1b[36m⏺\x1b[0m \x1b[1mBash\x1b[0m'

@@ -1,0 +1,24 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/private/tmp/claude-501/-Users-luton-Projects-CoXAgent/ecb4c356-76f2-47a3-8b02-23274d19a3a8/scratchpad/cox-sq2/evals/swebench/.venv/lib/python3.14/site-packages/swebench/harness/run_evaluation.py", line 863, in <module>
+    main(**vars(args))
+    ~~~~^^^^^^^^^^^^^^
+  File "/private/tmp/claude-501/-Users-luton-Projects-CoXAgent/ecb4c356-76f2-47a3-8b02-23274d19a3a8/scratchpad/cox-sq2/evals/swebench/.venv/lib/python3.14/site-packages/swebench/harness/run_evaluation.py", line 783, in main
+    run_instances(
+    ~~~~~~~~~~~~~^
+        predictions,
+        ^^^^^^^^^^^^
+    ...<5 lines>...
+        task_repo=task_repo,
+        ^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/private/tmp/claude-501/-Users-luton-Projects-CoXAgent/ecb4c356-76f2-47a3-8b02-23274d19a3a8/scratchpad/cox-sq2/evals/swebench/.venv/lib/python3.14/site-packages/swebench/harness/run_evaluation.py", line 455, in run_instances
+    test_specs = [make_test_spec(instance) for instance in instances]
+                  ~~~~~~~~~~~~~~^^^^^^^^^^
+  File "/private/tmp/claude-501/-Users-luton-Projects-CoXAgent/ecb4c356-76f2-47a3-8b02-23274d19a3a8/scratchpad/cox-sq2/evals/swebench/.venv/lib/python3.14/site-packages/swebench/harness/utils.py", line 262, in make_test_spec
+    image=instance["image"],
+          ~~~~~~~~^^^^^^^^^
+KeyError: 'image'
