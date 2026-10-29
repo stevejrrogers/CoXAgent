@@ -115,6 +115,9 @@ pub struct WorkShard {
     pub last_impediment_day: String,
     pub pr_rescues: std::collections::BTreeMap<u64, u32>,
     pub ticket_redesigns: std::collections::BTreeMap<String, u32>,
+    pub sweep_diagnoses:
+        std::collections::BTreeMap<String, crate::state::diagnosis::SweepDiagnosis>,
+    pub sweep_days: std::collections::BTreeMap<String, crate::state::diagnosis::SweepDay>,
     pub drain_notice_sprint: u32,
     pub ticket_fail_attempts: std::collections::BTreeMap<String, u32>,
     pub pr_rescue_attempts: std::collections::BTreeMap<String, u32>,
@@ -185,6 +188,8 @@ impl Default for WorkShard {
             last_impediment_day: String::new(),
             pr_rescues: std::collections::BTreeMap::new(),
             ticket_redesigns: std::collections::BTreeMap::new(),
+            sweep_diagnoses: std::collections::BTreeMap::new(),
+            sweep_days: std::collections::BTreeMap::new(),
             drain_notice_sprint: 0,
             ticket_fail_attempts: std::collections::BTreeMap::new(),
             pr_rescue_attempts: std::collections::BTreeMap::new(),
@@ -431,6 +436,8 @@ impl ProjectState {
             last_impediment_day,
             pr_rescues,
             ticket_redesigns,
+            sweep_diagnoses,
+            sweep_days,
             drain_notice_sprint,
             ticket_fail_attempts,
             pr_rescue_attempts,
@@ -484,6 +491,8 @@ impl ProjectState {
                 cycle,
                 sprint_goal,
                 last_digest_day,
+                sweep_diagnoses,
+                sweep_days,
                 pr_fix_attempts,
                 pr_review_skips,
                 pr_open_holds,
@@ -632,6 +641,8 @@ impl ProjectState {
             last_impediment_day,
             pr_rescues,
             ticket_redesigns,
+            sweep_diagnoses,
+            sweep_days,
             drain_notice_sprint,
             ticket_fail_attempts,
             pr_rescue_attempts,
@@ -759,6 +770,8 @@ impl ProjectState {
             last_impediment_day,
             pr_rescues,
             ticket_redesigns,
+            sweep_diagnoses,
+            sweep_days,
             drain_notice_sprint,
             ticket_fail_attempts,
             pr_rescue_attempts,
@@ -1106,6 +1119,32 @@ mod shard_tests {
         s.last_impediment_day = "2026-09-06".to_owned();
         s.pr_rescues.insert(1, 1);
         s.ticket_redesigns.insert("CXA-F293".to_owned(), 1);
+        s.sweep_diagnoses.insert(
+            "CXC-B001".to_owned(),
+            crate::state::diagnosis::SweepDiagnosis {
+                ticket: "CXC-B001".to_owned(),
+                day: "2026-10-28".to_owned(),
+                verdict: "resumed".to_owned(),
+                hold_reason: "deploy build failed".to_owned(),
+                detail: "diagnosis line".to_owned(),
+                at: "2026-10-28T03:00:00Z".to_owned(),
+                by: "daily-sweep".to_owned(),
+            },
+        );
+        s.sweep_days.insert(
+            "2026-10-28".to_owned(),
+            crate::state::diagnosis::SweepDay {
+                day: "2026-10-28".to_owned(),
+                phase: crate::state::diagnosis::SweepPhase::Complete,
+                subjects: 1,
+                recovered: 1,
+                escalated: 0,
+                at: "2026-10-28T03:00:00Z".to_owned(),
+                by: "daily-sweep".to_owned(),
+                reclaimed: false,
+                hint: String::new(),
+            },
+        );
         s.drain_notice_sprint = 3;
         s.ticket_fail_attempts.insert("CXA-F293".to_owned(), 1);
         s.pr_rescue_attempts.insert("1".to_owned(), 1);

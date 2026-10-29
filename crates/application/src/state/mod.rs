@@ -7,6 +7,7 @@ use coxagent_domain::{DebtSignal, Goal, SemVer, Ticket, TicketId};
 use serde::{Deserialize, Serialize};
 
 mod chat;
+mod diagnosis;
 mod docs;
 mod drift;
 mod goals;
@@ -21,6 +22,7 @@ mod work;
 mod workspace_id;
 
 pub use chat::*;
+pub use diagnosis::*;
 pub use docs::*;
 pub use drift::*;
 pub use goals::*;
@@ -431,6 +433,16 @@ pub struct ProjectState {
     /// ticket; failing again stays parked for a human.
     #[serde(default)]
     pub ticket_redesigns: std::collections::BTreeMap<String, u32>,
+    /// Latest daily-sweep diagnosis per held ticket (CXA-F404). Overwritten
+    /// per day — bounded by the held-ticket count, never append-only.
+    /// Absent = the sweep never ran; empty on old documents via serde default.
+    #[serde(default)]
+    pub sweep_diagnoses:
+        std::collections::BTreeMap<String, crate::state::diagnosis::SweepDiagnosis>,
+    /// One ledger entry per UTC day (CXA-F404) — the run record AND the
+    /// once-per-day idempotency lock. Pruned past retention by the sweep.
+    #[serde(default)]
+    pub sweep_days: std::collections::BTreeMap<String, crate::state::diagnosis::SweepDay>,
     /// The sprint number the clean-base drain notice was last announced for, so
     /// the SA explains the "merge everything first" hold once per sprint, not
     /// every cycle.
@@ -614,6 +626,8 @@ impl Default for ProjectState {
             last_impediment_day: String::new(),
             pr_rescues: std::collections::BTreeMap::new(),
             ticket_redesigns: std::collections::BTreeMap::new(),
+            sweep_diagnoses: std::collections::BTreeMap::new(),
+            sweep_days: std::collections::BTreeMap::new(),
             alias: String::new(),
             display_name: None,
             current_version: SemVer::default(),
