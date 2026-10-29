@@ -670,8 +670,12 @@ async function renderUserProjPicker(){
       }
     }catch(e){}
   }
-  if(!projects.length){el.innerHTML='<span style="font-size:12px;color:var(--dim)">no projects in this space</span>';return;}
-  el.innerHTML=projects.map(p=>`<label class="uprojchk"><input type="checkbox" value="${esc(p.id)}"><span class="sdot" style="background:${projColor(p.id)}"></span>${esc(p.name)}</label>`).join("");
+  if(!projects.length){
+    // AC4: the empty state is plain hint text — no dot, no empty chip shell.
+    el.innerHTML='<span class="usub">No projects in this space yet — create one in Manage, then assign it here.</span>';
+    return;
+  }
+  el.innerHTML=projects.map(p=>`<label class="uprojchk"><input type="checkbox" value="${esc(p.id)}">${esc(p.name)}</label>`).join("");
 }
 async function openInvite(){
   // Populate space dropdown from /api/spaces

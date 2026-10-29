@@ -25,6 +25,7 @@ use coxagent_application::ports::outbound::engine::{
     AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus, Usage,
 };
 use coxagent_application::PortError;
+use coxagent_domain::Role;
 use serde_json::json;
 
 /// Default gateway when `COXAGENT_LLM_BASE_URL` is unset — public OpenAI.
@@ -70,18 +71,126 @@ impl HttpEngine {
     fn endpoint(&self) -> String {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
     }
+
+    /// POST one chat-completions request and parse the reply. The single HTTP
+    /// path shared by the text completion and every turn of the tool loop.
+    async fn post_chat(
+        &self,
+        payload: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<Completion, PortError> {
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|e| PortError::Backend(format!("http engine client: {e}")))?;
+        let resp = client
+            .post(self.endpoint())
+            .bearer_auth(&self.api_key)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| PortError::Backend(format!("http engine request: {e}")))?;
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| PortError::Backend(format!("http engine read body: {e}")))?;
+        if !status.is_success() {
+            // Bodies can echo request context (incl. the key) on some gateways;
+            // keep only the first line and cap it.
+            let detail: String = body.lines().next().unwrap_or("").chars().take(200).collect();
+            return Err(PortError::Backend(format!(
+                "http engine: gateway returned {status}: {detail}"
+            )));
+        }
+        parse_completion(&body).map_err(|e| PortError::Backend(format!("http engine: {e}")))
+    }
+
+    /// Single-shot text completion — the engine's behaviour for text-producing
+    /// roles (chat/planning/review/docs).
+    async fn run_text(&self, req: &AgentRequest, timeout: Duration) -> Result<AgentOutcome, PortError> {
+        let payload = chat_payload(&self.model, &req.system_prompt, &req.task_prompt);
+        let c = self.post_chat(payload, timeout).await?;
+        Ok(self.outcome(c.content, c.input_tokens, c.output_tokens, String::new(), Some(0)))
+    }
+
+    /// Agentic coding run — drive the chat↔tool loop so the model inspects and
+    /// edits the workspace, then summarises.
+    async fn run_coding(&self, req: &AgentRequest, timeout: Duration) -> Result<AgentOutcome, PortError> {
+        let chat = |messages: Vec<serde_json::Value>| {
+            let payload = messages_payload(&self.model, &messages);
+            async move {
+                self.post_chat(payload, timeout)
+                    .await
+                    .map(|c| crate::engine::http_loop::TurnReply {
+                        content: c.content,
+                        input_tokens: c.input_tokens,
+                        output_tokens: c.output_tokens,
+                    })
+                    .map_err(|e| e.to_string())
+            }
+        };
+        let out = crate::engine::http_loop::run_tool_loop(
+            chat,
+            &req.work_dir,
+            &req.system_prompt,
+            &req.task_prompt,
+            MAX_TOOL_ITERS,
+        )
+        .await;
+        // Success for a coding run = finished cleanly; the cycle still decides
+        // whether the resulting diff is acceptable. Flag a clean finish that
+        // touched no files so a no-op run is not mistaken for real work.
+        let exit = if out.done { Some(0) } else { Some(1) };
+        let stdout = if out.done && !out.wrote_any {
+            format!("{} (no files were modified)", out.summary)
+        } else {
+            out.summary
+        };
+        Ok(self.outcome(stdout, out.input_tokens, out.output_tokens, out.transcript, exit))
+    }
+
+    /// Assemble an [`AgentOutcome`] from this engine's common fields.
+    fn outcome(
+        &self,
+        stdout: String,
+        input_tokens: u64,
+        output_tokens: u64,
+        trace: String,
+        exit_code: Option<i32>,
+    ) -> AgentOutcome {
+        AgentOutcome {
+            stdout,
+            stderr: String::new(),
+            exit_code,
+            usage: Some(Usage { input_tokens, output_tokens, cost_usd: 0.0 }),
+            trace,
+            session_id: None,
+            sandbox: SandboxStatus::NotRequested,
+            engine: "http".to_owned(),
+            model: self.model.clone(),
+            attempts: Vec::new(),
+        }
+    }
+}
+
+/// How many chat↔tool turns a coding run may take before giving up.
+const MAX_TOOL_ITERS: usize = 12;
+
+/// The request body for a conversation of `messages`.
+fn messages_payload(model: &str, messages: &[serde_json::Value]) -> serde_json::Value {
+    json!({ "model": model, "messages": messages, "stream": false })
 }
 
 /// The request body for a single system+user chat completion.
 fn chat_payload(model: &str, system_prompt: &str, task_prompt: &str) -> serde_json::Value {
-    json!({
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": task_prompt},
+    messages_payload(
+        model,
+        &[
+            json!({"role": "system", "content": system_prompt}),
+            json!({"role": "user", "content": task_prompt}),
         ],
-        "stream": false,
-    })
+    )
 }
 
 /// What one completion yields: the assistant text plus token usage.
@@ -107,11 +216,26 @@ fn parse_completion(body: &str) -> Result<Completion, String> {
     {
         return Err(format!("gateway error: {msg}"));
     }
-    let content = v
-        .pointer("/choices/0/message/content")
-        .and_then(serde_json::Value::as_str)
-        .ok_or("response had no choices[0].message.content")?
-        .to_owned();
+    // Require a message object, but tolerate a null/absent `content`: a gateway
+    // returns `content: null` when the model was cut off at max_tokens
+    // (finish_reason "length"), tripped a content filter, or is a reasoning
+    // model that carries its text elsewhere. Treating that as a hard error
+    // aborted the whole run — and killed a coding loop on a single truncated
+    // turn — when the gateway had in fact succeeded. Fall back to empty content
+    // and annotate it with finish_reason so an empty reply stays diagnosable.
+    let message = v
+        .pointer("/choices/0/message")
+        .ok_or("response had no choices[0].message")?;
+    let content = message.get("content").and_then(serde_json::Value::as_str).map_or_else(
+        || {
+            let reason = v
+                .pointer("/choices/0/finish_reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            format!("(empty response from gateway; finish_reason: {reason})")
+        },
+        str::to_owned,
+    );
     let usage = v.get("usage");
     let tok = |field: &str| -> u64 {
         usage
@@ -144,49 +268,13 @@ impl AgentEnginePort for HttpEngine {
                 "http engine: COXAGENT_LLM_API_KEY is not set".to_owned(),
             ));
         }
-        let client = reqwest::Client::builder()
-            .timeout(request.timeout.max(Duration::from_secs(30)))
-            .build()
-            .map_err(|e| PortError::Backend(format!("http engine client: {e}")))?;
-        let payload = chat_payload(&self.model, &request.system_prompt, &request.task_prompt);
-        let resp = client
-            .post(self.endpoint())
-            .bearer_auth(&self.api_key)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| PortError::Backend(format!("http engine request: {e}")))?;
-        let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| PortError::Backend(format!("http engine read body: {e}")))?;
-        if !status.is_success() {
-            // Bodies can carry the key back in echoed request context on some
-            // gateways; keep only the first line and cap it.
-            let detail: String = body.lines().next().unwrap_or("").chars().take(200).collect();
-            return Err(PortError::Backend(format!(
-                "http engine: gateway returned {status}: {detail}"
-            )));
+        let timeout = request.timeout.max(Duration::from_secs(30));
+        // Coding roles get the agentic tool loop (inspect + edit the workspace);
+        // every other role gets a single text completion.
+        match request.role {
+            Role::DevBug | Role::DevFeature => self.run_coding(&request, timeout).await,
+            _ => self.run_text(&request, timeout).await,
         }
-        let completion =
-            parse_completion(&body).map_err(|e| PortError::Backend(format!("http engine: {e}")))?;
-        Ok(AgentOutcome {
-            stdout: completion.content,
-            stderr: String::new(),
-            exit_code: Some(0),
-            usage: Some(Usage {
-                input_tokens: completion.input_tokens,
-                output_tokens: completion.output_tokens,
-                cost_usd: 0.0,
-            }),
-            trace: String::new(),
-            session_id: None,
-            sandbox: SandboxStatus::NotRequested,
-            engine: "http".to_owned(),
-            model: self.model.clone(),
-            attempts: Vec::new(),
-        })
     }
 }
 
@@ -245,5 +333,29 @@ mod tests {
     fn rejects_a_response_with_no_choices() {
         let err = parse_completion(r#"{"choices": []}"#).unwrap_err();
         assert!(err.contains("no choices"), "{err}");
+    }
+
+    #[test]
+    fn tolerates_null_content_from_a_truncated_turn() {
+        // Gateway cut the model off at max_tokens: content is null, not a hard
+        // error. Must parse to a non-empty, diagnosable placeholder carrying the
+        // finish_reason — never abort the run.
+        let body = r#"{"choices": [{"message": {"role": "assistant", "content": null}, "finish_reason": "length"}]}"#;
+        let c = parse_completion(body).unwrap();
+        assert!(c.content.contains("length"), "{}", c.content);
+        assert!(c.content.contains("empty response"), "{}", c.content);
+    }
+
+    #[test]
+    fn tolerates_absent_content_field() {
+        let body = r#"{"choices": [{"message": {"role": "assistant"}}]}"#;
+        let c = parse_completion(body).unwrap();
+        assert!(c.content.contains("empty response"), "{}", c.content);
+    }
+
+    #[test]
+    fn still_errors_when_the_message_object_is_missing() {
+        let err = parse_completion(r#"{"choices": [{"finish_reason": "stop"}]}"#).unwrap_err();
+        assert!(err.contains("no choices[0].message"), "{err}");
     }
 }
