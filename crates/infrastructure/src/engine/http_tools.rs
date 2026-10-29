@@ -273,13 +273,25 @@ pub(super) async fn run_command(work_dir: &Path, cmd: &str, timeout: Duration) -
     };
     let cap = |bytes: &[u8]| -> String {
         let s = String::from_utf8_lossy(bytes);
-        if s.len() > RUN_OUTPUT_CAP {
-            // Char-safe: take whole chars up to the cap, never split a boundary.
-            let head: String = s.chars().take(RUN_OUTPUT_CAP).collect();
-            format!("{head}\n…(truncated)")
-        } else {
-            s.into_owned()
+        // Char-safe throughout: count and slice by whole chars, never bytes, so
+        // a multi-byte boundary is never split.
+        let chars: Vec<char> = s.chars().collect();
+        if chars.len() <= RUN_OUTPUT_CAP {
+            return s.into_owned();
         }
+        // Keep a little HEAD (the invocation banner / early context) and mostly
+        // TAIL. A build or test prints its errors and the exit summary at the
+        // END; a head-only cap fed the model 8 KB of "Compiling …" progress and
+        // truncated away the actual failure, so it could not fix the problem and
+        // burned its turn budget — the empty-patch failure mode seen on
+        // heavy-build repos. Head+tail keeps both the command context and the
+        // diagnostics that matter.
+        let head_len = RUN_OUTPUT_CAP / 4;
+        let tail_len = RUN_OUTPUT_CAP - head_len;
+        let head: String = chars[..head_len].iter().collect();
+        let tail: String = chars[chars.len() - tail_len..].iter().collect();
+        let omitted = chars.len() - RUN_OUTPUT_CAP;
+        format!("{head}\n…(truncated {omitted} chars)…\n{tail}")
     };
     let code = out.status.code().unwrap_or(-1);
     let body = format!(
@@ -447,6 +459,28 @@ mod tests {
         let bad = run_command(&dir, "exit 3", Duration::from_secs(10)).await;
         assert!(!bad.ok);
         assert!(bad.content.contains("exit: 3"), "{}", bad.content);
+    }
+
+    #[tokio::test]
+    async fn run_command_keeps_the_tail_where_build_errors_live() {
+        // A chatty build that prints lots of progress, then fails at the very
+        // end. The cap must preserve the trailing diagnostic (and the exit
+        // line), not just the opening noise — otherwise the model can't fix it.
+        let dir = std::env::temp_dir();
+        // ~40 KB of head noise, well over RUN_OUTPUT_CAP, then the real error.
+        let cmd = "for i in $(seq 1 4000); do echo 'Compiling foo progress line'; done; \
+                   echo 'ERROR: expected `;`, found `}` at src/lib.rs:42'; exit 1";
+        let r = run_command(&dir, cmd, Duration::from_secs(30)).await;
+        assert!(!r.ok, "{r:?}");
+        assert!(r.content.contains("exit: 1"), "{}", r.content);
+        assert!(
+            r.content.contains("ERROR: expected"),
+            "the trailing build error must survive truncation: {}",
+            r.content
+        );
+        assert!(r.content.contains("truncated"), "{}", r.content);
+        // And some head context is still there.
+        assert!(r.content.contains("Compiling foo"), "{}", r.content);
     }
 
     #[tokio::test]

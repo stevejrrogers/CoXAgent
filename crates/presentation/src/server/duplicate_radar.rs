@@ -285,6 +285,17 @@ async fn allow_pair(app: &AppState, req: &DupeActionReq, by: &str) -> axum::resp
 /// and reject differ only in the trail they write: both move the duplicate
 /// ticket to `Rejected` in ITS OWN project, which removes the pair from
 /// future radar runs with no extra bookkeeping.
+/// A plain, actionable message for a duplicate that is too far along to retire
+/// from the radar (no legal edge to `Rejected`): tell the operator which states
+/// ARE retire-able and to handle it on its own board first.
+fn retire_blocked_msg(dup_ticket_id: &str, from: coxagent_domain::Status) -> String {
+    format!(
+        "Can't retire {dup_ticket_id}: it is {from:?}. The radar only retires a duplicate \
+         that is still Pending, Ready, or On-hold — stop or re-queue it on its own board \
+         first, then retire it here."
+    )
+}
+
 async fn retire_duplicate(
     app: &AppState,
     req: &DupeActionReq,
@@ -305,12 +316,22 @@ async fn retire_duplicate(
         return (StatusCode::NOT_FOUND, "no such ticket").into_response();
     };
     // The aggregate enforces who may reject from which status — a duplicate
-    // already InProgress is a 409 here, not a silent force-close.
+    // that has moved past the retire-able point (a Feature/Chore already
+    // In-progress or still Open, a Bug already Fixed) has no legal edge to
+    // Rejected. That is intentional — we must not silently force-close work in
+    // flight — but the operator clicking Redirect/Reject should get a plain,
+    // actionable message, NOT the raw `invalid transition for …` string.
     if let Err(e) = t.transition_to(
         coxagent_domain::Role::User,
         coxagent_domain::Status::Rejected,
     ) {
-        return (StatusCode::CONFLICT, e.to_string()).into_response();
+        let msg = match e {
+            coxagent_domain::DomainError::InvalidTransition { from, .. } => {
+                retire_blocked_msg(&req.dup_ticket_id, from)
+            }
+            other => other.to_string(),
+        };
+        return (StatusCode::CONFLICT, msg).into_response();
     }
     let home = format!("{}/{}", req.home_project_id, req.home_ticket_id);
     let msg = if action == "redirect" {
@@ -339,6 +360,39 @@ async fn retire_duplicate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_duplicate_too_far_along_gets_an_actionable_message_not_invalid_transition() {
+        use coxagent_domain::transitions::transition_allowed;
+        use coxagent_domain::{Status, TicketType};
+        // These radar-active statuses have NO legal edge to Rejected, so the
+        // retire would 409 — the exact "invalid transition" the operator hit.
+        for (ty, from) in [
+            (TicketType::Feature, Status::InProgress),
+            (TicketType::Feature, Status::Open),
+            (TicketType::Chore, Status::InProgress),
+            (TicketType::Bug, Status::Fixed),
+        ] {
+            assert!(
+                radar_active(from),
+                "{from:?} should be in the radar pool (so the buttons show)"
+            );
+            assert!(
+                !transition_allowed(ty, from, Status::Rejected),
+                "{ty:?} {from:?} -> Rejected must be illegal (the bug's root cause)"
+            );
+            let msg = retire_blocked_msg("CXC-F101", from);
+            assert!(msg.contains("CXC-F101"), "{msg}");
+            assert!(msg.contains("Pending, Ready, or On-hold"), "{msg}");
+            assert!(!msg.contains("invalid transition"), "leaked raw error: {msg}");
+        }
+        // A retire-able status still works (Pending -> Rejected is legal).
+        assert!(transition_allowed(
+            TicketType::Feature,
+            Status::Pending,
+            Status::Rejected
+        ));
+    }
 
     #[test]
     fn active_pool_matches_the_add_ticket_gate() {
