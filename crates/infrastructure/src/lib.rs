@@ -6,10 +6,12 @@
 
 pub mod archive_memory;
 pub mod archive_mongo;
+pub mod audit_chain;
 pub mod audit_sink;
 pub mod auth;
 pub mod backup_archive;
 pub mod cleanup;
+pub mod db_dump;
 pub mod deploy;
 pub mod deps_discovery;
 pub mod docs_store;
@@ -17,7 +19,9 @@ pub mod engine;
 pub mod forge;
 pub mod git;
 pub mod kv_doc;
+pub mod kv_merge_lock;
 pub mod notifier;
+pub mod oidc_auth;
 pub mod outbox;
 mod pg;
 pub mod pr_report;
@@ -46,6 +50,7 @@ pub use engine::{
 pub use forge::{github_forge, probe_git_access, GhApiForge, GhForge, GlForge};
 pub use git::SystemGit;
 pub use kv_doc::PgKvDoc;
+pub use kv_merge_lock::{merge_lock_key, KvMergeLock};
 pub use notifier::{spawn_outbox_flusher, WebhookNotifier};
 pub use outbox::{spool_in_dir, FileOutboxStore};
 pub use pr_report::HttpPrReporter;

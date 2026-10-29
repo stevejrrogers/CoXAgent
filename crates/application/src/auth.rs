@@ -471,6 +471,15 @@ pub trait AuthPort: Send + Sync {
     /// account). Returns a [`LoginResult`].
     async fn login(&self, username: &str, password: &str, totp: Option<&str>) -> LoginResult;
 
+    /// Mint a session for an already-authenticated user WITHOUT a password —
+    /// used by SSO/OIDC once the IdP has vouched for the identity (the password
+    /// flow proves the credential; here the id-token did). Returns the session
+    /// token, or `None` if the user is unknown or the backend does not support
+    /// passwordless sessions. Default: unsupported.
+    async fn issue_session(&self, _username: &str) -> Option<String> {
+        None
+    }
+
     /// Attach a human device label (e.g. "Chrome on macOS") to a session token,
     /// so a user can see where they're signed in. No-op if the token is unknown.
     async fn attach_device(&self, _token: &str, _device: &str) {}

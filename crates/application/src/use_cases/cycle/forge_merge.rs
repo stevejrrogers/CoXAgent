@@ -837,7 +837,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         stale_secs: u64,
         state: &crate::state::ProjectState,
     ) -> bool {
-        let Some(forge) = &self.forge else { return false };
+        let Some(forge) = &self.forge else {
+            return false;
+        };
         if pr.mergeable {
             return false;
         }

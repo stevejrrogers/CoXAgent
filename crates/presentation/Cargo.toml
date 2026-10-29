@@ -5,8 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# Propagate the infra `harxes` gate (private harxes-core dep) so an external
+# build can turn it off end to end with --no-default-features. Default-on →
+# live build unchanged.
+default = ["harxes"]
+harxes = ["coxagent-infrastructure/harxes"]
+
 [dependencies]
-coxagent-infrastructure = { path = "../infrastructure" }
+coxagent-infrastructure = { path = "../infrastructure", default-features = false }
 redis = { workspace = true }
 coxagent-contracts = { path = "../contracts" }
 coxagent-domain.workspace = true

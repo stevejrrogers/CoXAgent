@@ -15,6 +15,13 @@ path = "src/bin/service.rs"
 
 
 
+[features]
+# Propagate the harxes gate (private harxes-core dep) across the whole app so
+# an external operator can build with --no-default-features (no deploy key).
+# Default-on → the live build and CI are unchanged.
+default = ["harxes"]
+harxes = ["coxagent-infrastructure/harxes", "coxagent-presentation/harxes"]
+
 [dependencies]
 coxagent-domain.workspace = true
 coxagent-application.workspace = true

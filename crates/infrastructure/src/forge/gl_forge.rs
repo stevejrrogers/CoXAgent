@@ -5,11 +5,13 @@
 //! [`PullRequest`] shape the dashboard already speaks.
 
 use async_trait::async_trait;
-use coxagent_application::ports::outbound::{ForgePort, PullRequest};
+use coxagent_application::ports::outbound::{ForgePort, IssueDraft, PrFeedback, PullRequest};
 use coxagent_application::PortError;
 use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::process::Command;
+
+use super::gl_types::{encoded_project, feedback_from_discussions, RawIssue, RawMr};
 
 /// GitLab forge for one project (`group/name`).
 pub struct GlForge {
@@ -41,6 +43,20 @@ impl GlForge {
     async fn glab(&self, args: &[&str]) -> Result<String, PortError> {
         glab(&self.host, &self.work_dir, args).await
     }
+
+    /// Shared issue lister for the open/closed variants. `state` is the glab
+    /// state flag (`--opened` / `--closed`).
+    async fn issues(&self, state: &str, limit: usize) -> Result<Vec<IssueDraft>, PortError> {
+        let per_page = limit.to_string();
+        let json = self
+            .glab(&[
+                "issue", "list", "-R", &self.repo, state, "-P", &per_page, "-F", "json",
+            ])
+            .await?;
+        let raws: Vec<RawIssue> = serde_json::from_str(&json)
+            .map_err(|e| PortError::Backend(format!("glab issue list parse: {e}")))?;
+        Ok(raws.into_iter().map(Into::into).collect())
+    }
 }
 
 async fn glab(host: &str, work_dir: &std::path::Path, args: &[&str]) -> Result<String, PortError> {
@@ -64,74 +80,6 @@ async fn glab(host: &str, work_dir: &std::path::Path, args: &[&str]) -> Result<S
             args.first().unwrap_or(&""),
             String::from_utf8_lossy(&out.stderr).trim()
         )))
-    }
-}
-
-/// One merge request from `glab mr list -F json` (the GitLab API MR object).
-#[derive(serde::Deserialize)]
-struct RawMr {
-    iid: u64,
-    #[serde(default)]
-    title: String,
-    #[serde(default)]
-    source_branch: String,
-    #[serde(default)]
-    target_branch: String,
-    #[serde(default)]
-    web_url: String,
-    #[serde(default)]
-    author: RawAuthor,
-    #[serde(default)]
-    created_at: String,
-    #[serde(default)]
-    merge_status: String,
-    #[serde(default)]
-    pipeline: Option<RawPipeline>,
-    #[serde(default)]
-    head_pipeline: Option<RawPipeline>,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct RawAuthor {
-    #[serde(default)]
-    username: String,
-}
-
-#[derive(serde::Deserialize)]
-struct RawPipeline {
-    #[serde(default)]
-    status: String,
-}
-
-/// Map a GitLab pipeline status to the dashboard's CI rollup word.
-fn ci_from_pipeline(mr: &RawMr) -> String {
-    let status = mr
-        .head_pipeline
-        .as_ref()
-        .or(mr.pipeline.as_ref())
-        .map(|p| p.status.to_lowercase());
-    match status.as_deref() {
-        None | Some("") => "none".to_owned(),
-        Some("success" | "passed") => "passing".to_owned(),
-        Some("failed" | "canceled" | "cancelled") => "failing".to_owned(),
-        _ => "pending".to_owned(), // running / pending / created / manual / scheduled
-    }
-}
-
-impl From<RawMr> for PullRequest {
-    fn from(m: RawMr) -> Self {
-        let ci = ci_from_pipeline(&m);
-        PullRequest {
-            number: m.iid,
-            title: m.title,
-            head: m.source_branch,
-            base: m.target_branch,
-            url: m.web_url,
-            author: m.author.username,
-            ci,
-            mergeable: m.merge_status == "can_be_merged",
-            created: m.created_at,
-        }
     }
 }
 
@@ -203,51 +151,56 @@ impl ForgePort for GlForge {
             .await
             .map(|_| ())
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn maps_gitlab_mr_json_to_pull_request() {
-        let json = r#"{
-            "iid": 12, "title": "feat(X-1): add", "source_branch": "feat/X-1",
-            "target_branch": "develop", "web_url": "https://gitlab.com/g/p/-/merge_requests/12",
-            "author": {"username": "coxagent-bot"}, "created_at": "2026-07-14T00:00:00Z",
-            "merge_status": "can_be_merged", "head_pipeline": {"status": "success"}
-        }"#;
-        let raw: RawMr = serde_json::from_str(json).unwrap();
-        let pr: PullRequest = raw.into();
-        assert_eq!(pr.number, 12);
-        assert_eq!(pr.head, "feat/X-1");
-        assert_eq!(pr.base, "develop");
-        assert_eq!(pr.author, "coxagent-bot");
-        assert_eq!(pr.ci, "passing");
-        assert!(pr.mergeable);
+    async fn recently_merged(&self) -> Result<Vec<(u64, String)>, PortError> {
+        let json = self
+            .glab(&[
+                "mr", "list", "-R", &self.repo, "--merged", "-P", "30", "-F", "json",
+            ])
+            .await?;
+        let raws: Vec<RawMr> = serde_json::from_str(&json)
+            .map_err(|e| PortError::Backend(format!("glab merged list parse: {e}")))?;
+        Ok(raws.into_iter().map(|m| (m.iid, m.source_branch)).collect())
     }
 
-    #[test]
-    fn ci_rollup_covers_pipeline_states() {
-        let mk = |s: &str| RawMr {
-            iid: 1,
-            title: String::new(),
-            source_branch: String::new(),
-            target_branch: String::new(),
-            web_url: String::new(),
-            author: RawAuthor::default(),
-            created_at: String::new(),
-            merge_status: String::new(),
-            pipeline: None,
-            head_pipeline: Some(RawPipeline {
-                status: s.to_owned(),
-            }),
-        };
-        assert_eq!(ci_from_pipeline(&mk("success")), "passing");
-        assert_eq!(ci_from_pipeline(&mk("failed")), "failing");
-        assert_eq!(ci_from_pipeline(&mk("running")), "pending");
-        let mut none = mk("");
-        none.head_pipeline = None;
-        assert_eq!(ci_from_pipeline(&none), "none");
+    async fn closed_unmerged(&self) -> Result<Vec<(u64, String)>, PortError> {
+        // GitLab keeps `merged` and `closed` as distinct states (unlike GitHub,
+        // which lumps merged PRs under "closed"), so `--closed` is already the
+        // unmerged-closed set — no mergedAt filter needed.
+        let json = self
+            .glab(&[
+                "mr", "list", "-R", &self.repo, "--closed", "-P", "50", "-F", "json",
+            ])
+            .await?;
+        let raws: Vec<RawMr> = serde_json::from_str(&json)
+            .map_err(|e| PortError::Backend(format!("glab closed list parse: {e}")))?;
+        Ok(raws.into_iter().map(|m| (m.iid, m.source_branch)).collect())
+    }
+
+    async fn comment_pr(&self, number: u64, body: &str) -> Result<(), PortError> {
+        let n = number.to_string();
+        self.glab(&["mr", "note", &n, "-R", &self.repo, "-m", body])
+            .await
+            .map(|_| ())
+    }
+
+    async fn list_open_issues(&self, limit: usize) -> Result<Vec<IssueDraft>, PortError> {
+        self.issues("--opened", limit).await
+    }
+
+    async fn list_closed_issues(&self, limit: usize) -> Result<Vec<IssueDraft>, PortError> {
+        self.issues("--closed", limit).await
+    }
+
+    async fn pr_feedback(&self, number: u64) -> Result<Vec<PrFeedback>, PortError> {
+        // GitLab has no CHANGES_REQUESTED review verb; its equivalent is an
+        // unresolved resolvable discussion thread. Pull the MR's discussions and
+        // surface each still-open review thread as feedback to address.
+        let path = format!(
+            "projects/{}/merge_requests/{number}/discussions?per_page=100",
+            encoded_project(&self.repo)
+        );
+        let json = self.glab(&["api", &path]).await?;
+        feedback_from_discussions(&json)
     }
 }

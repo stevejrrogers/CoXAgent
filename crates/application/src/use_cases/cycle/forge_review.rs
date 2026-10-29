@@ -69,8 +69,11 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // reprints only when a PR enters or leaves the queue.
         {
             static LAST: std::sync::OnceLock<std::sync::Mutex<String>> = std::sync::OnceLock::new();
-            let mut into_base: Vec<u64> =
-                prs.iter().filter(|p| p.base == target).map(|p| p.number).collect();
+            let mut into_base: Vec<u64> = prs
+                .iter()
+                .filter(|p| p.base == target)
+                .map(|p| p.number)
+                .collect();
             into_base.sort_unstable();
             let summary = into_base
                 .iter()

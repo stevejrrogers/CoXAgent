@@ -3,6 +3,7 @@
 pub mod archive;
 pub mod audit;
 pub mod backup;
+pub mod daily_recovery;
 pub mod deploy;
 pub mod deps;
 pub mod doc_store;
@@ -12,6 +13,7 @@ pub mod forge;
 pub mod git;
 pub mod janitor;
 pub mod kv_doc;
+pub mod merge_lock;
 pub mod notify;
 pub mod outbox;
 pub mod overview_inventory;
@@ -23,7 +25,7 @@ pub mod storage;
 pub mod workspace;
 
 pub use archive::ArchiveStorePort;
-pub use audit::{AuditPort, AuditRecord};
+pub use audit::{AuditPort, AuditRecord, AuditVerification};
 pub use backup::{
     archive_sha256, hex_decode, hex_encode, is_safe_archive_path, sha256_hex, validate_archive,
     ArchiveFile, ArchiveManifest, ArchiveRoot, BackupArchivePort, SecretChoice, WorkspaceArchive,
@@ -40,6 +42,7 @@ pub use forge::{ForgePort, IssueDraft, PrFeedback, PullRequest};
 pub use git::{GitAuthor, GitPort, SyncBase, WorkingTreeDiff};
 pub use janitor::ProcessJanitorPort;
 pub use kv_doc::KvDocPort;
+pub use merge_lock::{MergeLockHolder, MergeLockPort};
 pub use notify::{ChatNotifier, FanoutNotifier, NotifierPort, NotifyEvent, NullNotifier};
 pub use outbox::{MemoryOutboxStore, OutboxStorePort};
 pub use overview_inventory::{LivePanelInventory, OverviewInventoryPort};

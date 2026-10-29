@@ -809,6 +809,32 @@ pub(super) async fn audit_log_ep(
     }
 }
 
+/// Tamper-evidence check over the hub-wide audit trail: walks the integrity
+/// chain and reports whether any row was edited, deleted, or reordered out of
+/// band. Admin/Super only, like the log itself.
+pub(super) async fn audit_verify_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    if let Some(auth) = app.auth.clone() {
+        let ok = match resolve_principal(&auth, &headers).await {
+            Some(u) => matches!(
+                u.role,
+                coxagent_application::auth::AuthRole::Admin
+                    | coxagent_application::auth::AuthRole::Super
+            ),
+            None => false,
+        };
+        if !ok {
+            return (StatusCode::FORBIDDEN, "admin role required").into_response();
+        }
+    }
+    match app.audit.verify().await {
+        Ok(result) => Json(result).into_response(),
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
 /// The super admin's cross-space overview: every space with its live stats
 /// (projects, members, spend, online), plus hub totals and the user directory.
 pub(super) async fn manage_overview_ep(

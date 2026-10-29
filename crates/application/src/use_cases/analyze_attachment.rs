@@ -286,11 +286,17 @@ mod tests {
     async fn assert_posts_fallback<E: AgentEnginePort + 'static>(engine: E) {
         let tmp = tempfile::tempdir().expect("tmp");
         let store = Arc::new(MemStore::default());
-        let uc = AnalyzeAttachmentUseCase::new(Arc::clone(&store), Arc::new(engine), tmp.path().into());
+        let uc =
+            AnalyzeAttachmentUseCase::new(Arc::clone(&store), Arc::new(engine), tmp.path().into());
         let atts = one_image(tmp.path());
 
-        let res = uc.execute("root", "sao cái này ko work?", None, &atts).await;
-        assert!(res.is_err(), "engine failure still surfaces an error upstream");
+        let res = uc
+            .execute("root", "sao cái này ko work?", None, &atts)
+            .await;
+        assert!(
+            res.is_err(),
+            "engine failure still surfaces an error upstream"
+        );
 
         let state = store.load().await.expect("load");
         let posted = state.comments.last().expect("a fallback reply was posted");

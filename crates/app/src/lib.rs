@@ -255,6 +255,42 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             ))
             .await
         }
+        Command::Audit { action, hub_dir } => {
+            // coordination.json carries the DB DSN that build_audit reads.
+            load_coordination(&hub_dir);
+            match action {
+                coxagent_presentation::AuditAction::Verify => {
+                    let audit = build_audit().await;
+                    let v = audit.verify().await?;
+                    // Print the verdict, flush, then exit — nonzero on tampering
+                    // so cron/CI can alarm (mirrors `doctor`'s exit-code gate).
+                    let (line, code) = if !v.supported {
+                        (
+                            format!(
+                                "audit: no verifiable integrity chain ({})",
+                                v.detail.as_deref().unwrap_or("unsupported backend")
+                            ),
+                            0,
+                        )
+                    } else if v.intact {
+                        (format!("audit: OK — {} rows, chain intact", v.verified), 0)
+                    } else {
+                        (
+                            format!(
+                                "audit: TAMPERING DETECTED — chain breaks at row {} of {}{}",
+                                v.broken_at.map_or_else(|| "?".to_owned(), |i| i.to_string()),
+                                v.verified,
+                                v.detail.as_deref().map(|d| format!(": {d}")).unwrap_or_default()
+                            ),
+                            2,
+                        )
+                    };
+                    println!("{line}");
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                    std::process::exit(code);
+                }
+            }
+        }
         Command::Codegraph { query, work_dir } => codegraph_query(&work_dir, &query).await,
         Command::Compress {
             cmd,
