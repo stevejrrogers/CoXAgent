@@ -397,16 +397,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDocsUseCase<S, E> {
             // id — page ids are `feat-<id>`, so they never collide — and
             // `documentable_candidates` drops the ticket at the cap.
             let (key, now) = (id.to_string(), crate::state::now_rfc3339());
-            let counted = std::cell::Cell::new(0_u32);
+            // AtomicU32 (not Cell) so the mutate_state closure's future stays
+            // Send — the docs run is `tokio::spawn`ed by the app layer.
+            let counted = std::sync::atomic::AtomicU32::new(0);
             let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
                 let m = s.doc_refresh.entry(key.clone()).or_default();
                 m.fails = m.fails.saturating_add(1);
                 m.at.clone_from(&now);
-                counted.set(m.fails);
+                counted.store(m.fails, std::sync::atomic::Ordering::Relaxed);
                 Ok(())
             })
             .await;
-            let fails = counted.get();
+            let fails = counted.load(std::sync::atomic::Ordering::Relaxed);
             if fails >= crate::selection::DOCS_STAGE_FAIL_CAP {
                 tracing::warn!(
                     "DOCS page for {id} rejected by the structure gate ({fails} cycles) — \
