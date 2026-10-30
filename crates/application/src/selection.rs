@@ -127,13 +127,34 @@ pub fn next_feature_needing_ux(state: &ProjectState) -> Option<TicketId> {
     ux_candidates(state).into_iter().next()
 }
 
-/// Feature/chore tickets in `Done` awaiting documentation (DOCS queue).
+/// How many cycles a ticket's DOCS stage may fail the structure gate before it
+/// is PARKED out of the docs queue. Each cycle already runs up to 3 in-run
+/// repair attempts (see `run_docs`), so a ticket the DOCS agent genuinely
+/// cannot document — e.g. it degenerates into guardrail-stopped narration every
+/// time — used to be re-selected forever (observed: CXA-F408, 347 failed gate
+/// attempts across ~115 cycles, each burning up to four 900s engine runs and
+/// dominating the team's cycle). At the cap it stays `Done` but leaves the
+/// queue until a human or a later edit clears the counter, so the team stops
+/// re-billing a doc that is not converging.
+pub const DOCS_STAGE_FAIL_CAP: u32 = 3;
+
+/// Feature/chore tickets in `Done` awaiting documentation (DOCS queue), minus
+/// any PARKED by [`DOCS_STAGE_FAIL_CAP`] consecutive structure-gate failures.
 #[must_use]
 pub fn documentable_candidates(state: &ProjectState) -> Vec<TicketId> {
     candidates(state, |t| {
         matches!(t.ticket_type(), TicketType::Feature | TicketType::Chore)
             && t.status() == Status::Done
     })
+    .into_iter()
+    .filter(|id| {
+        state
+            .doc_refresh
+            .get(id.as_str())
+            .map_or(0, |m| m.fails)
+            < DOCS_STAGE_FAIL_CAP
+    })
+    .collect()
 }
 
 /// Highest-priority feature/chore in `Done` awaiting documentation.
@@ -416,6 +437,55 @@ mod tests {
     #[test]
     fn no_ready_feature_returns_none() {
         assert!(next_ready_feature(&ProjectState::default()).is_none());
+    }
+
+    fn done_feature(id: &str) -> Ticket {
+        let mut t = ready_feature(id, Priority::High);
+        t.transition_to(Role::DevFeature, Status::InProgress)
+            .expect("in-progress");
+        t.transition_to(Role::DevFeature, Status::Done).expect("done");
+        t
+    }
+
+    #[test]
+    fn documentable_lists_done_features_then_parks_after_the_gate_fail_cap() {
+        let mut state = ProjectState {
+            tickets: vec![done_feature("FEAT-010"), done_feature("FEAT-011")],
+            ..ProjectState::default()
+        };
+        // Both are documentable to start.
+        let ids: Vec<String> = documentable_candidates(&state)
+            .iter()
+            .map(|t| t.as_str().to_owned())
+            .collect();
+        assert!(
+            ids.iter().any(|s| s == "FEAT-010") && ids.iter().any(|s| s == "FEAT-011"),
+            "{ids:?}"
+        );
+
+        // One shy of the cap stays in the queue.
+        state.doc_refresh.insert(
+            "FEAT-010".to_owned(),
+            crate::state::DocRefreshMark { at: String::new(), fails: DOCS_STAGE_FAIL_CAP - 1 },
+        );
+        assert!(
+            documentable_candidates(&state)
+                .iter()
+                .any(|t| t.as_str() == "FEAT-010"),
+            "below the cap must remain documentable"
+        );
+
+        // At the cap it is PARKED out of the queue; the other is untouched.
+        state.doc_refresh.insert(
+            "FEAT-010".to_owned(),
+            crate::state::DocRefreshMark { at: String::new(), fails: DOCS_STAGE_FAIL_CAP },
+        );
+        let ids: Vec<String> = documentable_candidates(&state)
+            .iter()
+            .map(|t| t.as_str().to_owned())
+            .collect();
+        assert!(ids.iter().all(|s| s != "FEAT-010"), "at the cap it must be parked: {ids:?}");
+        assert!(ids.iter().any(|s| s == "FEAT-011"), "other tickets keep flowing: {ids:?}");
     }
 
     // Ticket::new creates bugs already in `Open`.

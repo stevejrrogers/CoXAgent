@@ -3,7 +3,7 @@
 use coxagent_domain::DomainError;
 
 /// Error returned by outbound ports (adapters implement them).
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum PortError {
     #[error("not found: {0}")]
     NotFound(String),

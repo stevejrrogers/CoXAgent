@@ -1,0 +1,501 @@
+//! Tool protocol for the `http` engine's (forthcoming) agentic file-editing
+//! loop. This module is the PURE, testable core: the tool vocabulary a model
+//! may call, how to parse a model turn into a [`ToolCall`], and how to apply
+//! one against a workspace safely. The chat↔tool loop that drives it lives in a
+//! follow-up slice; keeping the protocol here lets every parsing and
+//! path-safety rule be unit-tested without a network or a live model.
+//!
+//! Safety: a tool path is always workspace-relative. [`safe_join`] rejects an
+//! absolute path or any `..` component *lexically* (before touching disk, so it
+//! also guards a not-yet-created write target), so a model can never read or
+//! write outside `work_dir`. File I/O lives here in infrastructure, never in
+//! application (the hexagonal gate forbids it there).
+
+use std::path::{Component, Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
+
+/// Max bytes of command output fed back to the model (each of stdout/stderr),
+/// so a chatty build cannot blow up the context.
+const RUN_OUTPUT_CAP: usize = 8192;
+
+/// One action the model asked for. The vocabulary is deliberately tiny — enough
+/// to inspect and edit a workspace, run a check, plus `Done` to end the loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolCall {
+    ReadFile { path: String },
+    WriteFile { path: String, content: String },
+    /// Surgical edit: replace the unique occurrence of `find` with `replace` in
+    /// an existing file (so large files are edited without a full rewrite).
+    PatchFile { path: String, find: String, replace: String },
+    ListDir { path: String },
+    Run { cmd: String },
+    Done { summary: String },
+}
+
+/// The outcome of applying a [`ToolCall`], fed back to the model as the tool
+/// result for the next turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolResult {
+    /// Whether the op succeeded; a failure is reported to the model, not fatal.
+    pub ok: bool,
+    /// Human/model-readable content (file text, listing, confirmation, error).
+    pub content: String,
+}
+
+impl ToolResult {
+    fn ok(content: impl Into<String>) -> Self {
+        Self { ok: true, content: content.into() }
+    }
+    fn err(content: impl Into<String>) -> Self {
+        Self { ok: false, content: content.into() }
+    }
+}
+
+/// Resolve a workspace-relative tool path under `work_dir`, rejecting anything
+/// that would escape it. Purely lexical: no canonicalize, so it is correct for
+/// a write to a path that does not exist yet.
+///
+/// # Errors
+/// A message naming why the path was refused (absolute, empty, or `..`).
+pub fn safe_join(work_dir: &Path, rel: &str) -> Result<PathBuf, String> {
+    if rel.trim().is_empty() {
+        return Err("empty path".to_owned());
+    }
+    let p = Path::new(rel);
+    if p.is_absolute() {
+        return Err(format!("absolute paths are not allowed: {rel}"));
+    }
+    for comp in p.components() {
+        match comp {
+            Component::ParentDir => {
+                return Err(format!("path escapes the workspace (`..`): {rel}"));
+            }
+            Component::Prefix(_) | Component::RootDir => {
+                return Err(format!("rooted paths are not allowed: {rel}"));
+            }
+            Component::CurDir | Component::Normal(_) => {}
+        }
+    }
+    Ok(work_dir.join(p))
+}
+
+/// Parse one normalized tool object — `{"tool": "...", ...}` — into a
+/// [`ToolCall`]. This is the shape both the OpenAI `tool_calls` arguments and
+/// the fenced-JSON fallback reduce to.
+#[must_use]
+pub fn tool_call_from_json(v: &serde_json::Value) -> Option<ToolCall> {
+    let tool = v.get("tool").and_then(serde_json::Value::as_str)?;
+    let s = |k: &str| v.get(k).and_then(serde_json::Value::as_str).map(str::to_owned);
+    match tool {
+        "read_file" => Some(ToolCall::ReadFile { path: s("path")? }),
+        "write_file" => Some(ToolCall::WriteFile {
+            path: s("path")?,
+            content: s("content").unwrap_or_default(),
+        }),
+        "list_dir" => Some(ToolCall::ListDir {
+            path: s("path").unwrap_or_else(|| ".".to_owned()),
+        }),
+        "patch_file" => Some(ToolCall::PatchFile {
+            path: s("path")?,
+            find: s("find")?,
+            replace: s("replace").unwrap_or_default(),
+        }),
+        "run" => Some(ToolCall::Run { cmd: s("cmd")? }),
+        "done" => Some(ToolCall::Done {
+            summary: s("summary").unwrap_or_default(),
+        }),
+        _ => None,
+    }
+}
+
+/// Extract a tool call from a model's assistant message content when it did not
+/// use native `tool_calls`: find the first ```json fenced block (or fall back
+/// to the first `{…}` object) and parse it. Lets the engine drive gateways that
+/// lack OpenAI function-calling.
+#[must_use]
+pub fn tool_call_from_content(content: &str) -> Option<ToolCall> {
+    let json = extract_json_block(content)?;
+    let v: serde_json::Value = serde_json::from_str(&json).ok()?;
+    tool_call_from_json(&v)
+}
+
+/// The first fenced ```json … ``` block, else the first balanced `{…}` span.
+fn extract_json_block(text: &str) -> Option<String> {
+    if let Some(start) = text.find("```json") {
+        let after = &text[start + "```json".len()..];
+        if let Some(end) = after.find("```") {
+            return Some(after[..end].trim().to_owned());
+        }
+    }
+    // Fallback: first `{` to its matching `}` (depth-counted, string-aware).
+    let bytes = text.as_bytes();
+    let start = text.find('{')?;
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut escaped = false;
+    for (i, &b) in bytes.iter().enumerate().skip(start) {
+        if in_str {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_str = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(text[start..=i].to_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Apply a [`ToolCall`] against `work_dir`, returning what to report back. Never
+/// panics and never escapes the workspace; a bad path or I/O error is a failed
+/// [`ToolResult`], not an error return.
+#[must_use]
+pub fn apply_tool(work_dir: &Path, call: &ToolCall) -> ToolResult {
+    match call {
+        ToolCall::ReadFile { path } => match safe_join(work_dir, path) {
+            Ok(p) => match std::fs::read_to_string(&p) {
+                Ok(text) => ToolResult::ok(text),
+                Err(e) => ToolResult::err(format!("read {path}: {e}")),
+            },
+            Err(e) => ToolResult::err(e),
+        },
+        ToolCall::WriteFile { path, content } => match safe_join(work_dir, path) {
+            Ok(p) => {
+                if let Some(parent) = p.parent() {
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        return ToolResult::err(format!("mkdir for {path}: {e}"));
+                    }
+                }
+                match std::fs::write(&p, content) {
+                    Ok(()) => ToolResult::ok(format!("wrote {} bytes to {path}", content.len())),
+                    Err(e) => ToolResult::err(format!("write {path}: {e}")),
+                }
+            }
+            Err(e) => ToolResult::err(e),
+        },
+        ToolCall::PatchFile { path, find, replace } => match safe_join(work_dir, path) {
+            Ok(p) => match std::fs::read_to_string(&p) {
+                Ok(text) => {
+                    let n = text.matches(find.as_str()).count();
+                    if n == 0 {
+                        ToolResult::err(format!(
+                            "patch {path}: `find` text not present — read the file and copy it exactly"
+                        ))
+                    } else if n > 1 {
+                        ToolResult::err(format!(
+                            "patch {path}: `find` matches {n} places — add surrounding context to make it unique"
+                        ))
+                    } else {
+                        let updated = text.replacen(find.as_str(), replace, 1);
+                        match std::fs::write(&p, &updated) {
+                            Ok(()) => ToolResult::ok(format!("patched {path}")),
+                            Err(e) => ToolResult::err(format!("patch write {path}: {e}")),
+                        }
+                    }
+                }
+                Err(e) => ToolResult::err(format!("patch read {path}: {e}")),
+            },
+            Err(e) => ToolResult::err(e),
+        },
+        ToolCall::ListDir { path } => match safe_join(work_dir, path) {
+            Ok(p) => match std::fs::read_dir(&p) {
+                Ok(entries) => {
+                    let mut names: Vec<String> = entries
+                        .flatten()
+                        .map(|e| {
+                            let n = e.file_name().to_string_lossy().into_owned();
+                            if e.path().is_dir() {
+                                format!("{n}/")
+                            } else {
+                                n
+                            }
+                        })
+                        .collect();
+                    names.sort();
+                    ToolResult::ok(names.join("\n"))
+                }
+                Err(e) => ToolResult::err(format!("list {path}: {e}")),
+            },
+            Err(e) => ToolResult::err(e),
+        },
+        // Run is side-effecting and needs a timeout, so the loop routes it to
+        // the async `run_command` instead of this sync path.
+        ToolCall::Run { .. } => ToolResult::err("run is executed by the loop, not apply_tool"),
+        ToolCall::Done { summary } => ToolResult::ok(summary.clone()),
+    }
+}
+
+/// Execute a `run` tool: `sh -c <cmd>` in `work_dir` with a hard `timeout`,
+/// capturing stdout+stderr (each capped) and the exit status. Never panics; a
+/// spawn failure or timeout is a failed [`ToolResult`], not an error return.
+///
+/// Unsandboxed by design: the `http` tool loop runs commands directly (unlike
+/// the seatbelt/bwrap confinement the CLI engines apply), so an operator opts
+/// into it by assigning `http` to a coding role. The hub already executes
+/// agent-authored code, so this is not a new trust boundary — but `cwd` is
+/// pinned to `work_dir`.
+pub(super) async fn run_command(work_dir: &Path, cmd: &str, timeout: Duration) -> ToolResult {
+    use tokio::process::Command;
+    let child = Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .current_dir(work_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn();
+    let child = match child {
+        Ok(c) => c,
+        Err(e) => return ToolResult::err(format!("run: spawn `{cmd}`: {e}")),
+    };
+    let out = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => return ToolResult::err(format!("run: `{cmd}`: {e}")),
+        Err(_) => {
+            // kill_on_drop reaps the child when the future is dropped here.
+            return ToolResult::err(format!("run: `{cmd}` timed out after {}s", timeout.as_secs()));
+        }
+    };
+    let cap = |bytes: &[u8]| -> String {
+        let s = String::from_utf8_lossy(bytes);
+        // Char-safe throughout: count and slice by whole chars, never bytes, so
+        // a multi-byte boundary is never split.
+        let chars: Vec<char> = s.chars().collect();
+        if chars.len() <= RUN_OUTPUT_CAP {
+            return s.into_owned();
+        }
+        // Keep a little HEAD (the invocation banner / early context) and mostly
+        // TAIL. A build or test prints its errors and the exit summary at the
+        // END; a head-only cap fed the model 8 KB of "Compiling …" progress and
+        // truncated away the actual failure, so it could not fix the problem and
+        // burned its turn budget — the empty-patch failure mode seen on
+        // heavy-build repos. Head+tail keeps both the command context and the
+        // diagnostics that matter.
+        let head_len = RUN_OUTPUT_CAP / 4;
+        let tail_len = RUN_OUTPUT_CAP - head_len;
+        let head: String = chars[..head_len].iter().collect();
+        let tail: String = chars[chars.len() - tail_len..].iter().collect();
+        let omitted = chars.len() - RUN_OUTPUT_CAP;
+        format!("{head}\n…(truncated {omitted} chars)…\n{tail}")
+    };
+    let code = out.status.code().unwrap_or(-1);
+    let body = format!(
+        "exit: {code}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        cap(&out.stdout),
+        cap(&out.stderr)
+    );
+    ToolResult { ok: out.status.success(), content: body }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_join_accepts_a_workspace_relative_path() {
+        let wd = Path::new("/work");
+        assert_eq!(safe_join(wd, "src/main.rs").unwrap(), Path::new("/work/src/main.rs"));
+        assert_eq!(safe_join(wd, "./a/b").unwrap(), Path::new("/work/a/b"));
+    }
+
+    #[test]
+    fn safe_join_rejects_escape_and_absolute() {
+        let wd = Path::new("/work");
+        assert!(safe_join(wd, "../etc/passwd").is_err());
+        assert!(safe_join(wd, "a/../../b").is_err());
+        assert!(safe_join(wd, "/etc/passwd").is_err());
+        assert!(safe_join(wd, "").is_err());
+    }
+
+    #[test]
+    fn parses_each_tool_from_json() {
+        let r = tool_call_from_json(&serde_json::json!({"tool":"read_file","path":"x.rs"}));
+        assert_eq!(r, Some(ToolCall::ReadFile { path: "x.rs".to_owned() }));
+        let w = tool_call_from_json(&serde_json::json!({"tool":"write_file","path":"x","content":"hi"}));
+        assert_eq!(w, Some(ToolCall::WriteFile { path: "x".to_owned(), content: "hi".to_owned() }));
+        let l = tool_call_from_json(&serde_json::json!({"tool":"list_dir"}));
+        assert_eq!(l, Some(ToolCall::ListDir { path: ".".to_owned() }));
+        let d = tool_call_from_json(&serde_json::json!({"tool":"done","summary":"ok"}));
+        assert_eq!(d, Some(ToolCall::Done { summary: "ok".to_owned() }));
+        assert_eq!(tool_call_from_json(&serde_json::json!({"tool":"nope"})), None);
+    }
+
+    #[test]
+    fn extracts_a_fenced_json_action_from_prose() {
+        let msg = "Sure, I'll read it.\n```json\n{\"tool\": \"read_file\", \"path\": \"a.txt\"}\n```\nthen continue.";
+        assert_eq!(
+            tool_call_from_content(msg),
+            Some(ToolCall::ReadFile { path: "a.txt".to_owned() })
+        );
+    }
+
+    #[test]
+    fn extracts_a_bare_json_object_when_unfenced() {
+        let msg = r#"here: {"tool":"write_file","path":"f","content":"x"} done"#;
+        assert_eq!(
+            tool_call_from_content(msg),
+            Some(ToolCall::WriteFile { path: "f".to_owned(), content: "x".to_owned() })
+        );
+    }
+
+    #[test]
+    fn write_then_read_round_trips_in_a_tempdir() {
+        let dir = std::env::temp_dir().join(format!("cox-http-tools-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let w = apply_tool(&dir, &ToolCall::WriteFile {
+            path: "sub/hello.txt".to_owned(),
+            content: "hi there".to_owned(),
+        });
+        assert!(w.ok, "{w:?}");
+
+        let r = apply_tool(&dir, &ToolCall::ReadFile { path: "sub/hello.txt".to_owned() });
+        assert!(r.ok);
+        assert_eq!(r.content, "hi there");
+
+        let l = apply_tool(&dir, &ToolCall::ListDir { path: "sub".to_owned() });
+        assert!(l.ok);
+        assert_eq!(l.content, "hello.txt");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_the_patch_tool() {
+        let r = tool_call_from_json(&serde_json::json!(
+            {"tool":"patch_file","path":"a.rs","find":"old","replace":"new"}
+        ));
+        assert_eq!(
+            r,
+            Some(ToolCall::PatchFile {
+                path: "a.rs".to_owned(),
+                find: "old".to_owned(),
+                replace: "new".to_owned(),
+            })
+        );
+        // find is required; missing it is not a valid patch.
+        assert_eq!(
+            tool_call_from_json(&serde_json::json!({"tool":"patch_file","path":"a"})),
+            None
+        );
+    }
+
+    #[test]
+    fn patch_replaces_a_unique_occurrence() {
+        let dir = std::env::temp_dir().join(format!("cox-patch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f.rs"), "let x = 1;\nlet y = 2;\n").unwrap();
+
+        let ok = apply_tool(&dir, &ToolCall::PatchFile {
+            path: "f.rs".to_owned(),
+            find: "let y = 2;".to_owned(),
+            replace: "let y = 42;".to_owned(),
+        });
+        assert!(ok.ok, "{ok:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.rs")).unwrap(),
+            "let x = 1;\nlet y = 42;\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn patch_refuses_missing_or_ambiguous_find() {
+        let dir = std::env::temp_dir().join(format!("cox-patch-amb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f.rs"), "a\na\n").unwrap();
+
+        let missing = apply_tool(&dir, &ToolCall::PatchFile {
+            path: "f.rs".to_owned(),
+            find: "zzz".to_owned(),
+            replace: "q".to_owned(),
+        });
+        assert!(!missing.ok && missing.content.contains("not present"), "{missing:?}");
+
+        let ambiguous = apply_tool(&dir, &ToolCall::PatchFile {
+            path: "f.rs".to_owned(),
+            find: "a".to_owned(),
+            replace: "b".to_owned(),
+        });
+        assert!(!ambiguous.ok && ambiguous.content.contains("matches 2"), "{ambiguous:?}");
+        // Unchanged after a refused patch.
+        assert_eq!(std::fs::read_to_string(dir.join("f.rs")).unwrap(), "a\na\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_the_run_tool() {
+        let r = tool_call_from_json(&serde_json::json!({"tool":"run","cmd":"cargo test"}));
+        assert_eq!(r, Some(ToolCall::Run { cmd: "cargo test".to_owned() }));
+        // Missing cmd is not a valid run.
+        assert_eq!(tool_call_from_json(&serde_json::json!({"tool":"run"})), None);
+    }
+
+    #[tokio::test]
+    async fn run_command_captures_stdout_and_exit() {
+        let dir = std::env::temp_dir();
+        let ok = run_command(&dir, "echo hello", Duration::from_secs(10)).await;
+        assert!(ok.ok, "{ok:?}");
+        assert!(ok.content.contains("hello"), "{}", ok.content);
+        assert!(ok.content.contains("exit: 0"), "{}", ok.content);
+
+        let bad = run_command(&dir, "exit 3", Duration::from_secs(10)).await;
+        assert!(!bad.ok);
+        assert!(bad.content.contains("exit: 3"), "{}", bad.content);
+    }
+
+    #[tokio::test]
+    async fn run_command_keeps_the_tail_where_build_errors_live() {
+        // A chatty build that prints lots of progress, then fails at the very
+        // end. The cap must preserve the trailing diagnostic (and the exit
+        // line), not just the opening noise — otherwise the model can't fix it.
+        let dir = std::env::temp_dir();
+        // ~40 KB of head noise, well over RUN_OUTPUT_CAP, then the real error.
+        let cmd = "for i in $(seq 1 4000); do echo 'Compiling foo progress line'; done; \
+                   echo 'ERROR: expected `;`, found `}` at src/lib.rs:42'; exit 1";
+        let r = run_command(&dir, cmd, Duration::from_secs(30)).await;
+        assert!(!r.ok, "{r:?}");
+        assert!(r.content.contains("exit: 1"), "{}", r.content);
+        assert!(
+            r.content.contains("ERROR: expected"),
+            "the trailing build error must survive truncation: {}",
+            r.content
+        );
+        assert!(r.content.contains("truncated"), "{}", r.content);
+        // And some head context is still there.
+        assert!(r.content.contains("Compiling foo"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn run_command_enforces_the_timeout() {
+        let dir = std::env::temp_dir();
+        let slow = run_command(&dir, "sleep 5", Duration::from_millis(300)).await;
+        assert!(!slow.ok);
+        assert!(slow.content.contains("timed out"), "{}", slow.content);
+    }
+
+    #[test]
+    fn apply_refuses_to_escape_the_workspace() {
+        let dir = std::env::temp_dir();
+        let r = apply_tool(&dir, &ToolCall::ReadFile { path: "../../etc/passwd".to_owned() });
+        assert!(!r.ok);
+        assert!(r.content.contains("escapes"), "{}", r.content);
+    }
+}

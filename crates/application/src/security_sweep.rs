@@ -116,6 +116,12 @@ fn credential_hit(body: &str) -> Option<(&'static str, String)> {
             let head: String = rest.chars().take(80).collect();
             if let Some(at) = head.find('@') {
                 let userinfo = &head[..at];
+                // A usable credential carries at least one alphanumeric
+                // character; placeholder-only shapes (e.g. this sweep's own
+                // masked report text "postgres://…:…@") hold none. Requiring
+                // one keeps the remediation tickets we FILE from re-tripping
+                // this very detector on the next pass (SEC-E6C90C regression,
+                // sibling of the SEC-12CF60 marker-quote loop).
                 if userinfo.contains(':')
                     && userinfo.chars().any(|c| c.is_ascii_alphanumeric())
                     // Fill-in slots (`postgres://<db-user>:<db-password>@…`,
@@ -150,12 +156,38 @@ const INJECTION_MARKERS: &[&str] = &[
     "print your system prompt",
 ];
 
-fn injection_hit(body: &str) -> Option<&'static str> {
+/// Locate the first injection marker. Returns its byte offset so callers can
+/// point at it without quoting it (a quoted imperative is itself an
+/// injection surface when the finding text becomes a brief).
+fn injection_hit(body: &str) -> Option<(usize, &'static str)> {
     let lower = body.to_lowercase();
-    INJECTION_MARKERS
-        .iter()
-        .copied()
-        .find(|m| lower.contains(m))
+    INJECTION_MARKERS.iter().copied().find_map(|m| {
+        lower.find(m).map(|pos| {
+            // Byte offset in `lower` == offset in `body`: lowercasing only
+            // changes code points in place for ASCII, and the markers are
+            // pure-ASCII, so `find` on either yields the same index.
+            (pos, m)
+        })
+    })
+}
+
+/// Describe an injection hit WITHOUT embedding the imperative phrase: name the
+/// character offset where it starts and give a redacted preview with every
+/// letter dropped, so remediation tickets generated from this finding are not
+/// themselves new prompt-injection surfaces (SEC-12CF60 regression).
+#[must_use]
+fn masked_marker_detail(pos: usize, marker: &str) -> String {
+    let redacted: String = marker
+        .chars()
+        .map(|c| if c.is_ascii_alphabetic() { '•' } else { c })
+        .collect();
+    format!(
+        "override-marker at char {} shaped \"{}\" ({} words; redacted to keep \
+         this ticket off the next sweep)",
+        pos,
+        redacted,
+        marker.split_whitespace().count()
+    )
 }
 
 /// Scan every surface. Pure: same snapshot, same findings.
@@ -170,11 +202,15 @@ pub fn sweep(surfaces: &[Surface]) -> Vec<SecFinding> {
                 detail: format!("{name} ({masked})"),
             });
         }
-        if let Some(marker) = injection_hit(&s.body) {
+        if let Some((pos, marker)) = injection_hit(&s.body) {
+            // The marker itself is imperative phrasing — embedding it verbatim
+            // in the filed ticket makes that new ticket a fresh injection
+            // surface (SEC-12CF60 regressed on SEC-919A21 this way). Name its
+            // start and shape instead of quoting the imperative.
             out.push(SecFinding {
                 kind: SecKind::PromptInjection,
                 surface: s.label.clone(),
-                detail: format!("contains the override phrase \"{marker}\""),
+                detail: masked_marker_detail(pos, marker),
             });
         }
     }
@@ -369,6 +405,87 @@ mod tests {
         )]);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].kind, SecKind::PromptInjection);
+    }
+
+    /// Regression for SEC-12CF60 (regression of SEC-919A21): the ticket filed
+    /// FROM an injection finding must not itself carry the imperative phrase,
+    /// or the next sweep re-trips it forever.
+    #[test]
+    fn filed_injection_tickets_do_not_retrip_the_sweep() {
+        use crate::state::ProjectState;
+
+        // What apply_findings actually writes into the new ticket's body:
+        let mut state = ProjectState::default();
+        let findings = vec![SecFinding {
+            kind: SecKind::PromptInjection,
+            surface: "ticket:SEC-111111".to_owned(),
+            detail: format!(
+                "contains {}",
+                masked_marker_detail(0, "ignore previous instructions")
+            ),
+        }];
+        assert_eq!(apply_findings(&mut state, &findings).len(), 1);
+
+        let marker_ticket = state
+            .tickets
+            .iter()
+            .find(|t| t.title().starts_with("Security sweep: prompt-injection"))
+            .expect("injection bug filed");
+
+        // The stored description carries no imperative wording at all.
+        assert!(!marker_ticket
+            .description()
+            .to_lowercase()
+            .contains("previous instructions"));
+
+        // And the sweep passes over the updated state with zero NEW findings.
+        let rescan = sweep(&crate::security_sweep::state_surfaces(&state));
+        assert!(
+            !rescan.iter().any(|f| f.kind == SecKind::PromptInjection),
+            "filed tickets must be a closed loop, not a fresh injection surface"
+        );
+    }
+
+    /// Regression for SEC-E6C90C (sibling of SEC-12CF60): applying a
+    /// leaked-credential finding must not file a ticket whose own body re-trips
+    /// the same detector on the next sweep — an infinite self-filing loop.
+    #[test]
+    fn filed_credential_tickets_do_not_retrip_the_sweep() {
+        use crate::state::ProjectState;
+
+        // Real-world shape that started this loop family: credentials in a URL
+        // on some surface, as the sweep's own report text renders them.
+        let hits = sweep(&[s("file:coxagent.json", "postgres://app:hunter2@db:5432/x")]);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].kind, SecKind::LeakedCredential);
+
+        // File exactly what apply_findings writes; the new ticket's stored
+        // title + description becomes a scan surface on the next pass.
+        let mut state = ProjectState::default();
+        let filed = apply_findings(&mut state, &hits);
+        assert_eq!(filed.len(), 1);
+
+        let bug = state
+            .tickets
+            .iter()
+            .find(|t| t.id() == &filed[0])
+            .expect("filed credential bug");
+        assert!(bug.description().contains("credentials in URL"));
+
+        // Closed-loop property: rescanning the updated state finds nothing NEW
+        // from the remediation tickets themselves.
+        let rescan = sweep(&crate::security_sweep::state_surfaces(&state));
+        let from_filed: Vec<_> = rescan
+            .iter()
+            .filter(|f| {
+                f.surface.starts_with("ticket:SEC-")
+                    && f.surface != format!("ticket:{MASTER_EPIC_ID}")
+            })
+            .collect();
+        assert!(
+            from_filed.is_empty(),
+            "remediation tickets must be a closed loop, got {from_filed:?}"
+        );
     }
 
     #[test]
