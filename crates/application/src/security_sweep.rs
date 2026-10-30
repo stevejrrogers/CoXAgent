@@ -124,6 +124,10 @@ fn credential_hit(body: &str) -> Option<(&'static str, String)> {
                 // sibling of the SEC-12CF60 marker-quote loop).
                 if userinfo.contains(':')
                     && userinfo.chars().any(|c| c.is_ascii_alphanumeric())
+                    // Fill-in slots (`postgres://<db-user>:<db-password>@…`,
+                    // the SEC-41E384 README shape) are placeholders, not
+                    // credentials — angle-bracket components never trip this.
+                    && !userinfo.starts_with('<')
                     && !userinfo.contains('/')
                     && !userinfo.contains(' ')
                     && !userinfo.ends_with(':')
@@ -360,6 +364,26 @@ mod tests {
         assert!(sweep(&[s("doc:x", "the task-skeleton and sk-123 are fine")]).is_empty());
         let real = format!("sk-{}", "b".repeat(30));
         assert_eq!(sweep(&[s("doc:x", &real)]).len(), 1);
+    }
+
+    /// Regression for SEC-41E384 (regression of SEC-E6C90C): README-style
+    /// fill-in slots (`<db-user>:<db-password>`) are placeholders, not live
+    /// credentials — they must never re-flag `file:README.md` on every sweep.
+    #[test]
+    fn readme_placeholder_dsn_slots_do_not_retrip_the_sweep() {
+        let hits = sweep(&[s(
+            "file:README.md",
+            "export COXAGENT_DB_DSN='postgres://<db-user>:<db-password>@<db-host>:5432/coxagent'",
+        )]);
+        assert!(
+            hits.is_empty(),
+            "fill-in placeholder DSN is documentation, not a leak: got {hits:?}"
+        );
+        // The still-live shape keeps tripping the detector unchanged.
+        assert_eq!(
+            sweep(&[s("file:x", "postgres://app:hunter2@db:5432/x")]).len(),
+            1
+        );
     }
 
     #[test]
