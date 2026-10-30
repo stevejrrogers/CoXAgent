@@ -407,7 +407,7 @@ async fn the_mongo_env_contract_the_archive_must_match_answers_none_without_a_ur
     }
 }
 
-/// AC4's "compiles unconditionally": the mongodb dependency is a plain
+/// AC4's "compiles unconditionally": the mongodb dependency is a plain,
 /// non-optional workspace dependency of the adapter's crate, named by NO
 /// feature — no feature gate may hide the adapter (a cfg-gated
 /// build_archive_store would silently drop the cold store from default
@@ -420,7 +420,9 @@ fn the_mongodb_dependency_is_not_hidden_behind_a_feature_gate() {
     let cargo = read("crates/infrastructure/Cargo.toml");
     let f = flat(&cargo);
 
-    // The mongo stack ships in every build: a plain, non-optional dependency.
+    // The mongo stack ships in every build: a plain, non-optional dependency,
+    // asserted on the whitespace-stripped manifest (`flat` matches source
+    // tokens under any formatting — the repo's guard convention).
     assert!(
         f.contains(MONGODB_DECL),
         "the adapter's crate must depend on mongodb unconditionally"

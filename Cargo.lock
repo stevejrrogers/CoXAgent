@@ -580,6 +580,7 @@ dependencies = [
 name = "coxagent-domain"
 version = "2.24.0"
 dependencies = [
+ "coxagent-contracts",
  "semver",
  "serde",
  "serde_json",
