@@ -216,11 +216,26 @@ fn parse_completion(body: &str) -> Result<Completion, String> {
     {
         return Err(format!("gateway error: {msg}"));
     }
-    let content = v
-        .pointer("/choices/0/message/content")
-        .and_then(serde_json::Value::as_str)
-        .ok_or("response had no choices[0].message.content")?
-        .to_owned();
+    // Require a message object, but tolerate a null/absent `content`: a gateway
+    // returns `content: null` when the model was cut off at max_tokens
+    // (finish_reason "length"), tripped a content filter, or is a reasoning
+    // model that carries its text elsewhere. Treating that as a hard error
+    // aborted the whole run — and killed a coding loop on a single truncated
+    // turn — when the gateway had in fact succeeded. Fall back to empty content
+    // and annotate it with finish_reason so an empty reply stays diagnosable.
+    let message = v
+        .pointer("/choices/0/message")
+        .ok_or("response had no choices[0].message")?;
+    let content = message.get("content").and_then(serde_json::Value::as_str).map_or_else(
+        || {
+            let reason = v
+                .pointer("/choices/0/finish_reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            format!("(empty response from gateway; finish_reason: {reason})")
+        },
+        str::to_owned,
+    );
     let usage = v.get("usage");
     let tok = |field: &str| -> u64 {
         usage
@@ -318,5 +333,29 @@ mod tests {
     fn rejects_a_response_with_no_choices() {
         let err = parse_completion(r#"{"choices": []}"#).unwrap_err();
         assert!(err.contains("no choices"), "{err}");
+    }
+
+    #[test]
+    fn tolerates_null_content_from_a_truncated_turn() {
+        // Gateway cut the model off at max_tokens: content is null, not a hard
+        // error. Must parse to a non-empty, diagnosable placeholder carrying the
+        // finish_reason — never abort the run.
+        let body = r#"{"choices": [{"message": {"role": "assistant", "content": null}, "finish_reason": "length"}]}"#;
+        let c = parse_completion(body).unwrap();
+        assert!(c.content.contains("length"), "{}", c.content);
+        assert!(c.content.contains("empty response"), "{}", c.content);
+    }
+
+    #[test]
+    fn tolerates_absent_content_field() {
+        let body = r#"{"choices": [{"message": {"role": "assistant"}}]}"#;
+        let c = parse_completion(body).unwrap();
+        assert!(c.content.contains("empty response"), "{}", c.content);
+    }
+
+    #[test]
+    fn still_errors_when_the_message_object_is_missing() {
+        let err = parse_completion(r#"{"choices": [{"finish_reason": "stop"}]}"#).unwrap_err();
+        assert!(err.contains("no choices[0].message"), "{err}");
     }
 }
