@@ -14,6 +14,7 @@ pub(crate) mod live;
 pub mod metering;
 pub mod mock;
 pub mod opencode;
+pub mod precheck;
 pub mod registry;
 pub mod routing;
 pub mod scripted;
