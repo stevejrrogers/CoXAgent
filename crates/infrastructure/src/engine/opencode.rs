@@ -358,6 +358,19 @@ impl AgentEnginePort for OpencodeEngine {
 }
 
 impl OpencodeEngine {
+    /// Precheck the scanner binary is present BEFORE any sweep run starts
+    /// (SEC-12CF60 criterion 4). Cheap `PATH` probe, no process spawned.
+    #[must_use]
+    pub fn binary_present(&self) -> bool {
+        crate::engine::registry::resolve_binary("opencode").is_some()
+    }
+
+    /// The dry-run report for this engine's binary: PASS with the resolved
+    /// path, or MISSING with the exact install command.
+    pub fn precheck(&self) -> crate::engine::precheck::BinaryCheck {
+        crate::engine::precheck::check_binary("opencode")
+    }
+
     /// Spawn `cmd`, stream NDJSON stdout to the live log, parse the outcome.
     /// `model` is the model id passed on THIS command's `--model` — stamped
     /// onto the outcome so provenance records the model that actually
@@ -376,7 +389,12 @@ impl OpencodeEngine {
         // a confinement that was not applied (COX-B016).
         let (mut child, sandbox) = crate::proc::spawn_confined(&mut cmd, sandbox)
             .await
-            .map_err(|e| PortError::Backend(format!("spawn opencode: {e}")))?;
+            .map_err(|e| {
+                // SEC-12CF60: name the missing binary + its fix instead of a
+                // bare `No such file or directory (os error 2)` three times.
+                let tool = crate::engine::precheck::SpawnTool("opencode");
+                PortError::Backend(crate::engine::precheck::spawn_error(tool, &e))
+            })?;
         let out = child
             .stdout
             .take()
