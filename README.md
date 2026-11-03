@@ -217,7 +217,7 @@ derived image to run real agents in the container.
 
 ```sh
 export COXAGENT_ADMIN_USER=root COXAGENT_ADMIN_PASSWORD='••••••••'
-export COXAGENT_DB_DSN='postgres://user:pass@host:5432/coxagent'    # state, chat, audit
+export COXAGENT_DB_DSN='postgres://<db-user>:<db-password>@<db-host>:5432/coxagent'  # state, chat, audit
 export COXAGENT_AUTH_DSN="$COXAGENT_DB_DSN"                         # accounts in Postgres
 export COXAGENT_REDIS_URL='redis://host:6379'                      # sessions + coordination
 export COXAGENT_MONGO_URL='mongodb://host:27017'                   # docs (optional)
