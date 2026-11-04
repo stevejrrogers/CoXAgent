@@ -159,10 +159,6 @@ const INJECTION_MARKERS: &[&str] = &[
 /// Locate the first injection marker. Returns its byte offset so callers can
 /// point at it without quoting it (a quoted imperative is itself an
 /// injection surface when the finding text becomes a brief).
-/// Title prefix shared by every remediation ticket `apply_findings` files —
-/// used both to file and (in `state_surfaces`) to keep those tickets out of
-/// the next scan, closing the self-filing loop.
-const SWEEP_TICKET_TITLE_PREFIX: &str = "Security sweep:";
 fn injection_hit(body: &str) -> Option<(usize, &'static str)> {
     let lower = body.to_lowercase();
     INJECTION_MARKERS.iter().copied().find_map(|m| {
@@ -475,7 +471,7 @@ mod tests {
         let marker_ticket = state
             .tickets
             .iter()
-            .find(|t| t.title().starts_with(SWEEP_TICKET_TITLE_PREFIX))
+            .find(|t| t.title().starts_with(FILED_TITLE_PREFIX))
             .expect("injection bug filed");
 
         // The stored description carries no imperative wording at all.
