@@ -48,7 +48,9 @@ async fn run_with_dead_path(engine: OpencodeEngine, work_dir: &std::path::Path) 
     // NotFound spawn error the ticket's mapper must translate.
     let empty = std::env::temp_dir().join(format!("cox-sec12cf60-empty-path-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&empty);
-    std::fs::create_dir_all(&empty).expect("mkdir empty PATH dir");
+    if let Err(e) = std::fs::create_dir_all(&empty) {
+        panic!("mkdir empty PATH dir: {e}");
+    }
     std::env::set_var("PATH", &empty);
 
     let outcome = engine.run(request(work_dir)).await;
@@ -56,12 +58,18 @@ async fn run_with_dead_path(engine: OpencodeEngine, work_dir: &std::path::Path) 
     std::env::set_var("PATH", saved.unwrap_or_default());
     let _ = std::fs::remove_dir_all(&empty);
 
-    outcome.expect_err("an unresolvable binary must fail the run")
+    match outcome {
+        Ok(ok) => panic!("an unresolvable binary must fail the run, got: {ok:?}"),
+        Err(e) => e,
+    }
 }
 
 #[tokio::test]
 async fn missing_scanner_cli_names_itself_and_its_fix_not_a_bare_enoent() {
-    let dir = tempfile::tempdir().expect("work dir");
+    let dir = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(e) => panic!("work dir: {e}"),
+    };
 
     let engine =
         OpencodeEngine::new("test/model").with_binary("/nonexistent/cox-sec-12cf60-no-such-cli");
