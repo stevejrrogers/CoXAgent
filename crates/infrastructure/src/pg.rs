@@ -125,7 +125,11 @@ fn pool_cache() -> &'static Mutex<HashMap<String, Pool>> {
 pub(crate) async fn pool(dsn: &str, label: &'static str) -> Result<Pool, String> {
     // Reuse an already-built pool for this DSN so every project/store shares
     // one capped connection set rather than minting its own.
-    if let Some(existing) = pool_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(dsn) {
+    if let Some(existing) = pool_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(dsn)
+    {
         return Ok(existing.clone());
     }
     let plan = tls_plan(dsn).map_err(|e| format!("{label} pool: {e}"))?;
@@ -172,7 +176,9 @@ pub(crate) async fn pool(dsn: &str, label: &'static str) -> Result<Pool, String>
     .map_err(|e| format!("{label} pool: {e}"))?;
     // Cache under the DSN; if another caller raced us to build the same DSN,
     // keep the stored pool so everyone shares a single connection set.
-    let mut cache = pool_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut cache = pool_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     Ok(cache.entry(dsn.to_owned()).or_insert(built).clone())
 }
 

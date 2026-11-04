@@ -57,7 +57,9 @@ fn mutating_routes(src: &str) -> BTreeSet<String> {
         }
         let body = &src[start..p.saturating_sub(1)];
         i = p;
-        let Some(path) = first_string_literal(body) else { continue };
+        let Some(path) = first_string_literal(body) else {
+            continue;
+        };
         if has_mutating_method(body) {
             out.insert(path);
         }
@@ -98,8 +100,16 @@ fn every_mutating_route_is_declared_in_the_rbac_registry() {
         "write-endpoint RBAC registry drifted from serve_full().\n\
          UNDECLARED mutating routes (confirm authorization in write_gate_ok, then add here):\n{}\n\
          ORPHANED registry entries (route gone — remove here):\n{}",
-        undeclared.iter().map(|p| format!("  {p}")).collect::<Vec<_>>().join("\n"),
-        orphaned.iter().map(|p| format!("  {p}")).collect::<Vec<_>>().join("\n"),
+        undeclared
+            .iter()
+            .map(|p| format!("  {p}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        orphaned
+            .iter()
+            .map(|p| format!("  {p}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
     );
 }
 
@@ -113,7 +123,10 @@ fn extractor_detects_a_mutating_route_and_skips_a_read_only_one() {
     let found = mutating_routes(sample);
     assert!(found.contains("/api/thing"), "post route must be detected");
     assert!(found.contains("/api/wipe"), "delete route must be detected");
-    assert!(!found.contains("/api/readonly"), "get-only route must be skipped");
+    assert!(
+        !found.contains("/api/readonly"),
+        "get-only route must be skipped"
+    );
 }
 
 /// Every mutating route live in `serve_full()`. Keep sorted. See the module

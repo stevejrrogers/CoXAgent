@@ -493,7 +493,10 @@ mod tests {
             coxagent_domain::Role::Po,
             Status::Rejected,
         );
-        assert!(closed.is_ok(), "Open -> Rejected must be a legal transition");
+        assert!(
+            closed.is_ok(),
+            "Open -> Rejected must be a legal transition"
+        );
 
         // Nothing re-trips: neither the Fixed ticket nor any other surface.
         let rescan = sweep(&crate::security_sweep::state_surfaces(&state));

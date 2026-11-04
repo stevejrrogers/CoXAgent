@@ -401,9 +401,12 @@ impl GitPort for SystemGit {
         // stale registration for this exact path is overwritten rather than
         // fatal. Prune is best-effort; the add is what must succeed.
         let _ = git(work_dir, &["worktree", "prune"]).await;
-        git(work_dir, &["worktree", "add", "--detach", "--force", &path, sha])
-            .await
-            .map(|_| ())
+        git(
+            work_dir,
+            &["worktree", "add", "--detach", "--force", &path, sha],
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn worktree_remove(&self, work_dir: &Path, path: &Path) -> Result<(), PortError> {

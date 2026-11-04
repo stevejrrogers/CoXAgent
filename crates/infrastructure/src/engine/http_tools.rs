@@ -23,14 +23,29 @@ const RUN_OUTPUT_CAP: usize = 8192;
 /// to inspect and edit a workspace, run a check, plus `Done` to end the loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolCall {
-    ReadFile { path: String },
-    WriteFile { path: String, content: String },
+    ReadFile {
+        path: String,
+    },
+    WriteFile {
+        path: String,
+        content: String,
+    },
     /// Surgical edit: replace the unique occurrence of `find` with `replace` in
     /// an existing file (so large files are edited without a full rewrite).
-    PatchFile { path: String, find: String, replace: String },
-    ListDir { path: String },
-    Run { cmd: String },
-    Done { summary: String },
+    PatchFile {
+        path: String,
+        find: String,
+        replace: String,
+    },
+    ListDir {
+        path: String,
+    },
+    Run {
+        cmd: String,
+    },
+    Done {
+        summary: String,
+    },
 }
 
 /// The outcome of applying a [`ToolCall`], fed back to the model as the tool
@@ -45,10 +60,16 @@ pub struct ToolResult {
 
 impl ToolResult {
     fn ok(content: impl Into<String>) -> Self {
-        Self { ok: true, content: content.into() }
+        Self {
+            ok: true,
+            content: content.into(),
+        }
     }
     fn err(content: impl Into<String>) -> Self {
-        Self { ok: false, content: content.into() }
+        Self {
+            ok: false,
+            content: content.into(),
+        }
     }
 }
 
@@ -86,7 +107,11 @@ pub fn safe_join(work_dir: &Path, rel: &str) -> Result<PathBuf, String> {
 #[must_use]
 pub fn tool_call_from_json(v: &serde_json::Value) -> Option<ToolCall> {
     let tool = v.get("tool").and_then(serde_json::Value::as_str)?;
-    let s = |k: &str| v.get(k).and_then(serde_json::Value::as_str).map(str::to_owned);
+    let s = |k: &str| {
+        v.get(k)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
     match tool {
         "read_file" => Some(ToolCall::ReadFile { path: s("path")? }),
         "write_file" => Some(ToolCall::WriteFile {
@@ -187,7 +212,11 @@ pub fn apply_tool(work_dir: &Path, call: &ToolCall) -> ToolResult {
             }
             Err(e) => ToolResult::err(e),
         },
-        ToolCall::PatchFile { path, find, replace } => match safe_join(work_dir, path) {
+        ToolCall::PatchFile {
+            path,
+            find,
+            replace,
+        } => match safe_join(work_dir, path) {
             Ok(p) => match std::fs::read_to_string(&p) {
                 Ok(text) => {
                     let n = text.matches(find.as_str()).count();
@@ -268,7 +297,10 @@ pub(super) async fn run_command(work_dir: &Path, cmd: &str, timeout: Duration) -
         Ok(Err(e)) => return ToolResult::err(format!("run: `{cmd}`: {e}")),
         Err(_) => {
             // kill_on_drop reaps the child when the future is dropped here.
-            return ToolResult::err(format!("run: `{cmd}` timed out after {}s", timeout.as_secs()));
+            return ToolResult::err(format!(
+                "run: `{cmd}` timed out after {}s",
+                timeout.as_secs()
+            ));
         }
     };
     let cap = |bytes: &[u8]| -> String {
@@ -299,7 +331,10 @@ pub(super) async fn run_command(work_dir: &Path, cmd: &str, timeout: Duration) -
         cap(&out.stdout),
         cap(&out.stderr)
     );
-    ToolResult { ok: out.status.success(), content: body }
+    ToolResult {
+        ok: out.status.success(),
+        content: body,
+    }
 }
 
 #[cfg(test)]
@@ -309,7 +344,10 @@ mod tests {
     #[test]
     fn safe_join_accepts_a_workspace_relative_path() {
         let wd = Path::new("/work");
-        assert_eq!(safe_join(wd, "src/main.rs").unwrap(), Path::new("/work/src/main.rs"));
+        assert_eq!(
+            safe_join(wd, "src/main.rs").unwrap(),
+            Path::new("/work/src/main.rs")
+        );
         assert_eq!(safe_join(wd, "./a/b").unwrap(), Path::new("/work/a/b"));
     }
 
@@ -325,14 +363,40 @@ mod tests {
     #[test]
     fn parses_each_tool_from_json() {
         let r = tool_call_from_json(&serde_json::json!({"tool":"read_file","path":"x.rs"}));
-        assert_eq!(r, Some(ToolCall::ReadFile { path: "x.rs".to_owned() }));
-        let w = tool_call_from_json(&serde_json::json!({"tool":"write_file","path":"x","content":"hi"}));
-        assert_eq!(w, Some(ToolCall::WriteFile { path: "x".to_owned(), content: "hi".to_owned() }));
+        assert_eq!(
+            r,
+            Some(ToolCall::ReadFile {
+                path: "x.rs".to_owned()
+            })
+        );
+        let w = tool_call_from_json(
+            &serde_json::json!({"tool":"write_file","path":"x","content":"hi"}),
+        );
+        assert_eq!(
+            w,
+            Some(ToolCall::WriteFile {
+                path: "x".to_owned(),
+                content: "hi".to_owned()
+            })
+        );
         let l = tool_call_from_json(&serde_json::json!({"tool":"list_dir"}));
-        assert_eq!(l, Some(ToolCall::ListDir { path: ".".to_owned() }));
+        assert_eq!(
+            l,
+            Some(ToolCall::ListDir {
+                path: ".".to_owned()
+            })
+        );
         let d = tool_call_from_json(&serde_json::json!({"tool":"done","summary":"ok"}));
-        assert_eq!(d, Some(ToolCall::Done { summary: "ok".to_owned() }));
-        assert_eq!(tool_call_from_json(&serde_json::json!({"tool":"nope"})), None);
+        assert_eq!(
+            d,
+            Some(ToolCall::Done {
+                summary: "ok".to_owned()
+            })
+        );
+        assert_eq!(
+            tool_call_from_json(&serde_json::json!({"tool":"nope"})),
+            None
+        );
     }
 
     #[test]
@@ -340,7 +404,9 @@ mod tests {
         let msg = "Sure, I'll read it.\n```json\n{\"tool\": \"read_file\", \"path\": \"a.txt\"}\n```\nthen continue.";
         assert_eq!(
             tool_call_from_content(msg),
-            Some(ToolCall::ReadFile { path: "a.txt".to_owned() })
+            Some(ToolCall::ReadFile {
+                path: "a.txt".to_owned()
+            })
         );
     }
 
@@ -349,7 +415,10 @@ mod tests {
         let msg = r#"here: {"tool":"write_file","path":"f","content":"x"} done"#;
         assert_eq!(
             tool_call_from_content(msg),
-            Some(ToolCall::WriteFile { path: "f".to_owned(), content: "x".to_owned() })
+            Some(ToolCall::WriteFile {
+                path: "f".to_owned(),
+                content: "x".to_owned()
+            })
         );
     }
 
@@ -359,17 +428,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        let w = apply_tool(&dir, &ToolCall::WriteFile {
-            path: "sub/hello.txt".to_owned(),
-            content: "hi there".to_owned(),
-        });
+        let w = apply_tool(
+            &dir,
+            &ToolCall::WriteFile {
+                path: "sub/hello.txt".to_owned(),
+                content: "hi there".to_owned(),
+            },
+        );
         assert!(w.ok, "{w:?}");
 
-        let r = apply_tool(&dir, &ToolCall::ReadFile { path: "sub/hello.txt".to_owned() });
+        let r = apply_tool(
+            &dir,
+            &ToolCall::ReadFile {
+                path: "sub/hello.txt".to_owned(),
+            },
+        );
         assert!(r.ok);
         assert_eq!(r.content, "hi there");
 
-        let l = apply_tool(&dir, &ToolCall::ListDir { path: "sub".to_owned() });
+        let l = apply_tool(
+            &dir,
+            &ToolCall::ListDir {
+                path: "sub".to_owned(),
+            },
+        );
         assert!(l.ok);
         assert_eq!(l.content, "hello.txt");
 
@@ -403,11 +485,14 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("f.rs"), "let x = 1;\nlet y = 2;\n").unwrap();
 
-        let ok = apply_tool(&dir, &ToolCall::PatchFile {
-            path: "f.rs".to_owned(),
-            find: "let y = 2;".to_owned(),
-            replace: "let y = 42;".to_owned(),
-        });
+        let ok = apply_tool(
+            &dir,
+            &ToolCall::PatchFile {
+                path: "f.rs".to_owned(),
+                find: "let y = 2;".to_owned(),
+                replace: "let y = 42;".to_owned(),
+            },
+        );
         assert!(ok.ok, "{ok:?}");
         assert_eq!(
             std::fs::read_to_string(dir.join("f.rs")).unwrap(),
@@ -422,19 +507,31 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("f.rs"), "a\na\n").unwrap();
 
-        let missing = apply_tool(&dir, &ToolCall::PatchFile {
-            path: "f.rs".to_owned(),
-            find: "zzz".to_owned(),
-            replace: "q".to_owned(),
-        });
-        assert!(!missing.ok && missing.content.contains("not present"), "{missing:?}");
+        let missing = apply_tool(
+            &dir,
+            &ToolCall::PatchFile {
+                path: "f.rs".to_owned(),
+                find: "zzz".to_owned(),
+                replace: "q".to_owned(),
+            },
+        );
+        assert!(
+            !missing.ok && missing.content.contains("not present"),
+            "{missing:?}"
+        );
 
-        let ambiguous = apply_tool(&dir, &ToolCall::PatchFile {
-            path: "f.rs".to_owned(),
-            find: "a".to_owned(),
-            replace: "b".to_owned(),
-        });
-        assert!(!ambiguous.ok && ambiguous.content.contains("matches 2"), "{ambiguous:?}");
+        let ambiguous = apply_tool(
+            &dir,
+            &ToolCall::PatchFile {
+                path: "f.rs".to_owned(),
+                find: "a".to_owned(),
+                replace: "b".to_owned(),
+            },
+        );
+        assert!(
+            !ambiguous.ok && ambiguous.content.contains("matches 2"),
+            "{ambiguous:?}"
+        );
         // Unchanged after a refused patch.
         assert_eq!(std::fs::read_to_string(dir.join("f.rs")).unwrap(), "a\na\n");
         let _ = std::fs::remove_dir_all(&dir);
@@ -443,9 +540,17 @@ mod tests {
     #[test]
     fn parses_the_run_tool() {
         let r = tool_call_from_json(&serde_json::json!({"tool":"run","cmd":"cargo test"}));
-        assert_eq!(r, Some(ToolCall::Run { cmd: "cargo test".to_owned() }));
+        assert_eq!(
+            r,
+            Some(ToolCall::Run {
+                cmd: "cargo test".to_owned()
+            })
+        );
         // Missing cmd is not a valid run.
-        assert_eq!(tool_call_from_json(&serde_json::json!({"tool":"run"})), None);
+        assert_eq!(
+            tool_call_from_json(&serde_json::json!({"tool":"run"})),
+            None
+        );
     }
 
     #[tokio::test]
@@ -494,7 +599,12 @@ mod tests {
     #[test]
     fn apply_refuses_to_escape_the_workspace() {
         let dir = std::env::temp_dir();
-        let r = apply_tool(&dir, &ToolCall::ReadFile { path: "../../etc/passwd".to_owned() });
+        let r = apply_tool(
+            &dir,
+            &ToolCall::ReadFile {
+                path: "../../etc/passwd".to_owned(),
+            },
+        );
         assert!(!r.ok);
         assert!(r.content.contains("escapes"), "{}", r.content);
     }

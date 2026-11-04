@@ -46,7 +46,8 @@ async fn run_with_dead_path(engine: OpencodeEngine, work_dir: &std::path::Path) 
     // A directory that exists but is empty: every exec lookup — the `nice`
     // wrapper AND the engine binary under it — misses, which is precisely the
     // NotFound spawn error the ticket's mapper must translate.
-    let empty = std::env::temp_dir().join(format!("cox-sec12cf60-empty-path-{}", std::process::id()));
+    let empty =
+        std::env::temp_dir().join(format!("cox-sec12cf60-empty-path-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&empty);
     if let Err(e) = std::fs::create_dir_all(&empty) {
         panic!("mkdir empty PATH dir: {e}");
@@ -94,8 +95,7 @@ async fn missing_scanner_cli_names_itself_and_its_fix_not_a_bare_enoent() {
         "SEC-12CF60: the error must carry an actionable install hint: {msg}"
     );
     assert!(
-        !msg.trim_end().ends_with("(os error 2)")
-            && !msg.ends_with("directory (os error 2)\n"),
+        !msg.trim_end().ends_with("(os error 2)") && !msg.ends_with("directory (os error 2)\n"),
         "the bare ENOENT payload is exactly what made three sweeps \
          undiagnosable — it must not survive as the whole story: {msg}"
     );

@@ -456,8 +456,12 @@ fn operation(spec: &RouteSpec, method: &str) -> serde_json::Value {
 fn security_for(path: &str) -> SecurityLevel {
     if matches!(
         path,
-        "/api/health" | "/api/ready" | "/api/openapi.json" | "/api/auth/login" | "/api/auth/oidc/login"
-        | "/api/auth/oidc/callback"
+        "/api/health"
+            | "/api/ready"
+            | "/api/openapi.json"
+            | "/api/auth/login"
+            | "/api/auth/oidc/login"
+            | "/api/auth/oidc/callback"
     ) || path.starts_with("/s/")
     {
         // /s/:token (CXA-F069): the unguessable share token IS the credential,

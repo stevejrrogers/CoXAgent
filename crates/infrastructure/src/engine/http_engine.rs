@@ -98,7 +98,13 @@ impl HttpEngine {
         if !status.is_success() {
             // Bodies can echo request context (incl. the key) on some gateways;
             // keep only the first line and cap it.
-            let detail: String = body.lines().next().unwrap_or("").chars().take(200).collect();
+            let detail: String = body
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(200)
+                .collect();
             return Err(PortError::Backend(format!(
                 "http engine: gateway returned {status}: {detail}"
             )));
@@ -108,15 +114,29 @@ impl HttpEngine {
 
     /// Single-shot text completion — the engine's behaviour for text-producing
     /// roles (chat/planning/review/docs).
-    async fn run_text(&self, req: &AgentRequest, timeout: Duration) -> Result<AgentOutcome, PortError> {
+    async fn run_text(
+        &self,
+        req: &AgentRequest,
+        timeout: Duration,
+    ) -> Result<AgentOutcome, PortError> {
         let payload = chat_payload(&self.model, &req.system_prompt, &req.task_prompt);
         let c = self.post_chat(payload, timeout).await?;
-        Ok(self.outcome(c.content, c.input_tokens, c.output_tokens, String::new(), Some(0)))
+        Ok(self.outcome(
+            c.content,
+            c.input_tokens,
+            c.output_tokens,
+            String::new(),
+            Some(0),
+        ))
     }
 
     /// Agentic coding run — drive the chat↔tool loop so the model inspects and
     /// edits the workspace, then summarises.
-    async fn run_coding(&self, req: &AgentRequest, timeout: Duration) -> Result<AgentOutcome, PortError> {
+    async fn run_coding(
+        &self,
+        req: &AgentRequest,
+        timeout: Duration,
+    ) -> Result<AgentOutcome, PortError> {
         let chat = |messages: Vec<serde_json::Value>| {
             let payload = messages_payload(&self.model, &messages);
             async move {
@@ -147,7 +167,13 @@ impl HttpEngine {
         } else {
             out.summary
         };
-        Ok(self.outcome(stdout, out.input_tokens, out.output_tokens, out.transcript, exit))
+        Ok(self.outcome(
+            stdout,
+            out.input_tokens,
+            out.output_tokens,
+            out.transcript,
+            exit,
+        ))
     }
 
     /// Assemble an [`AgentOutcome`] from this engine's common fields.
@@ -163,7 +189,11 @@ impl HttpEngine {
             stdout,
             stderr: String::new(),
             exit_code,
-            usage: Some(Usage { input_tokens, output_tokens, cost_usd: 0.0 }),
+            usage: Some(Usage {
+                input_tokens,
+                output_tokens,
+                cost_usd: 0.0,
+            }),
             trace,
             session_id: None,
             sandbox: SandboxStatus::NotRequested,
@@ -205,8 +235,7 @@ struct Completion {
 /// missing `usage` block (some gateways omit it) but requires at least one
 /// choice with assistant content.
 fn parse_completion(body: &str) -> Result<Completion, String> {
-    let v: serde_json::Value =
-        serde_json::from_str(body).map_err(|e| format!("bad JSON: {e}"))?;
+    let v: serde_json::Value = serde_json::from_str(body).map_err(|e| format!("bad JSON: {e}"))?;
     // A gateway error comes back as {"error": {"message": ...}} with 200 in
     // some proxies — surface it rather than reporting "no choices".
     if let Some(msg) = v
@@ -226,16 +255,19 @@ fn parse_completion(body: &str) -> Result<Completion, String> {
     let message = v
         .pointer("/choices/0/message")
         .ok_or("response had no choices[0].message")?;
-    let content = message.get("content").and_then(serde_json::Value::as_str).map_or_else(
-        || {
-            let reason = v
-                .pointer("/choices/0/finish_reason")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("unknown");
-            format!("(empty response from gateway; finish_reason: {reason})")
-        },
-        str::to_owned,
-    );
+    let content = message
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .map_or_else(
+            || {
+                let reason = v
+                    .pointer("/choices/0/finish_reason")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
+                format!("(empty response from gateway; finish_reason: {reason})")
+            },
+            str::to_owned,
+        );
     let usage = v.get("usage");
     let tok = |field: &str| -> u64 {
         usage

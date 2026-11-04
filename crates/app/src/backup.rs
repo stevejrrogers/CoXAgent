@@ -347,7 +347,9 @@ async fn dump_databases(hub_dir: &Path, retention: usize) -> Vec<String> {
                 }
             }
             Ok(DumpStatus::Skipped(why)) => {
-                out.push(format!("{label} database NOT dumped: {why} — run pg_dump manually"));
+                out.push(format!(
+                    "{label} database NOT dumped: {why} — run pg_dump manually"
+                ));
             }
             Err(e) => out.push(format!("{label} database dump FAILED: {e}")),
         }
@@ -372,7 +374,9 @@ async fn dump_databases(hub_dir: &Path, retention: usize) -> Vec<String> {
                 }
             }
             Ok(DumpStatus::Skipped(why)) => {
-                out.push(format!("mongo database NOT dumped: {why} — run mongodump manually"));
+                out.push(format!(
+                    "mongo database NOT dumped: {why} — run mongodump manually"
+                ));
             }
             Err(e) => out.push(format!("mongo database dump FAILED: {e}")),
         }

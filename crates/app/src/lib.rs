@@ -278,9 +278,13 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
                         (
                             format!(
                                 "audit: TAMPERING DETECTED — chain breaks at row {} of {}{}",
-                                v.broken_at.map_or_else(|| "?".to_owned(), |i| i.to_string()),
+                                v.broken_at
+                                    .map_or_else(|| "?".to_owned(), |i| i.to_string()),
                                 v.verified,
-                                v.detail.as_deref().map(|d| format!(": {d}")).unwrap_or_default()
+                                v.detail
+                                    .as_deref()
+                                    .map(|d| format!(": {d}"))
+                                    .unwrap_or_default()
                             ),
                             2,
                         )
@@ -371,7 +375,10 @@ mod doctor_tests {
         // the report's shape, not its contents — every run must produce the
         // three sections and exactly one VERDICT line, and never panic.
         let (out, ready) = render_doctor();
-        assert!(out.contains("Engines (PATH):"), "missing Engines section:\n{out}");
+        assert!(
+            out.contains("Engines (PATH):"),
+            "missing Engines section:\n{out}"
+        );
         assert!(out.contains("Tooling ("), "missing Tooling section:\n{out}");
         assert!(out.contains("Sandbox:"), "missing Sandbox section:\n{out}");
         assert_eq!(
@@ -386,7 +393,11 @@ mod doctor_tests {
         );
         // `ready` must agree with the verdict text: NOT READY <=> !ready, and a
         // warnings-only "READY (degraded)" still counts as ready (exit 0).
-        assert_eq!(ready, !out.contains("VERDICT: NOT READY"), "ready flag disagrees with verdict:\n{out}");
+        assert_eq!(
+            ready,
+            !out.contains("VERDICT: NOT READY"),
+            "ready flag disagrees with verdict:\n{out}"
+        );
     }
 }
 
@@ -2586,7 +2597,12 @@ fn render_doctor() -> (String, bool) {
         );
     } else {
         for d in &engines {
-            let _ = writeln!(out, "  [PASS] {:<10} {}", d.kind.as_binary(), d.path.display());
+            let _ = writeln!(
+                out,
+                "  [PASS] {:<10} {}",
+                d.kind.as_binary(),
+                d.path.display()
+            );
         }
     }
 

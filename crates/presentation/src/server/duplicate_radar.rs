@@ -384,7 +384,10 @@ mod tests {
             let msg = retire_blocked_msg("CXC-F101", from);
             assert!(msg.contains("CXC-F101"), "{msg}");
             assert!(msg.contains("Pending, Ready, or On-hold"), "{msg}");
-            assert!(!msg.contains("invalid transition"), "leaked raw error: {msg}");
+            assert!(
+                !msg.contains("invalid transition"),
+                "leaked raw error: {msg}"
+            );
         }
         // A retire-able status still works (Pending -> Rejected is legal).
         assert!(transition_allowed(

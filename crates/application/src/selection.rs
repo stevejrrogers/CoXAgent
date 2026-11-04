@@ -147,13 +147,7 @@ pub fn documentable_candidates(state: &ProjectState) -> Vec<TicketId> {
             && t.status() == Status::Done
     })
     .into_iter()
-    .filter(|id| {
-        state
-            .doc_refresh
-            .get(id.as_str())
-            .map_or(0, |m| m.fails)
-            < DOCS_STAGE_FAIL_CAP
-    })
+    .filter(|id| state.doc_refresh.get(id.as_str()).map_or(0, |m| m.fails) < DOCS_STAGE_FAIL_CAP)
     .collect()
 }
 
@@ -443,7 +437,8 @@ mod tests {
         let mut t = ready_feature(id, Priority::High);
         t.transition_to(Role::DevFeature, Status::InProgress)
             .expect("in-progress");
-        t.transition_to(Role::DevFeature, Status::Done).expect("done");
+        t.transition_to(Role::DevFeature, Status::Done)
+            .expect("done");
         t
     }
 
@@ -466,7 +461,10 @@ mod tests {
         // One shy of the cap stays in the queue.
         state.doc_refresh.insert(
             "FEAT-010".to_owned(),
-            crate::state::DocRefreshMark { at: String::new(), fails: DOCS_STAGE_FAIL_CAP - 1 },
+            crate::state::DocRefreshMark {
+                at: String::new(),
+                fails: DOCS_STAGE_FAIL_CAP - 1,
+            },
         );
         assert!(
             documentable_candidates(&state)
@@ -478,14 +476,23 @@ mod tests {
         // At the cap it is PARKED out of the queue; the other is untouched.
         state.doc_refresh.insert(
             "FEAT-010".to_owned(),
-            crate::state::DocRefreshMark { at: String::new(), fails: DOCS_STAGE_FAIL_CAP },
+            crate::state::DocRefreshMark {
+                at: String::new(),
+                fails: DOCS_STAGE_FAIL_CAP,
+            },
         );
         let ids: Vec<String> = documentable_candidates(&state)
             .iter()
             .map(|t| t.as_str().to_owned())
             .collect();
-        assert!(ids.iter().all(|s| s != "FEAT-010"), "at the cap it must be parked: {ids:?}");
-        assert!(ids.iter().any(|s| s == "FEAT-011"), "other tickets keep flowing: {ids:?}");
+        assert!(
+            ids.iter().all(|s| s != "FEAT-010"),
+            "at the cap it must be parked: {ids:?}"
+        );
+        assert!(
+            ids.iter().any(|s| s == "FEAT-011"),
+            "other tickets keep flowing: {ids:?}"
+        );
     }
 
     // Ticket::new creates bugs already in `Open`.

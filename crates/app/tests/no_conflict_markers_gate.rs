@@ -64,7 +64,11 @@ fn scan(path: &str, contents: &str) -> Vec<Marker> {
         } else if state == 1 && line.trim_end() == div {
             state = 2;
         } else if state == 2 && line.starts_with(close.as_str()) {
-            hits.push(Marker { path: path.to_string(), line: open_line, kind: "conflict" });
+            hits.push(Marker {
+                path: path.to_string(),
+                line: open_line,
+                kind: "conflict",
+            });
             state = 0;
         }
     }
@@ -74,8 +78,8 @@ fn scan(path: &str, contents: &str) -> Vec<Marker> {
 /// Extensions worth scanning — source and config text, not binaries or locks.
 fn is_text_source(path: &Path) -> bool {
     const EXTS: &[&str] = &[
-        "rs", "sh", "toml", "yml", "yaml", "md", "js", "ts", "jsx", "tsx",
-        "css", "html", "json", "py", "swift", "sql",
+        "rs", "sh", "toml", "yml", "yaml", "md", "js", "ts", "jsx", "tsx", "css", "html", "json",
+        "py", "swift", "sql",
     ];
     path.extension()
         .and_then(|e| e.to_str())
@@ -99,7 +103,9 @@ fn is_skippable_dir(name: &str) -> bool {
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name();
@@ -137,7 +143,9 @@ fn no_tracked_source_carries_a_conflict_marker() {
     let mut markers = Vec::new();
     for file in &files {
         // Non-UTF8 or oversized blobs can't carry a meaningful text marker.
-        let Ok(meta) = fs::metadata(file) else { continue };
+        let Ok(meta) = fs::metadata(file) else {
+            continue;
+        };
         if meta.len() > 4_000_000 {
             continue;
         }
@@ -171,8 +179,7 @@ fn scan_catches_the_autoheal_shape() {
     let base = format!("{} a3523607", "|".repeat(7));
     let div = "=".repeat(7);
     let close = format!("{} feat/CXA-B224-panel-shell-pilot", ">".repeat(7));
-    let sample =
-        format!("#!/usr/bin/env bash\n{open}\nset -u\n{base}\n{div}\nset -u\n{close}\n");
+    let sample = format!("#!/usr/bin/env bash\n{open}\nset -u\n{base}\n{div}\nset -u\n{close}\n");
     let hits = scan("deploy/autoheal-cxa.sh", &sample);
     assert_eq!(hits.len(), 1, "expected one conflict hunk");
     assert_eq!(hits[0].kind, "conflict");
