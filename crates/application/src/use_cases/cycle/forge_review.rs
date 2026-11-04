@@ -436,6 +436,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             if self.already_reviewed_at(pr.number, &head_sha).await {
                 continue;
             }
+            // Same dedup for the OTHER terminal the head-sha guard historically
+            // missed: a PR already surfaced to a human because the SA kept
+            // failing to render a verdict (the None branch below). Without this
+            // it was re-reviewed every cycle at the same frozen head — each a
+            // fresh failing LLM call and a duplicate surface line (#851 reached
+            // 165 such skips). A new push (head moves) clears it and the SA
+            // tries again.
+            if self.already_parked_no_verdict_at(pr.number, &head_sha).await {
+                continue;
+            }
             // Per-PR review lease: with a dedicated review runner per MACHINE
             // (event-dispatch P1) two machines can reach the same fresh head
             // at once — the head-sha guard only stops repeats after a verdict
@@ -862,6 +872,20 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                                 pr.number
                             ))
                             .await;
+                            // Park it at THIS head so the review loop stops
+                            // re-picking it next cycle (the surface already
+                            // asked a human). A push moves the head and the
+                            // guard above lets the SA try the new diff. This is
+                            // NOT a verdict: `has_review_for` excludes it, so
+                            // the anti-starvation deadline still owns a clean PR.
+                            self.record_review(
+                                pr.number,
+                                "parked_no_verdict",
+                                "SA kept failing to render a verdict — surfaced to a human and \
+                                 parked at this head until new commits.",
+                                &head_sha,
+                            )
+                            .await;
                         } else {
                             self.log_git(&format!(
                                 "review of PR #{} yielded no verdict (skip)",
@@ -992,16 +1016,34 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         })
     }
 
+    /// Whether this PR was already surfaced-and-parked at exactly this head
+    /// because the SA kept failing to render a verdict. Mirrors
+    /// [`already_reviewed_at`] for the no-verdict terminal so the review loop
+    /// stops re-picking a PR it already handed to a human; a new push (head
+    /// moves) clears it. The `"parked_no_verdict"` marker is deliberately NOT a
+    /// real verdict — see [`has_review_for`], which excludes it.
+    pub(super) async fn already_parked_no_verdict_at(&self, number: u64, head_sha: &str) -> bool {
+        if head_sha.is_empty() {
+            return false;
+        }
+        self.reporter().fetch_reviews().await.iter().any(|r| {
+            r.number == number && r.decision == "parked_no_verdict" && r.head_sha == head_sha
+        })
+    }
+
     /// Whether the SA has rendered ANY verdict (approve or request-changes)
     /// on this PR. A CLEAN PR with no verdict at all is a starvation candidate —
     /// the anti-starvation deadline and the "SA keeps failing" surface key off
-    /// this so a never-touched PR can't wait forever undistributed.
+    /// this so a never-touched PR can't wait forever undistributed. A
+    /// `"parked_no_verdict"` marker is NOT a verdict: it records that the SA
+    /// gave up at a head, so it must not suppress the anti-starvation deadline
+    /// that lands a clean PR a failing reviewer can never judge.
     pub(super) async fn has_review_for(&self, number: u64) -> bool {
         self.reporter()
             .fetch_reviews()
             .await
             .iter()
-            .any(|r| r.number == number)
+            .any(|r| r.number == number && r.decision != "parked_no_verdict")
     }
 
     /// The fix-on-fix brake: `Some(reason)` when this PR's ticket already had
