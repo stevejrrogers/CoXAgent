@@ -194,6 +194,29 @@ fn masked_marker_detail(pos: usize, marker: &str) -> String {
     )
 }
 
+/// Title prefix stamped on every remediation bug this sweep files — the
+/// provenance marker [`is_sweep_artifact`] keys on.
+pub const FILED_TITLE_PREFIX: &str = "Security sweep: ";
+
+/// Placeholder body used for sweep-authored tickets in scan snapshots.
+///
+/// It must be detector-INERT by construction: no `scheme://`, no `user:pass@`,
+/// no imperative override phrasing — otherwise the elision itself would be a
+/// fresh finding and the regress never terminates.
+pub const ARTIFACT_PLACEHOLDER: &str =
+    "[elided: body written by the automated security sweep (no secrets, no \
+     imperatives)]";
+
+/// Provenance predicate: was this ticket authored by the sweep itself?
+///
+/// Kept next to BOTH the writer ([`apply_findings`]) and the reader
+/// ([`state_surfaces`]) so the marker and its consumer can never drift apart.
+/// The master epic counts too — its body names the finding kinds verbatim.
+#[must_use]
+pub fn is_sweep_artifact(t: &DomainTicket) -> bool {
+    t.id().as_str() == MASTER_EPIC_ID || t.title().starts_with(FILED_TITLE_PREFIX)
+}
+
 /// Scan every surface. Pure: same snapshot, same findings.
 #[must_use]
 pub fn sweep(surfaces: &[Surface]) -> Vec<SecFinding> {
@@ -231,22 +254,28 @@ pub fn state_surfaces(state: &ProjectState) -> Vec<Surface> {
         if matches!(t.status(), Status::Documented | Status::Rejected) {
             continue;
         }
-        // Sweep-authored remediation tickets TALK ABOUT injection — their body
-        // necessarily describes the very markers this detector matches, so
-        // scanning them re-flagged each one on every pass and spawned an
-        // endless filing chain (SEC-919A21 -> SEC-12CF60 -> SEC-480127 ->
-        // SEC-8DED5F). Their content is machine-written behind the closed-loop
-        // tests below, or a human-closed historical row — never fresh
-        // untrusted input — so they are not surfaces.
-        if t.title().starts_with(SWEEP_TICKET_TITLE_PREFIX) {
-            continue;
-        }
-        let body = format!(
-            "{}\n{}\n{}",
-            t.title(),
-            t.description(),
-            t.acceptance_criteria().join("\n")
-        );
+        // Sweep-authored remediation tickets are DATA about a finding, not an
+        // active brief surface: their bodies restate the symptom class
+        // ("credentials in URL ...") or describe the very injection markers
+        // this detector matches, so scanning them re-trips the detectors on
+        // our own output every pass and spawns endless filing chains
+        // (SEC-58210B -> SEC-DE3FC7 -> SEC-659EC5, and SEC-919A21 ->
+        // SEC-12CF60 -> SEC-480127 -> SEC-8DED5F). Their content is
+        // machine-written behind the closed-loop tests below, or a
+        // human-closed historical row — never fresh untrusted input — so they
+        // enter the snapshot with a provenance placeholder and keep their
+        // ticket-surface label: real re-leaks after fix-and-close still
+        // refire via `ticket_id_for`.
+        let body = if is_sweep_artifact(t) {
+            ARTIFACT_PLACEHOLDER.to_owned()
+        } else {
+            format!(
+                "{}\n{}\n{}",
+                t.title(),
+                t.description(),
+                t.acceptance_criteria().join("\n")
+            )
+        };
         out.push(Surface {
             label: format!("ticket:{}", t.id()),
             body,
@@ -329,7 +358,10 @@ pub fn apply_findings(state: &mut ProjectState, findings: &[SecFinding]) -> Vec<
         let Ok(mut ticket) = DomainTicket::new(
             id.clone(),
             TicketType::Bug,
-            format!("Security sweep: {} on {}", f.kind.label(), f.surface),
+            // The title prefix doubles as self-elided provenance: state_surfaces
+            // keys is_sweep_artifact on it, so sweep-authored tickets never feed
+            // their own findings text back into a later scan pass.
+            format!("{FILED_TITLE_PREFIX}{} on {}", f.kind.label(), f.surface),
             format!(
                 "Automated agent-surface sweep (CXA-F421) flagged {}: {}.\n\n{advice}",
                 f.surface, f.detail
@@ -506,48 +538,6 @@ mod tests {
         );
     }
 
-    /// Regression for SEC-E6C90C (sibling of SEC-12CF60): applying a
-    /// leaked-credential finding must not file a ticket whose own body re-trips
-    /// the same detector on the next sweep — an infinite self-filing loop.
-    #[test]
-    fn filed_credential_tickets_do_not_retrip_the_sweep() {
-        use crate::state::ProjectState;
-
-        // Real-world shape that started this loop family: credentials in a URL
-        // on some surface, as the sweep's own report text renders them.
-        let hits = sweep(&[s("file:coxagent.json", "postgres://app:hunter2@db:5432/x")]);
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].kind, SecKind::LeakedCredential);
-
-        // File exactly what apply_findings writes; the new ticket's stored
-        // title + description becomes a scan surface on the next pass.
-        let mut state = ProjectState::default();
-        let filed = apply_findings(&mut state, &hits);
-        assert_eq!(filed.len(), 1);
-
-        let bug = state
-            .tickets
-            .iter()
-            .find(|t| t.id() == &filed[0])
-            .expect("filed credential bug");
-        assert!(bug.description().contains("credentials in URL"));
-
-        // Closed-loop property: rescanning the updated state finds nothing NEW
-        // from the remediation tickets themselves.
-        let rescan = sweep(&crate::security_sweep::state_surfaces(&state));
-        let from_filed: Vec<_> = rescan
-            .iter()
-            .filter(|f| {
-                f.surface.starts_with("ticket:SEC-")
-                    && f.surface != format!("ticket:{MASTER_EPIC_ID}")
-            })
-            .collect();
-        assert!(
-            from_filed.is_empty(),
-            "remediation tickets must be a closed loop, got {from_filed:?}"
-        );
-    }
-
     #[test]
     fn apply_is_idempotent_and_links_the_epic() {
         let mut state = ProjectState::default();
@@ -570,5 +560,47 @@ mod tests {
             .depends_on()
             .iter()
             .any(|d| d.as_str() == MASTER_EPIC_ID));
+    }
+
+    /// Regression for SEC-58210B -> SEC-DE3FC7 -> SEC-659EC5: pass 1 flags a
+    /// leaked DSN and files a bug; passes 2+ re-scan the state INCLUDING that
+    /// self-authored bug's body ("credentials in URL ...") — with self-elided
+    /// provenance they must file NOTHING, forever. Idempotence across >= 2
+    /// full scan->apply rounds, exactly as the cycle loop drives it.
+    #[test]
+    fn filed_credential_tickets_do_not_retrip_the_sweep() {
+        use crate::state::ProjectState;
+
+        let mut state = ProjectState::default();
+        let secret_dsn = format!("postgres://app:{}@db:5432/x", "s3cr3t-rotate-me");
+        // Pass 1: real leak on an ordinary ticket surface -> one filing.
+        let findings = sweep(&[s("ticket:CXA-F777", &secret_dsn)]);
+        assert_eq!(findings.len(), 1);
+        let first_pass = apply_findings(&mut state, &findings);
+        assert_eq!(first_pass.len(), 1);
+
+        // The filed bug restates the symptom class ...
+        let bug = state
+            .tickets
+            .iter()
+            .find(|t| t.id() == &first_pass[0])
+            .expect("credential bug filed");
+        assert!(bug.description().contains("credentials"));
+
+        // Passes 2..=4: scan from live state (the filed ticket is open, so it
+        // IS part of the snapshot) -> each pass files nothing new.
+        for pass in 2..=4 {
+            let rescan = sweep(&state_surfaces(&state));
+            assert!(
+                apply_findings(&mut state, &rescan).is_empty(),
+                "pass {pass} re-tripped the sweep on its own output"
+            );
+        }
+        // And the sweep-authored bodies never enter the detectors at all.
+        assert!(state
+            .tickets
+            .iter()
+            .filter(|t| is_sweep_artifact(t))
+            .all(|t| t.acceptance_criteria().is_empty()));
     }
 }
