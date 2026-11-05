@@ -696,6 +696,53 @@ async fn sa_review_failures_are_counted_and_surfaced_to_a_human() {
 }
 
 #[tokio::test]
+async fn a_surfaced_no_verdict_pr_is_parked_at_its_head_but_not_counted_as_reviewed() {
+    // The 165-skip bug: a PR surfaced to a human because the SA kept failing to
+    // render a verdict was still re-reviewed every cycle at the same frozen
+    // head — a fresh failing LLM call and a duplicate surface line each time.
+    // The surface now records a `parked_no_verdict` marker at that head so the
+    // review loop skips it until a push moves the head. The marker is NOT a
+    // verdict: `has_review_for` must still report the PR as unreviewed so the
+    // anti-starvation deadline can land a clean PR the reviewer can never judge.
+    use crate::ports::outbound::pr_report::PrReporterPort;
+    let mut cfg = Config::default();
+    cfg.git.enabled = true;
+    let store = Arc::new(MemStore::default());
+    let reporter = Arc::new(crate::ports::outbound::StorePrReporter::new(
+        Arc::clone(&store) as Arc<dyn crate::ports::outbound::StateStorePort>,
+    ));
+    // The surface branch would write exactly this.
+    reporter
+        .report_review(7, "parked_no_verdict", "SA kept failing", "head-abc")
+        .await;
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(FailEngine),
+        cfg,
+        PathBuf::from("/tmp"),
+        "goal".to_owned(),
+    )
+    .with_reporter(reporter as Arc<dyn crate::ports::outbound::PrReporterPort>);
+
+    assert!(
+        uc.already_parked_no_verdict_at(7, "head-abc").await,
+        "a PR parked after repeated no-verdict failures is skipped at that head"
+    );
+    assert!(
+        !uc.already_parked_no_verdict_at(7, "head-xyz").await,
+        "a new push (head moved) clears the park so the SA tries the new diff"
+    );
+    assert!(
+        !uc.already_parked_no_verdict_at(7, "").await,
+        "an unknown head never parks — same safety as already_reviewed_at"
+    );
+    assert!(
+        !uc.has_review_for(7).await,
+        "the park marker is not a verdict: anti-starvation still owns a clean PR"
+    );
+}
+
+#[tokio::test]
 async fn competing_prs_self_resolve_when_one_covers_the_other() {
     // The live deadlock: two open PRs for the same ticket. #98's diff covers
     // every file #89 touches, so the SA closes #89 (duplicate) and lets #98

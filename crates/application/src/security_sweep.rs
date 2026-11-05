@@ -159,6 +159,10 @@ const INJECTION_MARKERS: &[&str] = &[
 /// Locate the first injection marker. Returns its byte offset so callers can
 /// point at it without quoting it (a quoted imperative is itself an
 /// injection surface when the finding text becomes a brief).
+/// Title prefix shared by every remediation ticket `apply_findings` files —
+/// used both to file and (in `state_surfaces`) to keep those tickets out of
+/// the next scan, closing the self-filing loop.
+const SWEEP_TICKET_TITLE_PREFIX: &str = "Security sweep:";
 fn injection_hit(body: &str) -> Option<(usize, &'static str)> {
     let lower = body.to_lowercase();
     INJECTION_MARKERS.iter().copied().find_map(|m| {
@@ -225,6 +229,16 @@ pub fn state_surfaces(state: &ProjectState) -> Vec<Surface> {
     for t in &state.tickets {
         // Terminal tickets are history, not an active brief surface.
         if matches!(t.status(), Status::Documented | Status::Rejected) {
+            continue;
+        }
+        // Sweep-authored remediation tickets TALK ABOUT injection — their body
+        // necessarily describes the very markers this detector matches, so
+        // scanning them re-flagged each one on every pass and spawned an
+        // endless filing chain (SEC-919A21 -> SEC-12CF60 -> SEC-480127 ->
+        // SEC-8DED5F). Their content is machine-written behind the closed-loop
+        // tests below, or a human-closed historical row — never fresh
+        // untrusted input — so they are not surfaces.
+        if t.title().starts_with(SWEEP_TICKET_TITLE_PREFIX) {
             continue;
         }
         let body = format!(
@@ -429,7 +443,7 @@ mod tests {
         let marker_ticket = state
             .tickets
             .iter()
-            .find(|t| t.title().starts_with("Security sweep: prompt-injection"))
+            .find(|t| t.title().starts_with(SWEEP_TICKET_TITLE_PREFIX))
             .expect("injection bug filed");
 
         // The stored description carries no imperative wording at all.
@@ -443,6 +457,49 @@ mod tests {
         assert!(
             !rescan.iter().any(|f| f.kind == SecKind::PromptInjection),
             "filed tickets must be a closed loop, not a fresh injection surface"
+        );
+    }
+
+    /// Regression for SEC-8DED5F: sweep-authored remediation tickets — open
+    /// OR already fixed/closed by a human — must not be scan surfaces, or each
+    /// one re-trips the injection detector on every pass and spawns another
+    /// filing chain (SEC-919A21 -> SEC-12CF60 -> SEC-480127 -> SEC-8DED5F).
+    #[test]
+    fn sweep_tickets_are_not_scan_surfaces_even_after_human_resolution() {
+        use crate::state::ProjectState;
+
+        let findings = vec![SecFinding {
+            kind: SecKind::PromptInjection,
+            surface: "ticket:CXA-F143".to_owned(),
+            detail: format!(
+                "contains {}",
+                masked_marker_detail(0, "ignore previous instructions")
+            ),
+        }];
+        let mut state = ProjectState::default();
+        let filed = apply_findings(&mut state, &findings);
+        assert_eq!(filed.len(), 1);
+
+        // Simulate the human decision from SEC-8DED5F: legitimate doc text in
+        // CXA-F143, so close the remediation ticket (Open -> Rejected = filed
+        // as a duplicate/noise is the legal closure for an already-fixed
+        // chain link).
+        let closed = DomainTicket::transition_to(
+            state
+                .tickets
+                .iter_mut()
+                .find(|t| t.id() == &filed[0])
+                .expect("filed sweep ticket"),
+            coxagent_domain::Role::Po,
+            Status::Rejected,
+        );
+        assert!(closed.is_ok(), "Open -> Rejected must be a legal transition");
+
+        // Nothing re-trips: neither the Fixed ticket nor any other surface.
+        let rescan = sweep(&crate::security_sweep::state_surfaces(&state));
+        assert!(
+            rescan.iter().all(|f| f.kind != SecKind::PromptInjection),
+            "resolved sweep tickets must stay out of the next scan: {rescan:?}"
         );
     }
 
