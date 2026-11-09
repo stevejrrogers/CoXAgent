@@ -31,6 +31,10 @@ pub enum EngineKind {
     /// Harxes — in-process embedded engine (`harxes-core` crate, CXA-F372):
     /// no child process, cancel-safe, typed infra-fault errors.
     Harxes,
+    /// Any OpenAI-compatible `/chat/completions` HTTP gateway (in-process, no
+    /// CLI). Text-completion only for now — serves chat/planning/review/docs
+    /// roles; not yet a coding engine. Endpoint + key via `COXAGENT_LLM_*`.
+    Http,
 }
 
 impl EngineKind {
@@ -46,6 +50,7 @@ impl EngineKind {
             EngineKind::Copilot => "copilot",
             EngineKind::Scripted => "scripted",
             EngineKind::Harxes => "harxes",
+            EngineKind::Http => "http",
         }
     }
 
@@ -57,7 +62,10 @@ impl EngineKind {
     /// absent from the failover chain instead of letting it fail on every spawn.
     #[must_use]
     pub fn spawns_binary(self) -> bool {
-        !matches!(self, EngineKind::Harxes | EngineKind::Scripted)
+        !matches!(
+            self,
+            EngineKind::Harxes | EngineKind::Scripted | EngineKind::Http
+        )
     }
 
     /// All known engines, for discovery.
@@ -71,6 +79,7 @@ impl EngineKind {
             EngineKind::Codex,
             EngineKind::Copilot,
             EngineKind::Harxes,
+            EngineKind::Http,
         ]
     }
 }

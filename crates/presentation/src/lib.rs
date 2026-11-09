@@ -13,7 +13,7 @@ pub mod middleware;
 pub mod overview_panels;
 pub mod server;
 
-pub use cli::{parse, Cli, CodegraphQuery, Command};
+pub use cli::{parse, AuditAction, Cli, CodegraphQuery, Command};
 pub use server::{
     serve_full, BrokenProject, FactoryError, FactoryErrorKind, HubExtras, NewProjectReq,
     ProjectFactory, ProjectHandle, ProjectRemover,
