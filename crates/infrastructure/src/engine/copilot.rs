@@ -67,7 +67,11 @@ impl CopilotEngine {
         // a confinement that was not applied (COX-B016).
         let (mut child, sandbox) = crate::proc::spawn_confined(&mut cmd, sandbox)
             .await
-            .map_err(|e| PortError::Backend(format!("spawn copilot: {e}")))?;
+            .map_err(|e| {
+                // SEC-12CF60: a missing CLI must name itself and its fix.
+                let tool = crate::engine::precheck::SpawnTool("copilot");
+                PortError::Backend(crate::engine::precheck::spawn_error(tool, &e))
+            })?;
         let out = child
             .stdout
             .take()

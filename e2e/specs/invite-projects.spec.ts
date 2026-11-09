@@ -105,4 +105,4 @@ async function assertChipCheckbox(
     el.closest('.uprojchk')!.classList.contains('uprojchk')
     && getComputedStyle(el.parentElement!).borderColor !== 'rgb(0, 0, 0)');
   expect(tinted).toBe(true);
-});
+}
