@@ -4,12 +4,17 @@ pub mod any;
 pub mod claude;
 pub mod copilot;
 pub mod failover;
+#[cfg(feature = "harxes")]
 pub mod harxes;
 pub mod hermes;
+pub mod http_engine;
+pub mod http_loop;
+pub mod http_tools;
 pub(crate) mod live;
 pub mod metering;
 pub mod mock;
 pub mod opencode;
+pub mod precheck;
 pub mod registry;
 pub mod routing;
 pub mod scripted;
@@ -19,8 +24,10 @@ pub use any::AnyEngine;
 pub use claude::ClaudeEngine;
 pub use copilot::CopilotEngine;
 pub use failover::{is_quota_wall, FailoverEngine, ALL_EXHAUSTED};
+#[cfg(feature = "harxes")]
 pub use harxes::HarxesEngine;
 pub use hermes::HermesEngine;
+pub use http_engine::HttpEngine;
 pub use metering::{Meter, MeteringEngine};
 pub use mock::MockEngine;
 pub use opencode::OpencodeEngine;
