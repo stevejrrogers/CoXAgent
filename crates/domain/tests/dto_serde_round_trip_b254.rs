@@ -15,11 +15,17 @@
 //! outbound side, then also proving the defaulted load path keeps the same
 //! value — never by weakening an assertion.
 //!
+//! Every symmetric proof delegates to the SHARED reusable harness
+//! `coxagent_contracts::round_trip` (CXA-B326 / CXA-B317 AC2) instead of a
+//! hand-rolled per-type block — one implementation, used by every contract
+//! suite, so a fix here lands everywhere at once.
+//!
 //! Fixture-construction panics (`expect`/`unwrap` on serde round-trips of
 //! literal fixtures) are the test-fixture convention of this suite (same
 //! allow-scope as `terminal_state_contract_b252.rs`).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use coxagent_contracts::round_trip::{assert_symmetric_round_trip, assert_wire_shape};
 use coxagent_domain::artifact::ArtifactVersion;
 use coxagent_domain::coverage::{CoverageEntry, CoverageStatus};
 use coxagent_domain::ids::{GoalId, TicketId};
@@ -40,16 +46,10 @@ const WHEN_RFC3339: &str = "2025-06-01T12:00:00Z";
 #[test]
 fn id_newtypes_round_trip_as_bare_strings() {
     let tid = TicketId::new("CXC-F001").expect("valid ticket id");
-    let v = serde_json::to_value(&tid).unwrap();
-    assert_eq!(v, serde_json::json!("CXC-F001"));
-    let back: TicketId = serde_json::from_value(v).unwrap();
-    assert_eq!(back, tid);
+    assert_wire_shape(&tid, &serde_json::json!("CXC-F001"));
 
     let gid = GoalId::new("G-42").expect("valid goal id");
-    let gv = serde_json::to_value(&gid).unwrap();
-    assert_eq!(gv, serde_json::json!("G-42"));
-    let gback: GoalId = serde_json::from_value(gv).unwrap();
-    assert_eq!(gback, gid);
+    assert_wire_shape(&gid, &serde_json::json!("G-42"));
 }
 
 // ---------------------------------------------------------------------------
@@ -67,9 +67,7 @@ fn lifecycle_kinds_serialize_to_snake_case_and_back() {
         ("bug", TicketType::Bug),
         ("chore", TicketType::Chore),
     ] {
-        assert_eq!(serde_json::to_value(ty).unwrap(), serde_json::json!(wire));
-        let back: TicketType = serde_json::from_value(serde_json::json!(wire)).unwrap();
-        assert_eq!(back, ty);
+        assert_wire_shape(&ty, &serde_json::json!(wire));
     }
     for (wire, st) in [
         ("pending", Status::Pending),
@@ -78,9 +76,7 @@ fn lifecycle_kinds_serialize_to_snake_case_and_back() {
         ("documented", Status::Documented),
         ("verified", Status::Verified),
     ] {
-        assert_eq!(serde_json::to_value(st).unwrap(), serde_json::json!(wire));
-        let back: Status = serde_json::from_value(serde_json::json!(wire)).unwrap();
-        assert_eq!(back, st);
+        assert_wire_shape(&st, &serde_json::json!(wire));
     }
     for (wire, r) in [
         ("ba", Role::Ba),
@@ -89,19 +85,13 @@ fn lifecycle_kinds_serialize_to_snake_case_and_back() {
         ("dev_feature", Role::DevFeature),
         ("system", Role::System),
     ] {
-        assert_eq!(serde_json::to_value(r).unwrap(), serde_json::json!(wire));
-        let back: Role = serde_json::from_value(serde_json::json!(wire)).unwrap();
-        assert_eq!(back, r);
+        assert_wire_shape(&r, &serde_json::json!(wire));
     }
     for (wire, p) in [("low", Priority::Low), ("high", Priority::High)] {
-        assert_eq!(serde_json::to_value(p).unwrap(), serde_json::json!(wire));
-        let back: Priority = serde_json::from_value(serde_json::json!(wire)).unwrap();
-        assert_eq!(back, p);
+        assert_wire_shape(&p, &serde_json::json!(wire));
     }
     for (wire, c) in [("small", Complexity::Small), ("large", Complexity::Large)] {
-        assert_eq!(serde_json::to_value(c).unwrap(), serde_json::json!(wire));
-        let back: Complexity = serde_json::from_value(serde_json::json!(wire)).unwrap();
-        assert_eq!(back, c);
+        assert_wire_shape(&c, &serde_json::json!(wire));
     }
 }
 
@@ -121,22 +111,15 @@ fn semver_round_trips_through_its_plain_string_shape() {
 #[test]
 fn artifact_version_survives_a_symmetric_json_round_trip() {
     let av = ArtifactVersion::new("cxa", "web", "2.5.0").expect("valid semver");
-    let text = serde_json::to_string(&av).unwrap();
-    let back: ArtifactVersion = serde_json::from_str(&text).unwrap();
-    assert_eq!(back, av);
-    assert_eq!(serde_json::to_string(&back).unwrap(), text);
+    assert_symmetric_round_trip(&av);
 }
 
 #[test]
 fn artifact_version_keeps_the_checked_in_wire_keys() {
     let av = ArtifactVersion::new("cxa", "api", "0.1.0").expect("valid semver");
-    let got = serde_json::to_value(&av).unwrap();
     let golden: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/artifact_version_cxa_api.json")).unwrap();
-    assert_eq!(
-        got, golden,
-        "ArtifactVersion wire shape drifted — update the golden deliberately, not silently"
-    );
+    assert_wire_shape(&av, &golden);
 }
 
 // ---------------------------------------------------------------------------
@@ -157,10 +140,7 @@ fn a_technical_design() -> TechnicalDesign {
 #[test]
 fn technical_design_round_trips_with_all_fields_populated() {
     let d = a_technical_design();
-    let text = serde_json::to_string(&d).unwrap();
-    let back: TechnicalDesign = serde_json::from_str(&text).unwrap();
-    assert_eq!(back, d);
-    assert_eq!(serde_json::to_string(&back).unwrap(), text);
+    assert_symmetric_round_trip(&d);
     // Symmetry guard: `alternatives` carries #[serde(default)]; when present
     // it MUST survive both directions (populate-everything round-trip).
     assert!(serde_json::to_value(&d)
@@ -181,11 +161,7 @@ fn ux_design_and_design_envelope_round_trip() {
         technical: Some(a_technical_design()),
         ux: Some(ux.clone()),
     };
-    let text = serde_json::to_string(&envelope).unwrap();
-    let back: Design = serde_json::from_str(&text).unwrap();
-    assert_eq!(back.technical.as_ref(), Some(&a_technical_design()));
-    assert_eq!(back.ux, Some(ux));
-    assert_eq!(serde_json::to_string(&back).unwrap(), text);
+    assert_symmetric_round_trip(&envelope);
 }
 
 /// A fully populated ticket, assembled ONLY through real constructors and
@@ -226,10 +202,7 @@ fn a_fully_populated_ticket() -> Ticket {
 #[test]
 fn every_persisted_ticket_field_survives_a_serde_round_trip() {
     let t = a_fully_populated_ticket();
-    let text = serde_json::to_string(&t).unwrap();
-    let back: Ticket = serde_json::from_str(&text).unwrap();
-    assert_eq!(back, t, "a field lost or mangled its shape in transit");
-    assert_eq!(serde_json::to_string(&back).unwrap(), text);
+    assert_symmetric_round_trip(&t);
     // Every top-level key we claim to persist really is on the wire — no
     // silent skip_serializing drift while every slot is occupied.
     let obj = serde_json::to_value(&t).unwrap();
@@ -260,10 +233,7 @@ fn wip_checkpoint_value_object_round_trips_standalone() {
         note: "note".into(),
         recorded_at: WHEN_RFC3339.into(),
     };
-    let text = serde_json::to_string(&cp).unwrap();
-    let back: WipCheckpoint = serde_json::from_str(&text).unwrap();
-    assert_eq!(back, cp);
-    assert_eq!(serde_json::to_string(&back).unwrap(), text);
+    assert_symmetric_round_trip(&cp);
 }
 
 // ---------------------------------------------------------------------------
@@ -303,10 +273,7 @@ fn a_verified_case() -> TestCase {
 #[test]
 fn test_case_with_history_and_evidence_round_trips() {
     let tc = a_verified_case();
-    let text = serde_json::to_string(&tc).unwrap();
-    let back: TestCase = serde_json::from_str(&text).unwrap();
-    assert_eq!(back, tc);
-    assert_eq!(serde_json::to_string(&back).unwrap(), text);
+    assert_symmetric_round_trip(&tc);
 }
 
 #[test]
@@ -330,17 +297,13 @@ fn test_case_status_kinds_keep_their_snake_case_tags() {
         ("passed", TestCaseStatus::Passed),
         ("failed", TestCaseStatus::Failed),
     ] {
-        assert_eq!(serde_json::to_value(s).unwrap(), serde_json::json!(wire));
-        let back: TestCaseStatus = serde_json::from_value(serde_json::json!(wire)).unwrap();
-        assert_eq!(back, s);
+        assert_wire_shape(&s, &serde_json::json!(wire));
     }
     for (wire, k) in [
         ("verdict", RecordKind::Verdict),
         ("evidence_refresh", RecordKind::EvidenceRefresh),
     ] {
-        assert_eq!(serde_json::to_value(k).unwrap(), serde_json::json!(wire));
-        let back: RecordKind = serde_json::from_value(serde_json::json!(wire)).unwrap();
-        assert_eq!(back, k);
+        assert_wire_shape(&k, &serde_json::json!(wire));
     }
 }
 
@@ -359,9 +322,7 @@ fn a_coverage_entry(status: CoverageStatus) -> CoverageEntry {
 #[test]
 fn coverage_entry_round_trips_and_empty_sources_default_back_in() {
     let e = a_coverage_entry(CoverageStatus::Covered);
-    let text = serde_json::to_string(&e).unwrap();
-    let back: CoverageEntry = serde_json::from_str(&text).unwrap();
-    assert_eq!(back, e);
+    assert_symmetric_round_trip(&e);
     // defaulted field: an outbound-omitted `sources` list defaults on load
     let obj = serde_json::to_value(a_coverage_entry(CoverageStatus::NotTested)).unwrap();
     assert!(obj.get("sources").is_some());
@@ -378,8 +339,6 @@ fn coverage_status_wire_casing_is_snake_case_end_to_end() {
         ("partially_covered", CoverageStatus::PartiallyCovered),
         ("not_tested", CoverageStatus::NotTested),
     ] {
-        assert_eq!(serde_json::to_value(st).unwrap(), serde_json::json!(wire));
-        let back: CoverageStatus = serde_json::from_value(serde_json::json!(wire)).unwrap();
-        assert_eq!(back, st);
+        assert_wire_shape(&st, &serde_json::json!(wire));
     }
 }
