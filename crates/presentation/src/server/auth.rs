@@ -279,6 +279,8 @@ pub(super) async fn auth_mw(
     if path == "/"
         || path == "/api/health"
         || path == "/api/ready"
+        || path == "/api/auth/oidc/login"
+        || path == "/api/auth/oidc/callback"
         // OpenAPI spec - public, like health: MCP clients and SDK generators
         // must discover endpoints without holding a hub session.
         || path == "/api/openapi.json"

@@ -20,6 +20,11 @@
 # Every action is appended to $WD_LOG and posted to the hub chat once it is
 # back, so nothing happens silently.
 set -u
+# launchd runs this agent with a minimal PATH that omits Homebrew and Docker's
+# CLI dir, so the `docker exec` calls (redis desired-key restore, the
+# in_progress busy-guard) were silently "command not found". Prepend the usual
+# locations so docker is found under launchd.
+export PATH="/opt/homebrew/bin:/usr/local/bin:/Applications/Docker.app/Contents/Resources/bin:$PATH"
 HUB_LOG="${COXAGENT_HUB_LOG:-$HOME/CoXAgent/hub.log}"
 WD_LOG="${COXAGENT_WATCHDOG_LOG:-$HOME/CoXAgent/watchdog.log}"
 APP="${COXAGENT_APP:-$HOME/Projects/CoXAgent/desktop/build/CoXAgent.app}"
