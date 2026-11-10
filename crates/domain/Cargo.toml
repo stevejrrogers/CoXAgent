@@ -14,6 +14,8 @@ uuid.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+# CXA-B326: the shared serde round-trip harness lives next to the wire types.
+coxagent-contracts = { path = "../contracts" }
 # CXA-B192's table-driven suite drives the contract through RFC-3339 timestamps.
 time.workspace = true
 

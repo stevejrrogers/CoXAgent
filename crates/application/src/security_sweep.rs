@@ -116,7 +116,18 @@ fn credential_hit(body: &str) -> Option<(&'static str, String)> {
             let head: String = rest.chars().take(80).collect();
             if let Some(at) = head.find('@') {
                 let userinfo = &head[..at];
+                // A usable credential carries at least one alphanumeric
+                // character; placeholder-only shapes (e.g. this sweep's own
+                // masked report text "postgres://…:…@") hold none. Requiring
+                // one keeps the remediation tickets we FILE from re-tripping
+                // this very detector on the next pass (SEC-E6C90C regression,
+                // sibling of the SEC-12CF60 marker-quote loop).
                 if userinfo.contains(':')
+                    && userinfo.chars().any(|c| c.is_ascii_alphanumeric())
+                    // Fill-in slots (`postgres://<db-user>:<db-password>@…`,
+                    // the SEC-41E384 README shape) are placeholders, not
+                    // credentials — angle-bracket components never trip this.
+                    && !userinfo.starts_with('<')
                     && !userinfo.contains('/')
                     && !userinfo.contains(' ')
                     && !userinfo.ends_with(':')
@@ -148,6 +159,10 @@ const INJECTION_MARKERS: &[&str] = &[
 /// Locate the first injection marker. Returns its byte offset so callers can
 /// point at it without quoting it (a quoted imperative is itself an
 /// injection surface when the finding text becomes a brief).
+/// Title prefix shared by every remediation ticket `apply_findings` files —
+/// used both to file and (in `state_surfaces`) to keep those tickets out of
+/// the next scan, closing the self-filing loop.
+const SWEEP_TICKET_TITLE_PREFIX: &str = "Security sweep:";
 fn injection_hit(body: &str) -> Option<(usize, &'static str)> {
     let lower = body.to_lowercase();
     INJECTION_MARKERS.iter().copied().find_map(|m| {
@@ -214,6 +229,16 @@ pub fn state_surfaces(state: &ProjectState) -> Vec<Surface> {
     for t in &state.tickets {
         // Terminal tickets are history, not an active brief surface.
         if matches!(t.status(), Status::Documented | Status::Rejected) {
+            continue;
+        }
+        // Sweep-authored remediation tickets TALK ABOUT injection — their body
+        // necessarily describes the very markers this detector matches, so
+        // scanning them re-flagged each one on every pass and spawned an
+        // endless filing chain (SEC-919A21 -> SEC-12CF60 -> SEC-480127 ->
+        // SEC-8DED5F). Their content is machine-written behind the closed-loop
+        // tests below, or a human-closed historical row — never fresh
+        // untrusted input — so they are not surfaces.
+        if t.title().starts_with(SWEEP_TICKET_TITLE_PREFIX) {
             continue;
         }
         let body = format!(
@@ -355,6 +380,26 @@ mod tests {
         assert_eq!(sweep(&[s("doc:x", &real)]).len(), 1);
     }
 
+    /// Regression for SEC-41E384 (regression of SEC-E6C90C): README-style
+    /// fill-in slots (`<db-user>:<db-password>`) are placeholders, not live
+    /// credentials — they must never re-flag `file:README.md` on every sweep.
+    #[test]
+    fn readme_placeholder_dsn_slots_do_not_retrip_the_sweep() {
+        let hits = sweep(&[s(
+            "file:README.md",
+            "export COXAGENT_DB_DSN='postgres://<db-user>:<db-password>@<db-host>:5432/coxagent'",
+        )]);
+        assert!(
+            hits.is_empty(),
+            "fill-in placeholder DSN is documentation, not a leak: got {hits:?}"
+        );
+        // The still-live shape keeps tripping the detector unchanged.
+        assert_eq!(
+            sweep(&[s("file:x", "postgres://app:hunter2@db:5432/x")]).len(),
+            1
+        );
+    }
+
     #[test]
     fn url_credentials_and_private_keys_are_flagged() {
         let hits = sweep(&[
@@ -398,7 +443,7 @@ mod tests {
         let marker_ticket = state
             .tickets
             .iter()
-            .find(|t| t.title().starts_with("Security sweep: prompt-injection"))
+            .find(|t| t.title().starts_with(SWEEP_TICKET_TITLE_PREFIX))
             .expect("injection bug filed");
 
         // The stored description carries no imperative wording at all.
@@ -412,6 +457,91 @@ mod tests {
         assert!(
             !rescan.iter().any(|f| f.kind == SecKind::PromptInjection),
             "filed tickets must be a closed loop, not a fresh injection surface"
+        );
+    }
+
+    /// Regression for SEC-8DED5F: sweep-authored remediation tickets — open
+    /// OR already fixed/closed by a human — must not be scan surfaces, or each
+    /// one re-trips the injection detector on every pass and spawns another
+    /// filing chain (SEC-919A21 -> SEC-12CF60 -> SEC-480127 -> SEC-8DED5F).
+    #[test]
+    fn sweep_tickets_are_not_scan_surfaces_even_after_human_resolution() {
+        use crate::state::ProjectState;
+
+        let findings = vec![SecFinding {
+            kind: SecKind::PromptInjection,
+            surface: "ticket:CXA-F143".to_owned(),
+            detail: format!(
+                "contains {}",
+                masked_marker_detail(0, "ignore previous instructions")
+            ),
+        }];
+        let mut state = ProjectState::default();
+        let filed = apply_findings(&mut state, &findings);
+        assert_eq!(filed.len(), 1);
+
+        // Simulate the human decision from SEC-8DED5F: legitimate doc text in
+        // CXA-F143, so close the remediation ticket (Open -> Rejected = filed
+        // as a duplicate/noise is the legal closure for an already-fixed
+        // chain link).
+        let closed = DomainTicket::transition_to(
+            state
+                .tickets
+                .iter_mut()
+                .find(|t| t.id() == &filed[0])
+                .expect("filed sweep ticket"),
+            coxagent_domain::Role::Po,
+            Status::Rejected,
+        );
+        assert!(closed.is_ok(), "Open -> Rejected must be a legal transition");
+
+        // Nothing re-trips: neither the Fixed ticket nor any other surface.
+        let rescan = sweep(&crate::security_sweep::state_surfaces(&state));
+        assert!(
+            rescan.iter().all(|f| f.kind != SecKind::PromptInjection),
+            "resolved sweep tickets must stay out of the next scan: {rescan:?}"
+        );
+    }
+
+    /// Regression for SEC-E6C90C (sibling of SEC-12CF60): applying a
+    /// leaked-credential finding must not file a ticket whose own body re-trips
+    /// the same detector on the next sweep — an infinite self-filing loop.
+    #[test]
+    fn filed_credential_tickets_do_not_retrip_the_sweep() {
+        use crate::state::ProjectState;
+
+        // Real-world shape that started this loop family: credentials in a URL
+        // on some surface, as the sweep's own report text renders them.
+        let hits = sweep(&[s("file:coxagent.json", "postgres://app:hunter2@db:5432/x")]);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].kind, SecKind::LeakedCredential);
+
+        // File exactly what apply_findings writes; the new ticket's stored
+        // title + description becomes a scan surface on the next pass.
+        let mut state = ProjectState::default();
+        let filed = apply_findings(&mut state, &hits);
+        assert_eq!(filed.len(), 1);
+
+        let bug = state
+            .tickets
+            .iter()
+            .find(|t| t.id() == &filed[0])
+            .expect("filed credential bug");
+        assert!(bug.description().contains("credentials in URL"));
+
+        // Closed-loop property: rescanning the updated state finds nothing NEW
+        // from the remediation tickets themselves.
+        let rescan = sweep(&crate::security_sweep::state_surfaces(&state));
+        let from_filed: Vec<_> = rescan
+            .iter()
+            .filter(|f| {
+                f.surface.starts_with("ticket:SEC-")
+                    && f.surface != format!("ticket:{MASTER_EPIC_ID}")
+            })
+            .collect();
+        assert!(
+            from_filed.is_empty(),
+            "remediation tickets must be a closed loop, got {from_filed:?}"
         );
     }
 

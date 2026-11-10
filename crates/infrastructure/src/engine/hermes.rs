@@ -65,7 +65,11 @@ impl AgentEnginePort for HermesEngine {
         // confinement that never took effect (COX-B016).
         let (output, sandbox) = crate::proc::output_confined(&mut cmd, sandbox)
             .await
-            .map_err(|e| PortError::Backend(format!("spawn hermes: {e}")))?;
+            .map_err(|e| {
+                // SEC-12CF60: a missing CLI must name itself and its fix.
+                let tool = crate::engine::precheck::SpawnTool("hermes");
+                PortError::Backend(crate::engine::precheck::spawn_error(tool, &e))
+            })?;
 
         // ~3.8 chars per token, as integer ceil-div of `len * 10` by 38 — same
         // result as the float form, with no lossy casts to lint around.

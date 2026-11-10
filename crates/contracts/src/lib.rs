@@ -12,7 +12,9 @@ pub const CONTRACT_VERSION: u16 = 1;
 /// One event on the hub-wide bus (Redis pub/sub channel `cox:events`).
 /// `origin` is the emitting instance id so subscribers can drop their own
 /// echoes; `payload` is the JSON the realtime layer fans out to clients.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `PartialEq` backs the wire round-trip contract test (`round_trip` module).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BusEnvelope {
     pub v: u16,
     pub origin: String,
@@ -35,7 +37,9 @@ impl BusEnvelope {
 
 /// A queued unit of execution the gateway hands to a runner (Postgres-backed
 /// today; the shape is transport-agnostic so a queue can replace it).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `PartialEq` backs the wire round-trip contract test (`round_trip` module).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobSpec {
     pub v: u16,
     pub project: String,
@@ -44,3 +48,12 @@ pub struct JobSpec {
     #[serde(default)]
     pub args: serde_json::Value,
 }
+
+pub mod round_trip;
+
+/// Reusable serde wire-contract testing harness (see `round_trip` module docs).
+///
+/// Public so every consumer crate's test suite can pin its DTOs with the same
+/// one-call proof instead of hand-rolled per-type blocks. Test-only in spirit —
+/// it performs no IO and links nothing beyond `serde`/`serde_json`.
+pub use round_trip::{assert_symmetric_round_trip, assert_wire_shape, SymmetrySuite};
