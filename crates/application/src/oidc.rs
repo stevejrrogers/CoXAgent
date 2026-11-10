@@ -62,9 +62,12 @@ fn role_rank(role: AuthRole) -> u8 {
         AuthRole::TechLead | AuthRole::DsLead | AuthRole::DaLead => 70,
         AuthRole::Ba | AuthRole::Po | AuthRole::Sa | AuthRole::Sm => 60,
         AuthRole::Qa | AuthRole::Reviewer => 50,
-        AuthRole::Fe | AuthRole::Be | AuthRole::Aie | AuthRole::Ds | AuthRole::Da | AuthRole::De => {
-            40
-        }
+        AuthRole::Fe
+        | AuthRole::Be
+        | AuthRole::Aie
+        | AuthRole::Ds
+        | AuthRole::Da
+        | AuthRole::De => 40,
         AuthRole::Viewer => 10,
     }
 }
@@ -99,18 +102,20 @@ mod tests {
 
     #[test]
     fn the_most_privileged_group_wins_regardless_of_order() {
-        let groups = vec![
-            "viewer".to_owned(),
-            "admin".to_owned(),
-            "qa".to_owned(),
-        ];
+        let groups = vec!["viewer".to_owned(), "admin".to_owned(), "qa".to_owned()];
         assert_eq!(role_from_groups(&groups), AuthRole::Admin);
     }
 
     #[test]
     fn dotted_and_spaced_group_labels_are_accepted() {
-        assert_eq!(role_from_groups(&["tech.lead".to_owned()]), AuthRole::TechLead);
-        assert_eq!(role_from_groups(&["Super Admin".to_owned()]), AuthRole::Super);
+        assert_eq!(
+            role_from_groups(&["tech.lead".to_owned()]),
+            AuthRole::TechLead
+        );
+        assert_eq!(
+            role_from_groups(&["Super Admin".to_owned()]),
+            AuthRole::Super
+        );
     }
 
     #[test]

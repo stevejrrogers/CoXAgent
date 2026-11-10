@@ -1,0 +1,6 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+princeton-nlp/SWE-bench_Verified: running 3 instance(s)
+[1/3] astropy__astropy-12907: 0B patch in 5.1m · '36m⏺\x1b[0m \x1b[1mBash\x1b[0m \x1b[2mcd /private/tmp/claude-501/-Users-luton-Projects-CoXAgent/ecb4c356-76f2-47a3-8b02-23274d19a3a8'
+[2/3] astropy__astropy-13033: 1484B patch in 4.1m · '36m⏺\x1b[0m \x1b[1mBash\x1b[0m \x1b[2mcd /private/tmp/claude-501/-Users-luton-Projects-CoXAgent/ecb4c356-76f2-47a3-8b02-23274d19a3a8'
+[3/3] astropy__astropy-13236: 1474B patch in 2.9m · '36m⏺\x1b[0m \x1b[1mBash\x1b[0m \x1b[2mpython3 -c " import warnings import numpy as np from astropy.table import Table, Column, Ndarr'
+predictions → /private/tmp/claude-501/-Users-luton-Projects-CoXAgent/ecb4c356-76f2-47a3-8b02-23274d19a3a8/scratchpad/cox-sq2/evals/swebench/predictions.jsonl

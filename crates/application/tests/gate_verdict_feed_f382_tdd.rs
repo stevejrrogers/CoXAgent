@@ -110,8 +110,11 @@ fn pin_metrics_never_divide_by_zero_when_no_useful_runs_exist() {
         coxagent_domain::Status::InProgress,
     )
     .expect("in progress");
-    t.transition_to(coxagent_domain::Role::DevFeature, coxagent_domain::Status::Done)
-        .expect("done");
+    t.transition_to(
+        coxagent_domain::Role::DevFeature,
+        coxagent_domain::Status::Done,
+    )
+    .expect("done");
     s.tickets.push(t);
     // Pure compute over the snapshot must terminate and produce finite numbers.
     let m = metrics::compute(&s);

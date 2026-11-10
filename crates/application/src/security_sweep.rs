@@ -124,6 +124,10 @@ fn credential_hit(body: &str) -> Option<(&'static str, String)> {
                 // sibling of the SEC-12CF60 marker-quote loop).
                 if userinfo.contains(':')
                     && userinfo.chars().any(|c| c.is_ascii_alphanumeric())
+                    // Fill-in slots (`postgres://<db-user>:<db-password>@…`,
+                    // the SEC-41E384 README shape) are placeholders, not
+                    // credentials — angle-bracket components never trip this.
+                    && !userinfo.starts_with('<')
                     && !userinfo.contains('/')
                     && !userinfo.contains(' ')
                     && !userinfo.ends_with(':')
@@ -246,13 +250,18 @@ pub fn state_surfaces(state: &ProjectState) -> Vec<Surface> {
         if matches!(t.status(), Status::Documented | Status::Rejected) {
             continue;
         }
+        // Sweep-authored remediation tickets TALK ABOUT their own finding —
+        // their body necessarily restates the very shape the detectors match,
+        // so scanning them re-flagged each one on every pass and spawned an
+        // endless filing chain (SEC-919A21 -> SEC-12CF60 -> SEC-480127 ->
+        // SEC-8DED5F; SEC-58210B -> SEC-DE3FC7 -> SEC-659EC5 for credentials).
+        // Their content is machine-written behind the closed-loop tests below,
+        // or a human-closed historical row — never fresh untrusted input — so
+        // they are NOT active brief surfaces. Self-elided provenance: rather
+        // than dropping them outright they enter the snapshot with a
+        // placeholder body, keeping their ticket-surface label in play so real
+        // re-leaks after fix-and-close still refire via `ticket_id_for`.
         let body = if is_sweep_artifact(t) {
-            // Self-elided provenance: sweep-authored tickets are DATA about a
-            // finding, not an active brief surface. Re-scanning their bodies
-            // re-trips the detectors on our own output (SEC-58210B ->
-            // SEC-DE3FC7 -> SEC-659EC5 regress), so they enter the snapshot
-            // with a placeholder and keep their ticket-surface label — real
-            // re-leaks after fix-and-close still refire via `ticket_id_for`.
             ARTIFACT_PLACEHOLDER.to_owned()
         } else {
             format!(
@@ -398,6 +407,26 @@ mod tests {
         assert_eq!(sweep(&[s("doc:x", &real)]).len(), 1);
     }
 
+    /// Regression for SEC-41E384 (regression of SEC-E6C90C): README-style
+    /// fill-in slots (`<db-user>:<db-password>`) are placeholders, not live
+    /// credentials — they must never re-flag `file:README.md` on every sweep.
+    #[test]
+    fn readme_placeholder_dsn_slots_do_not_retrip_the_sweep() {
+        let hits = sweep(&[s(
+            "file:README.md",
+            "export COXAGENT_DB_DSN='postgres://<db-user>:<db-password>@<db-host>:5432/coxagent'",
+        )]);
+        assert!(
+            hits.is_empty(),
+            "fill-in placeholder DSN is documentation, not a leak: got {hits:?}"
+        );
+        // The still-live shape keeps tripping the detector unchanged.
+        assert_eq!(
+            sweep(&[s("file:x", "postgres://app:hunter2@db:5432/x")]).len(),
+            1
+        );
+    }
+
     #[test]
     fn url_credentials_and_private_keys_are_flagged() {
         let hits = sweep(&[
@@ -441,7 +470,7 @@ mod tests {
         let marker_ticket = state
             .tickets
             .iter()
-            .find(|t| t.title().starts_with("Security sweep: prompt-injection"))
+            .find(|t| t.title().starts_with(FILED_TITLE_PREFIX))
             .expect("injection bug filed");
 
         // The stored description carries no imperative wording at all.
@@ -455,6 +484,49 @@ mod tests {
         assert!(
             !rescan.iter().any(|f| f.kind == SecKind::PromptInjection),
             "filed tickets must be a closed loop, not a fresh injection surface"
+        );
+    }
+
+    /// Regression for SEC-8DED5F: sweep-authored remediation tickets — open
+    /// OR already fixed/closed by a human — must not be scan surfaces, or each
+    /// one re-trips the injection detector on every pass and spawns another
+    /// filing chain (SEC-919A21 -> SEC-12CF60 -> SEC-480127 -> SEC-8DED5F).
+    #[test]
+    fn sweep_tickets_are_not_scan_surfaces_even_after_human_resolution() {
+        use crate::state::ProjectState;
+
+        let findings = vec![SecFinding {
+            kind: SecKind::PromptInjection,
+            surface: "ticket:CXA-F143".to_owned(),
+            detail: format!(
+                "contains {}",
+                masked_marker_detail(0, "ignore previous instructions")
+            ),
+        }];
+        let mut state = ProjectState::default();
+        let filed = apply_findings(&mut state, &findings);
+        assert_eq!(filed.len(), 1);
+
+        // Simulate the human decision from SEC-8DED5F: legitimate doc text in
+        // CXA-F143, so close the remediation ticket (Open -> Rejected = filed
+        // as a duplicate/noise is the legal closure for an already-fixed
+        // chain link).
+        let closed = DomainTicket::transition_to(
+            state
+                .tickets
+                .iter_mut()
+                .find(|t| t.id() == &filed[0])
+                .expect("filed sweep ticket"),
+            coxagent_domain::Role::Po,
+            Status::Rejected,
+        );
+        assert!(closed.is_ok(), "Open -> Rejected must be a legal transition");
+
+        // Nothing re-trips: neither the Fixed ticket nor any other surface.
+        let rescan = sweep(&crate::security_sweep::state_surfaces(&state));
+        assert!(
+            rescan.iter().all(|f| f.kind != SecKind::PromptInjection),
+            "resolved sweep tickets must stay out of the next scan: {rescan:?}"
         );
     }
 
