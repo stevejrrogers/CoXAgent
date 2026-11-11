@@ -7,7 +7,6 @@ pub mod archive_read;
 pub mod artifacts;
 pub mod attribution_invariants;
 pub mod auth;
-pub mod oidc;
 pub mod backlog_hygiene;
 pub mod backlog_import;
 pub mod backlog_scoping;
@@ -22,9 +21,11 @@ pub mod deps_scan;
 pub mod doc_leak_scan;
 pub mod engine_provenance;
 pub mod error;
+pub mod export_invoice;
 pub mod faults;
 pub mod fleet;
 pub mod forensics;
+pub mod gate_feed;
 pub mod guardrails;
 pub mod hub_lessons;
 pub mod lesson_efficacy;
@@ -37,6 +38,7 @@ pub mod metrics_governance;
 pub mod metrics_health;
 pub mod metrics_registry;
 pub mod milestone_projection;
+pub mod oidc;
 pub mod parsing;
 pub mod policy;
 pub mod ports;
@@ -62,6 +64,8 @@ pub mod working_hours;
 
 #[cfg(test)]
 mod attribution_tests;
+#[cfg(test)]
+mod export_invoice_tests;
 #[cfg(test)]
 mod release_candidates_tdd_tests;
 
