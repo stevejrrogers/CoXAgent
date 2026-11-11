@@ -107,6 +107,55 @@ async fn build_fleet_cockpit(app: &AppState) -> coxagent_application::fleet::Fle
     build_cockpit(&snapshot, &spaces, hub_ceiling, WARN_PCT)
 }
 
+/// GET /api/fleet/spend/export.csv — CXA-F437 invoice-ready CSV export of the
+/// fleet-spend ledger. Pure serialization lives in
+/// [`coxagent_application::export_invoice`] (total-function: null caps → empty
+/// cell, NaN/±Inf → `0.00`, RFC-4180 quoting), so this handler CANNOT panic or
+/// emit a half-written stream on enterprise-shaped data — the crash class the
+/// ticket fixes. Read-only and audited like every other manage surface.
+pub(super) async fn fleet_spend_export_ep(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use coxagent_application::export_invoice::{invoice_rows, render_invoice_csv};
+
+    if !is_super(&app, &headers).await {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "super admin required" })),
+        )
+            .into_response();
+    }
+    let cockpit = build_fleet_cockpit(&app).await;
+    // UTC capture date doubles as both the `issued` column and the filename
+    // stamp — one clock read keeps them consistent for reconciliation.
+    let issued = now_rfc3339().get(..10).unwrap_or("").to_owned();
+    let rows = invoice_rows(&cockpit, "all", &issued);
+    let csv = render_invoice_csv(&rows);
+    let user = resolve_username(&app, &headers).await;
+    audit_push(
+        &app.audit,
+        &user,
+        "fleet spend exported to CSV (invoice)".to_owned(),
+        200,
+    )
+    .await;
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/csv; charset=utf-8".to_owned(),
+            ),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"coxagent-invoice-{issued}.csv\""),
+            ),
+        ],
+        csv,
+    )
+        .into_response()
+}
+
 /// GET /api/fleet/spend — the super-admin fleet cockpit payload. Open mode
 /// (no auth configured) is allowed, exactly like `/api/manage/overview`.
 pub(super) async fn fleet_spend_ep(

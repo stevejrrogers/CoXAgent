@@ -304,6 +304,96 @@ fn row<'v>(v: &'v serde_json::Value, id: &str) -> &'v serde_json::Value {
         .unwrap_or_else(|| panic!("row {id} missing from the fleet payload"))
 }
 
+/// CXA-F437: fetch the invoice CSV export. Returns status, content-type,
+/// Content-Disposition and body text.
+async fn get_export(port: u16, role: Option<AuthRole>) -> (u16, String, String, String) {
+    let mut builder = reqwest::Client::new().get(format!(
+        "http://127.0.0.1:{port}/api/fleet/spend/export.csv"
+    ));
+    if let Some(role) = role {
+        builder = builder.header(
+            reqwest::header::COOKIE,
+            format!("cox_session={}", StubAuth::token(role)),
+        );
+    }
+    let resp = builder.send().await.unwrap();
+    let status = resp.status().as_u16();
+    let ctype = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    let dispos = resp
+        .headers()
+        .get(reqwest::header::CONTENT_DISPOSITION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    let body = resp.text().await.unwrap_or_default();
+    (status, ctype, dispos, body)
+}
+
+/// Gate on the export surface mirrors the panel endpoint: member refused with
+/// a JSON error naming WHY (never half-written CSV bytes).
+async fn assert_export_gate(port: u16) {
+    let (status, ctype, _, body) = get_export(port, Some(AuthRole::Fe)).await;
+    assert_eq!(status, 403, "member-tier must be refused");
+    assert!(
+        ctype.starts_with("application/json"),
+        "403 must be JSON, got {ctype}"
+    );
+    assert!(
+        body.contains("super admin"),
+        "error must name the missing permission, got {body}"
+    );
+}
+
+/// CXA-F437 contract: a whole-file CSV download for a super admin — attachment
+/// headers, header row always present (even before any spend exists), every
+/// seeded project present with its fields, CRLF records. The broken project
+/// must appear too (flagged, zero spend) instead of being dropped silently —
+/// dropping rows under-reports an invoice.
+async fn assert_export_contract(port: u16) {
+    // The hub boots with auth configured here, so present the super-admin
+    // cookie — anonymous is refused by middleware before our handler runs.
+    let (status, ctype, dispos, body) = get_export(port, Some(AuthRole::Super)).await;
+    assert_eq!(status, 200);
+    assert!(
+        ctype.starts_with("text/csv"),
+        "expected text/csv, got {ctype}"
+    );
+    assert!(
+        dispos.starts_with("attachment; filename=\"coxagent-invoice-"),
+        "expected attachment disposition, got {dispos}"
+    );
+    let lines: Vec<&str> = body.split("\r\n").collect();
+    assert_eq!(
+        lines.first().copied(),
+        Some(
+            "window,issued,id,name,space_id,today_usd,spend_7d_usd,lifetime_usd,daily_cap_usd,lifetime_cap_usd,status"
+        ),
+        "header row must lead the document"
+    );
+    for id in ["over", "approaching", "uncapped", "broken"] {
+        assert!(
+            lines.iter().any(|l| l.contains(&format!(",{id},"))),
+            "project {id} must be exported, got:\n{body}"
+        );
+    }
+    // Broken registration exports as zero-spend money cells, never NaN/null.
+    let broken = lines.iter().find(|l| l.contains(",broken,")).unwrap();
+    assert!(
+        !broken.contains("NaN") && !broken.contains("null"),
+        "no NaN/null may leak into a cell: {broken}"
+    );
+    // RFC-4180: every non-empty record ends with CRLF (file ends after last).
+    assert!(
+        body.ends_with("\r\n"),
+        "document terminates with CRLF like every record"
+    );
+}
+
 /// One test per hub instance: the assertions share a process-wide TCP bind, so
 /// they live in a single `#[tokio::test]` rather than racing each other. The
 /// phases are extracted into helpers purely to keep each function readable.
@@ -311,6 +401,8 @@ fn row<'v>(v: &'v serde_json::Value, id: &str) -> &'v serde_json::Value {
 async fn fleet_spend_aggregates_flags_and_reconciles_for_a_super_admin() {
     let hub = boot(Some(Arc::new(StubAuth)), PORT).await;
     assert_gate_admits_only_the_super_admin(PORT).await;
+    assert_export_gate(PORT).await;
+    assert_export_contract(PORT).await;
     let body = assert_fleet_shape_totals_rows_and_spaces(PORT).await;
     assert_rows_reconcile_with_project_state(PORT, &body).await;
     assert_ceiling_round_trips_and_persists(PORT, hub.path()).await;

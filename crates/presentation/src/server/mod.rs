@@ -39,7 +39,6 @@ mod approval_policy;
 mod archive;
 mod assets;
 mod auth;
-mod oidc_routes;
 mod background;
 mod broken_projects;
 mod channels;
@@ -64,6 +63,7 @@ mod lessons;
 mod manage;
 mod meetings;
 mod metrics_admin;
+mod oidc_routes;
 mod openapi;
 mod people;
 mod pr_listing;
@@ -857,6 +857,7 @@ pub async fn serve_full(
         // aggregation with cap headroom + the soft-ceiling setting (see
         // fleet_spend.rs). Super admin; visibility-only by design.
         .route("/api/fleet/spend", get(fleet_spend_ep))
+        .route("/api/fleet/spend/export.csv", get(fleet_spend_export_ep))
         .route(
             "/api/fleet/ceiling",
             axum::routing::put(fleet_ceiling_put_ep),

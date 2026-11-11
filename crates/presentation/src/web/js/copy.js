@@ -27,7 +27,11 @@ window.CXACOPY = {
   "action.retry":    { params: [], label: "retry button label",   text: () => `Retry` },
   "error.network":   { params: ["where"], label: "request failed / offline", text: () => `Network error on {where} — check your connection and try again` },
   "action.dismiss":  { params: [], label: "dismiss button label", text: () => `Dismiss` },
-  "toast.nothingPicked": { params: ["surface"], label: "no rows selected (Settings → Services retag)", text: () => `Nothing ticked on {surface} — tick at least one suggestion first` }
+  "toast.nothingPicked": { params: ["surface"], label: "no rows selected (Settings → Services retag)", text: () => `Nothing ticked on {surface} — tick at least one suggestion first` },
+  "toast.fleetExportDenied":  { params: ["reason"], label: "fleet spend export blocked by RBAC (CXA-F437)", text: () => `Export blocked: {reason} — ask a hub owner for super-admin access` },
+  "toast.fleetExportFailed":  { params: ["why"], label: "fleet spend export server-side failure (CXA-F437)", text: () => `Export failed: {why}` },
+  "toast.fleetExportOffline": { params: ["where"], label: "fleet spend export network error (CXA-F437)", text: () => `Export failed: network error — {where} did not answer` },
+  "toast.fleetExportDone":    { params: ["file"], label: "fleet spend export success (CXA-F437)", text: () => `Invoice CSV exported ({file})` }
 };
 
 // Fixed skeleton kinds (CXA-B163 invariant): every skeleton span in the DOM

@@ -283,6 +283,7 @@ async function renderMgFleet(){
     <div class="panel" style="margin-bottom:18px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
       <span style="font-size:12.5px;font-weight:600">Hub daily soft ceiling</span>
       <input id="fleet-ceiling" type="number" min="0" step="1" placeholder="uncapped" value="${ceil}" style="width:130px;background:var(--card2);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:8px 11px;font-family:ui-monospace,monospace;font-size:11.5px">
+      <button class="pri" id="fleet-export" onclick="exportFleetSpendCsv(this)"><i class="ti ti-download"></i> Export CSV</button>
       <button class="pri" onclick="saveFleetCeiling()"><i class="ti ti-check"></i> Save</button>
       <span style="color:var(--dim);font-size:12px">USD per day, hub-wide · 0/empty = uncapped · soft: one #general alert per day when today's burn crosses ${Math.round((fleet.hub_warn_pct||0.8)*100)}% — pauses nothing.${t.hub_headroom_usd!=null?` Headroom today: <b style="font-family:ui-monospace,monospace">${money(t.hub_headroom_usd)}</b>.`:""}</span></div>
     <div class="wssec">Projects by burn</div>
@@ -294,6 +295,36 @@ async function renderMgFleet(){
       <span style="min-width:110px;text-align:right;color:var(--dim);font-size:12px">${s.budget_usd>0?("cap "+money(s.budget_usd)):"uncapped"}</span>
       <span style="min-width:64px;text-align:right">${fleetBadge(s.status)}</span></div>`).join("")||'<div class="empty">no spaces defined</div>'}</div>`;
 }
+// CXA-F437 invoice export: download the fleet spend ledger as CSV. The raw
+// fetch-and-pray pattern crashed here before (blob assembly on null/NaN cost
+// fields); now the server renders the whole file or returns a JSON error that
+// we surface verbatim — never a silent hang. On 403 the button stays enabled
+// and names WHY in a toast instead of failing silently.
+async function exportFleetSpendCsv(btn){
+  if(btn.disabled)return;
+  const label=btn.innerHTML;
+  btn.disabled=true;btn.innerHTML='<i class="ti ti-loader-2"></i> Exporting…';
+  try{
+    const r=await fetch("/api/fleet/spend/export.csv");
+    if(r.status===403){toasty(copyFor("toast.fleetExportDenied",{reason:"needs super admin"}),"err");return;}
+    if(!r.ok){
+      let why="server error "+r.status;
+      try{const j=await r.json();if(j&&j.error)why=j.error;}catch(_e){}
+      toasty(copyFor("toast.fleetExportFailed",{why}),"err");return;
+    }
+    const cd=r.headers.get("Content-Disposition")||"";
+    const m=/filename="([^"]+)"/.exec(cd);
+    const name=m?m[1]:"coxagent-invoice.csv";
+    const blob=await r.blob();
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement("a");a.href=url;a.download=name;
+    document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),5000);
+    toasty(copyFor("toast.fleetExportDone",{file:name}),"ok");
+  }catch(e){toasty(copyFor("toast.fleetExportOffline",{where:"the hub"}),"err");}
+  finally{btn.disabled=false;btn.innerHTML=label;}
+}
+
 async function saveFleetCeiling(){
   const inp=document.getElementById("fleet-ceiling");if(!inp)return;
   const raw=inp.value.trim();

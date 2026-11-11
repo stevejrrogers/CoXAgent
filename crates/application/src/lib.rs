@@ -21,6 +21,7 @@ pub mod deps_scan;
 pub mod doc_leak_scan;
 pub mod engine_provenance;
 pub mod error;
+pub mod export_invoice;
 pub mod faults;
 pub mod fleet;
 pub mod forensics;
@@ -63,6 +64,8 @@ pub mod working_hours;
 
 #[cfg(test)]
 mod attribution_tests;
+#[cfg(test)]
+mod export_invoice_tests;
 #[cfg(test)]
 mod release_candidates_tdd_tests;
 
