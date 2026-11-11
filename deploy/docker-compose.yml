@@ -92,8 +92,12 @@ services:
       COXAGENT_REGISTRY: /data/registry.json
     ports:
       # Direct host publishing of the hub (container binds 4000, service.rs
-      # default): reserved host port for this project — Caddy fronts 80/443.
-      - "8101:4000"
+      # default): reserved host port for this project. Host side comes from
+      # APP_PORT (default 8101) so a re-deploy racing a still-running old
+      # container — or another stack hardcoding the same shared port — can
+      # move the mapping via APP_PORT instead of dying on
+      # "port is already allocated" (CXA-B334).
+      - "${APP_PORT:-8101}:4000"
     volumes:
       - appdata:/data
       - ./data/TL:/data/TL:rw
