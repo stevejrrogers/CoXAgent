@@ -7,6 +7,7 @@ pub mod daily_recovery;
 pub mod deploy;
 pub mod deps;
 pub mod doc_store;
+pub mod email;
 pub mod engine;
 pub mod fold_freeze_source;
 pub mod forge;
@@ -37,6 +38,9 @@ pub use deploy::{
 };
 pub use deps::{DependencyDiscoveryPort, Lockfile};
 pub use doc_store::DocStorePort;
+pub use email::{
+    CapturedEmail, EmailAddress, EmailError, EmailMessage, EmailOutboxPort, EmailPort, EmailReceipt,
+};
 pub use engine::{AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus, Usage};
 pub use forge::{ForgePort, IssueDraft, PrFeedback, PullRequest};
 pub use git::{GitAuthor, GitPort, SyncBase, WorkingTreeDiff};
