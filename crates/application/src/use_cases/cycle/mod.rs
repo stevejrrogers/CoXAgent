@@ -1881,7 +1881,7 @@ mod version_reconcile_tests {
 }
 
 #[cfg(test)]
-mod cycle_tests;
+pub(crate) mod cycle_tests;
 
 #[cfg(test)]
 mod qa_evidence_tests;

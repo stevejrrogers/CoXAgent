@@ -338,6 +338,7 @@ async fn ac5_a_state_document_predating_the_field_loads_without_migration_failur
         burn_mode: true,
         burn_until_bugs_le: Some(2),
         last_eval_day: "2026-01-01".to_owned(),
+        ..Tuning::default()
     };
     let doc = serde_json::to_value(&s).expect("serialize state");
     let back: ProjectState = serde_json::from_value(doc).expect("load legacy state");

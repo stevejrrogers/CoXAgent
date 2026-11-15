@@ -10,7 +10,7 @@ use coxagent_domain::{Role, Status};
 use std::sync::Mutex;
 
 #[derive(Default)]
-pub(super) struct MemStore {
+pub(crate) struct MemStore {
     pub(super) state: Mutex<ProjectState>,
 }
 #[async_trait::async_trait]
@@ -27,7 +27,7 @@ impl StateStorePort for MemStore {
 
 /// Engine that answers each role by its system prompt: BA proposes one
 /// feature, TEST reports no bugs, DEV succeeds silently.
-pub(super) struct RoleAwareEngine;
+pub(crate) struct RoleAwareEngine;
 #[async_trait::async_trait]
 impl AgentEnginePort for RoleAwareEngine {
     fn id(&self) -> &'static str {

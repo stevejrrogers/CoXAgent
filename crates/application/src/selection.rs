@@ -147,13 +147,7 @@ pub fn documentable_candidates(state: &ProjectState) -> Vec<TicketId> {
             && t.status() == Status::Done
     })
     .into_iter()
-    .filter(|id| {
-        state
-            .doc_refresh
-            .get(id.as_str())
-            .map_or(0, |m| m.fails)
-            < DOCS_STAGE_FAIL_CAP
-    })
+    .filter(|id| state.doc_refresh.get(id.as_str()).map_or(0, |m| m.fails) < DOCS_STAGE_FAIL_CAP)
     .collect()
 }
 
@@ -335,15 +329,240 @@ pub fn burn_mode_holds(state: &ProjectState) -> bool {
 
 /// Apply the burn mode's explicit exit gate to live state: an engaged mode
 /// whose open-bug count has reached its target clears itself, so the
-/// burn-down sprint ends without waiting for a person. Returns whether the
-/// state changed — the caller persists it through the store.
+/// burn-down sprint ends by itself instead of waiting for a person. Returns
+/// whether the state changed — the caller persists it through the store.
 pub fn clear_burn_mode_if_gate_met(state: &mut ProjectState) -> bool {
-    if state.tuning.burn_mode && !burn_mode_holds(state) {
+    if state.tuning.burn_mode && !targeted_burn_holds(state) {
         state.tuning.burn_mode = false;
         true
     } else {
         false
     }
+}
+
+// ---------------------------------------------------------------------------
+// Targeted bug burn (CXA-F415) — pure policy over real domain types.
+//
+// The F030 burn holds features while ANY open bugs remain above a numeric
+// target. F415 narrows that to an explicitly committed set: at most 8
+// High-priority Open bugs, armed with an operator-owned deadline. The hold is
+// keyed on "every committed id is Fixed/Verified" — a domain invariant, never
+// a string match on cycle output (the relabel-evasion lesson).
+// ---------------------------------------------------------------------------
+
+/// At most eight targeted bugs per burn — CXA-F415's own cap.
+pub const MAX_COMMITTED_BUGS: usize = 8;
+
+/// One refused commitment, verbatim for the operator.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CommittedBugRejection {
+    pub id: String,
+    pub reason: String,
+}
+
+/// Admission validation: which of the requested ids may join the committed
+/// burn set. Pure over the ticket list; the HTTP layer turns the rejections
+/// into a 422 listing offenders. A valid commitment is ≤
+/// [`MAX_COMMITTED_BUGS`] distinct ids, each an existing `type=bug` ticket in
+/// `Open`/`InProgress` with priority exactly [`Priority::High`] ("high
+/// severity", per CXA-F415). Duplicate request lines are tolerated, not errors.
+#[must_use]
+pub fn validate_committed_bug_ids(
+    requested: &[String],
+    tickets: &[coxagent_domain::Ticket],
+) -> Vec<CommittedBugRejection> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for id in requested {
+        let id = id.trim();
+        if id.is_empty() || !seen.insert(id.to_owned()) {
+            continue;
+        }
+        let admitted = out.len();
+        if admitted + 1 > MAX_COMMITTED_BUGS {
+            out.push(CommittedBugRejection {
+                id: id.to_owned(),
+                reason: format!("burn commits at most {MAX_COMMITTED_BUGS} bugs"),
+            });
+            continue;
+        }
+        let Some(t) = tickets.iter().find(|t| t.id().as_str() == id) else {
+            out.push(CommittedBugRejection {
+                id: id.to_owned(),
+                reason: "unknown ticket id".to_owned(),
+            });
+            continue;
+        };
+        match (t.ticket_type(), t.priority(), t.status()) {
+            (TicketType::Bug, Priority::High, Status::Open | Status::InProgress) => {}
+            (TicketType::Bug, Priority::High, s) => out.push(CommittedBugRejection {
+                id: id.to_owned(),
+                reason: format!("bug is {s:?}, must be open or in_progress"),
+            }),
+            (_, prio, _) => out.push(CommittedBugRejection {
+                id: id.to_owned(),
+                reason: format!(
+                    "priority is {prio:?}, must be high (severity-1/2 burns commit high bugs)"
+                ),
+            }),
+        }
+    }
+    out
+}
+
+/// The lifecycle outcome of the targeted burn — derived purely from state and
+/// the wall clock the caller supplies (`now_unix`: seconds since the epoch).
+/// Keyed on the domain invariant "committed set fully Fixed/Verified", so a
+/// relabelled status cannot fake an early exit.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "exit", rename_all = "snake_case")]
+pub enum BurnExit {
+    /// Every committed bug is Fixed or Verified before the deadline: the burn
+    /// ends successfully and features resume.
+    AllCommittedFixed,
+    /// The window elapsed with committed work outstanding: features resume
+    /// anyway — a timebox that never expires is just another deadlock.
+    DeadlineElapsed { remaining: u32 },
+    /// Still inside the window with open commitments: DEV-FEATURE stays held.
+    StillBurning {
+        fixed_count: u32,
+        remaining: u32,
+        hours_left: i64,
+    },
+}
+
+impl BurnExit {
+    #[must_use]
+    pub fn still_burning(&self) -> bool {
+        matches!(self, BurnExit::StillBurning { .. })
+    }
+}
+
+fn committed_ticket<'a>(state: &'a ProjectState, id: &str) -> Option<&'a coxagent_domain::Ticket> {
+    state.tickets.iter().find(|t| t.id().as_str() == id)
+}
+
+fn unparseable_or_classic(state: &ProjectState) -> BurnExit {
+    // No committed set / no parseable stamp: fall back to the plain F030
+    // whole-backlog gate rather than silently resuming feature work mid-burn.
+    if burn_mode_holds(state) {
+        BurnExit::StillBurning {
+            fixed_count: 0,
+            remaining: u32::try_from(open_bug_candidates(state).len()).unwrap_or(u32::MAX),
+            hours_left: -1,
+        }
+    } else {
+        BurnExit::AllCommittedFixed
+    }
+}
+
+/// Evaluate the targeted burn against the supplied clock. With no committed
+/// set or no stored deadline this IS the classic F030 gate — one lane, so a
+/// half-armed targeted burn can never disagree with the brake the loop honours.
+#[must_use]
+pub fn burn_exit(state: &ProjectState, now_unix: i64) -> BurnExit {
+    let Some(deadline_s) = state
+        .tuning
+        .burn_deadline
+        .as_deref()
+        .and_then(crate::liveness::rfc3339_secs)
+    else {
+        return unparseable_or_classic(state);
+    };
+    if state.tuning.committed_bug_ids.is_empty() {
+        return unparseable_or_classic(state);
+    }
+    evaluate_targeted(state, deadline_s, now_unix.max(0))
+}
+
+fn evaluate_targeted(state: &ProjectState, deadline_s: i64, now: i64) -> BurnExit {
+    let mut fixed = 0_u32;
+    let mut remaining = 0_u32;
+    for id in &state.tuning.committed_bug_ids {
+        match committed_ticket(state, id) {
+            // Vanished from the board entirely (deleted/evicted): degrades,
+            // does not deadlock — it stops counting against completion, and
+            // `burn_exit_why` says so honestly instead of deadlocking the burn.
+            None => {}
+            Some(t) => match t.status() {
+                Status::Fixed | Status::Verified => fixed += 1,
+                _ => remaining += 1,
+            },
+        }
+    }
+    if remaining == 0 {
+        return BurnExit::AllCommittedFixed;
+    }
+    if now >= deadline_s {
+        return BurnExit::DeadlineElapsed { remaining };
+    }
+    BurnExit::StillBurning {
+        fixed_count: fixed,
+        remaining,
+        hours_left: ((deadline_s - now) / 3600).max(0),
+    }
+}
+
+/// Convenience wrapper sampling the host clock once. Application code treats
+/// time as data everywhere else (RFC3339 stamps); this only reads it.
+#[must_use]
+pub fn burn_exit_now(state: &ProjectState) -> BurnExit {
+    burn_exit(state, crate::state::unix_now_secs())
+}
+
+/// Whether the targeted burn currently pauses DEV-FEATURE pickup: the same
+/// F030 brake, narrowed to the committed set, self-expiring at the deadline
+/// so a stale burn can never hold features past its week.
+#[must_use]
+pub fn targeted_burn_holds(state: &ProjectState) -> bool {
+    state.tuning.burn_mode && burn_exit_now(state).still_burning()
+}
+
+/// Human-readable why-string for the banner / report: who armed the burn,
+/// when, why, how much is left, and any degraded (vanished) commitments.
+#[must_use]
+pub fn burn_exit_why(state: &ProjectState, now_unix: i64) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    match burn_exit(state, now_unix) {
+        BurnExit::AllCommittedFixed => {
+            parts.push("all committed bugs fixed — burn complete, features resumed".to_owned());
+        }
+        BurnExit::DeadlineElapsed { remaining } => {
+            parts.push(format!(
+                "timebox over, features resumed — burn exited with {remaining} committed bug(s) outstanding"
+            ));
+        }
+        BurnExit::StillBurning {
+            fixed_count,
+            remaining,
+            hours_left,
+        } => parts.push(format!(
+            "{fixed_count}/{total} committed bug(s) fixed, {remaining} open, {hours_left}h left",
+            total = fixed_count + remaining
+        )),
+    }
+    if let Some(reason) = nonempty(state.tuning.burn_reason.trim()) {
+        parts.push(reason.to_owned());
+    }
+    if let Some(by) = nonempty(state.tuning.burn_armed_by.trim()) {
+        parts.push(format!("armed by {by}"));
+    }
+    let vanished = state
+        .tuning
+        .committed_bug_ids
+        .iter()
+        .filter(|id| committed_ticket(state, id).is_none())
+        .count();
+    if vanished > 0 {
+        parts.push(format!(
+            "{vanished} committed bug(s) vanished from the board"
+        ));
+    }
+    parts.join("; ")
+}
+
+fn nonempty(s: &str) -> Option<&str> {
+    (!s.is_empty()).then_some(s)
 }
 
 /// DEV-FEATURE's pause for one cycle: the reactive `bugs_first` brake and the
@@ -353,7 +572,7 @@ pub fn clear_burn_mode_if_gate_met(state: &mut ProjectState) -> bool {
 /// brakes — the 50-cycle both-lanes-starved lesson from the reactive brake.
 #[must_use]
 pub fn dev_feature_paused(state: &ProjectState, bug_slot_worked: bool) -> bool {
-    (state.tuning.bugs_first || burn_mode_holds(state)) && bug_slot_worked
+    (state.tuning.bugs_first || targeted_burn_holds(state)) && bug_slot_worked
 }
 
 /// Did the bug slot do REAL fixing work this cycle? A not-reproducible close
@@ -443,7 +662,8 @@ mod tests {
         let mut t = ready_feature(id, Priority::High);
         t.transition_to(Role::DevFeature, Status::InProgress)
             .expect("in-progress");
-        t.transition_to(Role::DevFeature, Status::Done).expect("done");
+        t.transition_to(Role::DevFeature, Status::Done)
+            .expect("done");
         t
     }
 
@@ -466,7 +686,10 @@ mod tests {
         // One shy of the cap stays in the queue.
         state.doc_refresh.insert(
             "FEAT-010".to_owned(),
-            crate::state::DocRefreshMark { at: String::new(), fails: DOCS_STAGE_FAIL_CAP - 1 },
+            crate::state::DocRefreshMark {
+                at: String::new(),
+                fails: DOCS_STAGE_FAIL_CAP - 1,
+            },
         );
         assert!(
             documentable_candidates(&state)
@@ -478,14 +701,23 @@ mod tests {
         // At the cap it is PARKED out of the queue; the other is untouched.
         state.doc_refresh.insert(
             "FEAT-010".to_owned(),
-            crate::state::DocRefreshMark { at: String::new(), fails: DOCS_STAGE_FAIL_CAP },
+            crate::state::DocRefreshMark {
+                at: String::new(),
+                fails: DOCS_STAGE_FAIL_CAP,
+            },
         );
         let ids: Vec<String> = documentable_candidates(&state)
             .iter()
             .map(|t| t.as_str().to_owned())
             .collect();
-        assert!(ids.iter().all(|s| s != "FEAT-010"), "at the cap it must be parked: {ids:?}");
-        assert!(ids.iter().any(|s| s == "FEAT-011"), "other tickets keep flowing: {ids:?}");
+        assert!(
+            ids.iter().all(|s| s != "FEAT-010"),
+            "at the cap it must be parked: {ids:?}"
+        );
+        assert!(
+            ids.iter().any(|s| s == "FEAT-011"),
+            "other tickets keep flowing: {ids:?}"
+        );
     }
 
     // Ticket::new creates bugs already in `Open`.
