@@ -381,6 +381,25 @@ pub struct Tuning {
     /// no numeric gate — the mode then holds until switched off by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub burn_until_bugs_le: Option<u32>,
+    /// Targeted bug burn (CXA-F415): the at-most-8 High-severity Open bugs
+    /// the operator committed to fix during this burn. Admission validation
+    /// is a pure function over the ticket list (see the selection module);
+    /// these are the surviving ids only. Empty = classic F030 whole-backlog
+    /// burn with no per-ticket commitment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub committed_bug_ids: Vec<String>,
+    /// RFC3339 UTC instant when the targeted burn self-expires (`now` + the
+    /// operator's window). Absent on pre-F415 records, which load unchanged —
+    /// additive-only persistence, no migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burn_deadline: Option<String>,
+    /// Why the operator armed this burn ("billing cluster sev-1/2 sprint") —
+    /// surfaced verbatim as the board banner's why-string.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub burn_reason: String,
+    /// Who armed it (authenticated principal) — attribution for the banner.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub burn_armed_by: String,
     /// The day (`YYYY-MM-DD`) tuning was last evaluated.
     #[serde(default)]
     pub last_eval_day: String,
@@ -393,6 +412,10 @@ impl Tuning {
             && !self.skip_ba
             && !self.burn_mode
             && self.burn_until_bugs_le.is_none()
+            && self.committed_bug_ids.is_empty()
+            && self.burn_deadline.is_none()
+            && self.burn_reason.is_empty()
+            && self.burn_armed_by.is_empty()
             && self.last_eval_day.is_empty()
     }
 }
@@ -684,5 +707,38 @@ mod burn_mode_tests {
         let doc = serde_json::to_value(&s).expect("serialize");
         assert_eq!(doc["tuning"]["burn_mode"], serde_json::json!(true));
         assert_eq!(doc["tuning"]["burn_until_bugs_le"], serde_json::json!(2));
+    }
+
+    // CXA-F448 billing bug 3 regression: per-operator accounting is polluted
+    // when a zero-cost, zero-run ceremony cycle folds an empty row for the
+    // worker into `by_operator` (drain_meter now skips the fold; see scrum.rs).
+    #[test]
+    fn f448_zero_cost_ceremony_drain_adds_nothing_to_by_operator() {
+        use crate::use_cases::cycle::{cycle_tests as ct, RunCycleUseCase};
+        use crate::{Config, Spend};
+        use std::sync::Arc;
+
+        let meter = Arc::new(std::sync::Mutex::new(Spend::default()));
+        let mut uc = RunCycleUseCase::new(
+            Arc::new(ct::MemStore::default()),
+            Arc::new(ct::RoleAwareEngine),
+            Config::default(),
+            std::env::temp_dir().join(format!("f448op-{}", std::process::id())),
+            "goal".to_owned(),
+        )
+        .with_meter(Arc::clone(&meter));
+        uc.set_worker("alice@host");
+
+        let mut state = ProjectState::default();
+        let (cost, runs, _) = uc.drain_meter(&mut state);
+
+        // Zero-cost ceremony run: nothing metered, no operator row materialised.
+        assert_eq!((cost, runs), (0.0, 0));
+        assert!(
+            !state.spend.by_operator.contains_key("alice@host"),
+            "empty ceremony cycle must not create a 0.0 by_operator row"
+        );
+        // avg_role_cost stays None at 0 runs — unchanged contract.
+        assert_eq!(Spend::avg_role_cost(&state.spend, "dev"), None);
     }
 }
