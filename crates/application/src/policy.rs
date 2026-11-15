@@ -34,15 +34,25 @@ pub fn over_daily_budget(policy: &PolicyConfig, spent_today: f64) -> bool {
 }
 
 /// Whether `spend` is within the warning band of `cap` — at or past `pct` of
-/// it but not yet at the cap itself. `false` when no cap is configured, the
-/// cap is non-positive, or spend has already reached/passed the cap (that's
-/// [`over_daily_budget`]'s job, not a warning — the two never double-fire for
-/// the same crossing). Single source of truth for "near the line" so callers
-/// (the cycle loop, the hub-level budget watchdog) don't each re-derive the
-/// arithmetic.
+/// it, INCLUSIVELY up to and including the cap itself. `false` when no cap is
+/// configured or the cap is non-positive.
+///
+/// WHY (CXA-F448 billing bug 1 — cap-boundary off-by-one): the old rule ended
+/// the band strictly below the cap (`spend < cap`), so a cycle landing EXACTLY
+/// on the warn threshold's upper bound reported "no warning" while sitting on
+/// the line; downstream pause logic (`over_daily_budget`, scrum.rs caps) fires
+/// only at `>= cap`, leaving the exact-threshold boundary silently unwarned.
+/// A warning is now uniformly inclusive: `spend >= cap * pct`. Pausing remains
+/// the caller's stricter `>= cap` check — the two coincide for one beat at
+/// exact equality, which is correct (pause beats warn), not a double-fire.
+/// Blast radius audited: `fleet::cap_status` checks `>= cap` FIRST so
+/// `CapStatus::Over` still wins at the boundary (unchanged rendering);
+/// `presentation/server/manage.rs` warns and then continues into its own hard
+/// stop at `spend >= budget` — at exact equality the warning now accompanies
+/// the stop instead of being swallowed one tick earlier.
 #[must_use]
 pub fn approaching_cap(spend: f64, cap: Option<f64>, pct: f64) -> bool {
-    cap.is_some_and(|cap| cap > 0.0 && spend >= cap * pct && spend < cap)
+    cap.is_some_and(|cap| cap > 0.0 && spend >= cap * pct)
 }
 
 #[cfg(test)]
@@ -95,6 +105,31 @@ mod tests {
         assert!(!approaching_cap(1_000.0, None, 0.8));
     }
 
+    // CXA-F448 billing bug 1 regression: the boundary cases below were
+    // silently unwarned before the inclusive-threshold fix (red without it).
+    #[test]
+    fn f448_approaching_cap_warns_at_exact_threshold_and_above_up_to_cap() {
+        // Table: (spend, cap, pct) -> expected, incl. exact-equality edges.
+        let cases = [
+            (79.99, Some(100.0), 0.8, false), // just below band
+            (80.00, Some(100.0), 0.8, true),  // EXACT warn threshold
+            (80.01, Some(100.0), 0.8, true),
+            (99.99, Some(100.0), 0.8, true),
+            (100.00, Some(100.0), 0.8, true), // EXACTLY at the cap: still a warning beat
+            (100.01, Some(100.0), 0.8, true), // one cent over
+            (150.00, Some(100.0), 0.8, true), // full overrun
+            (25.00, Some(100.0), 0.25, true), // fractional pct, exact multiply
+            (24.999, Some(100.0), 0.25, false),
+        ];
+        for (spend, cap, pct, want) in cases {
+            assert_eq!(
+                approaching_cap(spend, cap, pct),
+                want,
+                "spend={spend} cap={cap:?} pct={pct}"
+            );
+        }
+    }
+
     #[test]
     fn approaching_cap_is_false_below_the_threshold() {
         assert!(!approaching_cap(79.99, Some(100.0), 0.8));
@@ -105,10 +140,13 @@ mod tests {
         assert!(approaching_cap(80.0, Some(100.0), 0.8));
     }
 
+    // CXA-F448 billing bug 1: the band is INCLUSIVE up to and including the
+    // cap — a cycle sitting exactly on (or past) the cap still counts as "at
+    // the line" so the warning accompanies, never precedes silently, the stop.
     #[test]
-    fn approaching_cap_is_false_once_spend_reaches_the_cap() {
-        assert!(!approaching_cap(100.0, Some(100.0), 0.8));
-        assert!(!approaching_cap(150.0, Some(100.0), 0.8));
+    fn approaching_cap_stays_true_once_spend_reaches_the_cap() {
+        assert!(approaching_cap(100.0, Some(100.0), 0.8));
+        assert!(approaching_cap(150.0, Some(100.0), 0.8));
     }
 
     #[test]

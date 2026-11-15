@@ -44,6 +44,7 @@ pub mod policy;
 pub mod ports;
 pub mod prompts;
 pub mod prompts_resolve;
+pub mod regression;
 pub mod release_candidates;
 pub mod repo_map;
 pub mod repro_url;
