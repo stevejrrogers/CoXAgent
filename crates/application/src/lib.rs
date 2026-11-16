@@ -20,6 +20,7 @@ pub mod dependency_radar;
 pub mod deps_scan;
 pub mod doc_leak_scan;
 pub mod engine_provenance;
+pub mod mock_payment_harness;
 pub mod error;
 pub mod export_invoice;
 pub mod faults;
