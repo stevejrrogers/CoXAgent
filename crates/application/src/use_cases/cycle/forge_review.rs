@@ -443,7 +443,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // fresh failing LLM call and a duplicate surface line (#851 reached
             // 165 such skips). A new push (head moves) clears it and the SA
             // tries again.
-            if self.already_parked_no_verdict_at(pr.number, &head_sha).await {
+            if self
+                .already_parked_no_verdict_at(pr.number, &head_sha)
+                .await
+            {
                 continue;
             }
             // Per-PR review lease: with a dedicated review runner per MACHINE

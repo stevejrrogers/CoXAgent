@@ -18,6 +18,7 @@ pub mod merge_lock;
 pub mod notify;
 pub mod outbox;
 pub mod overview_inventory;
+pub mod payments;
 pub mod pr_report;
 pub mod probe;
 pub mod screenshot;
@@ -52,6 +53,10 @@ pub use outbox::{MemoryOutboxStore, OutboxStorePort};
 pub use overview_inventory::{LivePanelInventory, OverviewInventoryPort};
 pub mod fold_drift_source;
 pub use fold_drift_source::FoldDriftSourcePort;
+pub use payments::{
+    ChargeReceipt, ChargeRequest, ChargeStatus, CurrencyCode, PaymentError, PaymentsPort,
+    RefundReceipt,
+};
 pub use pr_report::{NullPrReporter, PrOpen, PrReporterPort, StorePrReporter};
 pub use probe::{ApiProbePort, ApiProof};
 pub use screenshot::ScreenshotPort;

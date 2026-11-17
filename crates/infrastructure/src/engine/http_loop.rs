@@ -124,7 +124,11 @@ where
             ToolCall::Run { cmd } => run_command(work_dir, cmd, RUN_TIMEOUT).await,
             other => apply_tool(work_dir, other),
         };
-        if matches!(call, ToolCall::WriteFile { .. } | ToolCall::PatchFile { .. }) && result.ok {
+        if matches!(
+            call,
+            ToolCall::WriteFile { .. } | ToolCall::PatchFile { .. }
+        ) && result.ok
+        {
             wrote_any = true;
         }
         let _ = writeln!(
@@ -146,7 +150,11 @@ where
     LoopOutcome {
         summary: format!(
             "http loop hit the {max_iters}-turn cap without calling done ({})",
-            if wrote_any { "some files were written" } else { "no files written" }
+            if wrote_any {
+                "some files were written"
+            } else {
+                "no files written"
+            }
         ),
         transcript,
         input_tokens,
@@ -162,7 +170,9 @@ mod tests {
     use std::cell::RefCell;
 
     /// A scripted fake model: returns the queued replies in order.
-    fn scripted(replies: Vec<&str>) -> impl FnMut(Vec<serde_json::Value>) -> std::future::Ready<Result<TurnReply, String>> {
+    fn scripted(
+        replies: Vec<&str>,
+    ) -> impl FnMut(Vec<serde_json::Value>) -> std::future::Ready<Result<TurnReply, String>> {
         let q = RefCell::new(replies.into_iter().map(str::to_owned).collect::<Vec<_>>());
         move |_messages| {
             let next = if q.borrow().is_empty() {
@@ -170,7 +180,11 @@ mod tests {
             } else {
                 q.borrow_mut().remove(0)
             };
-            std::future::ready(Ok(TurnReply { content: next, input_tokens: 5, output_tokens: 7 }))
+            std::future::ready(Ok(TurnReply {
+                content: next,
+                input_tokens: 5,
+                output_tokens: 7,
+            }))
         }
     }
 
@@ -213,7 +227,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cox-http-loop-cap-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // Model keeps chatting with no tool call.
-        let out = run_tool_loop(scripted(vec!["thinking…", "still thinking…"]), &dir, "s", "t", 2).await;
+        let out = run_tool_loop(
+            scripted(vec!["thinking…", "still thinking…"]),
+            &dir,
+            "s",
+            "t",
+            2,
+        )
+        .await;
         assert!(!out.done);
         assert!(!out.wrote_any);
         assert!(out.summary.contains("cap"), "{}", out.summary);
@@ -261,7 +282,10 @@ mod tests {
         )
         .await;
         assert!(out.done);
-        assert!(!out.wrote_any, "an escaping write must not count as a write");
+        assert!(
+            !out.wrote_any,
+            "an escaping write must not count as a write"
+        );
         assert!(out.transcript.contains("[tool err]"), "{}", out.transcript);
         let _ = std::fs::remove_dir_all(&dir);
     }
