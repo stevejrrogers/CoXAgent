@@ -248,7 +248,10 @@ mod tests {
         let raws: Vec<RawMr> = serde_json::from_str(json).unwrap();
         let pairs: Vec<(u64, String)> =
             raws.into_iter().map(|m| (m.iid, m.source_branch)).collect();
-        assert_eq!(pairs, vec![(3, "feat/A".to_owned()), (4, "fix/B".to_owned())]);
+        assert_eq!(
+            pairs,
+            vec![(3, "feat/A".to_owned()), (4, "fix/B".to_owned())]
+        );
     }
 
     #[test]

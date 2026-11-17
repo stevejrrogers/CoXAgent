@@ -49,8 +49,7 @@ pub(super) async fn oidc_login() -> Response {
     let Some(cfg) = OidcConfig::from_env() else {
         return (StatusCode::NOT_FOUND, "SSO not configured").into_response();
     };
-    let (Ok(state), Ok(nonce), Ok(verifier)) =
-        (random_token(), random_token(), random_token())
+    let (Ok(state), Ok(nonce), Ok(verifier)) = (random_token(), random_token(), random_token())
     else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "oidc: RNG failure").into_response();
     };
@@ -183,10 +182,19 @@ pub(super) async fn oidc_callback(
     let pw = random_token().unwrap_or_else(|_| identity.subject.clone());
     let _ = auth.create_user(&username, &pw, role).await;
     let _ = auth
-        .update_user(&username, "", identity.email.as_deref().unwrap_or(""), Some(role))
+        .update_user(
+            &username,
+            "",
+            identity.email.as_deref().unwrap_or(""),
+            Some(role),
+        )
         .await;
     let Some(token) = auth.issue_session(&username).await else {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "oidc: could not issue session").into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "oidc: could not issue session",
+        )
+            .into_response();
     };
     audit_push(&app.audit, &username, "login (sso)".to_owned(), 200).await;
     // SameSite=Lax so the cookie survives the cross-site redirect back from the

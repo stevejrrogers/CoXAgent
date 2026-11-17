@@ -198,10 +198,9 @@ impl MockPaymentHarness {
         }
         match &self.config.kind {
             // AC2: one stable code on every attempt, never an approval.
-            ScenarioKind::PermanentFailure { failure_code } => (
-                PaymentStatus::Declined,
-                Some((*failure_code).to_owned()),
-            ),
+            ScenarioKind::PermanentFailure { failure_code } => {
+                (PaymentStatus::Declined, Some((*failure_code).to_owned()))
+            }
             // AC1: decline first, approve retries inside the window; past the
             // window the decline stops being retryable (stable hard-refusal
             // code, distinct from the transient one).
@@ -253,7 +252,11 @@ mod tests {
             "first refusal carries the retryable code"
         );
         let retry = h.authorize("pos-1", &stamp(5));
-        assert_eq!(retry.status, PaymentStatus::Approved, "retry approves inside window");
+        assert_eq!(
+            retry.status,
+            PaymentStatus::Approved,
+            "retry approves inside window"
+        );
 
         // Attempt log (AC4) records every leg with attribution.
         let log = h.attempts().expect("log");
@@ -356,7 +359,10 @@ mod tests {
         }
         // 25 recorded attempts per consumer, each attributed correctly.
         for w in 0..4 {
-            let mine: Vec<_> = log.iter().filter(|a| a.consumer_id == format!("worker-{w}")).collect();
+            let mine: Vec<_> = log
+                .iter()
+                .filter(|a| a.consumer_id == format!("worker-{w}"))
+                .collect();
             assert_eq!(mine.len(), 25);
             assert!(mine.iter().all(|a| a.rule == "retryable_decline"));
         }

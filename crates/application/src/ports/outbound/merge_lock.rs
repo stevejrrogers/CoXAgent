@@ -117,8 +117,15 @@ mod defaults_tests {
     #[tokio::test]
     async fn default_release_reports_success_and_default_holder_is_none() {
         let lock = NoopLock;
-        assert!(lock.release("merge-lock/develop", "dev@host").await.expect("default release"));
-        assert!(lock.holder("merge-lock/develop").await.expect("default holder").is_none());
+        assert!(lock
+            .release("merge-lock/develop", "dev@host")
+            .await
+            .expect("default release"));
+        assert!(lock
+            .holder("merge-lock/develop")
+            .await
+            .expect("default holder")
+            .is_none());
     }
 
     #[test]
@@ -130,7 +137,10 @@ mod defaults_tests {
             expires_at_unix: 160,
         };
         assert!(!held.expired_at(159));
-        assert!(!held.expired_at(160), "at == expires the last second is the holder's");
+        assert!(
+            !held.expired_at(160),
+            "at == expires the last second is the holder's"
+        );
         assert!(held.expired_at(161));
     }
 }

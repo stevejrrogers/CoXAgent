@@ -11,9 +11,9 @@
 //! unit-tested end to end with a real RS256 vector.
 
 use base64::{decode_config, encode_config};
+use ring::digest;
 use ring::rand::{SecureRandom, SystemRandom};
 use ring::signature::{RsaPublicKeyComponents, RSA_PKCS1_2048_8192_SHA256};
-use ring::digest;
 use serde::Deserialize;
 
 use coxagent_application::oidc::OidcConfig;
@@ -106,11 +106,7 @@ pub fn verify_id_token(
         e: b64u(&jwk.e)?,
     };
     pubkey
-        .verify(
-            &RSA_PKCS1_2048_8192_SHA256,
-            signing_input.as_bytes(),
-            &sig,
-        )
+        .verify(&RSA_PKCS1_2048_8192_SHA256, signing_input.as_bytes(), &sig)
         .map_err(|_| "id-token: invalid signature".to_owned())?;
 
     // Claims — only after the signature is proven.
@@ -172,9 +168,7 @@ pub fn verify_id_token(
 fn audience_matches(aud: Option<&serde_json::Value>, client_id: &str) -> bool {
     match aud {
         Some(serde_json::Value::String(s)) => s == client_id,
-        Some(serde_json::Value::Array(a)) => {
-            a.iter().any(|v| v.as_str() == Some(client_id))
-        }
+        Some(serde_json::Value::Array(a)) => a.iter().any(|v| v.as_str() == Some(client_id)),
         _ => false,
     }
 }
@@ -430,7 +424,9 @@ mod tests {
         assert_ne!(a, b);
         // base64url(32 bytes) with no padding = 43 chars, all URL-safe.
         assert_eq!(a.len(), 43);
-        assert!(a.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'));
+        assert!(a
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'));
     }
 
     #[test]
