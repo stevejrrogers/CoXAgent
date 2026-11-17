@@ -192,7 +192,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// Fold the spend meter's since-last-cycle deltas into persistent state and
     /// reset it, returning this cycle's cost. Kept separate so `record_activity`
     /// stays a readable list of what happened, not a ledger.
-    fn drain_meter(
+    pub(crate) fn drain_meter(
         &self,
         state: &mut crate::state::ProjectState,
     ) -> (f64, u64, std::collections::BTreeMap<String, f64>) {
@@ -201,28 +201,52 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         let mut cycle_by_role = std::collections::BTreeMap::new();
         if let Some(meter) = &self.meter {
             if let Ok(mut m) = meter.lock() {
+                // CXA-F448 billing bug 2 (double-drain): snapshot every delta
+                // into locals FIRST, then reset the accumulator BEFORE folding
+                // anything into persistent state. The previous order folded
+                // straight into `state.spend` and only reset `*m` at the end,
+                // so a leader crash or poisoned lock between fold and save left
+                // the meter intact and the next cycle re-folded the SAME
+                // deltas — inflating lifetime/daily totals until budget pause
+                // tripped falsely. Resetting up front makes the drain
+                // idempotent per cycle ("since last successful snapshot", the
+                // semantics documented on `Spend::step_provenance`): a partial
+                // failure now under-counts (self-healing direction) but can
+                // never double-count.
                 cycle_cost = m.total_cost_usd;
                 cycle_runs = m.runs;
-                state.spend.total_cost_usd += m.total_cost_usd;
-                state.spend.input_tokens += m.input_tokens;
-                state.spend.output_tokens += m.output_tokens;
-                state.spend.runs += m.runs;
-                for (role, cost) in std::mem::take(&mut m.by_role) {
+                let total_cost = m.total_cost_usd;
+                let input_tokens = m.input_tokens;
+                let output_tokens = m.output_tokens;
+                let runs = m.runs;
+                let by_role = std::mem::take(&mut m.by_role);
+                let runs_by_role = std::mem::take(&mut m.runs_by_role);
+                let metered_cost_by_role = std::mem::take(&mut m.metered_cost_by_role);
+                let prompt_chars_by_role = std::mem::take(&mut m.prompt_chars_by_role);
+                let engine_by_role = std::mem::take(&mut m.engine_by_role);
+                let step_provenance = std::mem::take(&mut m.step_provenance);
+                *m = Spend::default();
+
+                state.spend.total_cost_usd += total_cost;
+                state.spend.input_tokens += input_tokens;
+                state.spend.output_tokens += output_tokens;
+                state.spend.runs += runs;
+                for (role, cost) in by_role {
                     cycle_by_role.insert(role.clone(), cost);
                     *state.spend.by_role.entry(role).or_default() += cost;
                 }
-                for (role, n) in std::mem::take(&mut m.runs_by_role) {
+                for (role, n) in runs_by_role {
                     *state.spend.runs_by_role.entry(role).or_default() += n;
                 }
-                for (role, cost) in std::mem::take(&mut m.metered_cost_by_role) {
+                for (role, cost) in metered_cost_by_role {
                     *state.spend.metered_cost_by_role.entry(role).or_default() += cost;
                 }
-                for (role, chars) in std::mem::take(&mut m.prompt_chars_by_role) {
+                for (role, chars) in prompt_chars_by_role {
                     *state.spend.prompt_chars_by_role.entry(role).or_default() += chars;
                 }
                 // Live engine per role (last-wins), plus the operator that ran it
                 // — so each agent card can name its real engine and its user.
-                for (role, eng) in std::mem::take(&mut m.engine_by_role) {
+                for (role, eng) in engine_by_role {
                     if !self.worker.is_empty() {
                         state
                             .spend
@@ -235,25 +259,33 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 // record per captured run, appended to its ticket's log.
                 // Unlabeled runs (ceremonies, session resumes) carry no ticket
                 // and are dropped — provenance is per-ticket work.
-                for ms in std::mem::take(&mut m.step_provenance) {
+                for ms in step_provenance {
                     if let Some(ticket) = ms.ticket {
                         state.record_step_provenance(&ticket, ms.step);
                     }
                 }
                 // Attribute this cycle's spend to the operator that ran it, so
                 // each user's token usage is measurable in a shared project.
-                if !self.worker.is_empty() {
+                //
+                // WHY (CXA-F448 billing bug 3 — per-operator pollution): the
+                // fold used to run unconditionally whenever `worker` was set,
+                // even for a ceremony cycle with ZERO cost and ZERO runs,
+                // materialising an empty (0.0) row in `by_operator` per worker
+                // and skewing per-operator averages downstream
+                // (`integrity.rs` only flags NEGATIVE operator cost
+                // post-hoc). Skip the fold when nothing was metered; the
+                // integrity invariant stays authoritative.
+                if !self.worker.is_empty() && (total_cost != 0.0 || runs != 0) {
                     let op = state
                         .spend
                         .by_operator
                         .entry(self.worker.clone())
                         .or_default();
-                    op.cost_usd += m.total_cost_usd;
-                    op.input_tokens += m.input_tokens;
-                    op.output_tokens += m.output_tokens;
-                    op.runs += m.runs;
+                    op.cost_usd += total_cost;
+                    op.input_tokens += input_tokens;
+                    op.output_tokens += output_tokens;
+                    op.runs += runs;
                 }
-                *m = Spend::default();
             }
         }
         (cycle_cost, cycle_runs, cycle_by_role)
@@ -490,9 +522,11 @@ mod tests {
     use crate::ports::outbound::{AgentEnginePort, AgentOutcome, AgentRequest, StateStorePort};
     use crate::state::{CycleScore, EngineIncident, ProjectState, Spend};
     use crate::use_cases::cycle::{CycleReport, RunCycleUseCase};
+    use crate::Config;
     use crate::PortError;
     use coxagent_domain::TicketId;
     use std::collections::BTreeMap;
+    use std::sync::Arc;
 
     #[test]
     fn accepts_first_cycle_when_buffer_empty() {
@@ -699,5 +733,60 @@ mod tests {
         assert_eq!(accepted.cycle_scores.len(), 1);
         assert_eq!(accepted.role_health["TEST"].errors, 1);
         assert_eq!(accepted.spend, Spend::default());
+    }
+
+    // CXA-F448 billing bug 2 regression (double-drain on crash): snapshot
+    // then reset now happens BEFORE the fold into persistent state, so a
+    // leader crash or poisoned lock between drain and save can never re-fold
+    // the same deltas and inflate lifetime totals. Red before the fix: the
+    // old order folded from `*m` and only cleared it last.
+    #[test]
+    fn f448_drain_meter_folds_each_delta_exactly_once_across_repeated_calls() {
+        let meter = Spend {
+            total_cost_usd: 0.75,
+            input_tokens: 100,
+            output_tokens: 200,
+            runs: 3,
+            by_role: BTreeMap::from([("dev".to_owned(), 0.75)]),
+            ..Spend::default()
+        };
+        let meter = Arc::new(std::sync::Mutex::new(meter));
+
+        let mut uc = RunCycleUseCase::new(
+            Arc::new(crate::use_cases::cycle::cycle_tests::MemStore::default()),
+            Arc::new(crate::use_cases::cycle::cycle_tests::RoleAwareEngine),
+            Config::default(),
+            std::env::temp_dir().join(format!("f448drain-{}", std::process::id())),
+            "goal".to_owned(),
+        )
+        .with_meter(Arc::clone(&meter));
+        uc.set_worker("alice@host");
+
+        let mut state = ProjectState::default();
+
+        // First drain: everything folds once.
+        let (cost, runs, by_role) = uc.drain_meter(&mut state);
+        assert!((cost - 0.75).abs() < f64::EPSILON);
+        assert_eq!(runs, 3);
+        assert!((by_role["dev"] - 0.75).abs() < f64::EPSILON);
+        assert!((state.spend.total_cost_usd - 0.75).abs() < f64::EPSILON);
+        assert_eq!(state.spend.runs, 3);
+
+        // The accumulator is fully reset — nothing is left to re-fold.
+        {
+            let m = meter.lock().expect("lock");
+            assert_eq!(*m, Spend::default(), "meter must be empty after a drain");
+        }
+
+        // Simulated recovery path (crash between drain and save → next cycle
+        // drains again): totals must NOT inflate.
+        let second = uc.drain_meter(&mut state);
+        assert_eq!(second, (0.0, 0, BTreeMap::default()));
+        assert!((state.spend.total_cost_usd - 0.75).abs() < f64::EPSILON);
+        assert_eq!(state.spend.runs, 3);
+        assert!(
+            (uc.drain_meter(&mut state).0 - 0.0).abs() < f64::EPSILON,
+            "third drain stays zero"
+        );
     }
 }
