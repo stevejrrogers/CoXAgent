@@ -23,6 +23,7 @@ pub mod kv_merge_lock;
 pub mod notifier;
 pub mod oidc_auth;
 pub mod outbox;
+pub mod payments;
 mod pg;
 pub mod pr_report;
 pub mod probe;

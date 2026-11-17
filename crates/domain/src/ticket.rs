@@ -810,7 +810,11 @@ mod tests {
         let mut b = bug("B-3");
         b.status = Status::Ready;
         assert!(b.reclaim_misfiled(Role::DevBug).is_err());
-        assert_eq!(b.status(), Status::Ready, "a non-System actor changes nothing");
+        assert_eq!(
+            b.status(),
+            Status::Ready,
+            "a non-System actor changes nothing"
+        );
     }
 
     #[test]

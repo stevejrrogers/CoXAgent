@@ -15,9 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use coxagent_application::error::PortError;
-use coxagent_application::ports::outbound::{
-    KvDocPort, MergeLockHolder, MergeLockPort,
-};
+use coxagent_application::ports::outbound::{KvDocPort, MergeLockHolder, MergeLockPort};
 use serde::{Deserialize, Serialize};
 
 /// Key prefix under which lease documents live inside the kv store.
@@ -159,7 +157,11 @@ impl MergeLockPort for KvMergeLock {
     }
 
     async fn holder(&self, key: &str) -> Result<Option<MergeLockHolder>, PortError> {
-        Ok(self.read_lease(key).await?.as_ref().map(LeaseDoc::attribution))
+        Ok(self
+            .read_lease(key)
+            .await?
+            .as_ref()
+            .map(LeaseDoc::attribution))
     }
 }
 
@@ -197,10 +199,16 @@ mod tests {
 
     impl MemKv {
         fn new() -> Self {
-            Self { docs: Mutex::new(HashMap::new()), no_revisions: false }
+            Self {
+                docs: Mutex::new(HashMap::new()),
+                no_revisions: false,
+            }
         }
         fn legacy() -> Self {
-            Self { docs: Mutex::new(HashMap::new()), no_revisions: true }
+            Self {
+                docs: Mutex::new(HashMap::new()),
+                no_revisions: true,
+            }
         }
     }
 
@@ -247,7 +255,13 @@ mod tests {
             if self.no_revisions {
                 return Ok(None);
             }
-            Ok(Some(self.docs.lock().expect("memkv").get(key).map_or(0, |(_, r)| *r)))
+            Ok(Some(
+                self.docs
+                    .lock()
+                    .expect("memkv")
+                    .get(key)
+                    .map_or(0, |(_, r)| *r),
+            ))
         }
     }
 
@@ -258,7 +272,10 @@ mod tests {
     #[test]
     fn key_encoding_is_deterministic_and_collision_free() {
         assert_eq!(merge_lock_key("develop"), "merge-lock/develop");
-        assert_eq!(merge_lock_key("coxagent/CXA-F393"), "merge-lock/coxagent/CXA-F393");
+        assert_eq!(
+            merge_lock_key("coxagent/CXA-F393"),
+            "merge-lock/coxagent/CXA-F393"
+        );
         assert_eq!(merge_lock_key("release/v1.2"), "merge-lock/release/v1.2");
         // Hostile input still encodes injectively.
         assert_eq!(merge_lock_key("a:b%c"), "merge-lock/a%3Ab%25c");
@@ -288,7 +305,10 @@ mod tests {
     #[tokio::test]
     async fn expired_lease_is_stealable_without_a_release() {
         let lock = lock(Arc::new(MemKv::new()));
-        assert!(lock.try_acquire("k", "crashed@h", "gone", 1).await.expect("first"));
+        assert!(lock
+            .try_acquire("k", "crashed@h", "gone", 1)
+            .await
+            .expect("first"));
         // Force expiry by taking with the incumbent overwritten via a very old
         // write: emulate time passing by rewriting the doc directly.
         let old = serde_json::to_string(&LeaseDoc {
@@ -300,18 +320,32 @@ mod tests {
         .expect("encode");
         lock.kv.save("k", &old).await.expect("backdate");
         assert!(
-            lock.try_acquire("k", "fresh@h", "next sweep", 60).await.expect("steal"),
+            lock.try_acquire("k", "fresh@h", "next sweep", 60)
+                .await
+                .expect("steal"),
             "crashed holder must not wedge merges"
         );
-        assert_eq!(lock.holder("k").await.expect("holder").unwrap().holder, "fresh@h");
+        assert_eq!(
+            lock.holder("k").await.expect("holder").unwrap().holder,
+            "fresh@h"
+        );
     }
 
     #[tokio::test]
     async fn release_by_non_holder_returns_false_and_clears_nothing() {
         let lock = lock(Arc::new(MemKv::new()));
-        assert!(lock.try_acquire("k", "real@h", "sweep", 60).await.expect("acquire"));
-        assert!(!lock.release("k", "imposter@h").await.expect("foreign release"));
-        assert_eq!(lock.holder("k").await.expect("holder").unwrap().holder, "real@h");
+        assert!(lock
+            .try_acquire("k", "real@h", "sweep", 60)
+            .await
+            .expect("acquire"));
+        assert!(!lock
+            .release("k", "imposter@h")
+            .await
+            .expect("foreign release"));
+        assert_eq!(
+            lock.holder("k").await.expect("holder").unwrap().holder,
+            "real@h"
+        );
         assert!(lock.release("k", "real@h").await.expect("owner release"));
         // Holder view now reflects the freed (expired-tombstone) lease.
         let after = lock.holder("k").await.expect("holder");
@@ -321,7 +355,10 @@ mod tests {
     #[tokio::test]
     async fn legacy_backend_without_revisions_falls_back_to_plain_save() {
         let lock = lock(Arc::new(MemKv::legacy()));
-        assert!(lock.try_acquire("k", "solo@h", "single runner", 60).await.expect("grant"));
+        assert!(lock
+            .try_acquire("k", "solo@h", "single runner", 60)
+            .await
+            .expect("grant"));
         assert!(lock.release("k", "solo@h").await.expect("release"));
     }
 }

@@ -32,10 +32,7 @@ pub enum MergeAcquireOutcome {
     Granted,
     /// A live foreign lease holds the branch. Carries WHO and remaining TTL —
     /// the attribution surface for [2/3]'s sweep messages.
-    Contended {
-        holder: String,
-        ttl_secs: u64,
-    },
+    Contended { holder: String, ttl_secs: u64 },
 }
 
 /// Verdict of the pure gate. Never silently idle: every non-ready verdict
@@ -65,11 +62,7 @@ pub enum MergeDecision {
 /// - any other state (backend error, contradictory snapshot) ⇒ fail-closed
 ///   `Skip` with the stated reason.
 #[must_use]
-pub fn decide(
-    held: Option<&MergeLockHolder>,
-    now_unix: i64,
-    self_holder: &str,
-) -> MergeDecision {
+pub fn decide(held: Option<&MergeLockHolder>, now_unix: i64, self_holder: &str) -> MergeDecision {
     match held {
         // No lease, our own lease (never blocks us), or an expired foreign
         // lease (stealable on the next acquire — a crashed holder must not
@@ -132,7 +125,10 @@ mod tests {
         let h = held("b@h", 42, 1_000);
         let d = decide(Some(&h), 1_000, "a@h");
         match d {
-            MergeDecision::Skip { blocked_by, blocked_why } => {
+            MergeDecision::Skip {
+                blocked_by,
+                blocked_why,
+            } => {
                 assert_eq!(blocked_by, "b@h");
                 assert!(blocked_why.contains("b@h"), "who: {blocked_why}");
                 assert!(blocked_why.contains("42s remain"), "when: {blocked_why}");

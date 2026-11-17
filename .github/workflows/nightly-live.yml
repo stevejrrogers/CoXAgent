@@ -1,0 +1,84 @@
+# CXA-F451 — monitored nightly live-sandbox run.
+#
+# Secrets (provision as repo/org secrets BEFORE first scheduled run; never
+# echoed into logs or artifacts):
+#   COXAGENT_SANDBOX_BASE_URL  — https:// base URL of the payments sandbox
+#   COXAGENT_SANDBOX_API_KEY   — sandbox API key
+# Until provisioned, the job exits with an explicit fail-closed refusal naming
+# the missing variable — visible on the dashboard, not silent.
+name: Nightly payments live sandbox
+
+on:
+  schedule:
+    - cron: "0 3 * * *" # 03:00 UTC daily
+  workflow_dispatch: {} # manual re-run payload-free
+
+permissions:
+  contents: read
+  issues: write # monitored != silent: failure opens/updates a tracked issue
+
+concurrency:
+  group: nightly-payments
+  cancel-in-progress: false # partial runs must complete to report scenarios
+
+jobs:
+  payments-live:
+    name: Payments live sandbox
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run live payments suite (ignored tests only)
+        env:
+          COXAGENT_SANDBOX_BASE_URL: ${{ secrets.COXAGENT_SANDBOX_BASE_URL }}
+          COXAGENT_SANDBOX_API_KEY: ${{ secrets.COXAGENT_SANDBOX_API_KEY }}
+        run: |
+          if [ -z "${COXAGENT_SANDBOX_BASE_URL:-}" ]; then
+            echo "::error::refusing to run: COXAGENT_SANDBOX_BASE_URL is not set (fail-closed)"
+            exit 1
+          fi
+          if [ -z "${COXAGENT_SANDBOX_API_KEY:-}" ]; then
+            echo "::error::refusing to run: COXAGENT_SANDBOX_API_KEY is not set (fail-closed)"
+            exit 1
+          fi
+          cargo test -p coxagent-infrastructure --test payments_sandbox_live \
+            -- --ignored --nocapture --test-threads=1
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: payments-nightly-diagnostics
+          path: target/debug/deps/*.log
+          if-no-files-found: ignore
+
+      - name: Open or update tracked failure issue naming failing scenarios
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="Nightly payments live-sandbox run failed ($(date -u +%F))"
+          BODY=$(cat <<BODY_EOF
+          The scheduled nightly live-sandbox run FAILED.
+
+          Which scenario(s): see the job log step 'Run live payments suite'
+          (each failing test names its scenario in the panic message).
+          Job: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          Runbook: docs/wiki/testing/cxa-f451-payments-stub-live-split.md
+          ACTION REQUIRED: a human owner must pick this up — do not let the alarm repeat silently.
+          BODY_EOF
+          )
+          EXISTING=$(gh issue list --label nightly-live-failure --state open --json number --jq '.[0].number' || true)
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "$BODY"
+          else
+            gh issue create --title "$TITLE" --label nightly-live-failure --body "$BODY"
+          fi
