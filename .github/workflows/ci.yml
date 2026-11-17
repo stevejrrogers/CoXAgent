@@ -124,7 +124,7 @@ jobs:
       - name: Reclaimable teardown policy (protected infra stays protected)
         run: cargo test -p coxagent-infrastructure --lib reclaimable
       - name: CI wiring guards (jobs exist, ungated, real commands)
-        run: cargo test -p coxagent-app --test deploy_smoke --test ci_availability_gate --test test_env_guard_f326_gate
+        run: cargo test -p coxagent-app --test deploy_smoke --test ci_availability_gate --test test_env_guard_f326_gate --test ci_nightly_live_gate
       - name: Hexagonal gate (CXA-B211 — application layer does no direct IO)
         run: cargo test -p coxagent-app --test hexagonal_gate -- --nocapture
       # CXA-B250 (CXA-B188c): the depth gate — every presentation-surface

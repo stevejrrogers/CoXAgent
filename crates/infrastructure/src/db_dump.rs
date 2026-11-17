@@ -236,7 +236,14 @@ pub async fn mongo_dump(
         let file =
             std::fs::File::create(out).map_err(|e| format!("create {}: {e}", out.display()))?;
         let status = Command::new("docker")
-            .args(["exec", c, "mongodump", &format!("--uri={uri}"), "--archive", "--gzip"])
+            .args([
+                "exec",
+                c,
+                "mongodump",
+                &format!("--uri={uri}"),
+                "--archive",
+                "--gzip",
+            ])
             .stdout(Stdio::from(file))
             .stderr(Stdio::null())
             .status()
