@@ -167,6 +167,41 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 }
             }
         }
+        // Self-heal 1.5 — mechanical, engine-FREE: a run that died mid-edit
+        // (a lost-waker wedge or a dropped provider stream) leaves orphan
+        // residue on the shared tree, so `checkout -b` fails with "local
+        // changes / untracked working tree files would be overwritten". The
+        // reconcile below can clear that too, but it drives a DEV agent — no use
+        // when the ENGINE is what died, which is exactly when this residue
+        // appears. We are at branch-START for this ticket, before any phase has
+        // written, so dirt here is a dead run's leftovers: stash it (recoverable,
+        // the same convention tree-hygiene uses) and retry the checkout with no
+        // engine. Without this, one flapping engine stalled a whole week of
+        // tickets — every branch blocked behind residue reconcile could not fix.
+        if let Err(err) = &result {
+            if checkout_blocked_by_dirty_tree(&err.to_string()) {
+                let (ok, _) = git
+                    .raw(
+                        &self.work_dir,
+                        &[
+                            "stash",
+                            "push",
+                            "-u",
+                            "-m",
+                            "hygiene: residue blocking branch-start (engine died mid-run)",
+                        ],
+                    )
+                    .await;
+                if ok {
+                    self.log_git(&format!(
+                        "branch {branch}: stashed dead-run residue blocking checkout — \
+                         recover with `git stash list` — retrying",
+                    ))
+                    .await;
+                    result = git.checkout_branch(&self.work_dir, &branch).await;
+                }
+            }
+        }
         let mut reconciled = false;
 
         if let Err(e) = result {
@@ -582,6 +617,20 @@ fn worktree_path_in_use(err: &str) -> Option<PathBuf> {
     }
 }
 
+/// Whether a `checkout`/`checkout -b` failed ONLY because the working tree
+/// holds residue git would clobber — "local changes … would be overwritten",
+/// "untracked working tree files would be overwritten", or git's own "commit
+/// your changes or stash them" hint. A mechanical `git stash push -u` clears
+/// exactly this class, so the branch can be cut without a live engine. A real
+/// merge conflict or any other failure is deliberately NOT matched — those
+/// still fall through to the engine-driven reconcile.
+fn checkout_blocked_by_dirty_tree(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    e.contains("would be overwritten")
+        || e.contains("commit your changes or stash them")
+        || e.contains("please commit your changes or stash")
+}
+
 /// The tickets whose finished-but-uncommitted residue an end-of-cycle sweep may
 /// ship: those whose Definition-of-Done formally passed (`Done` feature/chore,
 /// `Fixed` bug). Ordered oldest-first so stranded work ships in commit order.
@@ -618,8 +667,31 @@ fn unshipped_candidates(state: &crate::state::ProjectState) -> Vec<(TicketId, &'
 
 #[cfg(test)]
 mod tests {
-    use super::{unshipped_candidates, worktree_path_in_use};
+    use super::{checkout_blocked_by_dirty_tree, unshipped_candidates, worktree_path_in_use};
     use crate::state::ProjectState;
+
+    #[test]
+    fn dirty_tree_checkout_failures_are_recognised_for_a_mechanical_stash() {
+        for msg in [
+            "error: Your local changes to the following files would be overwritten by checkout:\n\tsrc/a.rs\nPlease commit your changes or stash them before you switch branches.",
+            "error: The following untracked working tree files would be overwritten by checkout:\n\tb.rs\nPlease move or remove them before you switch branches.",
+            "COMMIT YOUR CHANGES OR STASH THEM",
+        ] {
+            assert!(checkout_blocked_by_dirty_tree(msg), "should stash-and-retry: {msg:?}");
+        }
+    }
+
+    #[test]
+    fn non_dirty_checkout_failures_are_left_for_reconcile() {
+        for msg in [
+            "error: pathspec 'main' did not match any file(s) known to git",
+            "fatal: 'feat/x' is already used by worktree at '/tmp/wt'",
+            "CONFLICT (content): Merge conflict in src/a.rs",
+            "",
+        ] {
+            assert!(!checkout_blocked_by_dirty_tree(msg), "should NOT stash: {msg:?}");
+        }
+    }
     use coxagent_domain::{
         Complexity, Priority, Role, Status, TechnicalDesign, Ticket, TicketId, TicketType,
     };
