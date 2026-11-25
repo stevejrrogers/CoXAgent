@@ -3,9 +3,14 @@
 //! ports, presentation drives the inbound ones.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod archive_read;
 pub mod artifacts;
+pub mod attribution_invariants;
 pub mod auth;
+pub mod backlog_hygiene;
+pub mod backlog_import;
 pub mod backlog_scoping;
+pub mod bootstrap_lessons;
 pub mod brief_screening;
 pub mod codegraph;
 pub mod config;
@@ -13,11 +18,17 @@ pub mod config_parse;
 pub mod conformance;
 pub mod dependency_radar;
 pub mod deps_scan;
+pub mod doc_leak_scan;
 pub mod engine_provenance;
 pub mod error;
+pub mod export_invoice;
 pub mod faults;
 pub mod fleet;
 pub mod forensics;
+pub mod gate_feed;
+pub mod guardrails;
+pub mod hub_lessons;
+pub mod lesson_efficacy;
 pub mod liveness;
 pub mod metrics;
 pub mod metrics_brakes;
@@ -27,14 +38,22 @@ pub mod metrics_governance;
 pub mod metrics_health;
 pub mod metrics_registry;
 pub mod milestone_projection;
+pub mod mock_payment_harness;
+pub mod oidc;
 pub mod parsing;
 pub mod policy;
 pub mod ports;
 pub mod prompts;
 pub mod prompts_resolve;
+pub mod regression;
 pub mod release_candidates;
+pub mod repo_map;
 pub mod repro_url;
+pub mod security_sweep;
 pub mod selection;
+pub mod service_retag;
+pub mod service_scan;
+pub mod slot_collision_radar;
 pub mod sprint;
 pub mod state;
 pub mod system_chat;
@@ -42,8 +61,13 @@ pub mod tokens;
 pub mod ts;
 pub mod use_cases;
 pub mod verify_cache;
+pub mod wiki_views;
 pub mod working_hours;
 
+#[cfg(test)]
+mod attribution_tests;
+#[cfg(test)]
+mod export_invoice_tests;
 #[cfg(test)]
 mod release_candidates_tdd_tests;
 
@@ -65,7 +89,9 @@ pub use state::{
     HealthCheckResult, Milestone, OutboxEntry, OutboxStatus, OutcomeLedgerEntry, PrReview,
     ProjectState, Reaction, Spend, Sprint, UnattributedOutcome, GENERAL_CHANNEL, SCHEMA_VERSION,
 };
-pub use system_chat::{ChatContext, ProjectRef, SystemChat, UserRef, Webhook};
+pub use system_chat::{
+    ChatContext, ProjectRef, SystemChat, UserRef, Webhook, MAX_PINS_PER_CHANNEL, REACTION_EMOJIS,
+};
 
 /// Test-only filesystem adapter: the real disk behind the files port, for
 /// tests that build fixtures in a temp dir. `#[cfg(test)]` code may use

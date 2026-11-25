@@ -19,6 +19,7 @@ use std::time::Duration;
 mod briefing;
 mod failures;
 mod gates;
+pub(crate) mod wip;
 
 /// Which developer role to run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +54,9 @@ pub struct RunDevUseCase<S: StateStorePort, E: AgentEnginePort> {
     config: Config,
     work_dir: PathBuf,
     mode: DevMode,
+    /// When set, only tickets resolving to this service are candidates
+    /// (CXA-F420a.2 — per-service slot pools, spec R2/R3).
+    service: Option<String>,
     /// Identity of this runner (`account@host`) recorded as the ticket's claim
     /// owner, so concurrent runners never work the same ticket.
     worker: String,
@@ -88,7 +92,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             git: None,
             files: None,
             context: None,
+            service: None,
         }
+    }
+
+    /// Bind this runner to one service (CXA-F420a.2): `Some(name)` makes
+    /// [`Self::candidates`] skip tickets that resolve to another service, so a
+    /// per-service slot pool only works its own repo. `None` = single-service
+    /// project, no filtering — exactly the pre-F420 behaviour.
+    #[must_use]
+    pub fn with_service(mut self, service: Option<String>) -> Self {
+        self.service = service;
+        self
     }
 
     /// Attach workspace file access, used to stat dirty paths for the green
@@ -601,7 +616,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                         })
                         .await;
                     if asked.is_ok() {
-                        self.release_claim(&id).await;
+                        // The run itself succeeded (a question, not a failure),
+                        // so a checkpoint failure is logged only — the residue
+                        // stays dirty and the cycle's slot hygiene re-parks it
+                        // next cycle, where a failure lands in report.errors.
+                        if let Err(e) = self.release_claim(&id).await {
+                            tracing::warn!("released {id} after ASK: WIP checkpoint failed: {e}");
+                        }
                         if let Some(p) = &self.phase {
                             p(None);
                         }
@@ -634,9 +655,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                                     Ok(f) if f.succeeded() => f.session_id.clone(),
                                     Ok(f) => {
                                         self.record_failure(&id, &f.failure_detail()).await;
-                                        self.release_claim(&id).await;
+                                        let ckpt =
+                                            checkpoint_error_suffix(self.release_claim(&id).await);
                                         return Err(PortError::Backend(format!(
-                                            "{:?} engine failed on {id}: {}",
+                                            "{:?} engine failed on {id}: {}{ckpt}",
                                             self.mode,
                                             f.failure_detail()
                                         ))
@@ -644,8 +666,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                                     }
                                     Err(e) => {
                                         self.record_failure(&id, &e.to_string()).await;
-                                        self.release_claim(&id).await;
-                                        return Err(e.into());
+                                        let ckpt =
+                                            checkpoint_error_suffix(self.release_claim(&id).await);
+                                        return Err(if ckpt.is_empty() {
+                                            e.into()
+                                        } else {
+                                            PortError::Backend(format!("{e}{ckpt}")).into()
+                                        });
                                     }
                                 }
                             }
@@ -656,9 +683,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             }
             Ok(o) => {
                 self.record_failure(&id, &o.failure_detail()).await;
-                self.release_claim(&id).await;
+                let ckpt = checkpoint_error_suffix(self.release_claim(&id).await);
                 return Err(PortError::Backend(format!(
-                    "{:?} engine failed on {id}: {}",
+                    "{:?} engine failed on {id}: {}{ckpt}",
                     self.mode,
                     o.failure_detail()
                 ))
@@ -666,8 +693,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             }
             Err(e) => {
                 self.record_failure(&id, &e.to_string()).await;
-                self.release_claim(&id).await;
-                return Err(e.into());
+                let ckpt = checkpoint_error_suffix(self.release_claim(&id).await);
+                return Err(if ckpt.is_empty() {
+                    e.into()
+                } else {
+                    PortError::Backend(format!("{e}{ckpt}")).into()
+                });
             }
         };
 
@@ -765,9 +796,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
             }
             if let Some(fail) = red {
                 self.record_failure(&id, &fail).await;
-                self.release_claim(&id).await;
+                let ckpt = checkpoint_error_suffix(self.release_claim(&id).await);
                 return Err(PortError::Backend(format!(
-                    "{:?} left tests red on {id} — ticket returned to the queue",
+                    "{:?} left tests red on {id} — ticket returned to the queue{ckpt}",
                     self.mode
                 ))
                 .into());
@@ -842,10 +873,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                                     Vec::new(),
                                 )
                                 .await;
-                                self.release_claim(&id).await;
+                                let ckpt = checkpoint_error_suffix(self.release_claim(&id).await);
                                 return Err(PortError::Backend(format!(
                                     "{:?} clippy repair broke tests on {id} — ticket returned \
-                                     to the queue",
+                                     to the queue{ckpt}",
                                     self.mode
                                 ))
                                 .into());
@@ -893,9 +924,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                                 lint_files,
                             )
                             .await;
-                            self.release_claim(&id).await;
+                            let ckpt = checkpoint_error_suffix(self.release_claim(&id).await);
                             return Err(PortError::Backend(format!(
-                                "{:?} added lint errors on {id} — ticket returned to the queue",
+                                "{:?} added lint errors on {id} — ticket returned to the \
+                                 queue{ckpt}",
                                 self.mode
                             ))
                             .into());
@@ -957,9 +989,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                         Vec::new(),
                     )
                     .await;
-                    self.release_claim(&id).await;
+                    let ckpt = checkpoint_error_suffix(self.release_claim(&id).await);
                     return Err(PortError::Backend(format!(
-                        "{:?} broke the Linux build on {id} — ticket returned to the queue",
+                        "{:?} broke the Linux build on {id} — ticket returned to the queue{ckpt}",
                         self.mode
                     ))
                     .into());
@@ -1016,9 +1048,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                 let fixup = format!(
                     "Your fix for {id} ships with NO regression test. Add a test that FAILS \
                      without your fix and passes with it — that is the only proof the bug is \
-                     dead. Put it where the gate can see it: a `tests/` path, a `*_test.rs` / \
-                     `*.test.ts` file, or an added `#[test]`/`#[tokio::test]`/`it(`/`def test_` \
-                     block. Do not start new work or commit."
+                     dead. Put it where the gate can see it: a `tests/` path, an e2e spec at \
+                     `*.spec.ts` / `*.spec.js`, a `*_test.rs` / `*.test.ts` file, or an added \
+                     `#[test]`/`#[tokio::test]`/`it(`/`def test_` block. Do not start new work \
+                     or commit."
                 );
                 if let Some(sid) = &session {
                     let _ = self
@@ -1052,9 +1085,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                         Vec::new(),
                     )
                     .await;
-                    self.release_claim(&id).await;
+                    let ckpt = checkpoint_error_suffix(self.release_claim(&id).await);
                     return Err(PortError::Backend(format!(
-                        "{:?} fix for {id} has no regression test — returned to the queue",
+                        "{:?} fix for {id} has no regression test — returned to the queue{ckpt}",
                         self.mode
                     ))
                     .into());
@@ -1070,9 +1103,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
                             Vec::new(),
                         )
                         .await;
-                        self.release_claim(&id).await;
+                        let ckpt = checkpoint_error_suffix(self.release_claim(&id).await);
                         return Err(PortError::Backend(format!(
-                            "{:?} regression test left suite red on {id}",
+                            "{:?} regression test left suite red on {id}{ckpt}",
                             self.mode
                         ))
                         .into());
@@ -1256,14 +1289,51 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
 
     /// Return a stranded ticket to the queue when the run failed, so it isn't
     /// stuck In-Progress. `System` is the only actor allowed to un-claim.
-    async fn release_claim(&self, id: &TicketId) {
-        if let Ok(mut state) = self.store.load().await {
-            if let Some(t) = state.ticket_mut(id) {
-                if t.release_claim(Role::System).is_ok() {
-                    let _ = self.store.save(&state).await;
-                }
+    ///
+    /// Before the claim is freed, any uncommitted WIP the slot tree holds is
+    /// parked on the ticket's checkpoint ref (CXA-F318) — releasing a slot must
+    /// never orphan in-flight implementation, and a clean tree parks nothing.
+    /// The release itself NEVER blocks on the checkpoint: the ticket is freed
+    /// either way, and a checkpoint failure is returned so the failing run
+    /// surfaces it (the cycle's errors==0 close gate then blocks delivery).
+    async fn release_claim(&self, id: &TicketId) -> Result<(), String> {
+        let parked = match (&self.git, self.config.git.enabled) {
+            (Some(git), true) => {
+                let author = wip::bot_author(&self.config.git.commit_email);
+                wip::park_slot_wip(
+                    git.as_ref(),
+                    &self.work_dir,
+                    self.store.as_ref(),
+                    Some(id),
+                    &author,
+                )
+                .await
             }
+            _ => Ok(None),
+        };
+        // Retry on optimistic-concurrency conflicts: a bare load+save lost
+        // the release whenever TEST/RELEASE wrote concurrently, leaving the
+        // ticket InProgress forever — zombie claims filled the WIP limit and
+        // 'PR queue full' deadlocked the whole dev lane.
+        let released = crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
+            if let Some(t) = s.ticket_mut(id) {
+                let _ = t.release_claim(Role::System);
+            }
+            Ok(())
+        })
+        .await;
+        if let Err(e) = released {
+            tracing::warn!("release_claim: {id} may stay InProgress: {e}");
         }
+        if let Ok(Some(p)) = &parked {
+            tracing::info!(
+                "released {id}: WIP parked on {} ({}) — {}",
+                p.checkpoint.ref_name,
+                p.checkpoint.sha,
+                p.checkpoint.note
+            );
+        }
+        parked.map(|_| ())
     }
 
     fn candidates(&self, state: &ProjectState) -> Vec<TicketId> {
@@ -1278,6 +1348,19 @@ impl<S: StateStorePort, E: AgentEnginePort> RunDevUseCase<S, E> {
         // to an open sprint is out of scope — DEV must ask to have it added
         // before picking it up.
         ids.retain(|id| crate::selection::in_dev_scope(state, id));
+        // Per-service pool filter (CXA-F420a.2): a slot bound to a service
+        // only works tickets that RESOLVE to it — the resolver, not the raw
+        // tag, so untagged legacy tickets stay with the default service and a
+        // typo'd tag degrades instead of stranding (spec R2).
+        if let Some(mine) = &self.service {
+            let services = self.config.effective_services("");
+            ids.retain(|id| {
+                state.ticket(id).is_some_and(|t| {
+                    crate::config::Config::resolve_service(&services, t.service_tag())
+                        .is_some_and(|svc| svc.name == *mine)
+                })
+            });
+        }
         ids
     }
 }
@@ -1298,6 +1381,15 @@ fn stub_hint(error_summary: &str) -> String {
             .to_owned();
     }
     String::new()
+}
+
+/// The run-error suffix a FAILED WIP checkpoint adds (CXA-F318): the run
+/// already returns an error; the checkpoint failure must ride on it so the
+/// cycle's errors==0 close gate blocks delivery until it is investigated.
+fn checkpoint_error_suffix(r: Result<(), String>) -> String {
+    r.err()
+        .map(|e| format!("; WIP checkpoint failed: {e}"))
+        .unwrap_or_default()
 }
 
 /// The full working brief for a ticket, BOUNDED: the description (what & why),
@@ -1367,20 +1459,26 @@ pub fn ticket_brief(ticket: Option<&coxagent_domain::Ticket>) -> String {
     }
     if let Some(d) = &t.design().technical {
         out.push_str("\nTECHNICAL DESIGN (from the SA — follow it, flag if it's wrong):\n");
+        // These caps date from when every prompt byte was precious. A rich
+        // SA design is ~6k chars (~1.5k tokens) — cutting it at 1200 made
+        // the DEV spend a hundred iterations re-deriving what the SA had
+        // already written (CXA-B167: C031 burned 2.4M tokens against a
+        // design whose key sections were sliced off mid-sentence). The cap
+        // now only guards against a runaway/degenerate design blob.
         if !d.approach.trim().is_empty() {
-            let _ = writeln!(out, "- Approach: {}", cap(&d.approach, 1200));
+            let _ = writeln!(out, "- Approach: {}", cap(&d.approach, 8000));
         }
         if !d.files.is_empty() {
-            let _ = writeln!(out, "- Files: {}", cap(&d.files.join(", "), 600));
+            let _ = writeln!(out, "- Files: {}", cap(&d.files.join(", "), 1500));
         }
         if !d.api_contract.trim().is_empty() {
-            let _ = writeln!(out, "- API contract: {}", cap(&d.api_contract, 800));
+            let _ = writeln!(out, "- API contract: {}", cap(&d.api_contract, 3000));
         }
         if !d.data_changes.trim().is_empty() {
-            let _ = writeln!(out, "- Data changes: {}", cap(&d.data_changes, 600));
+            let _ = writeln!(out, "- Data changes: {}", cap(&d.data_changes, 3000));
         }
         if !d.test_plan.trim().is_empty() {
-            let _ = writeln!(out, "- Test plan: {}", cap(&d.test_plan, 800));
+            let _ = writeln!(out, "- Test plan: {}", cap(&d.test_plan, 3000));
         }
     }
     out
@@ -1412,7 +1510,7 @@ fn transition(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ports::outbound::{AgentOutcome, SandboxStatus};
+    use crate::ports::outbound::{AgentOutcome, GitAuthor, SandboxStatus};
     use crate::selection::next_ready_feature;
     use coxagent_domain::{Complexity, Priority, TechnicalDesign, Ticket, TicketType};
     use std::sync::Mutex;
@@ -1495,7 +1593,7 @@ mod tests {
             PathBuf::from("/tmp"),
             DevMode::Feature,
         );
-        let done = uc.execute().await.expect("run");
+        let done = Box::pin(uc.execute()).await.expect("run");
         assert_eq!(done.expect("some").as_str(), "FEAT-001");
 
         let state = store.load().await.expect("load");
@@ -1503,6 +1601,57 @@ mod tests {
         // The version does NOT move on ticket completion — releases own it.
         assert_eq!(state.current_version.to_string(), "0.0.0");
         assert!(next_ready_feature(&state).is_none());
+    }
+
+    #[tokio::test]
+    async fn service_bound_runner_skips_other_services_tickets() {
+        // CXA-F420a.2: two active services; a runner bound to "engine" must
+        // skip the untagged ticket (it resolves to the FIRST service, "hub")
+        // and work only the one tagged for it.
+        // Field-reassign-free (clippy::field_reassign_with_default), via the
+        // local `active` helper.
+        let active = |name: &str| crate::config::ServiceConfig {
+            name: name.to_owned(),
+            repo: String::new(),
+            work_dir: String::new(),
+            scopes: Vec::new(),
+            build_cmd: String::new(),
+            test_cmd: String::new(),
+            status: "active".into(),
+        };
+        let cfg = Config {
+            services: vec![active("hub"), active("engine")],
+            ..Config::default()
+        };
+        let untagged = ready_feature("FEAT-001");
+        let mut tagged = ready_feature("FEAT-002");
+        tagged.set_service_tag(Role::Ba, "engine").expect("tag");
+        let store = Arc::new(MemStore {
+            state: Mutex::new(ProjectState {
+                tickets: vec![untagged, tagged],
+                ..ProjectState::default()
+            }),
+        });
+        let uc = RunDevUseCase::new(
+            Arc::clone(&store),
+            Arc::new(OkEngine),
+            cfg.clone(),
+            PathBuf::from("/tmp"),
+            DevMode::Feature,
+        )
+        .with_service(Some("engine".to_owned()));
+        let done = Box::pin(uc.execute()).await.expect("run");
+        assert_eq!(done.expect("some").as_str(), "FEAT-002");
+        // And the unbound (legacy) runner still sees the untagged ticket.
+        let uc = RunDevUseCase::new(
+            Arc::clone(&store),
+            Arc::new(OkEngine),
+            cfg,
+            PathBuf::from("/tmp"),
+            DevMode::Feature,
+        );
+        let done = Box::pin(uc.execute()).await.expect("run");
+        assert_eq!(done.expect("some").as_str(), "FEAT-001");
     }
 
     #[tokio::test]
@@ -1515,7 +1664,7 @@ mod tests {
             PathBuf::from("/tmp"),
             DevMode::Feature,
         );
-        assert!(uc.execute().await.expect("run").is_none());
+        assert!(Box::pin(uc.execute()).await.expect("run").is_none());
     }
 
     fn open_bug(id: &str) -> Ticket {
@@ -1604,7 +1753,9 @@ mod tests {
         )
         .with_verify(Some(deploy));
 
-        let err = uc.execute().await.expect_err("repair broke tests");
+        let err = Box::pin(uc.execute())
+            .await
+            .expect_err("repair broke tests");
         assert!(err.to_string().contains("clippy repair"), "{err}");
 
         // The ticket must be back in the queue, not silently marked done.
@@ -1717,7 +1868,7 @@ mod tests {
             DevMode::Feature,
         );
         // The ask parks the run: nothing was "done", the question waits.
-        assert!(uc.execute().await.expect("run").is_none());
+        assert!(Box::pin(uc.execute()).await.expect("run").is_none());
         let state = store.load().await.expect("load");
         let q = &state.questions[0];
         assert_eq!(q.to, "@LUFFY");
@@ -1737,7 +1888,7 @@ mod tests {
             PathBuf::from("/tmp"),
             DevMode::Feature,
         );
-        assert!(uc.execute().await.expect("run").is_none());
+        assert!(Box::pin(uc.execute()).await.expect("run").is_none());
         let state = store.load().await.expect("load");
         assert!(!state.questions[0].deferred);
     }
@@ -1895,6 +2046,247 @@ mod tests {
         assert_ne!(
             fp1, fp2,
             "editing renamed.rs again must invalidate the green cache"
+        );
+    }
+
+    /// A `GitPort` double for the slot-WIP checkpoint release path (CXA-F318):
+    /// reports a configurable `status --porcelain`, records every park, and
+    /// can fail the park on demand (the git-lock case).
+    struct WipGit {
+        status: String,
+        /// `Some(sha)` parks and returns that sha; `None` parks and reports a
+        /// clean tree; `park_error` set fails the park outright.
+        park_sha: Option<String>,
+        park_error: String,
+        parks: Mutex<Vec<String>>,
+    }
+    impl Default for WipGit {
+        fn default() -> Self {
+            Self {
+                status: String::new(),
+                park_sha: Some("wipsha123".to_owned()),
+                park_error: String::new(),
+                parks: Mutex::new(Vec::new()),
+            }
+        }
+    }
+    #[async_trait::async_trait]
+    impl crate::ports::outbound::GitPort for WipGit {
+        async fn is_repo(&self, _: &std::path::Path) -> bool {
+            true
+        }
+        async fn current_branch(&self, _: &std::path::Path) -> Result<String, PortError> {
+            Ok("feat/slot-1".to_owned())
+        }
+        async fn checkout_branch(&self, _: &std::path::Path, _: &str) -> Result<(), PortError> {
+            Ok(())
+        }
+        async fn commit_all(
+            &self,
+            _: &std::path::Path,
+            _: &str,
+            _: &GitAuthor,
+        ) -> Result<Option<String>, PortError> {
+            Ok(None)
+        }
+        async fn push(&self, _: &std::path::Path, _: &str) -> Result<(), PortError> {
+            Ok(())
+        }
+        async fn sync_base(
+            &self,
+            _: &std::path::Path,
+            _: &str,
+        ) -> Result<crate::ports::outbound::SyncBase, PortError> {
+            Ok(crate::ports::outbound::SyncBase::UpToDate)
+        }
+        async fn abort_merge(&self, _: &std::path::Path) -> Result<(), PortError> {
+            Ok(())
+        }
+        async fn raw(&self, _: &std::path::Path, args: &[&str]) -> (bool, String) {
+            match args.first() {
+                Some(&"status") => (true, self.status.clone()),
+                _ => (true, String::new()),
+            }
+        }
+        async fn checkpoint_tree(
+            &self,
+            _: &std::path::Path,
+            ref_name: &str,
+            _: &str,
+            _: &GitAuthor,
+        ) -> Result<Option<String>, PortError> {
+            self.parks.lock().expect("lock").push(ref_name.to_owned());
+            if !self.park_error.is_empty() {
+                return Err(PortError::Backend(self.park_error.clone()));
+            }
+            Ok(self.park_sha.clone())
+        }
+    }
+
+    /// Always-failing engine: the release path is what the test wants to see.
+    struct FailEngine;
+    #[async_trait::async_trait]
+    impl AgentEnginePort for FailEngine {
+        fn id(&self) -> &'static str {
+            "fail"
+        }
+        async fn run(&self, _r: AgentRequest) -> Result<AgentOutcome, PortError> {
+            Err(PortError::Backend("boom".to_owned()))
+        }
+    }
+
+    fn slot_dir(tmp: &tempfile::TempDir) -> PathBuf {
+        tmp.path().join(".coxagent-worktrees/slot-1")
+    }
+
+    fn wip_uc(
+        store: &Arc<MemStore>,
+        git: Arc<WipGit>,
+        tmp: &tempfile::TempDir,
+    ) -> RunDevUseCase<MemStore, FailEngine> {
+        let mut cfg = Config::default();
+        cfg.git.enabled = true;
+        RunDevUseCase::new(
+            Arc::clone(store),
+            Arc::new(FailEngine),
+            cfg,
+            slot_dir(tmp),
+            DevMode::Bug,
+        )
+        .with_git(Some(git))
+    }
+
+    #[tokio::test]
+    async fn releasing_a_dirty_slot_parks_the_wip_on_the_ticket_checkpoint_ref() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let store = Arc::new(MemStore {
+            state: Mutex::new(ProjectState {
+                tickets: vec![open_bug("BUG-1")],
+                ..ProjectState::default()
+            }),
+        });
+        let git = Arc::new(WipGit {
+            status: " M a.rs\n?? b.rs\n".to_owned(),
+            ..Default::default()
+        });
+        let uc = wip_uc(&store, git.clone(), &tmp);
+
+        let err = Box::pin(uc.execute()).await.expect_err("engine fails");
+        assert!(err.to_string().contains("boom"), "{err}");
+        assert!(
+            git.parks
+                .lock()
+                .expect("lock")
+                .contains(&"refs/coxagent/wip/BUG-1".to_owned()),
+            "the checkpoint ref was parked"
+        );
+
+        // The ticket is released — and its WIP is discoverable per ticket.
+        let state = store.load().await.expect("load");
+        let t = state
+            .ticket(&TicketId::new("BUG-1").expect("id"))
+            .expect("ticket");
+        assert_eq!(t.status(), Status::Open, "claim released");
+        assert!(t.claimed_by().is_none());
+        let cps = t.wip_checkpoints();
+        assert_eq!(cps.len(), 1, "one park recorded on the aggregate");
+        assert_eq!(cps[0].ref_name, "refs/coxagent/wip/BUG-1");
+        assert_eq!(cps[0].sha, "wipsha123");
+        assert!(
+            cps[0].note.contains("branch feat/slot-1") && cps[0].note.contains("1 untracked"),
+            "note carries branch + diffstat: {}",
+            cps[0].note
+        );
+        let evidence = state.ticket_evidence.get("BUG-1").expect("evidence");
+        assert!(
+            evidence
+                .iter()
+                .any(|e| e.kind == "wip" && e.detail.contains("refs/coxagent/wip/BUG-1")),
+            "evidence entry records ref + branch + diffstat: {evidence:?}"
+        );
+        assert!(
+            state
+                .ticket_journal
+                .get("BUG-1")
+                .expect("journal")
+                .iter()
+                .any(|n| n.contains("WIP parked") && n.contains("git checkout")),
+            "the next attempt is told how to restore: {:?}",
+            state.ticket_journal.get("BUG-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn releasing_a_clean_slot_creates_no_checkpoint_and_no_evidence() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let store = Arc::new(MemStore {
+            state: Mutex::new(ProjectState {
+                tickets: vec![open_bug("BUG-1")],
+                ..ProjectState::default()
+            }),
+        });
+        let git = Arc::new(WipGit::default()); // status "" → clean tree
+
+        let _ = Box::pin(wip_uc(&store, git.clone(), &tmp).execute()).await;
+
+        let state = store.load().await.expect("load");
+        let t = state
+            .ticket(&TicketId::new("BUG-1").expect("id"))
+            .expect("ticket");
+        assert_eq!(t.status(), Status::Open, "claim still released");
+        assert!(
+            t.wip_checkpoints().is_empty(),
+            "no checkpoint on a clean tree"
+        );
+        assert!(
+            !state
+                .ticket_evidence
+                .get("BUG-1")
+                .is_some_and(|ev| ev.iter().any(|e| e.kind == "wip")),
+            "no evidence entry on a clean tree"
+        );
+        assert!(
+            git.parks.lock().expect("lock").is_empty(),
+            "checkpoint_tree never called for a clean tree"
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_failure_still_releases_and_surfaces_as_a_run_error() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let store = Arc::new(MemStore {
+            state: Mutex::new(ProjectState {
+                tickets: vec![open_bug("BUG-1")],
+                ..ProjectState::default()
+            }),
+        });
+        let git = Arc::new(WipGit {
+            status: " M a.rs".to_owned(),
+            park_error: "git add failed: index.lock: unable to create".to_owned(),
+            ..Default::default()
+        });
+
+        let err = Box::pin(wip_uc(&store, git, &tmp).execute())
+            .await
+            .expect_err("engine fails");
+        // AC3: the checkpoint failure rides the run error → the errors==0
+        // close gate blocks delivery until it is investigated.
+        assert!(
+            err.to_string().contains("WIP checkpoint failed")
+                && err.to_string().contains("index.lock"),
+            "{err}"
+        );
+
+        // The slot STILL releases — the ticket is back in the queue.
+        let state = store.load().await.expect("load");
+        let t = state
+            .ticket(&TicketId::new("BUG-1").expect("id"))
+            .expect("ticket");
+        assert_eq!(t.status(), Status::Open);
+        assert!(t.claimed_by().is_none());
+        assert!(
+            t.wip_checkpoints().is_empty(),
+            "a failed park records nothing"
         );
     }
 }

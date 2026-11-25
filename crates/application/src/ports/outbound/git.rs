@@ -137,6 +137,39 @@ pub trait GitPort: Send + Sync {
         Err(PortError::Backend("update_ref: not supported".to_owned()))
     }
 
+    /// Park the working tree's uncommitted state (staged, unstaged and
+    /// untracked) as one commit reachable ONLY via `ref_name` — the slot-WIP
+    /// checkpoint (CXA-F318). HEAD, the current branch and the working tree
+    /// are left exactly as they were: the tree stays dirty, the ref holds the
+    /// parked work. Returns the parked commit's sha, or `None` when the tree
+    /// was clean (nothing to park — no ref is created).
+    ///
+    /// # Errors
+    /// [`PortError::Backend`] on a git failure (e.g. an index lock).
+    async fn checkpoint_tree(
+        &self,
+        work_dir: &Path,
+        ref_name: &str,
+        message: &str,
+        author: &GitAuthor,
+    ) -> Result<Option<String>, PortError> {
+        let _ = (work_dir, ref_name, message, author);
+        Err(PortError::Backend(
+            "checkpoint_tree: not supported".to_owned(),
+        ))
+    }
+
+    /// Overlay the content parked at `ref_name` (see [`GitPort::checkpoint_tree`])
+    /// onto the working tree — restore-only, HEAD and the current branch are
+    /// never touched, and files added since the park stay put.
+    ///
+    /// # Errors
+    /// [`PortError::Backend`] on a git failure or an unresolvable ref.
+    async fn restore_tree(&self, work_dir: &Path, ref_name: &str) -> Result<(), PortError> {
+        let _ = (work_dir, ref_name);
+        Err(PortError::Backend("restore_tree: not supported".to_owned()))
+    }
+
     /// Create a detached secondary worktree at `path`, checked out at `sha`.
     /// Rollback deploys run here so the live `work_dir` is never touched — no
     /// race with the concurrent `checkout_branch` calls elsewhere in the

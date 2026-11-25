@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 /// What kind of debt signal a sweep detected this cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum DebtSignalKind {
     /// The measured lint (clippy) error count rose above the prior baseline —

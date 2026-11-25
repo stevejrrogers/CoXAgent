@@ -22,8 +22,10 @@ pub(super) async fn build_state(
     let workspace = Ws::load(&hub_dir, kv).await;
     let spaces = Sp::load(&hub_dir, kv2).await;
     let kv4 = kv3_pf.clone();
+    let kv5 = kv3_pf.clone();
     let meetings = Mt::load(&hub_dir, kv3).await;
     let profiles = Pf::load(&hub_dir, kv4).await;
+    let user_keys = Uk::load(&hub_dir, kv5).await;
     AppState {
         projects: Arc::new(RwLock::new(map)),
         chat_bus: Arc::new(RwLock::new(HashMap::new())),
@@ -44,12 +46,14 @@ pub(super) async fn build_state(
         spaces,
         meetings,
         profiles,
+        user_keys,
         storage: extras.storage.unwrap_or_else(|| {
             Arc::new(DiskStorage {
                 root: hub_dir.join("blobs"),
             })
         }),
         doc_store: extras.doc_store,
+        archive_store: extras.archive_store,
     }
 }
 
@@ -126,7 +130,41 @@ pub(super) fn lite_state_value(state: &coxagent_application::ProjectState) -> se
     // change. A project with nothing to report emits no `derived` key at all,
     // so clients treat absence as an empty radar rather than an error.
     let radar = coxagent_application::dependency_radar::radar(state);
-    let derived = serde_json::to_value(&radar).unwrap_or_default();
+    let mut derived = serde_json::to_value(&radar).unwrap_or_default();
+    // Slot collision radar (CXA-F329): read-only derived summary on the SAME
+    // snapshot — which InProgress tickets in parallel slots declare the same
+    // files (pairs) and which running tickets declare none at all
+    // (unknown_files, radar-blind). Additive `collisions` key inside the same
+    // `derived` object, present ONLY when there is something to report:
+    // absence stays an empty radar for every existing client.
+    let collisions = serde_json::to_value(
+        coxagent_application::slot_collision_radar::collision_radar(state),
+    )
+    .unwrap_or_default();
+    if collisions.as_object().is_some_and(|o| !o.is_empty()) {
+        if !derived.is_object() {
+            derived = serde_json::json!({});
+        }
+        if let Some(obj) = derived.as_object_mut() {
+            obj.insert("collisions".into(), collisions);
+        }
+    }
+    // Milestone strip (CXA-F361): the roadmap's per-milestone progress bars and
+    // drill-in render from the SAME pure read model the projection endpoint
+    // serves, riding the snapshot the way the radars do — zero new requests on
+    // the 1 Hz stream. Present only when a roadmap exists; absence stays an
+    // empty read model for every existing client.
+    let milestones =
+        serde_json::to_value(coxagent_application::milestone_projection::project_milestones(state))
+            .unwrap_or_default();
+    if milestones.as_array().is_some_and(|a| !a.is_empty()) {
+        if !derived.is_object() {
+            derived = serde_json::json!({});
+        }
+        if let Some(obj) = derived.as_object_mut() {
+            obj.insert("milestones".into(), milestones);
+        }
+    }
     if derived.as_object().is_some_and(|o| !o.is_empty()) {
         if let Some(obj) = v.as_object_mut() {
             obj.insert("derived".into(), derived);
@@ -538,6 +576,33 @@ mod radar_state_tests {
         }
     }
 
+    /// An InProgress feature declaring `files` — the slot-collision radar's
+    /// subject (CXA-F329): the SA-declared touch surface.
+    fn running_feature(id: &str, files: &[&str]) -> Ticket {
+        let mut t = Ticket::new(
+            tid(id),
+            TicketType::Feature,
+            format!("feature {id}"),
+            "fixture",
+            Priority::Medium,
+            Complexity::Medium,
+            false,
+        )
+        .expect("ticket");
+        t.set_technical_design(
+            Role::Sa,
+            TechnicalDesign {
+                files: files.iter().map(|f| (*f).to_owned()).collect(),
+                ..TechnicalDesign::default()
+            },
+        )
+        .expect("attach design");
+        t.transition_to(Role::Sa, Status::Ready).expect("ready");
+        t.transition_to(Role::DevFeature, Status::InProgress)
+            .expect("in progress");
+        t
+    }
+
     /// The wire contract the backlog badge depends on (CXA-F237): a blocked
     /// Ready ticket surfaces `derived.blocked` with its full blocking chain.
     #[test]
@@ -577,5 +642,99 @@ mod radar_state_tests {
             ready_feature("FEAT-B", &[]),
         ]));
         assert!(v.get("derived").is_none(), "unblocked work is no finding");
+        // The collision radar obeys the same omission rule: running tickets
+        // on disjoint files are two silent slots, no `derived` key either.
+        let v = lite_state_value(&state_with(vec![
+            running_feature("FEAT-A", &["crates/app/src/main.rs"]),
+            running_feature("FEAT-B", &["web/app.css"]),
+        ]));
+        assert!(v.get("derived").is_none(), "disjoint slots stay silent");
+    }
+
+    /// The wire contract the roadmap's milestone strip depends on (CXA-F361):
+    /// the projection's rows ride the snapshot as `derived.milestones` with
+    /// the progress figure the bars render, and a roadmap-less project still
+    /// emits no `derived` key at all.
+    #[test]
+    fn the_milestone_projection_rides_the_snapshot_for_the_roadmap_strip() {
+        use coxagent_application::state::Milestone;
+
+        let mut state = state_with(vec![ready_feature("FEAT-A", &[])]);
+        state.current_version = coxagent_domain::SemVer::parse("0.5.2").expect("version");
+        state.milestones = vec![Milestone {
+            name: "Beta".into(),
+            goal: "the Beta goal".into(),
+            target_version: "0.9.0".into(),
+            goal_complete: false,
+            fulfilled: false,
+        }];
+        let v = lite_state_value(&state);
+        let rows = v
+            .get("derived")
+            .and_then(|d| d.get("milestones"))
+            .and_then(serde_json::Value::as_array)
+            .expect("the milestone projection must ride the snapshot");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("name").and_then(|n| n.as_str()), Some("Beta"));
+        assert_eq!(
+            rows[0].get("progress").and_then(serde_json::Value::as_u64),
+            Some(0),
+            "no attributed scope reads 0, never NaN"
+        );
+
+        // No roadmap → no projection rows → the omission rule still holds.
+        let v = lite_state_value(&state_with(vec![ready_feature("FEAT-A", &[])]));
+        let no_rows = v.get("derived").and_then(|d| d.get("milestones")).is_none();
+        assert!(
+            no_rows,
+            "a roadmap-less project must not emit derived.milestones"
+        );
+    }
+
+    /// The wire contract the board badge depends on (CXA-F329): two running
+    /// slots declaring the same file surface `derived.collisions.pairs` with
+    /// both ticket ids and the shared files.
+    #[test]
+    fn a_collision_between_running_slots_rides_the_snapshot_as_derived_collisions() {
+        let v = lite_state_value(&state_with(vec![
+            running_feature("FEAT-A", &["crates/app/src/main.rs"]),
+            running_feature("FEAT-B", &["crates/app/src/main.rs"]),
+        ]));
+        let collisions = v
+            .get("derived")
+            .and_then(|d| d.get("collisions"))
+            .expect("the collision radar must ride the snapshot");
+        let pairs = collisions
+            .get("pairs")
+            .and_then(serde_json::Value::as_array)
+            .expect("pairs list");
+        assert_eq!(pairs.len(), 1, "one overlapping pair");
+        assert_eq!(pairs[0].get("a").and_then(|i| i.as_str()), Some("FEAT-A"));
+        assert_eq!(pairs[0].get("b").and_then(|i| i.as_str()), Some("FEAT-B"));
+        assert_eq!(
+            pairs[0]
+                .get("files")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
+    }
+
+    /// A running ticket whose design declares no files is radar-blind — it
+    /// must surface in `unknown_files`, never silently read as safe.
+    #[test]
+    fn a_running_ticket_with_no_declared_files_is_radar_blind_on_the_snapshot() {
+        let v = lite_state_value(&state_with(vec![
+            running_feature("FEAT-A", &[]),
+            running_feature("FEAT-B", &["web/app.css"]),
+        ]));
+        let unknown = v
+            .get("derived")
+            .and_then(|d| d.get("collisions"))
+            .and_then(|c| c.get("unknown_files"))
+            .and_then(serde_json::Value::as_array)
+            .expect("unknown_files list");
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].as_str(), Some("FEAT-A"));
     }
 }

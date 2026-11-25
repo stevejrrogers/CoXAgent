@@ -4,7 +4,7 @@
 //! slug, so it is independent of the process working directory.
 
 use async_trait::async_trait;
-use coxagent_application::ports::outbound::{ForgePort, PullRequest};
+use coxagent_application::ports::outbound::{ForgePort, IssueDraft, PullRequest};
 use coxagent_application::PortError;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -56,6 +56,27 @@ impl GhForge {
 
     async fn gh(&self, args: &[&str]) -> Result<String, PortError> {
         gh_as(&self.host, &self.work_dir, &self.account, args).await
+    }
+
+    /// List issues in `state` (`open`/`closed`) as import drafts. `gh` caps at
+    /// 30 without `--limit` — a real backlog is longer, so the limit is passed.
+    async fn issues(&self, state: &str, limit: usize) -> Result<Vec<IssueDraft>, PortError> {
+        let limit = limit.to_string();
+        let json = self
+            .gh(&[
+                "issue",
+                "list",
+                "--repo",
+                &self.repo,
+                "--state",
+                state,
+                "--limit",
+                &limit,
+                "--json",
+                ISSUE_FIELDS,
+            ])
+            .await?;
+        parse_issue_json(&json)
     }
 }
 
@@ -196,6 +217,48 @@ impl From<RawPr> for PullRequest {
 
 const PR_FIELDS: &str =
     "number,title,headRefName,baseRefName,url,author,createdAt,mergeable,statusCheckRollup";
+
+const ISSUE_FIELDS: &str = "number,title,body,labels,url";
+
+/// gh's `issue list --json` row. Labels are `serde_json::Value`s because gh
+/// has shipped both object (`{"name": …}`) and plain-string entries.
+#[derive(serde::Deserialize)]
+struct RawIssue {
+    #[serde(default)]
+    number: u64,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    labels: Vec<serde_json::Value>,
+    #[serde(default)]
+    url: String,
+}
+
+impl From<RawIssue> for IssueDraft {
+    fn from(r: RawIssue) -> Self {
+        IssueDraft {
+            number: r.number,
+            title: r.title,
+            body: r.body,
+            labels: super::label_names(&r.labels),
+            url: r.url,
+        }
+    }
+}
+
+/// Parse `gh issue list --json` output into issue drafts. Public for the
+/// CXA-F258 fixture tests — the adapter's parse half is exercised with no
+/// network and no `gh` binary.
+///
+/// # Errors
+/// [`PortError::Backend`] when the JSON does not match gh's issue-list shape.
+pub fn parse_issue_json(json: &str) -> Result<Vec<IssueDraft>, PortError> {
+    let raws: Vec<RawIssue> = serde_json::from_str(json)
+        .map_err(|e| PortError::Backend(format!("gh issue list parse: {e}")))?;
+    Ok(raws.into_iter().map(Into::into).collect())
+}
 
 #[async_trait]
 impl ForgePort for GhForge {
@@ -385,5 +448,13 @@ impl ForgePort for GhForge {
         self.gh(&["pr", "comment", &n, "--repo", &self.repo, "--body", body])
             .await
             .map(|_| ())
+    }
+
+    async fn list_open_issues(&self, limit: usize) -> Result<Vec<IssueDraft>, PortError> {
+        self.issues("open", limit).await
+    }
+
+    async fn list_closed_issues(&self, limit: usize) -> Result<Vec<IssueDraft>, PortError> {
+        self.issues("closed", limit).await
     }
 }

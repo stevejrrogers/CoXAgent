@@ -37,3 +37,8 @@ tempfile.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "f415_high_severity"
+path = "tests/f415_high_severity/mod.rs"
+harness = true

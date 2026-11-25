@@ -3,8 +3,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "playwright test",
-    "baseline": "playwright test --update-snapshots"
+    "test": "sh -c '. ./fixture-guard.sh && clear_fixture_ports && exec npx playwright test'",
+    "test:auth": "sh -c '. ./fixture-guard.sh && clear_fixture_ports && exec npx playwright test -c playwright.auth.config.ts'",
+    "baseline": "sh -c '. ./fixture-guard.sh && clear_fixture_ports && exec npx playwright test --update-snapshots'"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1"

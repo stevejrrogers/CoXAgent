@@ -316,6 +316,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 has_ui: false,
                 acceptance_criteria: accepted,
                 goal: None,
+                service_tag: None,
             })
             .await
         else {

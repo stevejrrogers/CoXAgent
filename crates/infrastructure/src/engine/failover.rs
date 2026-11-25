@@ -251,6 +251,24 @@ mod tests {
         assert!(!is_transient("the tests failed"));
     }
 
+    #[test]
+    fn harxes_connect_hang_fails_over_but_steady_silence_keeps_its_semantics() {
+        // The harxes adapter's connect-phase watchdog (no first event within
+        // 90s) must be seen as transient so the chain tries the NEXT engine
+        // fast — a different CLI engine may connect when one provider hangs.
+        assert!(is_transient(
+            "harxes provider unreachable: no first event within 90s — connection timed out (engine stalled)"
+        ));
+        // Steady-state silence after the stream was alive keeps its original
+        // provider-down semantics: NOT transient, so it is not silently failed
+        // over to a sibling engine on the same provider. Pinning this guards
+        // the surgical split — if the message ever gains a transient keyword,
+        // this test flags the behaviour change.
+        assert!(!is_transient(
+            "harxes provider service unavailable: run went silent for 300s (engine stalled)"
+        ));
+    }
+
     /// A fake engine with a fixed id, outcome and success — the fixture for
     /// the attempt-trail regressions below. `fail` makes `run` error (a
     /// spawn/connection failure) instead of returning a failed outcome, so

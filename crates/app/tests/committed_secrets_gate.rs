@@ -33,6 +33,7 @@
 
 #![allow(clippy::unwrap_used)]
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -218,6 +219,26 @@ fn repo_root() -> PathBuf {
 /// real locations first and fall back to `PATH` only if none of them exist.
 const GIT_CANDIDATES: &[&str] = &["/usr/bin/git", "/opt/homebrew/bin/git", "git"];
 
+/// Which environment keys point a git invocation somewhere other than `root`.
+///
+/// Agent runs execute inside a linked worktree (`…/.git/worktrees/<slot>`), and
+/// their export block hands every child process a `GIT_DIR`/`GIT_WORK_TREE`
+/// aimed at that slot's admin directory. Once that slot is pruned, each `git`
+/// candidate fails identically with `fatal: not a git repository: …`, and the
+/// gate reports "cannot answer" about a repo that is perfectly readable without
+/// them. The gate already pins the repo with `-C root`, so an ambient checkout
+/// context can only contradict it: every `GIT_*` variable is dropped rather
+/// than trusted. Listing rather than removing individual keys means a variable
+/// added to that export block later cannot silently reintroduce the failure.
+fn ambient_git_vars<I>(keys: I) -> Vec<OsString>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    keys.into_iter()
+        .filter(|key| key.to_str().is_some_and(|k| k.starts_with("GIT_")))
+        .collect()
+}
+
 /// Paths this gate must be able to see. Every one of them is tracked and is
 /// either a file the gate scans or the file that decides what git ignores; if
 /// a listing is missing any of them, it is not a listing this gate can trust.
@@ -244,16 +265,22 @@ fn missing_sentinels(files: &[String]) -> Vec<&'static str> {
 /// Every path git tracks. There is no way to answer "is this committed?"
 /// without asking git, so an answer we cannot verify as complete fails the
 /// gate rather than letting it pass on a short list.
+///
+/// `-C root` pins the repo; ambient `GIT_DIR`/`GIT_WORK_TREE` (exported by agent
+/// worktree slots) can only contradict it — e.g. point at a slot whose admin
+/// directory was pruned mid-run — so they are dropped for this call.
 fn tracked_files() -> Result<Vec<String>, String> {
     let root = repo_root();
     let mut tried = Vec::new();
     for git in GIT_CANDIDATES {
-        let out = match Command::new(git)
-            .arg("-C")
-            .arg(&root)
-            .args(["ls-files", "-z"])
-            .output()
-        {
+        // `env_remove` takes one key per call, so the ambient checkout context is
+        // stripped variable by variable.
+        let mut command = Command::new(git);
+        command.arg("-C").arg(&root).args(["ls-files", "-z"]);
+        for var in ambient_git_vars(std::env::vars_os().map(|(key, _)| key)) {
+            command.env_remove(var);
+        }
+        let out = match command.output() {
             Ok(out) if out.status.success() => out,
             Ok(out) => {
                 tried.push(format!(

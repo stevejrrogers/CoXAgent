@@ -63,6 +63,7 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/app/download/:file", &["get"]),
     route("/api/app/latest", &["get"]),
     route("/api/audit-log", &["get"]),
+    route("/api/audit-log/verify", &["get"]),
     route("/api/auth/2fa/disable", &["post"]),
     route("/api/auth/2fa/enable", &["post"]),
     route("/api/auth/2fa/enroll", &["post"]),
@@ -108,11 +109,20 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/fleet/ceiling", &["put"]),
     route("/api/fleet/river", &["get"]),
     route("/api/fleet/spend", &["get"]),
+    // Invoice-ready CSV export of the same ledger (CXA-F437) — read-only,
+    // super-admin-gated exactly like /api/fleet/spend itself.
+    route("/api/fleet/spend/export.csv", &["get"]),
     route("/api/health", &["get"]),
+    route("/api/ready", &["get"]),
+    route("/api/auth/oidc/login", &["get"]),
+    route("/api/auth/oidc/callback", &["get"]),
     route("/api/manage/overview", &["get"]),
     route("/api/manage/spaces/:sid", &["get"]),
     route("/api/mcp", &["post"]),
     route("/api/me/agents", &["get"]),
+    route("/api/me/llm-keys", &["get", "post"]),
+    route("/api/me/llm-keys/:id", &["delete"]),
+    route("/api/me/llm-keys/:id/retest", &["post"]),
     route("/api/meetings", &["get", "post"]),
     route("/api/meetings/:id", &["patch"]),
     route("/api/meetings/:id/join", &["post"]),
@@ -170,9 +180,12 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/docs-review", &["post"]),
     route("/api/projects/:pid/docs/:id", &["delete", "put"]),
     route("/api/projects/:pid/docs/:id/ai-edit", &["post"]),
+    route("/api/projects/:pid/docs/:id/backlinks", &["get"]),
     route("/api/projects/:pid/docs/:id/move", &["post"]),
     route("/api/projects/:pid/docs/:id/ws", &["get"]),
     route("/api/projects/:pid/docs/generate", &["post"]),
+    route("/api/projects/:pid/lessons/dismiss", &["post"]),
+    route("/api/projects/:pid/lessons/escalate", &["post"]),
     route("/api/projects/:pid/events", &["get"]),
     route("/api/projects/:pid/file", &["get"]),
     route("/api/projects/:pid/git/auth", &["get"]),
@@ -204,6 +217,17 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/prs/:num/diff", &["get"]),
     route("/api/projects/:pid/reverts/:sha", &["post"]),
     route("/api/projects/:pid/runner", &["get"]),
+    // CXA-F420b: Add-repo wizard — list/add services, scan a candidate repo.
+    route("/api/projects/:pid/services", &["get", "post"]),
+    route("/api/projects/:pid/services/scan", &["post"]),
+    route("/api/projects/:pid/services/:name/status", &["post"]),
+    route("/api/projects/:pid/services/retag-suggestions", &["get"]),
+    route("/api/projects/:pid/services/retag", &["post"]),
+    route("/api/projects/:pid/services/assignments", &["get"]),
+    route(
+        "/api/projects/:pid/services/assignments/:username",
+        &["put"],
+    ),
     route("/api/projects/:pid/share-links", &["get", "post"]),
     route("/api/projects/:pid/share-links/:token", &["delete"]),
     route("/api/projects/:pid/sprint/:action", &["post"]),
@@ -226,29 +250,39 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("/api/projects/:pid/ticket/:id/attachments", &["post"]),
     route("/api/projects/:pid/ticket/:id/edit", &["post"]),
     route("/api/projects/:pid/ticket/:id/goal", &["post"]),
+    route("/api/projects/:pid/ticket/:id/handback", &["post"]),
     route("/api/projects/:pid/ticket/:id/priority", &["post"]),
     route("/api/projects/:pid/ticket/:id/ready", &["post"]),
     route("/api/projects/:pid/ticket/:id/reject", &["post"]),
     route("/api/projects/:pid/ticket/:id/reproduction-url", &["get"]),
     route("/api/projects/:pid/ticket/:id/send-back", &["post"]),
+    route("/api/projects/:pid/ticket/:id/takeover", &["post"]),
     route("/api/projects/:pid/ticket/:id/undo-approval", &["post"]),
     route("/api/projects/:pid/ticket/:id/unpark", &["post"]),
     route("/api/projects/:pid/ticket/:id/verify", &["post"]),
     route("/api/projects/:pid/tickets", &["post"]),
+    route("/api/projects/:pid/tickets/archive", &["get"]),
     route("/api/projects/:pid/transcripts", &["get"]),
     route("/api/projects/:pid/transcripts/:name", &["get"]),
     route("/api/projects/:pid/upload", &["post"]),
+    route("/api/projects/:pid/wiki/search", &["get"]),
     route("/api/projects/:pid/workers", &["get"]),
     route("/api/projects/:pid/workspace", &["get"]),
     // Global search (CXA-F275): labeled hits from tickets (open + closed),
     // wiki pages and chat threads, server-ranked and capped (8/kind, 30 total).
     route("/api/search", &["get"]),
+    route("/api/projects/:pid/agent-liveness", &["get"]),
     route("/api/spaces", &["get", "post"]),
     route("/api/spaces/:sid", &["delete", "put"]),
     route("/s/:token", &["get"]),
     route("/api/token-saver", &["get"]),
     route("/api/tooling", &["get"]),
     route("/api/workspace", &["get", "put"]),
+    route("/api/workspace/duplicates", &["get"]),
+    route("/api/workspace/duplicates/action", &["post"]),
+    // "Scan now" (CXA-F362): the operator's explicit radar re-run, gated to
+    // hub admins and leads.
+    route("/api/workspace/duplicates/scan", &["post"]),
     route("/api/workspace/invites", &["get", "post"]),
     route("/api/workspace/invites/:token", &["delete"]),
     route("/api/workspace/join", &["post"]),
@@ -340,6 +374,32 @@ const SUMMARY_OVERRIDES: &[(&str, &str)] = &[
          publish-port availability",
     ),
     (
+        "/api/projects/:pid/ticket/:id/takeover",
+        // The human claim lifecycle (CXA-F283): pull work into your own claim,
+        // or take over a stalled run. No body.
+        "Pull a claimable ticket (Ready feature/chore, Open bug) into the caller's own \
+         InProgress claim as account@host, or swap the holder of a stalled InProgress \
+         claim (response names the displaced previous_holder). Person-gated: a manager, \
+         or the account whose own run holds the claim; 409 'runner <op>@<host> is \
+         actively working this ticket — pause it first' while the hub's runner is \
+         running it. Deploy of the human's work follows the existing deploy triggers \
+         — out of scope here",
+    ),
+    (
+        "/api/projects/:pid/ticket/:id/handback",
+        // The human claim lifecycle (CXA-F283): a person completing work they
+        // did by hand. The note is mandatory — it IS the handback's audit
+        // trail; the optional `ref` names the branch/commit.
+        "Complete work a person did by hand: body {reason: string (non-empty \
+         implementation note), ref?: string (branch/commit)}. Feature/chore \
+         land Done (DOCS queue), a bug Fixed (TEST verification); the claim \
+         clears and the note is recorded on the ticket thread. Person-gated: \
+         a manager or the account whose own run holds the claim; 409 while \
+         the hub's runner is actively working the ticket. Deploy of the \
+         human's work follows the existing deploy triggers (next shipped \
+         ticket or failed-deploy retry) — out of scope here",
+    ),
+    (
         "/api/projects/:pid/ticket/:id",
         // The optional reproduce_url (CXA-F244) rides alongside the injected
         // evidence: present on a fixed ticket awaiting verification, null
@@ -399,7 +459,12 @@ fn operation(spec: &RouteSpec, method: &str) -> serde_json::Value {
 fn security_for(path: &str) -> SecurityLevel {
     if matches!(
         path,
-        "/api/health" | "/api/openapi.json" | "/api/auth/login"
+        "/api/health"
+            | "/api/ready"
+            | "/api/openapi.json"
+            | "/api/auth/login"
+            | "/api/auth/oidc/login"
+            | "/api/auth/oidc/callback"
     ) || path.starts_with("/s/")
     {
         // /s/:token (CXA-F069): the unguessable share token IS the credential,
@@ -409,9 +474,22 @@ fn security_for(path: &str) -> SecurityLevel {
     if path.starts_with("/api/auth/users")
         || path.starts_with("/api/auth/tokens")
         || path.contains("/share-links")
+        // Manage/review write surfaces: delegate to auth.rs's own classifiers
+        // so the published contract mirrors real enforcement and cannot drift
+        // from it again. The OpenAPI tier is per-path, so a management surface
+        // is Admin wholesale (as `/api/auth/users` already is) — never
+        // under-reporting the privilege a write needs. This branch was blind to
+        // the service endpoints after #798 made them admin-only (RCE/authz
+        // fix): an SDK generated from the spec would have shown a member-tier
+        // token as able to POST services, then hit 401 at runtime.
+        || super::auth::is_service_mgmt_path(path)
+        || super::auth::is_store_rpc_path(path)
+        || super::auth::is_pr_review_path(path)
+        || path == "/api/pr-report"
     {
-        // Share-link management is an admin surface: the handlers enforce
-        // manage rights on top of auth_mw's membership gate (CXA-F069).
+        // Admin/lead-gated surfaces: user & token administration (CXA-F069
+        // share-link management too), service management (#798), the raw store
+        // RPC + pr-report runner surfaces, and PR review actions.
         return SecurityLevel::Admin;
     }
     SecurityLevel::Authenticated
@@ -593,5 +671,37 @@ mod tests {
         let spec = tagged("/api/projects/:pid/metrics/summary");
         let op = operation(&spec, "get");
         assert_eq!(op["tags"], json!(["Projects"]));
+    }
+
+    #[test]
+    fn manage_and_review_surfaces_are_documented_as_admin() {
+        // Regression lock for the #798 class: the published security tier must
+        // mirror auth_mw's real enforcement. These paths are manage/review
+        // gated in `auth::write_gate_ok`; the spec must not under-report them
+        // as merely Authenticated (an SDK would then think a member token can
+        // call them, then hit 401). Delegating to auth.rs's own classifiers
+        // keeps the two in lockstep — this test fails if that link is cut.
+        for path in [
+            "/api/projects/demo/services",
+            "/api/projects/demo/services/scan",
+            "/api/projects/demo/services/web/status",
+            "/api/projects/demo/store",
+            "/api/pr-report",
+            "/api/projects/demo/prs/7/merge",
+            "/api/auth/users",
+            "/api/auth/tokens",
+        ] {
+            assert_eq!(
+                security_for(path),
+                SecurityLevel::Admin,
+                "{path} is manage/review-gated in auth_mw but documented below Admin"
+            );
+        }
+        // And an ordinary member-writable surface stays Authenticated — the
+        // fix must not over-reach into every project path.
+        assert_eq!(
+            security_for("/api/projects/demo/ticket/CXA-F001/priority"),
+            SecurityLevel::Authenticated
+        );
     }
 }

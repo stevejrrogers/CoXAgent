@@ -31,21 +31,25 @@ use tokio_stream::wrappers::IntervalStream;
 use tokio_stream::{Stream, StreamExt};
 
 use crate::middleware::{
-    cors_layer, rate_limit_mw, telemetry_mw, RateLimiter, AUTH_RATE_MAX, AUTH_RATE_WINDOW,
+    auth_rate_max, auth_rate_window, cors_layer, rate_limit_mw, telemetry_mw, RateLimiter,
 };
 
 mod alerts;
 mod approval_policy;
+mod archive;
 mod assets;
 mod auth;
 mod background;
 mod broken_projects;
 mod channels;
 mod chat;
+mod claims;
 mod comments;
 mod deps;
+mod docker_janitor;
 mod docs;
 mod downloads;
+mod duplicate_radar;
 mod engines;
 mod factory;
 mod fleet;
@@ -55,25 +59,31 @@ mod goals;
 mod guards;
 mod hub_docs;
 mod inbox;
+mod lessons;
 mod manage;
 mod meetings;
 mod metrics_admin;
+mod oidc_routes;
 mod openapi;
 mod people;
 mod pr_listing;
 mod preflight;
+mod project_import;
 mod projects;
 mod realtime;
 mod repro_url;
 mod requests;
 mod search;
 mod security;
+mod services;
 mod share_link;
 mod share_page;
 mod status;
 mod store_rpc;
 mod transcripts;
 mod tunecockpit;
+mod user_keys;
+pub mod wire_registry;
 mod work;
 
 use alerts::*;
@@ -85,9 +95,11 @@ pub use broken_projects::BrokenProject;
 use broken_projects::*;
 use channels::*;
 use chat::*;
+use claims::*;
 use comments::*;
 use docs::*;
 use downloads::*;
+use duplicate_radar::*;
 use engines::*;
 use fleet::*;
 use fleet_spend::*;
@@ -113,6 +125,7 @@ use share_page::*;
 use status::*;
 use transcripts::*;
 use tunecockpit::*;
+use user_keys::*;
 use work::*;
 
 /// The embedded single-page dashboard.
@@ -136,6 +149,29 @@ const APP_JS: &[(&str, &str)] = &[
     // Vendored Mermaid (pinned v11 UMD build) so Wiki pages render
     // sequence/flow diagrams offline — the hub never loads from a CDN.
     ("mermaid.min.js", include_str!("../web/js/mermaid.min.js")),
+    // Copy layer (CXA-B191) — shared microcopy catalog + renderers; every
+    // feature script resolves user-facing strings through it, so it must load
+    // before kpis.js/core.js.
+    ("copy.js", include_str!("../web/js/copy.js")),
+    // Shared terminal-state shell + Overview panel wiring (CXA-B196/B194) —
+    // index.html loads both before kpis.js/core.js.
+    (
+        "terminal_state.js",
+        include_str!("../web/js/terminal_state.js"),
+    ),
+    // View-mesh (CXA-B232b) — overview_states.js resolves panel mounts
+    // through window.OvViewMesh at runtime; loads first or panels don't mount.
+    ("overview_vm.js", include_str!("../web/js/overview_vm.js")),
+    (
+        "overview_states.js",
+        include_str!("../web/js/overview_states.js"),
+    ),
+    // Overview KPI tiles (CXA-F360) — sparkline/delta series helpers that
+    // core.js's overview render calls at runtime; loads before core.js.
+    ("kpis.js", include_str!("../web/js/kpis.js")),
+    // Copy catalog (CXA-B191) — shipped at last: it existed unloaded for
+    // weeks and two PRs tripped on calling it through a shadowed name.
+    ("copy.js", include_str!("../web/js/copy.js")),
     ("core.js", include_str!("../web/js/core.js")),
     ("manage.js", include_str!("../web/js/manage.js")),
     ("home.js", include_str!("../web/js/home.js")),
@@ -155,6 +191,12 @@ const APP_JS: &[(&str, &str)] = &[
         "approval_policy.js",
         include_str!("../web/js/approval_policy.js"),
     ),
+    // Add-repo wizard panel (CXA-F420b) — the Settings Services tab; loads
+    // before shell.js like every view helper.
+    ("services.js", include_str!("../web/js/services.js")),
+    // Lesson efficacy panel (CXA-F306) — the Overview recurrence view; loads
+    // before shell.js like every view helper.
+    ("lessons.js", include_str!("../web/js/lessons.js")),
     ("shell.js", include_str!("../web/js/shell.js")),
 ];
 
@@ -217,6 +259,10 @@ pub struct ProjectHandle {
 /// The contract lives in [`factory`]; re-exported here because every
 /// submodule globs `super::*` and `lib.rs` re-exports the names.
 pub use factory::{FactoryError, FactoryErrorKind, NewProjectReq, ProjectFactory, ProjectRemover};
+
+/// Brownfield import admission for `POST /api/projects` (CXA-B145), split into
+/// its own file — re-exported here because every submodule globs `super::*`.
+use project_import::{refused_import_owned_by_registered, refused_import_path};
 
 /// Extract the project ID from a URL path like `/api/projects/:pid/...`.
 fn extract_pid_from_path(path: &str) -> Option<&str> {
@@ -285,11 +331,16 @@ struct AppState {
     meetings: Mt,
     /// User avatars + Slack-style statuses (self-service).
     profiles: Pf,
+    /// Per-user BYOK LLM keys (CXA-F410): probe-first, masked reads.
+    user_keys: Uk,
     /// Blob storage for uploaded files (local disk by default, or S3/MinIO).
     storage: Arc<dyn coxagent_application::ports::outbound::StoragePort>,
     /// Server-side documentation store (MongoDB) when configured; `None` falls
     /// back to per-project `state.json`.
     doc_store: Option<Arc<dyn coxagent_application::ports::outbound::DocStorePort>>,
+    /// Cold store holding tickets evicted from the hot state (CXA-F272/F273);
+    /// `None` means no archive is wired and every read-back answers empty.
+    archive_store: Option<Arc<dyn coxagent_application::ports::outbound::ArchiveStorePort>>,
     /// A hub-level engine for cross-project drafting (e.g. project goals), with a
     /// working directory to run it in.
     analyzer: Option<(
@@ -543,6 +594,10 @@ pub struct HubExtras {
     pub storage: Option<Arc<dyn coxagent_application::ports::outbound::StoragePort>>,
     /// Server-side documentation store (e.g. MongoDB). `None` = per-project state.
     pub doc_store: Option<Arc<dyn coxagent_application::ports::outbound::DocStorePort>>,
+    /// Cold store for archived (evicted) tickets, e.g. MongoDB (CXA-F272);
+    /// the in-memory dev/e2e adapter stands in when configured. `None` = no
+    /// archive: the read-back endpoints answer empty, the UI shows nothing.
+    pub archive_store: Option<Arc<dyn coxagent_application::ports::outbound::ArchiveStorePort>>,
     /// Shared KV store for hub-wide singletons (system chat). `None` = local file.
     pub syschat_store: Option<Arc<dyn coxagent_application::ports::outbound::KvDocPort>>,
     /// Registered projects that failed to load (e.g. an unparseable
@@ -619,7 +674,7 @@ pub async fn serve_full(
         // the checker runs HERE, outside the unit that can hang.
         tokio::spawn(liveness_watchdog(state.clone()));
         // Keep the docker host clean of dead agent deploys.
-        tokio::spawn(docker_janitor());
+        tokio::spawn(docker_janitor::docker_janitor());
     }
     // Cross-instance realtime: bridge the local chat broadcast onto Redis
     // pub/sub so N hub instances fan out the same events (no-op without Redis).
@@ -660,6 +715,9 @@ pub async fn serve_full(
             get(|| async { ([("content-type", "font/woff2")], TABLER_WOFF2) }),
         )
         .route("/api/health", get(health))
+        .route("/api/ready", get(ready))
+        .route("/api/auth/oidc/login", get(oidc_routes::oidc_login))
+        .route("/api/auth/oidc/callback", get(oidc_routes::oidc_callback))
         .route("/api/openapi.json", get(openapi_ep))
         .route("/api/mcp", post(mcp_ep))
         .route("/api/app/latest", get(app_latest_ep))
@@ -711,6 +769,7 @@ pub async fn serve_full(
             post(reset_password_ep),
         )
         .route("/api/audit-log", get(audit_log_ep))
+        .route("/api/audit-log/verify", get(manage::audit_verify_ep))
         .route("/api/people-analytics", get(people_analytics_ep))
         .route("/api/projects/:pid/workspace", get(workspace_ep))
         .route("/api/projects/:pid/file", get(file_ep))
@@ -781,10 +840,24 @@ pub async fn serve_full(
         // project's runner phase + activity in ONE SSE stream, filterable by
         // project id and agent phase (see fleet.rs).
         .route("/api/fleet/river", get(fleet_river_ep))
+        // Cross-project duplicate radar (CXA-F253): pairs of active tickets
+        // in DIFFERENT projects that match under the existing similarity
+        // predicate, resolved by a human (redirect / reject / allow) — see
+        // duplicate_radar.rs. Auth via auth_mw; scoped to the caller's
+        // visible projects.
+        .route("/api/workspace/duplicates", get(duplicates_ep))
+        .route(
+            "/api/workspace/duplicates/action",
+            post(duplicates_action_ep),
+        )
+        // "Scan now" (CXA-F362): the operator's explicit radar re-run —
+        // admin-gated server-side, stamps the persisted last-scan instant.
+        .route("/api/workspace/duplicates/scan", post(duplicates_scan_ep))
         // Fleet spend cockpit (CXA-F278): hub-level cross-project cost
         // aggregation with cap headroom + the soft-ceiling setting (see
         // fleet_spend.rs). Super admin; visibility-only by design.
         .route("/api/fleet/spend", get(fleet_spend_ep))
+        .route("/api/fleet/spend/export.csv", get(fleet_spend_export_ep))
         .route(
             "/api/fleet/ceiling",
             axum::routing::put(fleet_ceiling_put_ep),
@@ -855,6 +928,14 @@ pub async fn serve_full(
             "/api/projects/:pid/approval-policy/release",
             post(approval_policy_release_ep),
         )
+        .route(
+            "/api/projects/:pid/lessons/dismiss",
+            post(lessons::lessons_dismiss_ep),
+        )
+        .route(
+            "/api/projects/:pid/lessons/escalate",
+            post(lessons::lessons_escalate_ep),
+        )
         .route("/api/projects/:pid/sprint/goal", post(set_sprint_goal_ep))
         .route("/api/projects/:pid/sprint/close", post(sprint_close_ep))
         .route("/api/projects/:pid/sprint-queue", post(queue_sprint_ep))
@@ -877,6 +958,35 @@ pub async fn serve_full(
         .route("/api/projects/:pid/sprint/:action", post(sprint_scope_ep))
         .route("/api/projects/:pid/digest", post(digest_ep))
         .route("/api/projects/:pid/deps/scan", post(deps::scan_ep))
+        // CXA-F420b: Add-repo wizard — list, scan/propose, add (probe-first).
+        .route(
+            "/api/projects/:pid/services",
+            get(services::list_services_ep).post(services::add_service_ep),
+        )
+        .route(
+            "/api/projects/:pid/services/scan",
+            post(services::scan_service_ep),
+        )
+        .route(
+            "/api/projects/:pid/services/:name/status",
+            post(services::set_service_status_ep),
+        )
+        .route(
+            "/api/projects/:pid/services/retag-suggestions",
+            get(services::retag_suggestions_ep),
+        )
+        .route(
+            "/api/projects/:pid/services/retag",
+            post(services::retag_apply_ep),
+        )
+        .route(
+            "/api/projects/:pid/services/assignments",
+            get(services::service_assignments_ep),
+        )
+        .route(
+            "/api/projects/:pid/services/assignments/:username",
+            axum::routing::put(services::set_service_assignment_ep),
+        )
         .route("/api/projects/:pid/merge-sweep", post(merge_sweep_ep))
         .route(
             "/api/workspace",
@@ -896,6 +1006,9 @@ pub async fn serve_full(
         .route("/api/manage/overview", get(manage_overview_ep))
         .route("/api/manage/spaces/:sid", get(manage_space_detail_ep))
         .route("/api/me/agents", get(my_agents_ep))
+        .route("/api/me/llm-keys", get(my_keys_ep).post(add_key_ep))
+        .route("/api/me/llm-keys/:id", axum::routing::delete(delete_key_ep))
+        .route("/api/me/llm-keys/:id/retest", post(retest_key_ep))
         .route("/join/:token", get(join_page_ep))
         .route("/api/workspace/join", post(join_ep))
         // Public share-link status page (CXA-F069): the token IS the
@@ -933,6 +1046,11 @@ pub async fn serve_full(
             axum::routing::put(doc_upsert_ep).delete(doc_delete_ep),
         )
         .route("/api/projects/:pid/docs/:id/ai-edit", post(doc_ai_edit_ep))
+        .route(
+            "/api/projects/:pid/docs/:id/backlinks",
+            get(doc_backlinks_ep),
+        )
+        .route("/api/projects/:pid/wiki/search", get(wiki_search_ep))
         .route("/api/projects/:pid/docs/:id/ws", get(docs_ws_ep))
         .route("/api/projects/:pid/terminal", get(terminal_ws_ep))
         .route("/api/projects/:pid/codegraph", get(codegraph_ep))
@@ -950,6 +1068,10 @@ pub async fn serve_full(
         .route("/api/projects/:pid/docs-review", post(docs_review_ep))
         .route("/api/projects/:pid/chat-reply", post(chat_reply_ep))
         .route("/api/projects/:pid/tickets", post(create_ticket))
+        .route(
+            "/api/projects/:pid/tickets/archive",
+            get(archive::ticket_archive_ep),
+        )
         .route("/api/projects/:pid/ticket/:id", get(ticket_detail_ep))
         .route("/api/projects/:pid/ticket/:id/priority", post(set_priority))
         .route("/api/projects/:pid/ticket/:id/reject", post(reject_ticket))
@@ -997,6 +1119,14 @@ pub async fn serve_full(
         .route(
             "/api/projects/:pid/ticket/:id/assign",
             post(assign_ticket_ep),
+        )
+        .route(
+            "/api/projects/:pid/ticket/:id/takeover",
+            post(takeover_ticket_ep),
+        )
+        .route(
+            "/api/projects/:pid/ticket/:id/handback",
+            post(handback_ticket_ep),
         )
         .route(
             "/api/projects/:pid/ticket/:id/undo-approval",
@@ -1049,6 +1179,10 @@ pub async fn serve_full(
         .route("/api/projects/:pid/prs/:num/:action", post(pr_action_ep))
         .route("/api/projects/:pid/agent-log", get(agent_log_ep))
         .route(
+            "/api/projects/:pid/agent-liveness",
+            get(transcripts::agent_liveness_ep),
+        )
+        .route(
             "/api/projects/:pid/agent-log/stream",
             get(agent_log_stream_ep),
         )
@@ -1080,8 +1214,8 @@ pub async fn serve_full(
             req,
             next,
             Arc::clone(&limiter),
-            AUTH_RATE_MAX,
-            AUTH_RATE_WINDOW,
+            auth_rate_max(),
+            auth_rate_window(),
             trust_proxy,
         )
     }));
@@ -1177,6 +1311,56 @@ async fn index() -> impl IntoResponse {
 
 async fn health() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION") }))
+}
+
+/// Readiness probe — unlike `/api/health` (a static `{status:ok}` stub that
+/// cannot tell a wedged hub from a healthy one), this actually TOUCHES the
+/// primary state backend with a bounded `current_version` query, so a hung or
+/// unreachable Postgres surfaces as `503` and the host-watchdog can act on a
+/// real signal instead of guessing a wedge from log-file mtime. Public and
+/// unauthenticated like `/api/health`; it discloses only up-vs-degraded (never
+/// the backend error, which could leak connection details), logging the detail
+/// server-side instead.
+async fn ready(State(state): State<AppState>) -> impl IntoResponse {
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+    // The system-chat store (Postgres when configured) is the always-present
+    // shared backend; a bounded read of a sentinel key exercises the live
+    // connection without touching real data. With no shared store (local-file
+    // fallback) there is no backend to be unready about → ready.
+    let Some(store) = state.syschat.store.clone() else {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "ready",
+                "version": env!("CARGO_PKG_VERSION"),
+                "backend": "file"
+            })),
+        )
+            .into_response();
+    };
+    let degraded = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({ "status": "degraded" })),
+    );
+    match tokio::time::timeout(PROBE_TIMEOUT, store.load("__readiness_probe__")).await {
+        Ok(Ok(_)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "ready",
+                "version": env!("CARGO_PKG_VERSION"),
+                "backend": "db"
+            })),
+        )
+            .into_response(),
+        Ok(Err(e)) => {
+            tracing::warn!("readiness: system-chat store probe failed: {e}");
+            degraded.into_response()
+        }
+        Err(_) => {
+            tracing::warn!("readiness: system-chat store probe timed out after {PROBE_TIMEOUT:?}");
+            degraded.into_response()
+        }
+    }
 }
 
 /// Run `bin args...` (no stdin), returning `(success, combined stdout+stderr)`.
@@ -1364,6 +1548,8 @@ mod alerts_tests;
 #[cfg(test)]
 mod approval_policy_tests;
 #[cfg(test)]
+mod archive_tests;
+#[cfg(test)]
 mod avatar_media_security_tests;
 #[cfg(test)]
 mod cors_rate_limit_tests;
@@ -1375,6 +1561,8 @@ mod pr_preview_tests;
 mod pr_review_gate_tests;
 #[cfg(test)]
 mod project_create_tests;
+#[cfg(test)]
+mod project_list_scoping_tests;
 #[cfg(test)]
 mod repro_url_tests;
 #[cfg(test)]
@@ -1391,3 +1579,5 @@ mod store_rpc_stale_write_tests;
 mod store_rpc_test_support;
 #[cfg(test)]
 mod ui_contrast_tests;
+#[cfg(test)]
+mod webhook_author_security_tests;

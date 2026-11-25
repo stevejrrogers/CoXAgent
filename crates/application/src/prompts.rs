@@ -110,6 +110,17 @@ regression test.\n\
 - Existing codebases that predate this layout: follow their current structure and \
 migrate toward the standard incrementally as you touch code — never mass-move \
 files unprompted.\n\
+- DEPTH BAR — no shallow features, however small (operator mandate). Function \
+alone is not done; depth is part of done: (1) a LIST VIEW ships with a filter, \
+a sensible sort, counts/totals, pagination past ~50 rows, and an empty state \
+that says what fills it; (2) a NUMBER ships with its window (today/7d/lifetime), \
+a trend or delta where history exists, and a zero-state hint instead of a bare \
+0; (3) a STATE ships with attribution — who changed it, when, why — and the UI \
+always says WHY something is off/paused/failing instead of silently idling; \
+(4) an ACTION ships with its inverse and its guardrail — undo where cheap, a \
+confirm naming the blast radius where destructive, and permission-DIMMED (not \
+hidden) where unauthorized. Before calling a UI ticket fixed, check: filter? \
+counts? empty state? attribution? drill-down? Two or more missing = not done.\n\
 - An unclear ticket is NOT a coding problem — never invent it yourself. If an \
 acceptance criterion or the design references data, state or behaviour the \
 codebase does not have, do NOT fabricate fixtures or fake test data to \
@@ -170,9 +181,72 @@ PO's goal gate.\n\n\
 Respond with ONLY a JSON array, no prose, each item exactly:\n\
 {\"title\": string, \"description\": string, \"priority\": \"low\"|\"medium\"|\"high\", \
 \"complexity\": \"small\"|\"medium\"|\"large\", \"has_ui\": boolean, \
-\"acceptance_criteria\": [string, ...]}\n\
+\"acceptance_criteria\": [string, ...], \"service_tag\": string}\n\
 acceptance_criteria: 2-5 concrete, testable statements (incl. key edge cases) that \
-define when the feature is done — user-visible behaviour, not implementation.";
+define when the feature is done — user-visible behaviour, not implementation.\n\
+service_tag: the SERVICE this ticket's code lives in, chosen from the \
+'Services in this project' list in the task when one is given (CXA-F420). With \
+one service, or when unsure, omit the field — an untagged ticket belongs to the \
+default service.";
+
+/// The active services of a multi-service project, rendered for intake-stage
+/// prompts so tickets are minted with the right `service_tag` (CXA-F420b).
+/// Empty (single-service project) renders nothing — prompts stay byte-for-byte
+/// what they were before F420.
+#[must_use]
+pub fn services_block(services: &[crate::config::ServiceConfig]) -> String {
+    use std::fmt::Write as _;
+    let active: Vec<_> = services.iter().filter(|s| s.status == "active").collect();
+    if active.len() < 2 {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\n\nServices in this project — service_tag must be EXACTLY one of the \
+         names below (the FIRST is the default for untagged tickets). Never \
+         invent a tag; when none fits or you are unsure, OMIT the field:\n",
+    );
+    for s in active {
+        let scope = if s.scopes.is_empty() {
+            String::new()
+        } else {
+            format!(" (owns: {})", s.scopes.join(", "))
+        };
+        let repo = if s.repo.is_empty() {
+            "this repository".to_owned()
+        } else {
+            s.repo.clone()
+        };
+        let _ = writeln!(out, "- {} — {repo}{scope}", s.name);
+    }
+    out
+}
+
+/// CXA-F420d (R4): the DEV brief names the scope its service owns, so a
+/// monorepo change stays inside the folders the ticket is about and the
+/// narrowed test gate (`scoped_tests`) stays provably sufficient. Renders
+/// nothing when the resolved service declares no scopes — single-repo
+/// projects keep their byte-identical prompts.
+#[must_use]
+pub fn service_scope_block(
+    services: &[crate::config::ServiceConfig],
+    service_tag: Option<&str>,
+) -> String {
+    let Some(svc) = crate::config::Config::resolve_service(services, service_tag) else {
+        return String::new();
+    };
+    if svc.scopes.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\n## Service scope (stay inside it)\nThis ticket belongs to service \
+         '{}', which owns: {}. Keep EVERY change inside those folders — the test \
+         gate narrows to the affected package, so an out-of-scope edit ships with \
+         weaker verification and belongs in its own ticket. If the fix genuinely \
+         requires touching another service's folders, STOP and ask the BA instead.\n",
+        svc.name,
+        svc.scopes.join(", ")
+    )
+}
 
 /// Solution Architect — produces the technical design for one feature. UX is
 /// owned by the PD in a separate pass.
@@ -272,7 +346,12 @@ change, and if the blocker is a real design gap, ASK instead of looping.\n\
 Your PR is born mergeable: before finishing, merge the latest base branch into \
 your branch; on conflict, read both sides, understand each change's intent, and \
 resolve preserving both — then make the build/tests green again. \
-When done, print a one-line summary.";
+When done, print a one-line summary.\n\
+BUDGET DISCIPLINE: your run has a hard iteration cap. Spend at most a third of \
+it exploring — by then you must be EDITING files. Prefer the Write and Edit \
+tools over shell heredocs/sed for file changes (safer, and the live log can \
+show your code). If prior WIP exists for this ticket, restore and CONTINUE it \
+instead of re-exploring from zero. Finish decisively: implement, test, summarize.";
 
 /// Self-healing boot: fix ALL compile errors so the project can build.
 /// Runs before any tickets are touched — infrastructure repair, not feature work.
@@ -427,9 +506,18 @@ pub fn system_prompt(role_section: &str) -> String {
     format!("{BASE}\n\n{ENGINEERING_STANDARDS}\n\n{role_section}")
 }
 
+/// Char budget for the repo-map block injected into agent briefs. The tiered
+/// map (see [`crate::repo_map`]) puts the tier-0 header — coverage line plus
+/// the top-level area rollup — first, so this budget always buys whole-tree
+/// directory coverage before any per-file detail.
+const REPO_MAP_BLOCK_CHARS: usize = 3000;
+
 /// A compact repo-map context block for code-touching agents: the file/symbol
 /// layout so they locate code without exploring blind (fewer tool calls / tokens).
-/// Empty when the token-saver is off or no map has been built yet.
+/// The map is compacted section-aware via [`crate::repo_map::prompt_slice`] —
+/// the tier-0 header always survives and dropped sections are counted in a
+/// footer — never a blind first-N-chars cut. Empty when the token-saver is off
+/// or no map has been built yet.
 pub async fn repo_map_block(
     files: Option<&dyn crate::ports::outbound::WorkspaceFilesPort>,
     work_dir: &std::path::Path,
@@ -442,7 +530,7 @@ pub async fn repo_map_block(
     let Some(map) = files.read(&path).await else {
         return String::new();
     };
-    let compact: String = map.chars().take(3000).collect();
+    let compact = crate::repo_map::prompt_slice(&map, REPO_MAP_BLOCK_CHARS);
     format!(
         "\n\n## Repo map — files & their symbols (use this to locate code fast, \
          don't re-scan the whole tree)\n{compact}\n"
@@ -1104,6 +1192,11 @@ pub fn hub_lessons_path() -> std::path::PathBuf {
 /// Record a lesson into the hub-wide store (dedup, newest last, capped at 30
 /// so the block stays prompt-sized). Best-effort: IO errors are swallowed —
 /// a lesson lost beats a crashed retro.
+///
+/// CXA-F306: eviction is no longer silent loss. Entries pushed past the cap
+/// move to the sidecar retention shelf (`hub_lessons::retain_evicted`) with
+/// any recurrence history they carry, so a lesson evicted today that matches
+/// a later incident is re-surfaced instead of gone.
 pub async fn record_hub_lesson(
     files: Option<&dyn crate::ports::outbound::WorkspaceFilesPort>,
     lesson: &str,
@@ -1137,7 +1230,16 @@ pub async fn record_hub_lesson(
     lines.push(entry);
     let overflow = lines.len().saturating_sub(30);
     if overflow > 0 {
-        lines.drain(0..overflow);
+        let evicted: Vec<String> = lines.drain(0..overflow).collect();
+        // Retain, don't lose: the evicted bullets (and their recurrence
+        // history, if any) stay matchable for later incidents (CXA-F306 AC4).
+        crate::hub_lessons::retain_evicted(
+            Some(files),
+            &path,
+            &evicted,
+            &crate::state::now_rfc3339(),
+        )
+        .await;
     }
     let _ = files.write(&path, &(lines.join("\n") + "\n")).await;
 }
@@ -1310,6 +1412,62 @@ pub fn stack_constraints(rules: &[crate::conformance::StackRule]) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn services_block_renders_only_for_multi_service_projects() {
+        let svc = |name: &str, status: &str| crate::config::ServiceConfig {
+            name: name.into(),
+            repo: String::new(),
+            work_dir: String::new(),
+            scopes: Vec::new(),
+            build_cmd: String::new(),
+            test_cmd: String::new(),
+            status: status.into(),
+        };
+        // Single service (every legacy project): byte-for-byte nothing.
+        assert_eq!(super::services_block(&[svc("main", "active")]), "");
+        // Two active + one paused: both actives listed, paused omitted.
+        let out = super::services_block(&[
+            svc("hub", "active"),
+            svc("harxes", "active"),
+            svc("old", "paused"),
+        ]);
+        assert!(out.contains("- hub"));
+        assert!(out.contains("- harxes"));
+        assert!(!out.contains("- old"));
+        assert!(out.contains("FIRST is the default"));
+    }
+    #[test]
+    fn service_scope_block_names_the_owned_folders_or_stays_silent() {
+        let svc = |name: &str, scopes: &[&str]| crate::config::ServiceConfig {
+            name: name.into(),
+            repo: String::new(),
+            work_dir: String::new(),
+            scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
+            build_cmd: String::new(),
+            test_cmd: String::new(),
+            status: "active".into(),
+        };
+        // No scopes declared: byte-for-byte nothing (single-repo projects).
+        assert_eq!(
+            super::service_scope_block(&[svc("hub", &[])], Some("hub")),
+            ""
+        );
+        // Scoped service, tagged ticket: block names service and folders.
+        let out = super::service_scope_block(
+            &[svc("hub", &["crates/", "web/"]), svc("harxes", &[])],
+            Some("hub"),
+        );
+        assert!(out.contains("'hub'"));
+        assert!(out.contains("crates/, web/"));
+        // Untagged resolves to the first active service — same block.
+        let out2 =
+            super::service_scope_block(&[svc("hub", &["crates/"]), svc("harxes", &[])], None);
+        assert!(out2.contains("'hub'"));
+        // No services at all: nothing.
+        assert_eq!(super::service_scope_block(&[], None), "");
+    }
+
     use super::{deploy_constraints, design_constraints, extract_brief_notes, repo_map_block};
     use crate::config::DeployConfig;
     use crate::state::DesignSystem;

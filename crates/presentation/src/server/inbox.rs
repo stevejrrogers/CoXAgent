@@ -740,6 +740,7 @@ async fn human_transition(
 pub(super) async fn assign_ticket_ep(
     State(app): State<AppState>,
     Path((pid, id)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<AssignReq>,
 ) -> axum::response::Response {
     let Some(p) = app.project(&pid).await else {
@@ -748,6 +749,17 @@ pub(super) async fn assign_ticket_ep(
     let Ok(mut state) = p.store.load().await else {
         return internal_error("load failed");
     };
+    // CXA-F420f: service-scoped members only assign within their services.
+    let tag = state
+        .tickets
+        .iter()
+        .find(|t| t.id().as_str() == id)
+        .and_then(|t| t.service_tag().map(ToOwned::to_owned));
+    if let Some(refusal) =
+        super::services::refuse_outside_member_scope(&app, &headers, &p, tag.as_deref()).await
+    {
+        return refusal;
+    }
     let Some(t) = state.tickets.iter_mut().find(|t| t.id().as_str() == id) else {
         return (axum::http::StatusCode::NOT_FOUND, "no such ticket").into_response();
     };

@@ -212,7 +212,7 @@ function renderSprintPanel(s){
   const card=t=>{const col=pc[t.priority]||"var(--border2)";
     return `<div class="sp-card" style="border-left-color:${col}" onclick="showTicket('${t.id}')">
       <div class="t">${esc(t.title||'(removed)')}</div>
-      <div class="m"><span class="id">${esc(t.id)}</span><i class="ti ti-${t.type==='bug'?'bug':'bulb'}" style="font-size:11px"></i><span style="margin-left:auto;color:${col}">${esc(t.priority||'—')}</span></div></div>`;};
+      <div class="m"><span class="id">${esc(t.id)}</span><i class="ti ti-${t.type==='bug'?'bug':'bulb'}" style="font-size:11px"></i><span style="margin-left:auto;color:${col}">${esc(t.priority||'—')}</span>${collisionBadge(s,t)}</div></div>`;};
   const colHtml=(label,dot,items)=>`<div class="sp-col"><div class="sp-colh"><span class="dot2" style="background:${dot}"></span>${label}<span class="n">${items.length}</span></div>${items.map(card).join("")||'<div class="empty">—</div>'}</div>`;
   const stat=(v,k,c)=>`<div class="sp-stat"><div class="v"${c?` style="color:${c}"`:""}>${v}</div><div class="k">${k}</div></div>`;
   el.innerHTML=`
@@ -275,6 +275,27 @@ function blockedBadge(s,t){
   if(!b||!(b.blockers||[]).length)return"";
   const chain=b.blockers.map(esc).join(" ← ");
   return ` <span title="waiting on: ${chain}" style="display:inline-flex;align-items:center;gap:3px;padding:1px 8px;border-radius:20px;font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;background:color-mix(in srgb,var(--red) 16%,transparent);color:var(--red)"><i class="ti ti-lock" style="font-size:10px"></i>BLOCKED</span> <span title="waiting on: ${chain}" style="font-size:10.5px;color:var(--muted)">${chain}</span>`;
+}
+// COLLISION badge (CXA-F329): the board answers "will two running slots edit
+// the same files?" straight from the server's derived collision radar — the
+// partner id and the shared files ride the tooltip so meaning never rides on
+// color alone. Advisory only (the claim already succeeded); a running ticket
+// that declares NO files is radar-blind and gets the UNMAPPED marker instead
+// — visible, never silently treated as safe.
+function collisionBadge(s,t){
+  if(t.status!=="in_progress")return"";
+  const c=(s.derived||{}).collisions||{};
+  // A slot can collide with SEVERAL others (three slots on one file produce
+  // three pairs): name every partner and the union of shared files, not just
+  // the first pair found.
+  const hits=(c.pairs||[]).filter(p=>p.a===t.id||p.b===t.id);
+  if(hits.length){
+    const others=hits.map(p=>p.a===t.id?p.b:p.a);
+    const files=[...new Set(hits.flatMap(p=>p.files||[]))].join(", ");
+    return ` <span title="${escAttr("slot collision: "+others.join(", ")+" (other slot"+(others.length===1?"":"s")+") declares the same files: "+files)}" style="display:inline-flex;align-items:center;gap:3px;padding:1px 8px;border-radius:20px;font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;background:color-mix(in srgb,var(--amber) 16%,transparent);color:var(--amber)"><i class="ti ti-arrows-exchange" style="font-size:10px"></i>COLLISION ${esc(others.join(", "))}</span>`;
+  }
+  if((c.unknown_files||[]).includes(t.id))return ` <span title="${escAttr("declares no files — the collision radar cannot check it (low confidence)")}" style="display:inline-flex;align-items:center;gap:3px;padding:1px 8px;border-radius:20px;font-size:10px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;background:color-mix(in srgb,var(--muted) 14%,transparent);color:var(--muted)"><i class="ti ti-eye-off" style="font-size:10px"></i>UNMAPPED</span>`;
+  return"";
 }
 // Collapsed-section memory for the Jira-style backlog (keys: "active", "q<id>").
 function spqCollapsed(){

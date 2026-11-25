@@ -9,7 +9,11 @@ use std::str::FromStr;
 ///
 /// Mapping (from the plan): bug fix -> `Patch`, new feature -> `Minor`,
 /// breaking/architecture change -> `Major`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Wire form is `snake_case` ("major"/"minor"/"patch") like every other
+/// domain enum — enforced by the CXA-B287 contract guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Bump {
     Major,
     Minor,

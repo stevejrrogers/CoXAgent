@@ -120,6 +120,58 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// The adaptive gate: let routine designed tickets through with an undo
     /// window, ask about the rest, and learn which is which from what humans
     /// decided (docs/ADAPTIVE_APPROVAL.md).
+    /// Daily agent-surface security sweep (CXA-F421): leaked-credential and
+    /// prompt-injection detectors over everything briefs ingest — active
+    /// tickets, knowledge docs, and the root files every brief embeds. Pure
+    /// detectors (`crate::security_sweep`); findings file deduplicated bugs
+    /// under the SEC-AUDIT epic. Once per day, leader only.
+    pub(super) async fn security_sweep_pass(&self) {
+        let Ok(state) = self.store.load().await else {
+            return;
+        };
+        let today = crate::state::now_rfc3339()[..10].to_owned();
+        if state.daily_jobs.get("security_sweep") == Some(&today) {
+            return;
+        }
+        let mut surfaces = crate::security_sweep::state_surfaces(&state);
+        if let Some(files) = &self.files {
+            for name in [
+                "project_context.md",
+                "README.md",
+                "CLAUDE.md",
+                "AGENTS.md",
+                ".env",
+                "coxagent.json",
+            ] {
+                if let Some(body) = files.read(&self.work_dir.join(name)).await {
+                    surfaces.push(crate::security_sweep::Surface {
+                        label: format!("file:{name}"),
+                        body,
+                    });
+                }
+            }
+        }
+        let findings = crate::security_sweep::sweep(&surfaces);
+        let count = findings.len();
+        let _ = crate::ports::outbound::mutate_state(self.store.as_ref(), move |s| {
+            let filed = crate::security_sweep::apply_findings(s, &findings).len();
+            s.daily_jobs
+                .insert("security_sweep".to_owned(), today.clone());
+            if filed > 0 {
+                s.log_activity(
+                    "COX",
+                    &format!("security sweep: {count} finding(s), {filed} bug(s) filed"),
+                    None,
+                );
+            }
+            Ok(())
+        })
+        .await;
+        if count > 0 {
+            tracing::warn!("security sweep: {count} finding(s)");
+        }
+    }
+
     pub(super) async fn adaptive_approval_pass(&self) {
         let cfg = &self.config.workflow.human;
         if !cfg.gate_ready || !cfg.adaptive.enabled {

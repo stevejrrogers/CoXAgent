@@ -61,6 +61,11 @@ pub(super) fn diff_touches_tests(tree: &WorkingTreeDiff) -> bool {
         let f = f.to_lowercase();
         f.contains("/tests/")
             || f.starts_with("tests/")
+            // E2E suites (Playwright et al.) name specs `*.spec.ts` — CXA-B313:
+            // a container-build regression shipped as an e2e spec was bounced
+            // four times because the gate could not see it.
+            || f.ends_with(".spec.ts")
+            || f.ends_with(".spec.js")
             || f.ends_with("_test.rs")
             || f.ends_with("_test.go")
             || f.ends_with(".test.ts")
@@ -213,6 +218,29 @@ mod tests {
         assert!(!diff_touches_tests(&t), "a plain code change is not a test");
         t.full_diff = "+#[test]\n+fn t() {}\n".to_owned();
         assert!(diff_touches_tests(&t), "an added #[test] counts");
+    }
+
+    #[test]
+    fn an_e2e_playwright_spec_counts_as_a_test_change() {
+        // CXA-B313: e2e suites name their specs `*.spec.ts`, which none of the
+        // pre-existing predicates matched — so a container-build regression
+        // fixed in `e2e/specs/` read as "no test shipped" and got bounced.
+        assert!(
+            diff_touches_tests(&tree(&["e2e/specs/deploy_smoke.spec.ts"])),
+            ".spec.ts must count wherever it lives"
+        );
+        assert!(
+            diff_touches_tests(&tree(&["e2e/specs/auth.login.spec.js"])),
+            ".spec.js too (legacy runners)"
+        );
+        assert!(
+            diff_touches_tests(&tree(&["tests/e2e/smoke.spec.ts"])),
+            "specs under tests/ were already covered; stay covered"
+        );
+        assert!(
+            !diff_touches_tests(&tree(&["e2e/spec.snapshot.ts"])),
+            "only exact .spec.ts suffix, not arbitrary files that merely contain 'spec'"
+        );
     }
 
     #[test]

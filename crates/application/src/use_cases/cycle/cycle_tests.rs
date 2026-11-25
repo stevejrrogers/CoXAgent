@@ -6,11 +6,11 @@ use crate::ports::outbound::{AgentOutcome, AgentRequest};
 use crate::ports::outbound::{GitAuthor, SandboxStatus};
 use crate::state::ProjectState;
 use crate::PortError;
-use coxagent_domain::Status;
+use coxagent_domain::{Role, Status};
 use std::sync::Mutex;
 
 #[derive(Default)]
-pub(super) struct MemStore {
+pub(crate) struct MemStore {
     pub(super) state: Mutex<ProjectState>,
 }
 #[async_trait::async_trait]
@@ -27,7 +27,7 @@ impl StateStorePort for MemStore {
 
 /// Engine that answers each role by its system prompt: BA proposes one
 /// feature, TEST reports no bugs, DEV succeeds silently.
-pub(super) struct RoleAwareEngine;
+pub(crate) struct RoleAwareEngine;
 #[async_trait::async_trait]
 impl AgentEnginePort for RoleAwareEngine {
     fn id(&self) -> &'static str {
@@ -290,6 +290,9 @@ struct SpyForge {
     /// untouched. Set it to an old RFC3339 stamp to exercise the
     /// anti-starvation deadline path.
     created: Option<String>,
+    /// What `recently_merged` reports: `(number, head branch)` pairs —
+    /// merges done by a human or another PR, for the merged-elsewhere path.
+    merged_list: Vec<(u64, String)>,
 }
 #[async_trait::async_trait]
 impl ForgePort for SpyForge {
@@ -297,8 +300,15 @@ impl ForgePort for SpyForge {
         unimplemented!()
     }
     async fn list_open_prs(&self) -> Result<Vec<PullRequest>, PortError> {
-        if let Some(items) = &self.competing {
-            return Ok(items
+        // Model the forge's truth: a PR this spy already closed or merged is
+        // no longer open — a later review pass must not see it again.
+        let gone: Vec<u64> = {
+            let closed = self.closed.lock().expect("lock");
+            let merged = self.merged.lock().expect("lock");
+            closed.iter().chain(merged.iter()).copied().collect()
+        };
+        let mut prs = if let Some(items) = &self.competing {
+            items
                 .iter()
                 .map(|(n, t, _)| PullRequest {
                     number: *n,
@@ -311,19 +321,22 @@ impl ForgePort for SpyForge {
                     mergeable: self.mergeable,
                     created: String::new(),
                 })
-                .collect());
-        }
-        Ok(vec![PullRequest {
-            number: 7,
-            title: "feat(X-1): add a".to_owned(),
-            head: "feat/X-1".to_owned(),
-            base: "main".to_owned(),
-            url: String::new(),
-            author: "coxagent-bot".to_owned(),
-            ci: self.ci.clone(),
-            mergeable: self.mergeable,
-            created: self.created.clone().unwrap_or_default(),
-        }])
+                .collect::<Vec<_>>()
+        } else {
+            vec![PullRequest {
+                number: 7,
+                title: "feat(X-1): add a".to_owned(),
+                head: "feat/X-1".to_owned(),
+                base: "main".to_owned(),
+                url: String::new(),
+                author: "coxagent-bot".to_owned(),
+                ci: self.ci.clone(),
+                mergeable: self.mergeable,
+                created: self.created.clone().unwrap_or_default(),
+            }]
+        };
+        prs.retain(|p| !gone.contains(&p.number));
+        Ok(prs)
     }
     async fn pr_diff(&self, n: u64) -> Result<String, PortError> {
         if let Some(items) = &self.competing {
@@ -344,6 +357,9 @@ impl ForgePort for SpyForge {
     async fn close_pr(&self, n: u64) -> Result<(), PortError> {
         self.closed.lock().expect("lock").push(n);
         Ok(())
+    }
+    async fn recently_merged(&self) -> Result<Vec<(u64, String)>, PortError> {
+        Ok(self.merged_list.clone())
     }
 }
 
@@ -458,6 +474,54 @@ async fn require_ci_off_reviews_and_merges_despite_failing_ci() {
     .await;
     assert_eq!(*forge.merged.lock().expect("lock"), vec![7]);
     assert!(forge.changes.lock().expect("lock").is_empty());
+}
+
+#[tokio::test]
+async fn conflicted_pr_past_stale_window_gets_one_rescue_then_closes() {
+    // The #802 livelock: a PR that stays unmergeable past the stale window —
+    // the per-cycle auto-rebase keeps churning its head so the request-changes
+    // staleness check never fires, yet the conflict never clears. It must get
+    // one rescue, then be closed so the ticket is redone on a fresh branch,
+    // not squat the review lane forever.
+    let forge = Arc::new(SpyForge {
+        ci: "pending".to_owned(),
+        mergeable: false,
+        created: Some("2020-01-01T00:00:00Z".to_owned()), // well past pr_stale_days
+        ..Default::default()
+    });
+    let uc = review_uc(Arc::clone(&forge), "approve", false);
+    // First sweep: one forced rescue, not yet closed.
+    uc.sweep_stale_prs().await;
+    assert!(
+        forge.closed.lock().expect("lock").is_empty(),
+        "first sweep rescues, it does not close"
+    );
+    // Second sweep: the conflict persisted → close it.
+    uc.sweep_stale_prs().await;
+    assert_eq!(
+        *forge.closed.lock().expect("lock"),
+        vec![7],
+        "a conflict unresolved past the stale window after one rescue is closed"
+    );
+}
+
+#[tokio::test]
+async fn freshly_conflicted_pr_within_stale_window_is_left_alone() {
+    // A newly-opened PR that is merely unmergeable (base moved under it) is
+    // NOT the livelock — the auto-rebase gets a fair chance. No age → no sweep.
+    let forge = Arc::new(SpyForge {
+        ci: "pending".to_owned(),
+        mergeable: false,
+        created: None, // unknown/zero age — inside the stale window
+        ..Default::default()
+    });
+    let uc = review_uc(Arc::clone(&forge), "approve", false);
+    uc.sweep_stale_prs().await;
+    uc.sweep_stale_prs().await;
+    assert!(
+        forge.closed.lock().expect("lock").is_empty(),
+        "a fresh conflicted PR must not be closed by the livelock guard"
+    );
 }
 
 #[tokio::test]
@@ -632,6 +696,53 @@ async fn sa_review_failures_are_counted_and_surfaced_to_a_human() {
 }
 
 #[tokio::test]
+async fn a_surfaced_no_verdict_pr_is_parked_at_its_head_but_not_counted_as_reviewed() {
+    // The 165-skip bug: a PR surfaced to a human because the SA kept failing to
+    // render a verdict was still re-reviewed every cycle at the same frozen
+    // head — a fresh failing LLM call and a duplicate surface line each time.
+    // The surface now records a `parked_no_verdict` marker at that head so the
+    // review loop skips it until a push moves the head. The marker is NOT a
+    // verdict: `has_review_for` must still report the PR as unreviewed so the
+    // anti-starvation deadline can land a clean PR the reviewer can never judge.
+    use crate::ports::outbound::pr_report::PrReporterPort;
+    let mut cfg = Config::default();
+    cfg.git.enabled = true;
+    let store = Arc::new(MemStore::default());
+    let reporter = Arc::new(crate::ports::outbound::StorePrReporter::new(
+        Arc::clone(&store) as Arc<dyn crate::ports::outbound::StateStorePort>,
+    ));
+    // The surface branch would write exactly this.
+    reporter
+        .report_review(7, "parked_no_verdict", "SA kept failing", "head-abc")
+        .await;
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(FailEngine),
+        cfg,
+        PathBuf::from("/tmp"),
+        "goal".to_owned(),
+    )
+    .with_reporter(reporter as Arc<dyn crate::ports::outbound::PrReporterPort>);
+
+    assert!(
+        uc.already_parked_no_verdict_at(7, "head-abc").await,
+        "a PR parked after repeated no-verdict failures is skipped at that head"
+    );
+    assert!(
+        !uc.already_parked_no_verdict_at(7, "head-xyz").await,
+        "a new push (head moved) clears the park so the SA tries the new diff"
+    );
+    assert!(
+        !uc.already_parked_no_verdict_at(7, "").await,
+        "an unknown head never parks — same safety as already_reviewed_at"
+    );
+    assert!(
+        !uc.has_review_for(7).await,
+        "the park marker is not a verdict: anti-starvation still owns a clean PR"
+    );
+}
+
+#[tokio::test]
 async fn competing_prs_self_resolve_when_one_covers_the_other() {
     // The live deadlock: two open PRs for the same ticket. #98's diff covers
     // every file #89 touches, so the SA closes #89 (duplicate) and lets #98
@@ -714,6 +825,335 @@ async fn a_safe_subset_pr_is_not_held_by_a_load_bearing_competitor() {
         !closed.contains(&89),
         "the load-bearing #89 is never auto-closed: {closed:?}"
     );
+}
+
+/// CXA-C026 wiring: drive the merged-elsewhere hold through consecutive
+/// review passes over ONE shared store, exactly how #605 burned eleven rounds.
+/// The single-entry `competing` list serves ONE open PR with a custom title.
+/// `max_rounds` is the expiry cap under test (0 = the brake is off).
+fn hold_expiry_uc(
+    forge: &Arc<SpyForge>,
+    store: &Arc<MemStore>,
+    max_rounds: u32,
+) -> RunCycleUseCase<MemStore, FailEngine> {
+    let mut cfg = Config::default();
+    cfg.git.enabled = true;
+    cfg.git.auto_merge = true;
+    cfg.git.review_deadline_hours = 0; // keep the anti-starvation path out
+    cfg.git.hold_max_rounds = max_rounds;
+    RunCycleUseCase::new(
+        Arc::clone(store),
+        Arc::new(FailEngine),
+        cfg,
+        PathBuf::from("/tmp"),
+        "goal".to_owned(),
+    )
+    .with_forge(Arc::clone(forge) as Arc<dyn ForgePort>)
+    .with_git(Arc::new(FakeGit {
+        ls_remote_sha: HEAD_SHA.to_owned(),
+        ..Default::default()
+    }) as Arc<dyn GitPort>)
+}
+
+#[tokio::test]
+async fn a_kept_open_hold_expires_after_three_rounds_and_closes() {
+    // CXA-C026: #605 re-recorded "kept OPEN — letting review land it" eleven
+    // cycles in a row — the merged-elsewhere hold runs BEFORE the head-sha
+    // dedup and records no review, so nothing ever counted the rounds. The
+    // hold now counts while the head is frozen and, at `hold_max_rounds`,
+    // forces the terminal close in favor of the merge that carried the ticket.
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: false, // unlandable → the terminal is a close
+        competing: Some(vec![(
+            7,
+            "fix(COX-B157): rebuild what the other merge missed".to_owned(),
+            "+ added a line".to_owned(),
+        )]),
+        merged_list: vec![(6, "feat/COX-B157".to_owned())],
+        ..Default::default()
+    });
+    let store = Arc::new(MemStore::default());
+    let uc = hold_expiry_uc(&forge, &store, 3);
+
+    // Round 1: first identical hold — logged with attribution, nothing ends.
+    uc.review_open_prs().await;
+    let hold = store
+        .load()
+        .await
+        .unwrap()
+        .pr_open_holds
+        .get(&7)
+        .expect("hold recorded")
+        .clone();
+    assert_eq!(hold.rounds, 1, "the first identical hold is round 1");
+    assert_eq!(hold.head_sha, HEAD_SHA, "rounds attribute to the head");
+    assert!(forge.closed.lock().expect("lock").is_empty());
+    assert!(forge.merged.lock().expect("lock").is_empty());
+
+    // Round 2: same hold, same head — counts up, still no terminal.
+    uc.review_open_prs().await;
+    let s = store.load().await.unwrap();
+    assert_eq!(s.pr_open_holds.get(&7).expect("held").rounds, 2);
+    assert!(
+        s.activity.iter().any(|a| a.action.contains("hold 2/3")),
+        "the log carries round attribution"
+    );
+    assert!(forge.closed.lock().expect("lock").is_empty());
+
+    // Round 3: at the cap — the SAME cycle forces the terminal close.
+    uc.review_open_prs().await;
+    assert_eq!(
+        *forge.closed.lock().expect("lock"),
+        vec![7],
+        "the unlandable held PR is closed exactly once at expiry"
+    );
+    assert!(forge.merged.lock().expect("lock").is_empty());
+    assert!(
+        !store.load().await.unwrap().pr_open_holds.contains_key(&7),
+        "the terminal decision clears the record"
+    );
+
+    // Round 4: the PR is gone from the forge — a no-op, never re-opened.
+    uc.review_open_prs().await;
+    assert_eq!(*forge.closed.lock().expect("lock"), vec![7]);
+    assert!(!store.load().await.unwrap().pr_open_holds.contains_key(&7));
+}
+
+#[tokio::test]
+async fn a_landable_hold_expires_into_a_forced_landing() {
+    // Same chain, but the PR IS landable (mergeable, marker- and
+    // scratch-free): at the cap the expiry lands it instead of closing —
+    // the hold itself says the diff carries work main lacks.
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: true,
+        competing: Some(vec![(
+            7,
+            "fix(COX-B157): rebuild what the other merge missed".to_owned(),
+            "+ added a line".to_owned(),
+        )]),
+        merged_list: vec![(6, "feat/COX-B157".to_owned())],
+        ..Default::default()
+    });
+    let store = Arc::new(MemStore::default());
+    let uc = hold_expiry_uc(&forge, &store, 3);
+
+    uc.review_open_prs().await;
+    uc.review_open_prs().await;
+    assert!(
+        forge.merged.lock().expect("lock").is_empty(),
+        "rounds 1-2 hold"
+    );
+
+    uc.review_open_prs().await;
+    assert_eq!(
+        *forge.merged.lock().expect("lock"),
+        vec![7],
+        "the landable held PR is merged exactly once at expiry"
+    );
+    assert!(forge.closed.lock().expect("lock").is_empty());
+    assert!(!store.load().await.unwrap().pr_open_holds.contains_key(&7));
+
+    uc.review_open_prs().await;
+    assert_eq!(*forge.merged.lock().expect("lock"), vec![7], "no re-merge");
+}
+
+#[tokio::test]
+async fn a_settled_ticket_hold_expires_the_same_way() {
+    // The OTHER kept-OPEN hold (settled ticket, diff not on main, unlandable)
+    // gets the same one-round expiry: rounds 1-2 log, round 3 closes.
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: false, // unlandable → the terminal is a close
+        competing: Some(vec![(
+            7,
+            "fix(COX-B200): a late second branch".to_owned(),
+            "+ added a line".to_owned(),
+        )]),
+        ..Default::default()
+    });
+    let store = Arc::new(MemStore::default());
+    let _ = crate::ports::outbound::mutate_state(store.as_ref(), |s| {
+        let mut settled = coxagent_domain::Ticket::new(
+            coxagent_domain::TicketId::new("COX-B200").expect("id"),
+            coxagent_domain::TicketType::Bug,
+            "d",
+            "",
+            coxagent_domain::Priority::High,
+            coxagent_domain::Complexity::Small,
+            false,
+        )
+        .expect("t");
+        settled
+            .transition_to(Role::DevBug, Status::InProgress)
+            .expect("claimed");
+        settled
+            .transition_to(Role::DevBug, Status::Fixed)
+            .expect("fixed");
+        settled
+            .transition_to(Role::Test, Status::Verified)
+            .expect("verified");
+        s.tickets.push(settled);
+        Ok(())
+    })
+    .await;
+    let uc = hold_expiry_uc(&forge, &store, 3);
+
+    uc.review_open_prs().await;
+    assert_eq!(
+        store
+            .load()
+            .await
+            .unwrap()
+            .pr_open_holds
+            .get(&7)
+            .expect("hold recorded")
+            .rounds,
+        1
+    );
+    assert!(forge.closed.lock().expect("lock").is_empty());
+
+    uc.review_open_prs().await;
+    assert_eq!(
+        store
+            .load()
+            .await
+            .unwrap()
+            .pr_open_holds
+            .get(&7)
+            .expect("held")
+            .rounds,
+        2
+    );
+    assert!(forge.closed.lock().expect("lock").is_empty());
+
+    uc.review_open_prs().await;
+    assert_eq!(
+        *forge.closed.lock().expect("lock"),
+        vec![7],
+        "the settled-ticket hold terminates at the cap"
+    );
+    assert!(!store.load().await.unwrap().pr_open_holds.contains_key(&7));
+}
+
+#[tokio::test]
+async fn a_restarted_hold_re_stamps_first_at_instead_of_inheriting_the_old_chain() {
+    // The hold on PR 7 was "merged elsewhere"; that merge aged out of the
+    // forge's recently-merged window and the ticket has since settled — so
+    // this round's hold is a DIFFERENT hold (the settled-site reason). A new
+    // chain starts at round 1, and `first_at` must be re-stamped now: the
+    // record would otherwise report an age this hold never accumulated.
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: false,
+        competing: Some(vec![(
+            7,
+            "fix(COX-B157): rebuild what the other merge missed".to_owned(),
+            "+ added a line".to_owned(),
+        )]),
+        ..Default::default()
+    });
+    let store = Arc::new(MemStore::default());
+    let _ = crate::ports::outbound::mutate_state(store.as_ref(), |s| {
+        let mut settled = coxagent_domain::Ticket::new(
+            coxagent_domain::TicketId::new("COX-B157").expect("id"),
+            coxagent_domain::TicketType::Bug,
+            "d",
+            "",
+            coxagent_domain::Priority::High,
+            coxagent_domain::Complexity::Small,
+            false,
+        )
+        .expect("t");
+        settled
+            .transition_to(Role::DevBug, Status::InProgress)
+            .expect("claimed");
+        settled
+            .transition_to(Role::DevBug, Status::Fixed)
+            .expect("fixed");
+        settled
+            .transition_to(Role::Test, Status::Verified)
+            .expect("verified");
+        s.tickets.push(settled);
+        s.pr_open_holds.insert(
+            7,
+            crate::state::PrOpenHold {
+                reason: "COX-B157 merged elsewhere but this diff is NOT on main".to_owned(),
+                rounds: 2,
+                head_sha: HEAD_SHA.to_owned(),
+                first_at: "2000-01-01T00:00:00Z".to_owned(),
+                last_at: "2000-01-01T00:00:00Z".to_owned(),
+            },
+        );
+        Ok(())
+    })
+    .await;
+    let uc = hold_expiry_uc(&forge, &store, 3);
+
+    uc.review_open_prs().await;
+    let hold = store
+        .load()
+        .await
+        .unwrap()
+        .pr_open_holds
+        .get(&7)
+        .expect("hold recorded")
+        .clone();
+    assert_eq!(
+        hold.reason, "COX-B157 is settled but the diff is NOT on main",
+        "the merged-elsewhere signal aged out; the settled site holds now"
+    );
+    assert_eq!(hold.rounds, 1, "a different reason is a different hold");
+    assert_eq!(hold.head_sha, HEAD_SHA);
+    assert_ne!(
+        hold.first_at, "2000-01-01T00:00:00Z",
+        "a fresh chain re-stamps first_at — inheriting the old hold's age is \
+         the stale attribution CXA-C026 exists to kill"
+    );
+}
+
+#[tokio::test]
+async fn hold_max_rounds_zero_is_the_legacy_never_expire_loop() {
+    // CXA-C026 ships armed at 3, but an operator pinning `git.hold_max_rounds`
+    // to 0 must get the exact pre-C026 loop back: the hold re-logs every
+    // round with the legacy (cap-free) line shape, nothing ever terminates,
+    // and no hold record is ever written — an old config must not grow new
+    // state or advertise a cap that does not exist.
+    let forge = Arc::new(SpyForge {
+        ci: "passing".to_owned(),
+        mergeable: false, // unlandable → nothing may merge it either
+        competing: Some(vec![(
+            7,
+            "fix(COX-B157): rebuild what the other merge missed".to_owned(),
+            "+ added a line".to_owned(),
+        )]),
+        merged_list: vec![(6, "feat/COX-B157".to_owned())],
+        ..Default::default()
+    });
+    let store = Arc::new(MemStore::default());
+    let uc = hold_expiry_uc(&forge, &store, 0);
+
+    for round in 1..=4 {
+        uc.review_open_prs().await;
+        let s = store.load().await.unwrap();
+        assert!(
+            s.activity
+                .iter()
+                .any(|a| a.action.contains("kept OPEN") && a.action.contains("merged elsewhere")),
+            "round {round} still re-logs the legacy kept-OPEN verdict"
+        );
+        assert!(
+            s.activity.iter().all(|a| !a.action.contains("/0")),
+            "the legacy shape never advertises a cap"
+        );
+        assert!(
+            s.pr_open_holds.is_empty(),
+            "with the brake off, no hold record is ever written"
+        );
+        assert!(forge.closed.lock().expect("lock").is_empty());
+        assert!(forge.merged.lock().expect("lock").is_empty());
+    }
 }
 
 // ---- COX-F001: auto-rollback to last known-good deploy on failure ----
@@ -815,11 +1255,37 @@ const GOOD_SHA: &str = "cafef00d";
 /// A `GitPort` double for rollback tests: reports a fixed HEAD, records
 /// every worktree op so a test can assert rollback NEVER touches the live
 /// `work_dir` (only the dedicated rollback path), and reports no changed
-/// paths (no migration in the way) unless a test overrides it.
+/// paths (no migration in the way) unless a test overrides it. Also doubles
+/// for the slot-WIP checkpoint hygiene (CXA-F318): a configurable
+/// `status --porcelain`, a scriptable park outcome, and every `raw` git call
+/// recorded so a test can assert park/wipe/stash/prune behavior.
 #[derive(Default)]
 struct FakeGit {
     worktree_adds: Mutex<Vec<(std::path::PathBuf, String)>>,
     migration_paths: Vec<String>,
+    /// What `status --porcelain` reports ("" = clean tree).
+    status_output: String,
+    /// What `for-each-ref refs/coxagent/wip/` lists.
+    refs_output: String,
+    /// The sha `checkpoint_tree` returns (`None` = clean tree).
+    park_sha: Option<String>,
+    /// Set to fail the park outright (the git-lock case).
+    park_error: String,
+    parks: Mutex<Vec<String>>,
+    raw_calls: Mutex<Vec<String>>,
+    /// What `ls-remote origin refs/heads/<branch>` answers — the PR head sha
+    /// the review flow reads. Empty (the default) = git answered nothing.
+    ls_remote_sha: String,
+}
+impl FakeGit {
+    fn raw_call_count(&self, needle: &str) -> usize {
+        self.raw_calls
+            .lock()
+            .expect("lock")
+            .iter()
+            .filter(|c| c.contains(needle))
+            .count()
+    }
 }
 #[async_trait::async_trait]
 impl GitPort for FakeGit {
@@ -859,6 +1325,28 @@ impl GitPort for FakeGit {
     async fn update_ref(&self, _: &std::path::Path, _: &str, _: &str) -> Result<(), PortError> {
         Ok(())
     }
+    async fn raw(&self, _: &std::path::Path, args: &[&str]) -> (bool, String) {
+        self.raw_calls.lock().expect("lock").push(args.join(" "));
+        match args.first() {
+            Some(&"status") => (true, self.status_output.clone()),
+            Some(&"for-each-ref") => (true, self.refs_output.clone()),
+            Some(&"ls-remote") => (true, self.ls_remote_sha.clone()),
+            _ => (true, String::new()),
+        }
+    }
+    async fn checkpoint_tree(
+        &self,
+        _: &std::path::Path,
+        ref_name: &str,
+        _: &str,
+        _: &GitAuthor,
+    ) -> Result<Option<String>, PortError> {
+        self.parks.lock().expect("lock").push(ref_name.to_owned());
+        if !self.park_error.is_empty() {
+            return Err(PortError::Backend(self.park_error.clone()));
+        }
+        Ok(self.park_sha.clone())
+    }
     async fn worktree_add(
         &self,
         _work_dir: &std::path::Path,
@@ -886,6 +1374,218 @@ impl GitPort for FakeGit {
     ) -> Result<Vec<String>, PortError> {
         Ok(self.migration_paths.clone())
     }
+}
+
+/// A cycle use case wired for slot-hygiene tests (CXA-F318): git enabled and
+/// a `work_dir` that looks like a concurrency slot worktree. The FakeGit does
+/// no filesystem IO, so the path need not exist — only its components matter.
+fn hygiene_uc(
+    initial: ProjectState,
+    git: &Arc<FakeGit>,
+) -> (Arc<MemStore>, RunCycleUseCase<MemStore, RoleAwareEngine>) {
+    let store = Arc::new(MemStore {
+        state: Mutex::new(initial),
+    });
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let slot = tmp.path().join(".coxagent-worktrees/slot-1");
+    let mut cfg = Config::default();
+    cfg.git.enabled = true;
+    let uc = RunCycleUseCase::new(
+        Arc::clone(&store),
+        Arc::new(RoleAwareEngine),
+        cfg,
+        slot,
+        "goal".to_owned(),
+    )
+    .with_git(Arc::clone(git) as Arc<dyn GitPort>);
+    (store, uc)
+}
+
+/// CXA-F318 AC1 (reclaim leg) + AC2: slot hygiene parks dirty residue on a
+/// durable checkpoint ref and wipes the tree — no anonymous stash when the
+/// park succeeded; a clean slot gets no checkpoint at all.
+#[tokio::test]
+async fn slot_hygiene_parks_residue_then_wipes_instead_of_stashing() {
+    let git = Arc::new(FakeGit {
+        status_output: " M a.rs\n?? b.rs\n".to_owned(),
+        park_sha: Some("wipsha1".to_owned()),
+        ..FakeGit::default()
+    });
+    let (_store, uc) = hygiene_uc(ProjectState::default(), &git);
+
+    let errors = uc.tree_hygiene().await;
+
+    assert!(
+        errors.is_empty(),
+        "a clean park records no run error: {errors:?}"
+    );
+    let parks = git.parks.lock().expect("lock").clone();
+    assert_eq!(parks.len(), 1, "exactly one checkpoint commit");
+    assert!(
+        parks[0].starts_with("refs/coxagent/wip/unattributed-"),
+        "unattributable residue gets an unattributed-<instant> ref: {}",
+        parks[0]
+    );
+    assert_eq!(
+        git.raw_call_count("reset --hard"),
+        1,
+        "parked residue is wiped from the slot"
+    );
+    assert_eq!(git.raw_call_count("clean -fd"), 1);
+    assert_eq!(
+        git.raw_call_count("stash push"),
+        0,
+        "no anonymous stash when the park succeeded"
+    );
+}
+
+/// CXA-F318 AC2: a clean slot releases with no checkpoint commit at all.
+#[tokio::test]
+async fn slot_hygiene_parks_nothing_for_a_clean_tree() {
+    let git = Arc::new(FakeGit::default());
+    let (_store, uc) = hygiene_uc(ProjectState::default(), &git);
+
+    let errors = uc.tree_hygiene().await;
+
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(git.parks.lock().expect("lock").is_empty());
+    assert_eq!(git.raw_call_count("stash push"), 0);
+}
+
+/// CXA-F318 AC3: a failed checkpoint still releases the slot (stash fallback)
+/// and surfaces as a run error, so the errors==0 close gate blocks delivery.
+#[tokio::test]
+async fn slot_hygiene_checkpoint_failure_stashes_and_records_a_run_error() {
+    let git = Arc::new(FakeGit {
+        status_output: " M a.rs".to_owned(),
+        park_error: "git add failed: index.lock: unable to create".to_owned(),
+        ..FakeGit::default()
+    });
+    let (_store, uc) = hygiene_uc(ProjectState::default(), &git);
+
+    let errors = uc.tree_hygiene().await;
+
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].starts_with("WIP checkpoint:") && errors[0].contains("index.lock"),
+        "{}",
+        errors[0]
+    );
+    assert_eq!(
+        git.raw_call_count("stash push"),
+        1,
+        "the work still survives in the shared stash"
+    );
+    assert_eq!(
+        git.parks.lock().expect("lock").len(),
+        1,
+        "the park was attempted exactly once (and failed)"
+    );
+}
+
+/// CXA-F318 AC5: checkpoint refs whose ticket is closed or gone are pruned,
+/// live tickets' refs stay, and the unattributed namespace is bounded to the
+/// newest few.
+#[tokio::test]
+async fn wip_refs_of_closed_or_gone_tickets_are_pruned() {
+    use coxagent_domain::{Complexity, Priority, TicketId, TicketType};
+    let mut done = coxagent_domain::Ticket::new(
+        TicketId::new("DONE-1").expect("id"),
+        TicketType::Bug,
+        "d",
+        "",
+        Priority::High,
+        Complexity::Small,
+        false,
+    )
+    .expect("t");
+    done.transition_to(Role::DevBug, Status::InProgress)
+        .expect("claimed");
+    done.transition_to(Role::DevBug, Status::Fixed)
+        .expect("fixed");
+    done.transition_to(Role::Test, Status::Verified)
+        .expect("verified");
+    let mut live = coxagent_domain::Ticket::new(
+        TicketId::new("LIVE-1").expect("id"),
+        TicketType::Bug,
+        "l",
+        "",
+        Priority::High,
+        Complexity::Small,
+        false,
+    )
+    .expect("t");
+    live.transition_to(Role::DevBug, Status::InProgress)
+        .expect("claimed");
+    // Pre-seed checkpoint records on BOTH tickets so the prune's aggregate
+    // bookkeeping is exercised for real: the closed ticket's pointers must be
+    // cleared with its ref; the live ticket's history must survive.
+    let seeded = |ref_name: &str| coxagent_domain::WipCheckpoint {
+        ref_name: ref_name.to_owned(),
+        sha: "seededsha".to_owned(),
+        note: "branch main".to_owned(),
+        recorded_at: "2026-09-02T00:00:00Z".to_owned(),
+    };
+    done.record_wip_checkpoint(Role::System, seeded("refs/coxagent/wip/DONE-1"))
+        .expect("seed done");
+    live.record_wip_checkpoint(Role::System, seeded("refs/coxagent/wip/LIVE-1"))
+        .expect("seed live");
+    let initial = ProjectState {
+        tickets: vec![done, live],
+        ..ProjectState::default()
+    };
+
+    let git = Arc::new(FakeGit {
+        refs_output: [
+            "refs/coxagent/wip/LIVE-1",
+            "refs/coxagent/wip/DONE-1",
+            "refs/coxagent/wip/GONE-9",
+            "refs/coxagent/wip/unattributed-20260101T000000Z",
+            "refs/coxagent/wip/unattributed-20260102T000000Z",
+            "refs/coxagent/wip/unattributed-20260103T000000Z",
+            "refs/coxagent/wip/unattributed-20260104T000000Z",
+        ]
+        .join("\n"),
+        ..FakeGit::default()
+    });
+    let (store, uc) = hygiene_uc(initial, &git);
+
+    let errors = uc.tree_hygiene().await;
+    assert!(errors.is_empty(), "{errors:?}");
+
+    // Clean tree in this test (status_output "") — but the PRUNE deletes the
+    // dead refs through `update-ref -d`; assert exactly which ones.
+    let deletes: Vec<String> = git
+        .raw_calls
+        .lock()
+        .expect("lock")
+        .iter()
+        .filter(|c| c.contains("update-ref -d"))
+        .cloned()
+        .collect();
+    let has = |needle: &str| deletes.iter().any(|d| d.contains(needle));
+    assert!(!has("LIVE-1"), "a live ticket keeps its checkpoint ref");
+    assert!(has("DONE-1"), "a closed ticket's ref is pruned");
+    assert!(has("GONE-9"), "an absent ticket's ref is pruned");
+    assert!(
+        has("unattributed-20260101T000000Z"),
+        "the oldest unattributed ref is pruned"
+    );
+    assert!(
+        !has("unattributed-20260102T000000Z"),
+        "newer unattributed refs survive the cap"
+    );
+    // The closed ticket's aggregate pointers go with its refs; the live
+    // ticket's checkpoint history survives untouched.
+    let state = store.load().await.expect("load");
+    let done_t = state
+        .ticket(&TicketId::new("DONE-1").expect("id"))
+        .expect("done ticket");
+    assert!(done_t.wip_checkpoints().is_empty(), "cleared with its ref");
+    let live_t = state
+        .ticket(&TicketId::new("LIVE-1").expect("id"))
+        .expect("live ticket");
+    assert_eq!(live_t.wip_checkpoints().len(), 1, "live history stays");
 }
 
 /// A cycle that will complete a fresh feature (so the deploy step runs),
@@ -3122,6 +3822,99 @@ async fn rollbacks_post_mortems_target_the_incidents_channel_and_notify_distinct
         !incidents_chat(&state).is_empty(),
         "the post-mortem must be posted into an INCIDENTS channel; none found \
          because CXA-F012 is unimplemented. Channels seen so far depend on it."
+    );
+}
+
+/// CXA-F306 AC1, behaviorally: a post-mortem whose summary matches an
+/// existing project lesson above the similarity threshold increments that
+/// lesson's recurrence count exactly once for the incident — anchored to the
+/// incident's own stamp — while an unrelated lesson stays untouched. A second
+/// incident of the same class counts again (once per incident, not once ever).
+#[tokio::test]
+async fn a_recurring_failure_increments_the_matching_lessons_recurrence_once() {
+    const FAILING: &str = "deploy failed: docker build fails when the base image tag moves";
+    let deploy = Arc::new(ScriptedDeploy::new(vec![
+        crate::ports::outbound::DeployReport {
+            failure_bundle: None,
+            success: false,
+            deployed: true,
+            summary: FAILING.to_owned(),
+        },
+        crate::ports::outbound::DeployReport {
+            failure_bundle: None,
+            success: true,
+            deployed: true,
+            summary: "rollback redeploy ok".to_owned(),
+        },
+        crate::ports::outbound::DeployReport {
+            failure_bundle: None,
+            success: false,
+            deployed: true,
+            summary: FAILING.to_owned(),
+        },
+        crate::ports::outbound::DeployReport {
+            failure_bundle: None,
+            success: true,
+            deployed: true,
+            summary: "rollback redeploy ok".to_owned(),
+        },
+    ]));
+    let notifier = Arc::new(SpyNotifier {
+        ..Default::default()
+    });
+    let (store, _git, uc) = rollback_uc(true, &deploy, &notifier);
+    // One lesson the failing summary repeats, one it shares nothing with.
+    {
+        let mut s = store.state.lock().expect("lock");
+        s.record_lesson(
+            "docker build fails when the base image tag moves — pin the base image version",
+        );
+        s.record_lesson("route PRs that touch gating files to their human approver at open");
+    }
+
+    Box::pin(uc.run_cycle(1)).await;
+
+    let recurrence_of = |state: &ProjectState| {
+        state
+            .lesson_records
+            .iter()
+            .find(|r| r.text.contains("pin the base image"))
+            .expect("the seeded lesson stays tracked")
+            .recurrences
+            .clone()
+    };
+    let state = store.load().await.expect("load");
+    let recurrences = recurrence_of(&state);
+    assert_eq!(
+        recurrences.len(),
+        1,
+        "one incident, exactly one recurrence — got {recurrences:?}"
+    );
+    assert!(
+        !recurrences[0].incident_at.is_empty() && recurrences[0].incident_reason == "deploy failed",
+        "the recurrence is anchored to its incident"
+    );
+    assert!(
+        state
+            .lesson_records
+            .iter()
+            .find(|r| r.text.contains("gating files"))
+            .is_some_and(|r| r.recurrences.is_empty()),
+        "the unrelated lesson must not be dragged into the match"
+    );
+
+    Box::pin(uc.run_cycle(2)).await;
+
+    let state = store.load().await.expect("load");
+    let recurrences = recurrence_of(&state);
+    assert_eq!(
+        recurrences.len(),
+        2,
+        "a second incident of the class counts again"
+    );
+    assert_ne!(
+        recurrences[0].incident_at, recurrences[1].incident_at,
+        "each recurrence carries its own incident"
     );
 }
 

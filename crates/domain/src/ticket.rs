@@ -99,6 +99,19 @@ pub struct Ticket {
     /// as brand new or ancient.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     created_at: Option<String>,
+    /// Where uncommitted slot work was parked when a run died or the slot was
+    /// reclaimed (CXA-F318). Guarded mutations live in `wip_checkpoint.rs`,
+    /// which keeps the list capped; serde-defaulted so old tickets load clean.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    wip_checkpoints: Vec<crate::wip_checkpoint::WipCheckpoint>,
+    /// Optional bounded-context service tag (CXA-F253): the BA stamps it when
+    /// filing shared-infrastructure work (e.g. `"infra"`, `"ci"`) that may
+    /// legitimately exist in several projects at once. `None` for ordinary
+    /// project-local work — the cross-project duplicate radar applies its
+    /// same-tag carve-out only when BOTH sides carry the same tag. Persisted
+    /// with `serde(default)` so pre-F253 tickets load clean.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    service_tag: Option<String>,
 }
 
 impl Ticket {
@@ -143,6 +156,8 @@ impl Ticket {
             assignee: None,
             goal_id: None,
             created_at: None,
+            wip_checkpoints: Vec::new(),
+            service_tag: None,
         })
     }
 
@@ -196,6 +211,37 @@ impl Ticket {
         Ok(())
     }
 
+    /// The bounded-context service tag the BA stamped at filing, or `None`
+    /// for ordinary project-local work.
+    #[must_use]
+    pub fn service_tag(&self) -> Option<&str> {
+        self.service_tag.as_deref()
+    }
+
+    /// Declare (or clear, with a blank tag) the bounded-context service tag.
+    /// Requirements-scoped like [`Ticket::clarify`]: the BA authors the value
+    /// when filing, the PO (or a `User` acting as super-PO) may amend it —
+    /// agents and DEV roles cannot relabel work as shared infrastructure to
+    /// slip past the cross-project duplicate radar.
+    ///
+    /// # Errors
+    /// [`DomainError::FieldNotPermitted`] if `actor` lacks requirement scope.
+    pub fn set_service_tag(&mut self, actor: Role, tag: &str) -> Result<(), DomainError> {
+        if !field_permitted(actor, "service_tag") {
+            return Err(DomainError::FieldNotPermitted {
+                role: actor,
+                field: "service_tag",
+            });
+        }
+        let tag = tag.trim();
+        self.service_tag = if tag.is_empty() {
+            None
+        } else {
+            Some(tag.to_owned())
+        };
+        Ok(())
+    }
+
     /// Crate-internal handles for the test-case seam (`test_case.rs`) to read
     /// and reconcile the case list against the acceptance criteria.
     /// Deliberately not `pub`: outside the domain crate the aggregate stays
@@ -206,6 +252,19 @@ impl Ticket {
 
     pub(crate) fn test_case_list_mut(&mut self) -> &mut Vec<TestCase> {
         &mut self.test_cases
+    }
+
+    /// Crate-internal handles for the WIP-checkpoint seam (`wip_checkpoint.rs`)
+    /// to read and bound the parked-WIP history. Deliberately not `pub`:
+    /// outside the domain crate the aggregate stays opaque.
+    pub(crate) fn wip_checkpoint_list(&self) -> &[crate::wip_checkpoint::WipCheckpoint] {
+        &self.wip_checkpoints
+    }
+
+    pub(crate) fn wip_checkpoint_list_mut(
+        &mut self,
+    ) -> &mut Vec<crate::wip_checkpoint::WipCheckpoint> {
+        &mut self.wip_checkpoints
     }
 
     // --- Accessors ---
@@ -421,6 +480,45 @@ impl Ticket {
         Ok(())
     }
 
+    /// Who this ticket was split from. Set once by the SA when an oversize
+    /// ticket is decomposed into subtasks (CXA-F381).
+    #[must_use]
+    pub fn parent_id(&self) -> Option<&TicketId> {
+        self.parent_id.as_ref()
+    }
+
+    /// Bind this ticket to the oversize parent it was split from.
+    ///
+    /// # Errors
+    /// [`DomainError::FieldNotPermitted`] unless the actor owns the
+    /// dependency graph (SA; System for bookkeeping).
+    pub fn set_parent(&mut self, actor: Role, parent: TicketId) -> Result<(), DomainError> {
+        if !field_permitted(actor, "parent_id") {
+            return Err(DomainError::FieldNotPermitted {
+                role: actor,
+                field: "parent_id",
+            });
+        }
+        self.parent_id = Some(parent);
+        Ok(())
+    }
+
+    /// Drop a dependency edge by id (System bookkeeping: the target ticket
+    /// was archived, and an archived dependency is terminal — satisfied).
+    ///
+    /// # Errors
+    /// [`DomainError::FieldNotPermitted`] if `actor` may not edit dependencies.
+    pub fn remove_dependency(&mut self, actor: Role, on: &str) -> Result<(), DomainError> {
+        if !field_permitted(actor, "depends_on") {
+            return Err(DomainError::FieldNotPermitted {
+                role: actor,
+                field: "depends_on",
+            });
+        }
+        self.depends_on.retain(|d| d.as_str() != on);
+        Ok(())
+    }
+
     /// Declare a dependency on another ticket (SA during design/split).
     ///
     /// # Errors
@@ -529,6 +627,85 @@ impl Ticket {
         Ok(())
     }
 
+    /// Repair a BUG stranded in a feature-only status.
+    ///
+    /// The bug transition table (see `transitions`) has NO edge into `Pending`,
+    /// `Ready`, `Done` or `Documented` — those are feature/chore states. A bug
+    /// that nonetheless reaches one (a bad import, a ticket re-typed to Bug, a
+    /// row predating the current rules) is unreachable by every bug transition
+    /// AND claimed by no dispatcher: the bug lane pulls `Open` bugs and the
+    /// feature lane pulls features, so a `Ready` bug strands forever and — if
+    /// it is sprint-committed — deadlocks the whole sprint (observed live
+    /// 2026-10-27: CXA-B159/B160/B161 `Ready`, sprint #656 frozen). Reset it to
+    /// `Open` so the bug lane can pick it up. System-only like
+    /// [`Self::release_claim`], and a no-op on every legal state, so it is safe
+    /// to run each cycle.
+    ///
+    /// Returns whether a repair was made.
+    ///
+    /// # Errors
+    /// - [`DomainError::FieldNotPermitted`] if `actor` is not `System`.
+    pub fn reclaim_misfiled(&mut self, actor: Role) -> Result<bool, DomainError> {
+        if actor != Role::System {
+            return Err(DomainError::FieldNotPermitted {
+                role: actor,
+                field: "status",
+            });
+        }
+        let misfiled = self.kind == TicketType::Bug
+            && matches!(
+                self.status,
+                Status::Pending | Status::Ready | Status::Done | Status::Documented
+            );
+        if !misfiled {
+            return Ok(false);
+        }
+        self.status = Status::Open;
+        self.claimed_by = None;
+        self.claimed_at = None;
+        Ok(true)
+    }
+
+    /// Atomically swap the holder of an existing `InProgress` claim (CXA-F283):
+    /// a person taking over work a crashed run left behind. Like
+    /// [`Ticket::release_claim`] this is `System`-only bookkeeping — the API
+    /// layer decides WHO may take the decision (a manager, or the account whose
+    /// own run holds the claim), and the aggregate enforces only that the swap
+    /// happens in one guarded mutation with no steal window between checking
+    /// and stamping. Status is unchanged: the ticket stays `InProgress`, now
+    /// held by the new worker.
+    ///
+    /// Returns the holder that was displaced, so the caller can attribute the
+    /// takeover ("taken over by @alice (was `dev@mac`)").
+    ///
+    /// # Errors
+    /// - [`DomainError::FieldNotPermitted`] if `actor` is not `System`.
+    /// - [`DomainError::InvalidTransition`] if the ticket is not `InProgress`.
+    pub fn take_over(
+        &mut self,
+        actor: Role,
+        worker: impl Into<String>,
+        now: impl Into<String>,
+    ) -> Result<Option<String>, DomainError> {
+        if actor != Role::System {
+            return Err(DomainError::FieldNotPermitted {
+                role: actor,
+                field: "claim",
+            });
+        }
+        if self.status != Status::InProgress {
+            return Err(DomainError::InvalidTransition {
+                ticket_type: self.kind,
+                from: self.status,
+                to: self.status,
+            });
+        }
+        let previous = self.claimed_by.take();
+        self.claimed_by = Some(worker.into());
+        self.claimed_at = Some(now.into());
+        Ok(previous)
+    }
+
     /// Definition of Ready: technical design present, and UX design present when
     /// the ticket has UI.
     fn check_ready(&self) -> Result<(), DomainError> {
@@ -584,6 +761,60 @@ mod tests {
         )
         .expect("bug");
         assert_eq!(bug.status(), Status::Open);
+    }
+
+    fn bug(id: &str) -> Ticket {
+        Ticket::new(
+            TicketId::new(id).expect("id"),
+            TicketType::Bug,
+            "A bug",
+            "",
+            Priority::High,
+            Complexity::Small,
+            false,
+        )
+        .expect("bug")
+    }
+
+    #[test]
+    fn reclaim_misfiled_resets_a_ready_bug_to_open() {
+        let mut b = bug("B-1");
+        // Force the illegal state the transition table can never produce, the
+        // way a bad import / re-typed ticket did live.
+        b.status = Status::Ready;
+        assert_eq!(b.reclaim_misfiled(Role::System), Ok(true));
+        assert_eq!(b.status(), Status::Open);
+        // Idempotent: a now-legal Open bug is left alone.
+        assert_eq!(b.reclaim_misfiled(Role::System), Ok(false));
+        assert_eq!(b.status(), Status::Open);
+    }
+
+    #[test]
+    fn reclaim_misfiled_leaves_legal_bug_and_feature_states_untouched() {
+        // Verified is a LEGAL bug state — never reclaimed.
+        let mut v = bug("B-2");
+        v.status = Status::Verified;
+        assert_eq!(v.reclaim_misfiled(Role::System), Ok(false));
+        assert_eq!(v.status(), Status::Verified);
+        // A feature in Ready is correct — never touched.
+        let mut f = feature(false);
+        f.set_technical_design(Role::Sa, TechnicalDesign::default())
+            .expect("design");
+        f.transition_to(Role::Sa, Status::Ready).expect("ready");
+        assert_eq!(f.reclaim_misfiled(Role::System), Ok(false));
+        assert_eq!(f.status(), Status::Ready);
+    }
+
+    #[test]
+    fn reclaim_misfiled_is_system_only() {
+        let mut b = bug("B-3");
+        b.status = Status::Ready;
+        assert!(b.reclaim_misfiled(Role::DevBug).is_err());
+        assert_eq!(
+            b.status(),
+            Status::Ready,
+            "a non-System actor changes nothing"
+        );
     }
 
     #[test]
@@ -689,6 +920,67 @@ mod tests {
         assert_eq!(t.claimed_by(), None);
     }
 
+    /// A claimed `InProgress` ticket, the raw material of a takeover.
+    fn claimed(t: &mut Ticket, worker: &str, at: &str) {
+        t.set_technical_design(Role::Sa, tech_design())
+            .expect("set");
+        t.transition_to(Role::Sa, Status::Ready).expect("ready");
+        t.claim(Role::DevFeature, worker, at).expect("claim");
+    }
+
+    #[test]
+    fn take_over_stamps_the_new_holder_and_reports_the_steal() {
+        let mut t = feature(false);
+        claimed(&mut t, "alice@mac", "2026-07-15T00:00:00Z");
+        let previous = t
+            .take_over(Role::System, "bob@pc", "2026-07-15T09:30:00Z")
+            .expect("swap");
+        assert_eq!(previous.as_deref(), Some("alice@mac"));
+        assert_eq!(t.status(), Status::InProgress, "the work stays in flight");
+        assert_eq!(t.claimed_by(), Some("bob@pc"));
+        assert_eq!(t.claimed_at(), Some("2026-07-15T09:30:00Z"));
+    }
+
+    #[test]
+    fn non_system_cannot_take_over_claim() {
+        let mut t = feature(false);
+        claimed(&mut t, "alice@mac", "2026-07-15T00:00:00Z");
+        assert!(matches!(
+            t.take_over(Role::DevFeature, "bob@pc", "2026-07-15T09:30:00Z"),
+            Err(DomainError::FieldNotPermitted { .. })
+        ));
+        // A refused swap leaves the original claim untouched.
+        assert_eq!(t.claimed_by(), Some("alice@mac"));
+    }
+
+    #[test]
+    fn take_over_refused_off_in_progress() {
+        // Feature parked on Ready (claim released) — nothing in flight to take.
+        let mut f = feature(false);
+        f.set_technical_design(Role::Sa, tech_design())
+            .expect("set");
+        f.transition_to(Role::Sa, Status::Ready).expect("ready");
+        assert!(matches!(
+            f.take_over(Role::System, "bob@pc", "2026-07-15T09:30:00Z"),
+            Err(DomainError::InvalidTransition { .. })
+        ));
+        // A fresh bug sits on Open until claimed — same refusal.
+        let mut b = Ticket::new(
+            TicketId::new("BUG-T1").expect("id"),
+            TicketType::Bug,
+            "A bug",
+            "",
+            Priority::High,
+            Complexity::Small,
+            false,
+        )
+        .expect("bug");
+        assert!(matches!(
+            b.take_over(Role::System, "bob@pc", "2026-07-15T09:30:00Z"),
+            Err(DomainError::InvalidTransition { .. })
+        ));
+    }
+
     #[test]
     fn non_system_cannot_release_claim() {
         let mut t = feature(false);
@@ -742,5 +1034,35 @@ mod tests {
     #[test]
     fn new_tickets_start_without_a_goal_association() {
         assert!(feature(false).goal_id().is_none());
+    }
+
+    #[test]
+    fn service_tag_is_requirement_scope_ba_stamps_po_amends() {
+        let mut t = feature(false);
+        assert!(
+            t.service_tag().is_none(),
+            "no tag until the BA declares one"
+        );
+        // Agents and DEV roles must not be able to relabel work as shared
+        // infrastructure to slip past the duplicate radar.
+        assert!(matches!(
+            t.set_service_tag(Role::DevFeature, "infra"),
+            Err(DomainError::FieldNotPermitted {
+                field: "service_tag",
+                ..
+            })
+        ));
+        // The SA may tag since CXA-F420c: an oversize split along a service
+        // boundary stamps each subtask with the service its code lives in.
+        t.set_service_tag(Role::Sa, "engine")
+            .expect("SA tags split children");
+        assert_eq!(t.service_tag(), Some("engine"));
+        t.set_service_tag(Role::Ba, "  infra  ").expect("BA stamps");
+        assert_eq!(t.service_tag(), Some("infra"), "value is trimmed");
+        t.set_service_tag(Role::Po, "ci").expect("PO may amend");
+        assert_eq!(t.service_tag(), Some("ci"));
+        t.set_service_tag(Role::User, "")
+            .expect("super-PO may clear");
+        assert_eq!(t.service_tag(), None, "a blank tag clears the field");
     }
 }

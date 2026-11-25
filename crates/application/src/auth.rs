@@ -471,6 +471,15 @@ pub trait AuthPort: Send + Sync {
     /// account). Returns a [`LoginResult`].
     async fn login(&self, username: &str, password: &str, totp: Option<&str>) -> LoginResult;
 
+    /// Mint a session for an already-authenticated user WITHOUT a password —
+    /// used by SSO/OIDC once the IdP has vouched for the identity (the password
+    /// flow proves the credential; here the id-token did). Returns the session
+    /// token, or `None` if the user is unknown or the backend does not support
+    /// passwordless sessions. Default: unsupported.
+    async fn issue_session(&self, _username: &str) -> Option<String> {
+        None
+    }
+
     /// Attach a human device label (e.g. "Chrome on macOS") to a session token,
     /// so a user can see where they're signed in. No-op if the token is unknown.
     async fn attach_device(&self, _token: &str, _device: &str) {}
@@ -493,6 +502,24 @@ pub trait AuthPort: Send + Sync {
     /// Mint an API token (`label`, `role`) and return the secret **once**.
     /// Returns `None` if the label is taken or persistence fails.
     async fn create_token(&self, label: &str, role: AuthRole) -> Option<String>;
+
+    /// Mint an API token bound to a minting member: `owner` names the account
+    /// whose project memberships the token's bearer inherits (resolved LIVE on
+    /// every bearer resolution, so membership changes and account deletion
+    /// take effect without re-minting); `None` mints a plain service token
+    /// that carries no projects. Same taken-label / `None` contract as
+    /// [`AuthPort::create_token`]. The default deliberately ignores `owner`
+    /// and delegates to [`AuthPort::create_token`], so stores that do not
+    /// model ownership — and every test double — keep their exact behaviour.
+    async fn create_token_for(
+        &self,
+        label: &str,
+        role: AuthRole,
+        owner: Option<&str>,
+    ) -> Option<String> {
+        let _ = owner;
+        self.create_token(label, role).await
+    }
 
     /// Harvest a personal bearer token for `username` at login time — mint-or-
     /// reuse on the self-service path used by `/my/tokens`

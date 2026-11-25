@@ -417,6 +417,10 @@ async function boot(){
   let r;try{r=await fetch("/api/auth/me");}catch(e){rememberDestination();showLogin();return;}
   if(r.status===401){rememberDestination();showLogin();return;}
   try{ME=await r.json();}catch(e){ME={auth:false};}
+  // Open mode (no accounts configured): the server resolves every caller as
+  // "user" — the client must carry the same identity, or own-message actions
+  // (edit/delete) and reaction "mine" states are unreachable (CXA-F367).
+  if(ME&&!ME.username)ME.username="user";
   try{updateSegments();}catch(e){}
   startApp();
 }
@@ -666,8 +670,12 @@ async function renderUserProjPicker(){
       }
     }catch(e){}
   }
-  if(!projects.length){el.innerHTML='<span style="font-size:12px;color:var(--dim)">no projects in this space</span>';return;}
-  el.innerHTML=projects.map(p=>`<label class="uprojchk"><input type="checkbox" value="${esc(p.id)}"><span class="sdot" style="background:${projColor(p.id)}"></span>${esc(p.name)}</label>`).join("");
+  if(!projects.length){
+    // AC4: the empty state is plain hint text — no dot, no empty chip shell.
+    el.innerHTML='<span class="usub">No projects in this space yet — create one in Manage, then assign it here.</span>';
+    return;
+  }
+  el.innerHTML=projects.map(p=>`<label class="uprojchk"><input type="checkbox" value="${esc(p.id)}">${esc(p.name)}</label>`).join("");
 }
 async function openInvite(){
   // Populate space dropdown from /api/spaces
@@ -1385,12 +1393,14 @@ async function openAgent(role,worker){
   // stream never delivers, showAgentLogError paints the error state instead.
   body.innerHTML='<div class="wl-empty"><i class="ti ti-moon-stars"></i> this agent hasn\'t run yet</div>';
   AGENT_LOG_SIGS=[];   // force a fresh render for this role/operator
+
   document.getElementById("ov-agent").classList.add("open");
   AGENT_LOG_ROLE=role.toLowerCase().replace(/-/g,"_");  // serde key: DEV-FEATURE→dev_feature
   restartAgentLog();
 }
 let AGENT_LOG_ES=null, AGENT_LOG_ROLE=null, AGENT_LOG_WORKER="", AGENT_LOG_BUF="", AGENT_LOG_LIVE=false, AGENT_LOG_DONE=false, AGENT_LOG_INIT=false, AGENT_LOG_SIGS=[];
 let AGENT_LOG_RETRIES=0, AGENT_LOG_RETRY_TIMER=null;
+
 // Icon + colour for a tool name, so every engine's tool calls read at a glance.
 // A tool call, said in words: "Read run_chat_reply.rs:400-500" instead of a
 // truncated JSON blob. Long absolute paths collapse to the part a reader
@@ -1403,14 +1413,22 @@ function wlShortPath(p){
 function wlSay(name,args){
   const n=String(name||"").toLowerCase().replace(/^mcp__[^_]*__/,"");
   const raw=String(args||"");
+  // harxes emits human summaries, not JSON args — show them verbatim under
+  // the tool's own verb/icon instead of trying to salvage JSON keys.
+  if(raw && !raw.trim().startsWith("{")){
+    const verbs={read:"Read",edit:"Edit",write:"Write",bash:"Run",grep:"Search",glob:"Find files",list:"List",skill:"Skill",webfetch:"Fetch"};
+    return {verb:verbs[n]||name,detail:raw.length>110?raw.slice(0,110)+"…":raw};
+  }
   let a={};
   try{a=JSON.parse(raw||"{}");}catch(e){
     // The log line is often TRUNCATED mid-JSON, which used to leave a bare
     // "Run" with no command. Salvage the value we care about by hand.
     const grab=k=>{const m=raw.match(new RegExp('"'+k+'"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)'));return m?m[1].replace(/\\"/g,'"').replace(/\\n/g," "):"";};
-    a={command:grab("command"),file_path:grab("file_path"),pattern:grab("pattern"),path:grab("path"),url:grab("url"),description:grab("description")};
+    a={command:grab("command"),file_path:grab("file_path")||grab("filePath"),pattern:grab("pattern"),path:grab("path"),url:grab("url"),description:grab("description")};
   }
-  const f=a.file_path||a.path||a.notebook_path;
+  // opencode uses camelCase arg keys (filePath) where the CLI engines use
+  // snake_case — accept both, or its Read/Edit chips render with no path.
+  const f=a.file_path||a.filePath||a.path||a.notebook_path||a.notebookPath;
   const where=f?wlShortPath(f):"";
   const span=(a.offset!=null)?`:${a.offset}${a.limit?"-"+(a.offset+a.limit):""}`:"";
   if(n==="read")return {verb:"Read",detail:where?where+span:""};
@@ -1490,6 +1508,27 @@ function parseWorklog(raw){
     if(/^#\s/.test(s)){ flush(); items.push({k:"meta",text:s.replace(/^#\s*/,"")}); continue; }
     if(/^\s*—\s*run finished/.test(s)){ flush(); items.push({k:"end"}); continue; }
     if(s.startsWith("💬")){ flush(); cur={k:"msg",text:s.slice(2).replace(/^\s+/,"")}; continue; }
+    // 🧠 thinking (harxes reasoning stream) — consecutive lines fold into ONE
+    // collapsible block so a long deliberation reads as a chapter, not a wall.
+    const th=s.startsWith("🧠")?s.slice(2).replace(/^\s+/,""):(s.match(/^\[thinking\]\s?(.*)$/)||[])[1];
+    if(th!=null){ const last=cur===null?items[items.length-1]:null;
+      if(last&&last.k==="think"){ last.text+="\n"+th; } else { flush(); items.push({k:"think",text:th}); }
+      continue; }
+    // ⏱ loop progress beat (iteration N · cumulative tokens) — the newest
+    // beat supersedes the previous one, so only the latest is kept and the
+    // log doesn't grow a ruler of stale counters.
+    if(/^⏱\s/.test(s)){ flush(); const t=s.replace(/^⏱\s*/,"");
+      const last=items[items.length-1];
+      if(last&&last.k==="iter") last.text=t; else items.push({k:"iter",text:t});
+      continue; }
+    // ↻ provider retry (transient backoff — a status beat, not an error).
+    if(/^↻\s/.test(s)){ flush(); items.push({k:"retry",text:s.replace(/^↻\s*/,"")}); continue; }
+    // Legacy harxes markers (pre-protocol logs): ▶ tool start / ✓ tool end.
+    const lg=s.match(/^([▶✓])\s+(\w+):\s*(.*)$/);
+    if(lg){ flush();
+      if(lg[1]==="▶") items.push({k:"tool",name:lg[2],args:lg[3]});
+      else items.push({k:"result",info:lg[3],body:[]});
+      continue; }
     if(s.startsWith("🔧")){ flush(); const m=s.slice(2).trim(); const i=m.indexOf("(");
       items.push({k:"tool",name:i>=0?m.slice(0,i):m,args:i>=0?m.slice(i+1).replace(/\)$/,""):""}); continue; }
     // Result line: the backend now emits a human summary ("↳ ✓ 220 passed");
@@ -1505,6 +1544,25 @@ function parseWorklog(raw){
   }
   flush();
   return items;
+}
+// Tool output, readable: ANSI escape codes stripped, each line classified so
+// diffs/test results/errors read at a glance instead of as a grey slab.
+function wlPre(body){
+  const lines=body.join("\n").replace(/\[[0-9;]*[A-Za-z]/g,"").split("\n")
+    // opencode wraps file reads in pseudo-XML (<path>..., <type>file</type>,
+    // <content>) — transport framing, not output. The chip already names the
+    // file, so these lines are pure noise in a human-facing preview.
+    .filter(l=>!/^\s*<\/?(path|type|content|file)>/.test(l));
+  const cls=l=>{
+    if(/^\+(?!\+\+)/.test(l))return "add";
+    if(/^-(?!--)/.test(l))return "del";
+    if(/^(error|thread '.*' panicked|FAILED|✗)|error\[E\d+\]/.test(l.trim()))return "err";
+    if(/^(warning)\b/.test(l.trim()))return "warn";
+    if(/\b(test result: ok|passed|Finished|✓)\b/.test(l))return "ok";
+    return "";
+  };
+  const rows=lines.map(l=>`<div class="wl-pl ${cls(l)}">${esc(l)||" "}</div>`).join("");
+  return `<div class="wl-pre">${rows}</div>`;
 }
 // A review/structured-output line is often the model's final answer dumped as
 // raw JSON — `{"decision":"approve","summary":"…"}`. Rendered verbatim it is a
@@ -1548,6 +1606,18 @@ function wlVerdictCard(text){
 // "refresh" flicker on every SSE push).
 function wlItemHtml(it){
   if(it.k==="meta") return `<i class="ti ti-player-play"></i> ${esc(it.text)}`;
+  if(it.k==="think"){
+    // Collapsed by default: the first line as a teaser, the full chain of
+    // thought one click away. Keeps the log scannable while losing nothing.
+    const lines=String(it.text||"").split("\n").filter(l=>l.trim());
+    const teaser=lines[0].length>110?lines[0].slice(0,110)+"…":lines[0];
+    const n=lines.length;
+    // Expanded: each thought is its own numbered step, not a wall of italics.
+    const steps=lines.map((l,i)=>`<div class="wl-think-step"><span class="wl-think-n">${i+1}</span><span>${wlFmt(l)}</span></div>`).join("");
+    return `<details class="wl-think-d" open><summary><i class="ti ti-bulb"></i><span class="wl-think-lbl">thinking${n>1?` · ${n} steps`:""}</span><span class="wl-think-tz">${wlFmt(teaser)}</span></summary><div class="wl-think-body">${steps}</div></details>`;
+  }
+  if(it.k==="iter") return `<span class="wl-iter-in"><i class="ti ti-activity-heartbeat"></i> ${esc(it.text)}</span>`;
+  if(it.k==="retry") return `<span class="wl-chip wl-retry-chip"><i class="ti ti-refresh wl-tic" style="color:var(--amber)"></i><span class="wl-tname">${esc(it.text)}</span></span>`;
   if(it.k==="end")  return `<span><i class="ti ti-circle-check"></i> run finished</span>`;
   if(it.k==="tool"){ const m=wlToolMeta(it.name);
     // Harness-control calls read like errors to a person ("ScheduleWakeup
@@ -1558,15 +1628,18 @@ function wlItemHtml(it){
     return `<span class="wl-chip"><i class="ti ${m.ic} wl-tic" style="color:var(${m.col})"></i><span class="wl-tname">${esc(said.verb)}</span>${said.detail?`<span class="wl-targs">${esc(said.detail)}</span>`:""}</span>`; }
   if(it.k==="result"){
     const body=(it.body||[]).filter(x=>x!=null);
-    const head=`<i class="ti ti-corner-down-right"></i> ${esc(it.info)}`;
+    // A failed tool result (harxes marks it ✗) reads red, not the default green.
+    const bad=/^✗/.test(it.info||"");
+    const head=`<i class="ti ti-corner-down-right"${bad?' style="color:var(--red)"':''}></i> ${esc(it.info)}`;
     if(!body.length) return `<span class="wl-rin">${head}</span>`;
     // The real output, revealed on click — a summary you can open, not a
     // dead-end count.
-    return `<details class="wl-out"><summary class="wl-rin">${head} <span class="wl-more">show output</span></summary><pre class="wl-pre">${esc(body.join("\n"))}</pre></details>`;
+    return `<details class="wl-out"><summary class="wl-rin">${head} <span class="wl-more">show output</span></summary>${wlPre(body)}</details>`;
   }
   const card=wlVerdictCard(it.text);
   if(card) return card;
   return `<span class="wl-ic"><i class="ti ti-sparkles"></i></span><div class="wl-body">${wlFmt(it.text)}</div>`;
+
 }
 // A content signature for one parsed item — two renders with the same signature
 // produce identical DOM, so the live renderer can leave them untouched.
@@ -1650,6 +1723,7 @@ function paintAgentLogIdle(){
   body.innerHTML='<div class="wl-empty"><i class="ti ti-moon-stars"></i> this agent hasn\'t run yet</div>';
 }
 function renderAgentLog(force){
+
   const body=document.getElementById("agent-transcript");
   const badge=document.getElementById("agent-live-badge");
   if(badge)badge.style.display=AGENT_LOG_LIVE?"inline-block":"none";
@@ -1674,8 +1748,14 @@ function renderAgentLog(force){
     const nd=document.createElement("div");
     nd.className="wl-item wl-"+items[i].k;
     nd.innerHTML=wlItemHtml(items[i]);
-    if(body.children[i]) body.replaceChild(nd, body.children[i]);
-    else body.appendChild(nd);
+    if(body.children[i]){
+      // Replacing the still-being-written tail: NO entry animation — the
+      // fade re-triggering on every SSE push read as constant flicker.
+      body.replaceChild(nd, body.children[i]);
+    } else {
+      nd.classList.add("wl-in");
+      body.appendChild(nd);
+    }
     AGENT_LOG_SIGS[i]=sig;
     touched=true;
   }
@@ -1685,6 +1765,7 @@ function renderAgentLog(force){
   updateTyping(body);
   // Only auto-scroll when the user is already pinned to the bottom.
   if(touched && (force||atBottom)) body.scrollTop=body.scrollHeight;
+
 }
 function updateTyping(body){
   const typing=body.querySelector(":scope > .wl-typing");
@@ -1692,7 +1773,7 @@ function updateTyping(body){
   if(want&&!typing){
     const n=document.createElement("div");
     n.className="wl-typing";
-    n.innerHTML='<span class="wl-ic"><i class="ti ti-sparkles"></i></span><span class="dots"><i></i><i></i><i></i></span>';
+    n.innerHTML='<span class="wl-ic"><i class="ti ti-sparkles"></i></span><span class="dots"><i></i><i></i><i></i></span><span class="wl-typing-lbl">working — waiting for the next step</span>';
     body.appendChild(n);
   } else if(!want&&typing){ typing.remove(); }
 }
@@ -1717,6 +1798,7 @@ function stopAgentLog(){
   showAgentLogError(false);
 }
 function closeAgent(){stopAgentLog();AGENT_LOG_ROLE=null;AGENT_LOG_WORKER="";close_('ov-agent');}
+
 async function openTranscript(enc,name){
   document.getElementById("tr-title").textContent=name;
   document.getElementById("tr-body").textContent="loading…";
@@ -1798,17 +1880,58 @@ async function mintToken(){
   }catch(e){box.innerHTML='<div style="color:var(--red);font-size:12px">Network error.</div>';}
 }
 async function revokeToken(label){try{await fetch("/api/auth/tokens/"+label,{method:"DELETE"});renderAccess();}catch(e){}}
+// Security-audit view (deepened per operator's no-shallow-features directive):
+// the endpoint returns the whole log; filtering, paging and CSV export are
+// client-side over that snapshot, so the server stays a dumb export.
+let AUDIT_ROWS=[],AUDIT_PAGE=0;
+const AUDIT_PER=50;
 function renderAudit(){
   fetch("/api/audit-log").then(r=>r.ok?r.json():[]).then(rows=>{
-    const el=document.getElementById("audit-body");
-    if(!Array.isArray(rows)||!rows.length){el.innerHTML='<div class="empty">no audited actions yet</div>';return;}
-    el.innerHTML=rows.map(e=>{
-      const bad=e.status>=400;const col=bad?"var(--red)":"var(--green)";
-      const ic=e.action.includes("login")?(bad?"lock-x":"login"):"pencil";
-      return `<div class="act"><div class="ad" style="background:${col}22;color:${col}"><i class="ti ti-${ic}" style="font-size:13px"></i></div>
-        <div class="atx"><span class="who">${esc(e.user)}</span> ${esc(e.action)} <span class="tk" style="background:${col}22;color:${col}">${e.status}</span></div>
-        <span class="tm">${esc((e.at||"").slice(5,16).replace("T"," "))}</span></div>`;}).join("");
+    AUDIT_ROWS=Array.isArray(rows)?rows:[];AUDIT_PAGE=0;renderAuditRows();
   }).catch(()=>{document.getElementById("audit-body").innerHTML='<div class="empty">unable to load audit log</div>';});
+}
+function auditFiltered(){
+  const q=(document.getElementById("audit-q")?.value||"").toLowerCase();
+  const kind=document.getElementById("audit-kind")?.value||"";
+  const days=document.getElementById("audit-range")?.value||"";
+  const cutoff=days?Date.now()-Number(days)*86400000:0;
+  return AUDIT_ROWS.filter(e=>{
+    if(q&&!(String(e.user||"").toLowerCase().includes(q)||String(e.action||"").toLowerCase().includes(q)))return false;
+    if(kind==="login"&&!String(e.action||"").includes("login"))return false;
+    if(kind==="mutation"&&String(e.action||"").includes("login"))return false;
+    if(kind==="fail"&&!(e.status>=400))return false;
+    if(cutoff&&new Date(e.at||0).getTime()<cutoff)return false;
+    return true;
+  });
+}
+function renderAuditRows(){
+  const el=document.getElementById("audit-body");if(!el)return;
+  const rows=auditFiltered();
+  const cnt=document.getElementById("audit-count");
+  if(cnt)cnt.textContent=rows.length+" / "+AUDIT_ROWS.length+" events";
+  if(!rows.length){el.innerHTML='<div class="empty">'+(AUDIT_ROWS.length?"nothing matches the filter":"no audited actions yet")+'</div>';const pg=document.getElementById("audit-pager");if(pg)pg.innerHTML="";return;}
+  const pages=Math.max(1,Math.ceil(rows.length/AUDIT_PER));
+  if(AUDIT_PAGE>=pages)AUDIT_PAGE=pages-1;
+  const page=rows.slice(AUDIT_PAGE*AUDIT_PER,(AUDIT_PAGE+1)*AUDIT_PER);
+  el.innerHTML=page.map(e=>{
+    const bad=e.status>=400;const col=bad?"var(--red)":"var(--green)";
+    const ic=String(e.action||"").includes("login")?(bad?"lock-x":"login"):"pencil";
+    return `<div class="act"><div class="ad" style="background:${col}22;color:${col}"><i class="ti ti-${ic}" style="font-size:13px"></i></div>
+      <div class="atx"><span class="who">${esc(e.user)}</span> ${esc(e.action)} <span class="tk" style="background:${col}22;color:${col}">${e.status}</span></div>
+      <span class="tm" title="${esc(e.at||"")}">${esc((e.at||"").slice(5,16).replace("T"," "))}</span></div>`;}).join("");
+  const pg=document.getElementById("audit-pager");
+  if(pg)pg.innerHTML=pages<=1?"":`
+    <button class="fchip" ${AUDIT_PAGE<=0?"disabled style='opacity:.4'":""} onclick="AUDIT_PAGE--;renderAuditRows()">‹ newer</button>
+    <span style="font-size:11.5px;color:var(--dim);align-self:center">page ${AUDIT_PAGE+1} / ${pages}</span>
+    <button class="fchip" ${AUDIT_PAGE>=pages-1?"disabled style='opacity:.4'":""} onclick="AUDIT_PAGE++;renderAuditRows()">older ›</button>`;
+}
+function exportAuditCsv(){
+  const rows=auditFiltered();
+  const q=v=>'"'+String(v??"").replace(/"/g,'""')+'"';
+  const csv="at,user,action,status\n"+rows.map(e=>[q(e.at),q(e.user),q(e.action),q(e.status)].join(",")).join("\n");
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
+  a.download="audit-log.csv";a.click();URL.revokeObjectURL(a.href);
 }
 function relTime(iso){if(!iso)return "never";const t=Date.parse(iso.replace(" ","T"));if(isNaN(t))return esc(iso.slice(5,16));
   const s=(Date.now()-t)/1000;if(s<90)return "just now";if(s<3600)return Math.round(s/60)+"m ago";if(s<86400)return Math.round(s/3600)+"h ago";return Math.round(s/86400)+"d ago";}
@@ -1857,10 +1980,16 @@ function renderPeople(){
   }).catch(()=>{body.innerHTML='<div class="empty">unable to load analytics</div>';});
 }
 /* ---- Toasts ---- */
-function toast(msg,type){const c=document.getElementById("toasts");if(!c)return;
+// opts (all optional): { ms: <lifetime>, action: { label, fn } } — an action
+// renders an inline button (the dupes radar's 10s undo, CXA-F362) and its
+// lifetime overrides the 3s default.
+function toast(msg,type,opts){const c=document.getElementById("toasts");if(!c)return;
+  const o=opts||{};
   const ic=type==="ok"?"circle-check":(type==="err"?"alert-triangle":"info-circle");
   const el=document.createElement("div");el.className="toast "+(type||"");el.innerHTML=`<i class="ti ti-${ic}"></i><span>${esc(msg)}</span>`;
-  c.appendChild(el);setTimeout(()=>{el.classList.add("hide");setTimeout(()=>el.remove(),220);},3000);}
+  const done=()=>{el.classList.add("hide");setTimeout(()=>el.remove(),220);};
+  if(o.action){const b=document.createElement("button");b.className="toast-act";b.textContent=o.action.label;b.onclick=()=>{done();o.action.fn();};el.appendChild(b);}
+  c.appendChild(el);setTimeout(done,o.ms||3000);}
 /* ---- Command palette (⌘K) ---- */
 const NAV_IC={overview:"layout-dashboard",team:"robot",board:"columns",roadmap:"timeline",activity:"activity",discuss:"messages",insights:"coin",people:"user-star",audit:"shield-lock",access:"user-cog",settings:"settings"};
 let CMDK_ITEMS=[],CMDK_SEL=0;
@@ -2089,7 +2218,11 @@ async function deleteMsg(id){
   try{const r=await fetch("/api/chat/messages/"+id,{method:"DELETE"});if(!r.ok)toasty("Cannot delete","err");}
   catch(e){toasty("Network error","err");}}
 async function togglePin(id){
-  try{const r=await fetch("/api/chat/messages/"+id+"/pin",{method:"POST"});const d=await r.json();
+  try{const r=await fetch("/api/chat/messages/"+id+"/pin",{method:"POST"});
+    // A refused pin (not owner/admin, or the 5-pin cap) carries the reason —
+    // show it instead of a generic network failure.
+    if(!r.ok){toasty((await r.text())||"Cannot pin","err");return;}
+    const d=await r.json();
     toasty(d.pinned?"Pinned":"Unpinned","ok");loadPins();
   }catch(e){toasty("Network error","err");}}
 function copyMsgLink(id){
@@ -2343,3 +2476,149 @@ function applyFontSize(s){
 })();
 
 boot();
+
+// Cross-project duplicate radar (CXA-F253): pairs of active tickets in
+// DIFFERENT projects that match under the same similarity rule the BA insert
+// loop uses. Each project's BA dedupes only against its own board, so the
+// same generic feature gets independently invented everywhere — this view is
+// where a human redirects, rejects, or explicitly allows a pair. Nothing is
+// auto-suppressed except the one carve-out (CXA-F254 AC4): pairs whose
+// tickets share the same bounded-context service tag are presumed
+// legitimately-shared infrastructure and stay silent while their similarity
+// is within the stricter same-tag bound.
+async function renderDupes(){
+  const el=document.getElementById("dupes-body");if(!el)return;
+  el.innerHTML='<div class="empty"><i class="ti ti-loader-2 att-spin"></i> scanning the fleet…</div>';
+  let data=null;
+  try{
+    const r=await fetch("/api/workspace/duplicates");
+    if(!r.ok){el.innerHTML='<div class="empty">unable to load the duplicate radar ('+r.status+')</div>';return;}
+    data=await r.json();
+  }catch(_){el.innerHTML='<div class="empty">unable to load the duplicate radar</div>';return;}
+  const all=(data&&data.crossProjectDuplicates)||[];
+  const pairs=all.filter(e=>!DUPES_DISMISSED.includes(dupeKey(e)));
+  const hidden=all.length-pairs.length;
+  const head=dupesHeader(data,pairs.length,hidden);
+  if(!pairs.length){
+    el.innerHTML=head+`<div class="panel"><div class="dupe-empty"><i class="ti ti-copy"></i>
+      <div class="dupe-empty-t">No cross-project duplicates</div>
+      <div class="dupe-empty-s">${hidden?hidden+" dismissed this session · <a href='#' onclick='dupeUndoAll();return false'>undo</a>":"Every project is building its own thing. Pairs of tickets across projects with matching titles show up here for a human decision."}</div></div></div>`;
+    return;
+  }
+  el.innerHTML=head+pairs.map(dupesCard).join("");
+}
+// CXA-F362 depth: the header carries the radar's own provenance — when the
+// comparison last ran (the persisted `scannedAt` the server stamps on every
+// run, so it survives a restart) and the refresh cadence — plus the admin's
+// explicit re-run. Session-level dismissals hide reported pairs without
+// touching the boards; each shows a 10s undo toast (the rejection verdicts
+// are the destructive path and stay behind their confirm modal).
+let DUPES_DISMISSED=[];
+// One rendered card IS one reported pair (or collapsed group): the key covers
+// the home AND every dup side, because the paraphrase pass emits one entry per
+// pair — two cards can share a home ticket, and a home-only key would dismiss
+// (and undo) its siblings with it.
+function dupeKey(e){return e.homeProjectId+"/"+e.homeTicketId+"/"+(e.duplicates||[]).map(d=>d.projectId+"/"+d.ticketId).sort().join("|");}
+function dupesHeader(data,count,hidden){
+  return `<div class="panel" style="display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+      <i class="ti ti-copy" style="color:var(--amber)"></i>
+      <b style="font-size:13px">${count} duplicated ask${count===1?"":"s"} across projects</b>
+      <span style="font-size:11px;color:var(--dim)">last scanned ${relTime((data&&data.scannedAt)||"")} · <span title="scan cadence — the radar recomputes on every view open; Scan now forces a re-run">scans every view open</span></span>
+      ${hidden?`<span style="font-size:11px;color:var(--dim)">${hidden} dismissed</span>`:""}
+      <span style="flex:1"></span>
+      ${isHubAdmin()?`<button id="dupes-scan" class="tk-btn go" onclick="dupesScanNow(this)"><i class="ti ti-refresh"></i> Scan now</button>`:""}
+      <span style="font-size:11px;color:var(--dim)">redirect or reject the copy · allow a legitimately-shared ticket</span>
+    </div>`;
+}
+async function dupesScanNow(btn){
+  const old=btn.innerHTML;
+  btn.disabled=true;btn.innerHTML='<i class="ti ti-loader-2 att-spin"></i> Scanning…';
+  try{
+    const r=await fetch("/api/workspace/duplicates/scan",{method:"POST"});
+    if(!r.ok){const t=await r.text().catch(()=>(""));toast(t||("scan failed ("+r.status+")"),"err");btn.disabled=false;btn.innerHTML=old;return;}
+    renderDupes();
+  }catch(_){toast("scan failed","err");btn.disabled=false;btn.innerHTML=old;}
+}
+function dupesCard(e){
+  const rows=(e.duplicates||[]).map(d=>`
+    <div class="dupe-row">
+      <div class="dupe-main">
+        <div class="dupe-title">${esc(d.title)} <span class="dupe-proj">${esc(d.projectName||d.projectId)}</span></div>
+        <div class="dupe-scope">${esc(d.scope||"—")}</div>
+        <div class="dupe-meta"><span class="dupe-tid">${esc(d.ticketId)}</span><span class="dupe-proj">${esc(d.projectId)}</span><span class="dupe-score">similarity ${(Number(d.score)||0).toFixed(2)}</span></div>
+      </div>
+      <div class="dupe-actions">
+        <button class="tk-btn go" onclick="dupeAction('redirect','${esc(e.homeProjectId)}','${esc(e.homeTicketId)}','${esc(d.projectId)}','${esc(d.ticketId)}')"><i class="ti ti-arrow-right"></i> Redirect</button>
+        <button class="tk-btn danger" onclick="dupeAction('reject','${esc(e.homeProjectId)}','${esc(e.homeTicketId)}','${esc(d.projectId)}','${esc(d.ticketId)}')"><i class="ti ti-x"></i> Reject</button>
+        <button class="tk-btn" onclick="dupeAction('allow','${esc(e.homeProjectId)}','${esc(e.homeTicketId)}','${esc(d.projectId)}','${esc(d.ticketId)}')"><i class="ti ti-check"></i> Allow both</button>
+      </div>
+    </div>`).join("");
+  return `<div class="panel dupe-card">
+    <div class="dupe-head">
+      <span class="dupe-badge">duplicate</span>
+      <div class="dupe-main">
+        <div class="dupe-title">${esc(e.homeTicketTitle)} <span class="dupe-proj">${esc(e.homeProjectName||e.homeProjectId)}</span></div>
+        <div class="dupe-scope">${esc(e.homeTicketScope||"—")}</div>
+        <div class="dupe-meta"><span class="dupe-tid">${esc(e.homeTicketId)}</span><span class="dupe-proj">${esc(e.homeProjectId)}</span><span style="color:var(--dim);font-size:11px">home — the keeper</span></div>
+      </div>
+      <div class="dupe-actions"><button class="tk-btn" title="Hide this reported pair for this session" onclick="dupeDismiss('${esc(dupeKey(e))}')"><i class="ti ti-eye-off"></i> Dismiss</button></div>
+    </div>
+    ${rows}
+  </div>`;
+}
+async function dupeAction(action,homeProjectId,homeTicketId,dupProjectId,dupTicketId){
+  if(action!=="allow"){
+    const verb=action==="redirect"?"redirect":"reject";
+    const ok=await coxModal({title:verb[0].toUpperCase()+verb.slice(1)+" the duplicate",
+      message:`${verb[0].toUpperCase()+verb.slice(1)} ${dupProjectId}/${dupTicketId} — the ask stays tracked by ${homeProjectId}/${homeTicketId}.`,
+      confirmText:"Confirm",cancelText:"Cancel",danger:action==="reject"});
+    if(!ok)return;
+  }
+  try{
+    const r=await fetch("/api/workspace/duplicates/action",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({action,home_project_id:homeProjectId,home_ticket_id:homeTicketId,dup_project_id:dupProjectId,dup_ticket_id:dupTicketId})});
+    if(!r.ok){const t=await r.text().catch(()=>(""));toast(t||("action failed ("+r.status+")"),"err");return;}
+    toast(action==="allow"?"Pair allowed — it will not surface again":(action==="redirect"?"Duplicate redirected to the home ticket":"Duplicate rejected"),"ok");
+    renderDupes();
+  }catch(_){toast("action failed","err");}
+}
+// Session-level dismissal: the pair hides from THIS browser until the tab is
+// reloaded — no board mutation, no persisted suppression (that is what
+// "Allow both" is for). The 10s undo toast is the inverse; after it lapses
+// the dismissal stands for the session.
+function dupeDismiss(key){
+  if(!DUPES_DISMISSED.includes(key))DUPES_DISMISSED.push(key);
+  toast("Duplicate pair dismissed — hidden for this session","ok",
+    {ms:10000,action:{label:"Undo",fn:()=>{DUPES_DISMISSED=DUPES_DISMISSED.filter(k=>k!==key);renderDupes();}}});
+  renderDupes();
+}
+function dupeUndoAll(){DUPES_DISMISSED=[];renderDupes();}
+
+// ── Engine health card (depth pass round 3) ─────────────────────────────────
+// The wedge/failure picture the operator was reconstructing by hand from
+// hub.log, drawn from state the SSE snapshot already carries: open
+// engine_incidents (engine · role · reason · repeat count) and the tickets
+// with the most failed attempts. Pure client-side, refreshed on Team nav.
+function renderEngineHealth(){
+  const el=document.getElementById("team-enginehealth");if(!el)return;
+  const s=window.STATE||{};
+  const inc=Array.isArray(s.engine_incidents)?s.engine_incidents:[];
+  const fails=Object.entries(s.ticket_failures||{}).map(([id,v])=>[id,Array.isArray(v)?v.length:0])
+    .filter(x=>x[1]>0).sort((a,b)=>b[1]-a[1]).slice(0,5);
+  if(!inc.length&&!fails.length){el.innerHTML="";return;}
+  const incRows=inc.map(i=>`<div style="display:flex;gap:9px;align-items:baseline;padding:5px 0;border-bottom:1px solid var(--border)">
+    <span class="tk" style="background:color-mix(in srgb,var(--red) 14%,transparent);color:var(--red);flex:none">${esc(i.engine)}</span>
+    <span style="font-size:12px;font-weight:600;flex:none">${esc(i.role||"")}</span>
+    <span style="font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1" title="${esc(i.reason||"")}">${esc(i.reason||"")}</span>
+    <span style="font-size:11px;color:var(--dim);flex:none">×${i.count||1} since ${esc((i.since||"").slice(5,16).replace("T"," "))}</span></div>`).join("");
+  const failRows=fails.map(([id,n])=>`<div style="display:flex;gap:9px;align-items:center;padding:4px 0">
+    <span class="tk" style="cursor:pointer" onclick="showTicket('${esc(id)}')">${esc(id)}</span>
+    <div style="flex:1;background:var(--card2);border-radius:5px;height:7px;overflow:hidden"><div style="width:${Math.min(100,n*20)}%;height:100%;background:var(--amber)"></div></div>
+    <span style="font-size:11.5px;color:var(--muted);flex:none">${n} failed attempt${n>1?"s":""}</span></div>`).join("");
+  el.innerHTML=`<div class="panel" style="margin:10px 0 14px">
+    <h4><i class="ti ti-heart-rate-monitor" style="color:${inc.length?"var(--red)":"var(--green)"}"></i> Engine health
+      <span style="margin-left:auto;font-weight:400;font-size:12px;color:${inc.length?"var(--red)":"var(--green)"}">${inc.length?inc.length+" open incident"+(inc.length>1?"s":""):"no open incidents"}</span></h4>
+    ${incRows}
+    ${fails.length?`<div style="font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--dim);margin:10px 0 4px">Struggling tickets</div>${failRows}`:""}
+  </div>`;
+}

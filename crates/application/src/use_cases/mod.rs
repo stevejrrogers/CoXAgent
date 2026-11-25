@@ -7,15 +7,22 @@ pub mod approval_policy;
 pub mod approval_risk;
 pub mod backup;
 pub mod ceremony;
+pub mod claims;
 pub mod conformance_check;
 pub mod coverage;
 pub mod cycle;
+pub mod daily_recovery;
+pub mod duplicate_radar;
+pub mod freeze_fold_inventory;
 pub mod generate_docs;
 pub mod global_search;
 pub mod json_repair;
+pub mod list_panels;
 pub mod manual_rollback;
+pub mod merge_gate;
 pub mod merge_policy;
 pub mod merge_sweep;
+pub mod overview_contracts;
 pub mod question_batching;
 pub mod readiness_preflight;
 pub mod recover;
@@ -52,21 +59,37 @@ pub use backup::{
     is_excluded, path_stamp, rel_from, secret_statement, BackupOutcome, BackupRequest,
     BackupWorkspaceUseCase,
 };
+pub use claims::{may_touch_claim, ClaimError, ClaimsUseCase, HandbackOutcome, TakeoverOutcome};
 pub use conformance_check::RunConformanceUseCase;
 pub use coverage::{match_score, matches_criterion, record_verdicts};
 pub use cycle::{CycleReport, RunCycleUseCase};
+pub use duplicate_radar::{
+    find_cross_project_duplicates, pair_key, DuplicatePair, RadarTicket, TicketSnapshot,
+};
+pub use freeze_fold_inventory::{freeze_inventory, FrozenInventory, OVERVIEW_ROUTE};
+pub mod fold_drift_gate;
+pub use daily_recovery::{
+    daily_recovery_plan, recovery_eligibility, RecoveryBlock, RecoveryPlan, RecoverySnapshot,
+    RecoveryVerdict, DAILY_RECOVERY_FLOOR, SWEEP_ACTOR,
+};
+pub use fold_drift_gate::{run_fold_drift_gate, FoldDriftVerdict, REFREEZE_COMMAND};
 pub use generate_docs::GenerateDocsUseCase;
 pub use global_search::{
     global_search, global_search_many, GroupedSearch, SearchGroup, SearchHit, SearchKind,
     MAX_PER_KIND, MAX_QUERY_LEN, MAX_TOTAL, MIN_QUERY_LEN,
 };
 pub use json_repair::repair_json;
+pub use list_panels::{list_panels, PanelSlotFilter};
 pub use manual_rollback::{known_good_target, ManualRollbackInput, RollbackOutcome};
+pub use merge_gate::{clamp_lease_ttl, decide as merge_lock_decision, MergeDecision};
 pub use merge_policy::{
     competing_pr, escalation_route, needs_human_eyes, route_from_failures, EscalationRoute,
     MAX_TICKET_RESCUES,
 };
 pub use merge_sweep::{merge_sweep, SweepOutcome};
+pub use overview_contracts::{
+    all_overview_contracts, overview_contracts, OverviewContractRow, OverviewContracts,
+};
 pub use question_batching::{flush_batches, select_deferred, should_defer};
 pub use readiness_preflight::{
     run_preflight, PreflightItem, PreflightProbe, PreflightReport, PreflightSnapshot,
@@ -97,7 +120,7 @@ pub use run_reviews::{RunArchitectureAuditUseCase, RunDocsAuditUseCase};
 pub use run_sa::RunSaUseCase;
 pub use run_standup::RunStandupUseCase;
 pub use run_test::RunTestUseCase;
-pub use runner::{run_forever, RunnerHandle, RunnerSnapshot};
+pub use runner::{cycle_may_run, run_forever, RunnerHandle, RunnerSnapshot};
 pub use scan_deps::{FindingReport, ScanDependenciesUseCase, ScanDepsInput, ScanDepsOutcome};
 
 #[cfg(test)]

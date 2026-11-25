@@ -34,17 +34,22 @@ pub(super) const OUTSIDE_SESSION: &str = "session-outside";
 /// handler gate (distinct from the manage-bar branch the member-tier outsider
 /// trips).
 pub(super) const LEAD_ELSEWHERE_SESSION: &str = "session-lead-elsewhere";
+/// Vanessa's session — legacy Viewer role, member of NOTHING: the strictest
+/// reader there is. The project list must answer her with an empty registry
+/// (CXA-B141), exactly as the per-project gate answers her reads with 403.
+pub(super) const VIEWER_NOWHERE_SESSION: &str = "session-viewer-nowhere";
 /// Alice's bearer token. Every other bearer is invalid or expired.
 pub(super) const INSIDE_BEARER: &str = "bearer-inside";
 /// A fixed RFC3339 instant for lease arguments.
 pub(super) const NOW: &str = "2026-08-28T00:00:00Z";
 
-/// Mint a stub principal. The three the harness actually uses: Alice (member
-/// of [`PID`], Admin — hub-wide by design), Mallory (member of [`OTHER_PID`]
-/// only, member tier) and Morgan (member of [`OTHER_PID`] only, manage tier).
-/// Mallory and Morgan are authenticated globally yet hold no membership in
-/// [`PID`], the exact cross-project case the RBAC gate forbids — they differ
-/// in WHICH gate branch refuses them.
+/// Mint a stub principal. The cast the harness arms in [`StubAuth`]: Alice
+/// (member of [`PID`], Admin — hub-wide by design), Carol (member-tier member
+/// of [`PID`]), Mallory (member of [`OTHER_PID`] only, member tier), Morgan
+/// (member of [`OTHER_PID`] only, manage tier) and Vanessa (Viewer, member of
+/// NOTHING). Mallory, Morgan and Vanessa are authenticated globally yet hold
+/// no membership in [`PID`], the exact cross-project case the RBAC gate
+/// forbids — they differ in WHICH gate branch refuses them.
 pub(super) fn principal(username: &str, role: AuthRole, projects: &[&str]) -> AuthUser {
     AuthUser {
         username: username.to_owned(),
@@ -71,6 +76,7 @@ impl AuthPort for StubAuth {
             MEMBER_SESSION => Some(principal("carol", AuthRole::Be, &[PID])),
             OUTSIDE_SESSION => Some(principal("mallory", AuthRole::Be, &[OTHER_PID])),
             LEAD_ELSEWHERE_SESSION => Some(principal("morgan", AuthRole::Manager, &[OTHER_PID])),
+            VIEWER_NOWHERE_SESSION => Some(principal("vanessa", AuthRole::Viewer, &[])),
             _ => None,
         }
     }

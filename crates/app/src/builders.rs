@@ -6,6 +6,7 @@
 
 use super::retry::{boot_backoff, retrying, BOOT_ATTEMPTS};
 use super::*;
+use std::pin::Pin;
 
 /// Build the state store for one project. Backend selection is ordered,
 /// REMOTE-first:
@@ -287,8 +288,34 @@ pub fn provision_local_token(_base: &Path) {
 
 /// Build one project: store, engine stack, runner (spawned, paused), returned as
 /// a `ProjectHandle` the hub server can host alongside others.
+///
+/// The future is boxed AT THE SOURCE: `ProjectState` grows with every feature
+/// (each new field widens every future that holds it), and this builder's
+/// future already sat just under clippy's `large_futures` bound — a single
+/// state field broke all four call sites at once. Boxing here once means the
+/// next field never breaks a caller again.
+/// The boxed future [`build_project`] returns — named once so the signature
+/// stays readable and the boxing stays in exactly one place.
+type BuildProjectFuture<'a> = Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<coxagent_presentation::ProjectHandle, Box<dyn std::error::Error>>,
+            > + Send
+            + 'a,
+    >,
+>;
+
+pub(crate) fn build_project<'a>(
+    id: &'a str,
+    state_dir: &'a Path,
+    work_dir: PathBuf,
+    auth: Option<&'a Arc<dyn coxagent_application::auth::AuthPort>>,
+) -> BuildProjectFuture<'a> {
+    Box::pin(build_project_inner(id, state_dir, work_dir, auth))
+}
+
 #[allow(clippy::too_many_lines)] // one linear wiring pass; splitting hurts readability
-pub(crate) async fn build_project(
+async fn build_project_inner(
     id: &str,
     state_dir: &Path,
     work_dir: PathBuf,
@@ -320,7 +347,25 @@ pub(crate) async fn build_project(
         tracing::info!("[{id}] recovered {} orphaned claim(s)", recovered.len());
     }
 
-    let loaded = store.load().await.ok();
+    let mut loaded = store.load().await.ok();
+    // CXA-F371: a fresh install starts with the accumulated lesson base —
+    // seed the shipped lessons into state.lessons on boot. The seed is pure
+    // and idempotent (`bootstrap_lessons`): a second boot seeds nothing, and
+    // runtime-learned or operator-edited lessons are never overwritten — an
+    // upgrade adds only the new shipped ids. The save fires only when
+    // something was actually added, so later boots stay read-only here.
+    if let Some(state) = loaded.as_mut() {
+        let seeded = coxagent_application::bootstrap_lessons::seed_lessons(state);
+        if !seeded.is_empty() {
+            match store.save(state).await {
+                Ok(()) => tracing::info!(
+                    "[{id}] seeded {} shipped lesson(s) into the lesson base",
+                    seeded.len()
+                ),
+                Err(e) => tracing::warn!("[{id}] could not persist the seeded lesson base: {e}"),
+            }
+        }
+    }
     let alias = loaded.as_ref().map(|s| s.alias.clone()).unwrap_or_default();
     let custom_name = loaded.as_ref().and_then(|s| s.display_name.clone());
     let mut context =
@@ -421,6 +466,17 @@ pub(crate) async fn build_project(
         }
     };
 
+    // CXA-F420a.2: per-service slot pools. With one service (every legacy
+    // project), the filter stays None and nothing changes. With several, each
+    // runner is bound to exactly one service's tickets and repo.
+    let active_services: Vec<_> = config
+        .effective_services(work_dir.to_string_lossy().as_ref())
+        .into_iter()
+        .filter(|svc| svc.status == "active")
+        .collect();
+    let default_service_filter =
+        (active_services.len() > 1).then(|| active_services[0].name.clone());
+
     // Leader runner: singleton phases (BA, PO, standup, etc.)
     {
         // The leader's feedback-fix / SA-rescue git ops get their OWN worktree,
@@ -444,6 +500,10 @@ pub(crate) async fn build_project(
             coxagent_infrastructure::screenshot::ChromeScreenshot,
         )))
         .with_probe(Some(Arc::new(coxagent_infrastructure::probe::HttpProbe)))
+        .with_service(default_service_filter.clone())
+        // CXA-F273: the leader owns the eviction sweep; without a cold store
+        // the sweep is a no-op and the hot state simply keeps growing.
+        .with_archive(build_archive_store().await)
         // Evidence blobs go where the hub serves media from: S3/MinIO when
         // configured, else the default hub's local blob dir (~/CoXAgent/blobs).
         .with_storage(Some(build_storage().await.unwrap_or_else(|| {
@@ -581,6 +641,7 @@ pub(crate) async fn build_project(
             slot_dir,
             context.clone(),
         )
+        .with_service(default_service_filter.clone())
         // Co-located slots never compete for the machine's leader lease —
         // rotation across slots produced the scorecard-numbering and
         // version-ping-pong bugs. Machine-level election (slot 0) remains,
@@ -635,18 +696,125 @@ pub(crate) async fn build_project(
         tokio::spawn(async move { run_forever(wh, worker, Duration::from_secs(5)).await });
     }
 
+    // CXA-F420a.2: one DEV worker per EXTRA active service, bound to that
+    // service's repo and ticket set. The default service keeps the classic
+    // slot pool above; a service whose clone is missing is skipped loudly
+    // (cloning is the F420b wizard's job, not boot's).
+    for svc in active_services.iter().skip(1) {
+        let svc_repo = std::path::PathBuf::from(&svc.work_dir);
+        if svc.work_dir.is_empty() || !svc_repo.exists() {
+            tracing::warn!(
+                "[{id}] service '{}' has no clone at '{}' — skipping its worker \
+                 (run the F420b onboarding probe, or clone it and restart)",
+                svc.name,
+                svc.work_dir
+            );
+            continue;
+        }
+        let slot_dir = worktree_at(svc_repo, &format!("{id}-{}-slot-1", svc.name));
+        tracing::info!(
+            "[{id}] service '{}' worker on {}",
+            svc.name,
+            slot_dir.display()
+        );
+        let worker = RunCycleUseCase::new(
+            Arc::clone(&store),
+            engine.clone(),
+            config.clone(),
+            slot_dir,
+            context.clone(),
+        )
+        .with_service(Some(svc.name.clone()))
+        .with_leader_election(false)
+        .with_meter(meter.clone())
+        .with_live_budget(Arc::clone(&live_budget))
+        .with_deploy(Arc::new(DockerComposeDeploy::new()))
+        .with_host_port_probe(host_port_probe)
+        .with_shot(Some(Arc::new(
+            coxagent_infrastructure::screenshot::ChromeScreenshot,
+        )))
+        .with_probe(Some(Arc::new(coxagent_infrastructure::probe::HttpProbe)))
+        .with_storage(Some(build_storage().await.unwrap_or_else(|| {
+            Arc::new(coxagent_infrastructure::storage::LocalStorage::new(
+                std::env::var_os("HOME")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_default()
+                    .join("CoXAgent")
+                    .join("blobs"),
+            ))
+        })))
+        .with_git(Arc::new(coxagent_infrastructure::SystemGit::new()))
+        .with_files(Some(Arc::new(
+            coxagent_infrastructure::FsWorkspaceFiles::new(),
+        )))
+        .with_janitor(Some(Arc::new(coxagent_infrastructure::OsProcessJanitor)))
+        .with_reloader(mk_reloader());
+        let worker = if let Some(ref f) = forge {
+            worker.with_forge(Arc::clone(f))
+        } else {
+            worker
+        };
+        let worker = worker.with_notifier(build_notifier(
+            Arc::clone(&store),
+            webhook.clone(),
+            Arc::clone(&outbox),
+        ));
+        let worker = if let Some(r) = build_pr_reporter(&config, auth, id, id).await {
+            worker.with_reporter(r)
+        } else {
+            worker.with_reporter(Arc::new(
+                coxagent_application::ports::outbound::StorePrReporter::new(Arc::clone(&store)
+                    as Arc<dyn coxagent_application::ports::outbound::StateStorePort>),
+            ))
+        };
+        let wh = Arc::clone(&handle);
+        tokio::spawn(async move { run_forever(wh, worker, Duration::from_secs(5)).await });
+    }
+
     // Auto-resume this machine's operator if the user left it running last time
     // (per-operator desired state). This restores only THIS user's operator —
     // it never starts anyone else's, so no one's credentials get spent for them.
-    if let Ok(op) = std::env::var("COXAGENT_OPERATOR") {
-        if !op.is_empty() {
-            let operator = format!("{op}@{}", worker_host());
-            if matches!(store.get_desired(&operator).await, Ok(Some(true))) {
-                handle.set_operator(&op, &worker_host());
-                handle.resume();
-                tracing::info!("auto-resumed operator {operator} (left running)");
+    //
+    // Identity comes from COXAGENT_OPERATOR — but macOS GUI launchctl envs
+    // have now vanished three times without a reboot (2026-10-16, -20, -22),
+    // and every loss read as a total "hub wedge": boot looks healthy, the
+    // runner silently stays paused forever (the Oct-20 outage alone was 17h).
+    // So the identity is PERSISTED next to operator.token the first time the
+    // env is seen, later boots fall back to that file, and having neither is
+    // a LOUD warning that names the fix — never a silent pause again.
+    let identity_path = operator_token_path().map(|p| p.with_file_name("operator.identity"));
+    let op_env = std::env::var("COXAGENT_OPERATOR")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    let op = op_env.clone().or_else(|| {
+        let p = identity_path.as_ref()?;
+        let from_file = std::fs::read_to_string(p).ok()?.trim().to_owned();
+        if from_file.is_empty() {
+            None
+        } else {
+            tracing::warn!(
+                "COXAGENT_OPERATOR is unset — recovered operator identity '{from_file}'                  from {} (launchctl envs are known to vanish; restore them when convenient)",
+                p.display()
+            );
+            Some(from_file)
+        }
+    });
+    if let Some(op) = op {
+        if op_env.is_some() {
+            if let Some(p) = &identity_path {
+                let _ = std::fs::write(p, &op);
             }
         }
+        let operator = format!("{op}@{}", worker_host());
+        if matches!(store.get_desired(&operator).await, Ok(Some(true))) {
+            handle.set_operator(&op, &worker_host());
+            handle.resume();
+            tracing::info!("auto-resumed operator {operator} (left running)");
+        }
+    } else {
+        tracing::warn!(
+            "auto-resume SKIPPED: COXAGENT_OPERATOR is unset and no operator.identity              file exists — the runner stays PAUSED until someone presses Resume.              Fix: `launchctl setenv COXAGENT_OPERATOR <name>` and restart, or write              the name into ~/CoXAgent/operator.identity"
+        );
     }
 
     // Self-upgrade (dogfood CD, opt-in): every 15 min a DETACHED script checks
@@ -801,6 +969,42 @@ pub(crate) async fn build_doc_store(
         Ok(None) => None,
         Err(e) => {
             tracing::warn!("MongoDB configured but unreachable ({e}); using per-project state");
+            None
+        }
+    }
+}
+
+/// Cold store for archived (evicted) tickets (CXA-F264b). The Mongo adapter
+/// (`MongoTicketArchive`, the `COXAGENT_MONGO_*` knobs shared with the docs
+/// store) takes the slot in production; the env-gated in-memory adapter
+/// stands in for dev/e2e runs (`COXAGENT_ARCHIVE_MEMORY=1`, optionally seeded
+/// via `COXAGENT_ARCHIVE_MEMORY_SEED`). Off by default: with nothing wired
+/// every archive read-back answers empty, exactly the pre-archive behavior,
+/// and an unreachable Mongo degrades to that same empty archive with a warn.
+pub(crate) async fn build_archive_store(
+) -> Option<std::sync::Arc<dyn coxagent_application::ports::outbound::ArchiveStorePort>> {
+    match coxagent_infrastructure::MongoTicketArchive::from_env().await {
+        Ok(Some(store)) => {
+            tracing::info!("ticket archive: MongoDB cold store");
+            return Some(std::sync::Arc::new(store));
+        }
+        Ok(None) => {} // Mongo not configured: the dev/e2e memory gate decides below.
+        Err(e) => {
+            tracing::warn!(
+                "MongoDB ticket archive configured but unreachable ({e}); \
+                 falling back — archive read-back stays empty unless the \
+                 in-memory dev/e2e archive is enabled"
+            );
+        }
+    }
+    match coxagent_infrastructure::MemoryArchiveStore::from_env() {
+        Ok(Some(store)) => {
+            tracing::info!("ticket archive: in-memory (dev/e2e; no Mongo cold store wired)");
+            Some(std::sync::Arc::new(store))
+        }
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!("in-memory archive requested but unusable ({e}); archive stays empty");
             None
         }
     }

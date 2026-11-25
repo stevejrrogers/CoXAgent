@@ -5,7 +5,9 @@ pub mod json_store;
 mod quarantine;
 pub mod redis_coord;
 mod rest_store;
+mod sql_shards;
 pub mod sql_store;
+mod tombstone;
 
 pub use any_store::AnyStateStore;
 pub use json_store::JsonStateStore;

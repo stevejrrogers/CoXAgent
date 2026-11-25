@@ -28,6 +28,23 @@ pub struct PullRequest {
     pub created: String,
 }
 
+/// One issue on the connected repo's backlog, as surfaced to the brownfield
+/// import (CXA-F258). Images/attachments are NOT carried — the imported
+/// ticket embeds [`IssueDraft::url`] and links back to the source issue.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IssueDraft {
+    /// Provider issue number (`#123`).
+    pub number: u64,
+    pub title: String,
+    /// The issue body (markdown), as authored on the forge.
+    pub body: String,
+    /// Label names on the issue (e.g. `bug`, `priority:high`).
+    pub labels: Vec<String>,
+    /// Web URL of the source issue — the back-link the imported ticket embeds
+    /// and the identity a re-run dedupes on.
+    pub url: String,
+}
+
 /// The forge (code host) API for a project's repository.
 #[async_trait]
 pub trait ForgePort: Send + Sync {
@@ -103,6 +120,27 @@ pub trait ForgePort: Send + Sync {
     /// [`PortError::Backend`] on an API/CLI failure.
     async fn comment_pr(&self, _number: u64, _body: &str) -> Result<(), PortError> {
         Ok(())
+    }
+
+    /// Open issues on the connected repo, newest first — the source of the
+    /// brownfield backlog import (CXA-F258). At most `limit` drafts. Default:
+    /// unsupported → empty (forges without an issue listing, e.g. GitLab
+    /// until it ships one).
+    ///
+    /// # Errors
+    /// [`PortError::Backend`] on an API/CLI failure.
+    async fn list_open_issues(&self, _limit: usize) -> Result<Vec<IssueDraft>, PortError> {
+        Ok(Vec::new())
+    }
+
+    /// Closed issues on the connected repo — imported only when the operator
+    /// opts in (CXA-F258 AC4); they land `Pending` and never enter the agent
+    /// claim pipeline. Default: unsupported → empty.
+    ///
+    /// # Errors
+    /// [`PortError::Backend`] on an API/CLI failure.
+    async fn list_closed_issues(&self, _limit: usize) -> Result<Vec<IssueDraft>, PortError> {
+        Ok(Vec::new())
     }
 }
 

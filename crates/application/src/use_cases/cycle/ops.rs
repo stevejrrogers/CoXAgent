@@ -257,8 +257,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // when IT failed at the compose level.
         // CXA-F289: the failed attempt's forensics triggered this rollback.
         // A SUCCESSFUL rollback overwrites the deploy record below, so the
-        // bundle must ride the rollback record to stay visible.
-        let trigger_bundle = state.deploy.as_ref().and_then(|d| d.failure_bundle.clone());
+        // bundle must ride the rollback record to stay visible — and the
+        // failure's one-line summary must be captured NOW too (CXA-F306):
+        // it is the failure-class text the lesson-efficacy matcher keys on,
+        // and after the overwrite only the rollback's own summary remains.
+        let trigger = state.deploy.as_ref();
+        let trigger_bundle = trigger.and_then(|d| d.failure_bundle.clone());
+        let trigger_summary = trigger.map(|d| d.summary.clone());
         let path = self.rollback_worktree_path();
         let _ = git.worktree_remove(&self.work_dir, &path).await;
         let (ok, summary, own_bundle) =
@@ -300,6 +305,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             &good.sha,
             ok,
             summary,
+            trigger_summary,
             record_bundle,
             report,
         )
@@ -340,6 +346,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         good_sha: &str,
         ok: bool,
         summary: String,
+        // The FAILING deploy's own summary (CXA-F306), captured before the
+        // rollback overwrote the deploy record — `None` when the failure's
+        // text was unavailable and the rollback summary is all there is.
+        failure_summary: Option<String>,
         failure_bundle: Option<crate::state::DeployFailureBundle>,
         report: &mut CycleReport,
     ) {
@@ -397,8 +407,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
 
         // A successful rollback is an incident worth learning from — run the
         // post-mortem loop exactly once for this revision.
-        self.post_mortem(reason, failed_sha, good_sha, false, summary.clone(), report)
-            .await;
+        self.post_mortem(
+            reason,
+            failed_sha,
+            good_sha,
+            false,
+            summary.clone(),
+            failure_summary,
+            report,
+        )
+        .await;
     }
     /// Record a rollback that was deliberately NOT attempted (stale target or
     /// a migration in the way) — distinct from an attempt that failed. The
@@ -440,12 +458,15 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         )
         .await;
         // A skipped rollback is still an incident — record its post-mortem once.
+        // No deploy-failure summary exists to match (nothing was attempted), so
+        // the skip explanation is the post-mortem's only text.
         self.post_mortem(
             reason,
             failed_sha,
             to_sha,
             true,
             summary.to_string(),
+            None,
             report,
         )
         .await;
@@ -461,6 +482,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     ///
     /// Best-effort throughout: none of these failures may break or stall a run,
     /// and there must never be more than one post-mortem per revision.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn post_mortem(
         &self,
         reason: &str,
@@ -468,12 +490,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         target_sha: &str,
         rolled_forward: bool,
         summary: String,
+        // The failure-class text for the lesson-efficacy matcher (CXA-F306):
+        // what the failing deploy itself said, not the rollback's own outcome
+        // line. Falls back to `summary` when unavailable.
+        failure_summary: Option<String>,
         _report: &mut CycleReport,
     ) {
         use crate::state::{INCIDENTS_CHANNEL, MAX_INCIDENTS};
 
         let failed = failed_sha.clone().unwrap_or_default();
         let short_target = short_sha(target_sha);
+        let incident_at = crate::state::now_rfc3339();
         let mood = if rolled_forward {
             "rolled-forward/stale"
         } else {
@@ -485,14 +512,16 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         );
 
         // Blacklist + durable record + #incidents surface in ONE state mutation:
-        // they describe the same incident and must land atomically.
+        // they describe the same incident and must land atomically. The stamp
+        // is minted once: it is also the once-per-incident identity the lesson
+        // efficacy loop dedupes and dismisses on (CXA-F306).
         crate::ports::outbound::mutate_state(self.store.as_ref(), |s| {
             if !failed.is_empty() {
                 s.rolled_back_commits.insert(failed.clone());
             }
             s.post_chat_in("SM", &body, INCIDENTS_CHANNEL, Vec::new());
             s.incidents.push(crate::state::IncidentRecord {
-                at: crate::state::now_rfc3339(),
+                at: incident_at.clone(),
                 reason: reason.to_owned(),
                 failed_sha: failed.clone(),
                 to_sha: target_sha.to_owned(),
@@ -525,6 +554,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         })
         .await
         .ok();
+
+        // CXA-F306: does this failure class ALREADY have a lesson? Match the
+        // FAILURE's own summary against existing project + hub lessons and
+        // increment the hit's recurrence count (once per incident). Best-
+        // effort like the rest of this path — a matching failure never
+        // delays the cycle.
+        let match_text = failure_summary
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| summary.clone());
+        self.match_lesson_recurrence(&match_text, reason, &incident_at)
+            .await;
     }
     /// File a High bug when a rollback attempt itself fails (deduped on an
     /// open one) — the root-cause failure already filed its own bug via
@@ -561,6 +601,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     "The app is reachable and serving a known-good build".to_owned()
                 ],
                 goal: None,
+                service_tag: None,
             })
             .await
             .ok()
@@ -628,6 +669,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 has_ui: false,
                 acceptance_criteria: acceptance,
                 goal: None,
+                service_tag: None,
             })
             .await
             .ok()
@@ -647,6 +689,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // rejection and force a redesign loop. Only externally-closed PRs
             // (a real person) must trigger that signal.
             s.seen_closed_prs.insert(number);
+            // A closed PR can never be held open again (CXA-C026): drop any
+            // kept-OPEN hold counter it was accumulating.
+            s.pr_open_holds.remove(&number);
             Ok(())
         })
         .await;
@@ -659,8 +704,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// - a SLOT worktree sitting on a named branch (worktrees must stay
     ///   detached, or they hold `main`/feature branches hostage) → detach;
     /// - a SLOT worktree with uncommitted residue (an engine died mid-edit)
-    ///   that would otherwise block every future checkout → stash the WIP with
-    ///   a named marker;
+    ///   that would otherwise block every future checkout → park the WIP on a
+    ///   durable checkpoint ref (CXA-F318), then wipe the tree; a FAILED park
+    ///   falls back to the anonymous stash and surfaces as a run error;
     /// - the LEADER tree dirty on a feature branch (half-written edits block
     ///   every checkout) → stash the WIP with a named marker and return to the
     ///   base branch;
@@ -668,13 +714,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     ///   agent merged a feature branch into local base by mistake) → keep them
     ///   on a `backup/…` branch and hard-reset base to origin.
     ///
-    /// Best-effort: every step logs what it did; a failure never stops the
-    /// cycle. Pure orchestration over `GitPort::raw` — no direct IO here.
-    pub(super) async fn tree_hygiene(&self) {
-        let Some(git) = &self.git else { return };
+    /// Returns the run errors recorded this pass (e.g. a failed WIP checkpoint)
+    /// so the cycle can push them into `report.errors` — the errors==0 close
+    /// gate then blocks delivery until investigated. Best-effort otherwise:
+    /// every step logs what it did; a failure never stops the cycle. Pure
+    /// orchestration over `GitPort::raw` — no direct IO here.
+    pub(super) async fn tree_hygiene(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        let Some(git) = &self.git else { return errors };
         let wd = &self.work_dir;
         if !self.config.git.enabled || !git.is_repo(wd).await {
-            return;
+            return errors;
         }
         let base = {
             let t = self.config.git.target_branch.trim();
@@ -685,9 +735,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
         };
         let branch = git.current_branch(wd).await.unwrap_or_default();
-        let is_slot = wd
-            .components()
-            .any(|c| c.as_os_str() == ".coxagent-worktrees");
+        let is_slot = crate::use_cases::run_dev::wip::is_slot_worktree(wd);
         if is_slot {
             // Slots must stay detached; holding a branch blocks every other
             // tree from checking it out.
@@ -703,10 +751,77 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // A slot left with uncommitted residue (an engine died mid-edit)
             // is the SAME trap as the leader tree: every later `checkout` of a
             // new branch fails with "local changes would be overwritten" and
-            // the ticket is mis-assigned forever. Stash the WIP with a named
-            // marker so the slot is clean for the next checkout.
+            // the ticket is mis-assigned forever.
             let (_, status) = git.raw(wd, &["status", "--porcelain"]).await;
             if !status.trim().is_empty() {
+                self.park_slot_residue(git, wd, &mut errors).await;
+            }
+        } else {
+            // Leader-tree hygiene lives in its own method to keep tree_hygiene lean.
+            self.tree_hygiene_leader(git, wd, &base, &branch).await;
+        }
+        // Checkpoint refs are inert once their ticket is done: prune the ones
+        // whose ticket is closed or gone, and bound the unattributed ones.
+        let pruned = crate::use_cases::run_dev::wip::prune_ticket_wip_refs(
+            git.as_ref(),
+            wd,
+            self.store.as_ref(),
+        )
+        .await;
+        if !pruned.is_empty() {
+            self.log_git(&format!(
+                "hygiene: pruned {} spent WIP checkpoint ref(s): {}",
+                pruned.len(),
+                pruned.join(", ")
+            ))
+            .await;
+        }
+        errors
+    }
+
+    /// Park a dirty slot's residue on a durable checkpoint ref (CXA-F318) and
+    /// wipe the tree — an anonymous `git stash` is exactly what
+    /// `git stash clear` loses (the recorded team lesson). A FAILED park falls
+    /// back to the stash so the work still survives somewhere, and surfaces as
+    /// a run error: the errors==0 close gate blocks delivery until it is
+    /// investigated. The slot releases either way.
+    async fn park_slot_residue(
+        &self,
+        git: &Arc<dyn GitPort>,
+        wd: &std::path::Path,
+        errors: &mut Vec<String>,
+    ) {
+        let author = crate::use_cases::run_dev::wip::bot_author(&self.config.git.commit_email);
+        match crate::use_cases::run_dev::wip::park_slot_wip(
+            git.as_ref(),
+            wd,
+            self.store.as_ref(),
+            None,
+            &author,
+        )
+        .await
+        {
+            Ok(Some(parked)) => {
+                let cp = &parked.checkpoint;
+                self.log_git(&format!(
+                    "hygiene: parked slot WIP on {} ({}) — {} — wiping residue",
+                    cp.ref_name, cp.sha, cp.note
+                ))
+                .await;
+                // The work is on the ref: the tree can be wiped.
+                let (reset, _) = git.raw(wd, &["reset", "--hard"]).await;
+                let (clean, _) = git.raw(wd, &["clean", "-fd"]).await;
+                if !(reset && clean) {
+                    errors.push(
+                        "WIP checkpoint: slot residue parked but the wipe failed — the tree \
+                         stays dirty"
+                            .to_owned(),
+                    );
+                }
+            }
+            // Nothing to park raced clean — leave the tree alone.
+            Ok(None) => {}
+            Err(e) => {
                 let (ok, _) = git
                     .raw(
                         wd,
@@ -715,19 +830,21 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                             "push",
                             "-u",
                             "-m",
-                            "hygiene: slot WIP (engine died mid-edit)",
+                            "hygiene: slot WIP (checkpoint FAILED) — recover with \
+                             `git stash list`",
                         ],
                     )
                     .await;
                 if ok {
-                    self.log_git("hygiene: stashed slot WIP — recover with `git stash list`")
-                        .await;
+                    self.log_git(
+                        "hygiene: stashed slot WIP — checkpoint FAILED, recover with \
+                         `git stash list`",
+                    )
+                    .await;
                 }
+                errors.push(format!("WIP checkpoint: {e}"));
             }
-            return;
         }
-        // Leader-tree hygiene lives in its own method to keep tree_hygiene lean.
-        self.tree_hygiene_leader(git, wd, &base, &branch).await;
     }
 
     /// Leader-tree hygiene: orphan WIP on a feature branch -> stash + back to

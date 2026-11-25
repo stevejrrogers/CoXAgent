@@ -865,10 +865,7 @@ fn linux_c_toolchain_present() -> bool {
         "musl-clang",
         "zig", // zig cc can drive a configured cross build when present
     ];
-    if std::env::var("CARGO_BUILD_TARGET")
-        .ok()
-        .is_some_and(|v| v.contains("linux"))
-    {
+    if std::env::var("CARGO_BUILD_TARGET").is_ok_and(|v| v.contains("linux")) {
         return true;
     }
     let overrides = [
@@ -1216,6 +1213,11 @@ impl DeployPort for DockerComposeDeploy {
     }
 
     async fn down(&self, work_dir: &Path) -> Result<(), PortError> {
+        // Deliberately WITHOUT `-v`: callers use this to PAUSE a project (the
+        // forge preview swap/restore stops the main build and brings it back
+        // later), so the pgdata volume must survive the pause (CXA-B115).
+        // Dormant volumes of genuinely-destroyed projects are the janitor
+        // sweep's job (CXA-B143).
         let proj = compose_project_name(work_dir);
         let _ = Command::new("docker")
             .args(["compose", "-p", &proj, "down", "--remove-orphans"])
@@ -1329,6 +1331,10 @@ impl DeployPort for DockerComposeDeploy {
         // ports, so `up` fails with "port is already allocated" — a recurring,
         // self-inflicted deploy blocker. `down --remove-orphans` releases the
         // project's own ports (and orphaned services) so `up` starts clean.
+        // Deliberately WITHOUT `-v`: this is a REDEPLOY, not a teardown — the
+        // pgdata volume must survive so the stored secrets keep matching the
+        // initialised database (CXA-B115/B032). Dormant-volume hygiene for
+        // genuinely-destroyed projects is the janitor's sweep (CXA-B143).
         let proj = compose_project_name(work_dir);
         // Safety: `compose_project_name` always yields `cox-<parent>-<dir>`,
         // but double-check it can never collide with the live hub project
@@ -1408,8 +1414,11 @@ impl DeployPort for DockerComposeDeploy {
                 if !reclaimable_compose_project(&project) {
                     break;
                 }
+                // `-v`: eviction DESTROYS this project — containers, networks
+                // and volumes alike. Leaving the volumes behind is how dormant
+                // pgdata/workspace residue accumulated on the host (CXA-B143).
                 let _ = Command::new("docker")
-                    .args(["compose", "-p", &project, "down", "--remove-orphans"])
+                    .args(["compose", "-p", &project, "down", "-v", "--remove-orphans"])
                     .stdin(std::process::Stdio::null())
                     .kill_on_drop(true)
                     .output()
@@ -1741,12 +1750,76 @@ fn interpolation_gap(stderr: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+#[cfg(test)]
+mod cross_check_infra_tests {
+    use super::{build_failure_check, looks_like_build_infra_failure};
+
+    #[test]
+    fn registry_deadline_is_unavailable_not_a_code_failure() {
+        let stderr = "------\n > [internal] load metadata for docker.io/library/docker:cli:\n                      ------\nfailed to solve: DeadlineExceeded: context deadline exceeded\n";
+        let c = build_failure_check(stderr);
+        assert!(!c.available, "network weather must not bounce tickets");
+        assert!(c.errors.is_empty());
+        assert!(c.reason.contains("environment"));
+    }
+
+    #[test]
+    fn compiler_diagnostics_still_fail_the_gate() {
+        let stderr = "error[E0425]: cannot find value `x` in this scope\n --> src/main.rs:1:1\n                      DeadlineExceeded mentioned later must not whitewash a real error\n";
+        let c = build_failure_check(stderr);
+        assert!(c.available);
+        assert!(!c.errors.is_empty());
+    }
+
+    #[test]
+    fn plain_build_failures_keep_their_tail() {
+        let c = build_failure_check("some linker exploded\nexit status 1\n");
+        assert!(c.available);
+        assert_eq!(c.errors.len(), 1);
+        assert!(!looks_like_build_infra_failure("ordinary failure"));
+    }
+}
+
+/// Whether a docker-build stderr describes an environment fault (registry,
+/// network, daemon, disk) rather than the project's code. Conservative: only
+/// phrases BuildKit/compose emit before any compiler ran.
+fn looks_like_build_infra_failure(text: &str) -> bool {
+    const MARKS: [&str; 8] = [
+        "DeadlineExceeded",
+        "context deadline exceeded",
+        "failed to solve: failed to fetch",
+        "load metadata for",
+        "TLS handshake timeout",
+        "temporary failure in name resolution",
+        "no space left on device",
+        "Cannot connect to the Docker daemon",
+    ];
+    MARKS.iter().any(|m| text.contains(m))
+}
+
 /// Build a `CrossCheck` reporting a genuine (non-interpolation) build failure
 /// from a `docker ... build` command's stderr — shared by the compose-build
 /// path and the Dockerfile fallback so the two don't drift.
 fn build_failure_check(text: &str) -> coxagent_application::ports::outbound::CrossCheck {
     use coxagent_application::ports::outbound::CrossCheck;
+    // Infra-shaped failures are NOT evidence about the ticket's code. A
+    // registry/network hiccup ("load metadata … DeadlineExceeded") bounced
+    // every ticket of 2026-10-21 as "broke the Linux build" until someone ran
+    // the same build on a clean main and watched it fail identically. When
+    // the stderr carries no compiler diagnostics and matches a known
+    // environment failure, answer "unavailable" so run_dev warns instead of
+    // blocking the queue on weather.
     let (errors, _) = parse_clippy(text);
+    if errors.is_empty() && looks_like_build_infra_failure(text) {
+        let tail: String = text.lines().rev().take(3).collect::<Vec<_>>().join(" | ");
+        return CrossCheck {
+            available: false,
+            reason: format!(
+                "docker build failed for environment reasons (registry/network/daemon),                  not the code: {tail}"
+            ),
+            errors: Vec::new(),
+        };
+    }
     CrossCheck {
         available: true,
         reason: "verified via the Docker (Linux) image build".to_owned(),
@@ -1783,7 +1856,9 @@ async fn compose_build_check(
     // to start services.
     let secrets = resolve_deploy_secrets(work_dir);
     let mut build = Command::new("docker");
-    build.args(["compose", "-p", &proj, "build"]);
+    // `--ssh default` forwards the host agent so the builder stage can fetch
+    // the private harxes-core git dependency (see Dockerfile).
+    build.args(["compose", "-p", &proj, "build", "--ssh", "default"]);
     build.current_dir(work_dir);
     seed_deploy_secrets(&mut build, &secrets);
     let out = tokio::time::timeout(DEPLOY_TIMEOUT, build.output())
@@ -1817,7 +1892,7 @@ async fn compose_build_check(
     let dockerfile_build = tokio::time::timeout(
         DEPLOY_TIMEOUT,
         Command::new("docker")
-            .args(["build", "-f", "Dockerfile", "."])
+            .args(["build", "--ssh", "default", "-f", "Dockerfile", "."])
             .current_dir(work_dir)
             .stdin(std::process::Stdio::null())
             .output(),

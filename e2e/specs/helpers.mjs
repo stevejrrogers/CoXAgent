@@ -14,7 +14,37 @@ export async function assertNoConsoleErrors(errors) {
   expect(errors, `console errors:\n${errors.join('\n')}`).toEqual([]);
 }
 
-/// Open the app and wait until it has painted real content.
+/// Wait until the app's classic-script STATE global actually holds the fixture
+/// tickets. The snapshot arrives over the 1 Hz SSE stream AFTER load, so a
+/// spec that interacts immediately races it; this is the hydration gate every
+/// openApp must pass before handing control to a spec. Both suites (open and
+/// auth) hydrate over the same stream, so the wait is defined here and shared.
+export async function awaitStateSnapshot(page) {
+  try {
+    await page.waitForFunction(
+      () => {
+        try {
+          /* eslint-disable no-undef */
+          return typeof STATE !== 'undefined' && Array.isArray(STATE.tickets) && STATE.tickets.length > 0;
+        } catch {
+          return false;
+        }
+      },
+      null,
+      { timeout: 15000 },
+    );
+  } catch {
+    // Name the unhydrated app state (CXA-F315 AC5): a bare function timeout
+    // reads as an unrelated spec bug deep inside the interactions.
+    throw new Error(
+      'fixture readiness failed: the state snapshot never arrived — app STATE holds no tickets ' +
+        'after 15s, so the app is unhydrated (the fixture server did not deliver the SSE snapshot)',
+    );
+  }
+}
+
+/// Open the app and wait until it has painted real content AND hydrated the
+/// fixture state.
 export async function openApp(page) {
   // Pin a runnable engine before first paint. On load, CoXAgent asks
   // /api/engines what agent CLIs this machine has; a bare runner (Linux CI,
@@ -55,23 +85,10 @@ export async function openApp(page) {
     }),
   );
   await page.goto('/');
-  await page.waitForLoadState('networkidle');
-  // The state snapshot arrives over SSE AFTER networkidle (the stream keeps
-  // the connection open, so idle fires first). A spec that drives the UI
-  // immediately — window.showTicket(...) — raced it and flaked. Wait until
-  // the app actually holds tickets before handing control to the spec.
-  // STATE is a classic-script `let` global — NOT a window property — so it
-  // is only reachable via bare identifier inside the page.
-  await page.waitForFunction(
-    () => {
-      try {
-        /* eslint-disable no-undef */
-        return typeof STATE !== 'undefined' && Array.isArray(STATE.tickets) && STATE.tickets.length > 0;
-      } catch {
-        return false;
-      }
-    },
-    null,
-    { timeout: 15000 },
-  );
+  // networkidle can NEVER fire once the SSE stream holds its connection open,
+  // so it is bounded and tolerated — the snapshot wait below subsumes what it
+  // was for (the stream opens as soon as the app connects; if idle wins the
+  // race it fires first, exactly as before, just without unbounded waiting).
+  await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+  await awaitStateSnapshot(page);
 }

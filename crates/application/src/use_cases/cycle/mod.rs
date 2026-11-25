@@ -23,6 +23,7 @@ mod backlog;
 mod ceremonies;
 mod debt_sweep;
 mod escalation;
+mod hygiene;
 mod po_daily;
 mod pr_truth;
 mod preflight;
@@ -31,10 +32,12 @@ mod ship_truth;
 mod sm_watch;
 mod wiring;
 
+mod evict;
 mod forge;
 mod forge_feedback;
 mod forge_merge;
 mod forge_review;
+mod lesson_sweep;
 mod ops;
 mod qa_evidence;
 mod recovery;
@@ -153,6 +156,8 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     shot: Option<Arc<dyn crate::ports::outbound::ScreenshotPort>>,
     probe: Option<Arc<dyn crate::ports::outbound::ApiProbePort>>,
     storage: Option<Arc<dyn crate::ports::outbound::StoragePort>>,
+    /// Cold store for evicted terminal tickets (CXA-F273); None = eviction off.
+    archive: Option<std::sync::Arc<dyn crate::ports::outbound::ArchiveStorePort>>,
     deploy: Option<Arc<dyn DeployPort>>,
     notifier: Option<Arc<dyn crate::ports::outbound::NotifierPort>>,
     /// Reporter that pushes PR/review activity to the hub over HTTP. The runner
@@ -178,6 +183,9 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     /// Polled between phases: `true` = the user pressed Pause, stop starting
     /// new phases and end this cycle early. `None` (tests/headless) = never.
     pause_check: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// Service this runner's DEV legs are bound to (CXA-F420a.2); `None` =
+    /// single-service project, no filtering.
+    service: Option<String>,
     /// Whether this runner competes for the project leader lease (default
     /// true). Worker slots co-located with a primary runner set false — see
     /// the election comment in `run_cycle`.
@@ -232,6 +240,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             shot: None,
             probe: None,
             storage: None,
+            archive: None,
             deploy: None,
             host_port_probe,
             notifier: None,
@@ -244,6 +253,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             phase: None,
             reloader: None,
             pause_check: None,
+            service: None,
             leader_election: true,
             phase_track: Mutex::new((None, std::collections::BTreeMap::new())),
             worker: String::new(),
@@ -384,6 +394,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     }
 
     /// Attach local git so completed tickets are committed (and, later, pushed)
+    /// Attach the ticket cold store; eviction runs only when present.
+    #[must_use]
+    pub fn with_archive(
+        mut self,
+        archive: Option<std::sync::Arc<dyn crate::ports::outbound::ArchiveStorePort>>,
+    ) -> Self {
+        self.archive = archive;
+        self
+    }
+
+    /// Attach the git port for merge-queue and hygiene work, used
     /// when `config.git.enabled`.
     #[must_use]
     pub fn with_git(mut self, git: Arc<dyn GitPort>) -> Self {
@@ -674,7 +695,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // phase: if the engine answers, the incident closes on the evidence
         // and the next cycle is full; if not, one fault, not eight.
         if self.engine_incident_open().await {
-            self.run_canary_probe(&mut report).await;
+            // Box::pin: the cycle future crossed the large-future bound once
+            // hygiene grew its WIP-checkpoint error channel (CXA-F318) —
+            // boxing this one branch keeps the whole future under it.
+            Box::pin(self.run_canary_probe(&mut report)).await;
             return report;
         }
 
@@ -746,8 +770,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         // the LEADER tree dirty on a feature branch or its local base polluted,
         // and a SLOT worktree holding a branch hostage — then every later git
         // op this cycle fails in a chain (the 2026-08-16 all-D night). Clean
-        // up before anything touches git.
-        self.tree_hygiene().await;
+        // up before anything touches git. A failed slot-WIP checkpoint (CXA-F318)
+        // comes back as a run error: the errors==0 close gate blocks delivery
+        // until it is investigated.
+        for hygiene_error in self.tree_hygiene().await {
+            report.errors.push(hygiene_error);
+        }
         // Brake-hold reconciliation BEFORE any phase reads the brakes
         // (CXA-F238): an operator hold whose expiry bound elapsed must not
         // survive to gate this cycle's BA/DEV phases.
@@ -797,6 +825,10 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.memory_hygiene().await;
             // Self-tuning: react to our own evals (daily) — quality/intake brakes.
             self.self_tune().await;
+            // Lesson efficacy (CXA-F306, daily): force lessons with 2+
+            // recurrences into structural fixes — chore first, then a bug
+            // when a closed chore failed to stop the recurrence.
+            self.lesson_efficacy_sweep().await;
             // Forge hygiene: rebase open PRs onto the moving base + learn
             // from PRs a human closed without merging.
             self.forge_hygiene().await;
@@ -810,6 +842,9 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             self.ship_truth_sweep().await;
             self.pr_truth_sweep().await;
             self.po_daily_pass().await;
+            self.security_sweep_pass().await;
+            self.backlog_hygiene_pass().await;
+            self.lesson_to_gate_pass().await;
             // Stop starting, start finishing: review + merge the PR queue at
             // the TOP of the cycle. This used to run at the very end — after
             // codegraph, ceremonies and the (tens-of-minutes) dev phases — so
@@ -819,14 +854,33 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // Debt sweep cadence (configurable): every Nth cycle files ONE
             // tech-debt chore (lint baseline, dead code, missing docs) — the
             // discipline of paying debt down on a schedule instead of never.
+            // Debt chores are intake too — only file one when the backlog
+            // has room (same demand gate as the BA above).
             if cycle % self.config.workflow.cadence.debt_sweep_every_cycles() == 0 {
-                self.file_debt_sweep(cycle).await;
+                let room = self.store.load().await.is_ok_and(|s| {
+                    use coxagent_domain::ticket::Status;
+                    s.tickets
+                        .iter()
+                        .filter(|t| {
+                            matches!(t.status(), Status::Open | Status::Pending | Status::Ready)
+                        })
+                        .count()
+                        < 30
+                });
+                if room {
+                    self.file_debt_sweep(cycle).await;
+                }
             }
 
             // SM dispatch FIRST (agents resolve), then report what remains.
             // Boxed: the escalation ladder holds a failure log across its awaits,
             // and inlining it here pushes the whole cycle future over 16KB.
+            // Repair misfiled bugs (a BUG stranded in a feature-only status is
+            // dispatchable by no one and deadlocks a sprint that committed it)
+            // BEFORE the SM drive, so a reclaimed bug is immediately eligible.
+            self.reclaim_misfiled_bugs().await;
             Box::pin(self.sm_unpark_tickets()).await;
+            self.sm_drive_sprint_flow().await;
             self.impediment_watch().await;
 
             // Merge-queue recovery gate: with a blown-up queue the ONLY useful
@@ -874,7 +928,26 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     .errors
                     .push("BA: paused by self-tuning — backlog outgrew throughput".to_owned());
             }
-            if !ba_paused && !refactoring && ba_every > 0 && (cycle - 1) % ba_every == 0 {
+            // Demand-driven intake (Steve: clock-driven cadences went absurd
+            // once cycles shrank to minutes): the BA proposes only when the
+            // actionable backlog has ROOM. A board already deeper than the
+            // team can drain does not need more ideas — it needs finishing.
+            let backlog_has_room = self.store.load().await.is_ok_and(|s| {
+                use coxagent_domain::ticket::Status;
+                s.tickets
+                    .iter()
+                    .filter(|t| {
+                        matches!(t.status(), Status::Open | Status::Pending | Status::Ready)
+                    })
+                    .count()
+                    < 30
+            });
+            if !ba_paused
+                && !refactoring
+                && ba_every > 0
+                && (cycle - 1) % ba_every == 0
+                && backlog_has_room
+            {
                 if recovery {
                     report
                         .errors
@@ -889,7 +962,18 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             }
 
             // Team hygiene: reject any duplicate tickets before design/dev.
-            self.dedup_backlog().await;
+            // Dupes only appear when new tickets were minted (BA above, or
+            // through the API). The full token-set scan every cycle was
+            // eating the leader loop alive (146/168 stack samples in dedup
+            // while engine legs starved) — scan when BA just created work,
+            // plus a periodic sweep for API-minted tickets.
+            if !report.ba_created.is_empty() || cycle % 10 == 0 {
+                self.dedup_backlog().await;
+            }
+            // CXA-F273: keep the hot state small — terminal tickets move to
+            // the cold archive; every save serializes the whole row, and an
+            // unbounded tickets array had grown saves into minute-long stalls.
+            self.evict_terminal_tickets().await;
 
             // Both of these are author-once jobs that re-check every cycle and
             // almost always exit early — but the early exit still costs a
@@ -973,7 +1057,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                     .push("cycle cut short — paused by user".to_owned());
                 return report;
             }
-            match self.dev(DevMode::Bug).execute().await {
+            match Box::pin(self.dev(DevMode::Bug).execute()).await {
                 Ok(id) => {
                     if let Some(tid) = &id {
                         self.commit_for_ticket(tid, "fix").await;
@@ -1006,7 +1090,14 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                 .await;
             }
         }
-        let bug_slot_worked = report.bug_fixed.is_some();
+        // Count the slot as worked only when a REAL fix landed — a
+        // not-reproducible close ships no code and must not hold the feature
+        // lane (see `bug_slot_did_real_work`). No state loaded → fall back to
+        // the old presence signal.
+        let bug_slot_worked = brake_state.as_ref().map_or_else(
+            || report.bug_fixed.is_some(),
+            |s| crate::selection::bug_slot_did_real_work(report.bug_fixed.as_ref(), s),
+        );
         if reactive_brake && bug_slot_worked {
             report
                 .errors
@@ -1031,7 +1122,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             // Before building, make sure the next feature has a clear definition
             // of done — DEV raises unclear tickets and the BA fills them in.
             self.clarify_next_feature().await;
-            match self.dev(DevMode::Feature).execute().await {
+            match Box::pin(self.dev(DevMode::Feature).execute()).await {
                 Ok(id) => {
                     if let Some(tid) = &id {
                         self.commit_for_ticket(tid, "feat").await;
@@ -1245,7 +1336,12 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             } else {
                 self.report("TEST", &verifying);
                 match self.test().execute().await {
-                    Ok(ids) => report.bugs_filed = ids,
+                    Ok(ids) => {
+                        report.bugs_filed = ids;
+                        // Only a COMPLETED run retires this Fixed set; a failed
+                        // run must leave it eligible for the next cycle.
+                        self.record_test_pass_fingerprint().await;
+                    }
                     Err(e) => report.errors.push(format!("TEST: {e}")),
                 }
                 // Deterministic screenshot pass: attach a real image to each UI
@@ -1444,7 +1540,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     /// fault instead of a phase-by-phase burn.
     async fn run_canary_probe(&self, report: &mut CycleReport) {
         self.report("DEV-BUG", "canary probe (engine incident open)");
-        match self.dev(DevMode::Bug).execute().await {
+        match Box::pin(self.dev(DevMode::Bug).execute()).await {
             Ok(Some(done)) => report.bug_fixed = Some(done),
             // Nothing to claim proves nothing about the engine — without a
             // fallback the incident could never close on an empty backlog.
@@ -1785,7 +1881,7 @@ mod version_reconcile_tests {
 }
 
 #[cfg(test)]
-mod cycle_tests;
+pub(crate) mod cycle_tests;
 
 #[cfg(test)]
 mod qa_evidence_tests;

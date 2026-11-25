@@ -23,10 +23,13 @@ const CLIENT_XFF = { 'X-Forwarded-For': '10.7.0.42' };
 // Rate-limit budget: every non-GET /api/auth/* call shares one 20-per-60s
 // window per client IP (rate_limit_mw), and the whole suite runs in well
 // under that window on one loopback IP. Measured on this suite: the other
-// specs spend 16 POSTs of the window, so this file budgets exactly FOUR —
-// one admin login + one admin personal token (cached module-wide and reused
-// by every runner-class assertion), one viewer login, one admin-minted
-// lead-role token. The viewer account itself is NOT unconditionally created:
+// specs spend 16 POSTs of the window, so this file historically budgeted
+// exactly FOUR. CXA-F350 adds the lead-tier persona (one user upsert, one
+// lead login, one lead personal-token mint) — three more /api/auth POSTs —
+// and run-server-auth.sh now raises the window with the AUTH_RATE_MAX env
+// var that same ticket introduced, so the budget note below is the
+// without-override shape, kept for operators running default limits.
+// The viewer account itself is NOT unconditionally created:
 // rbac-viewer provisions it earlier in the run (the suite's documented
 // cross-file fixture sharing); a member-assign probe detects its absence
 // (standalone runs) and only then pays the create POST. No retry loops over
@@ -59,6 +62,12 @@ const PID = 'default';
 const STORE = `/api/projects/${PID}/store`;
 const VIEWER_USER = 'viewere2e';
 const VIEWER_PASSWORD = 'ViewerPass_12345';
+// CXA-F350 persona: a lead-tier member whose personal bearer token must
+// inherit the member's project memberships. The account itself is fixed
+// (create_user upserts hash/role across boots); only the minted token's
+// label is run-unique, because the token store persists across boots.
+const LEAD_USER = 'leade2e';
+const LEAD_PASSWORD = 'LeadPass_12345';
 
 /// The full twelve-op wire surface RestStateStore drives over this route
 /// (crates/infrastructure/src/state/rest_store.rs; pinned in-process by
@@ -323,6 +332,68 @@ test('AC2: a manage-tier non-member is refused by the project-membership branch'
   });
   expect(refused.status).toBe(403);
   expect(refused.body).toMatchObject({ error: 'not a member of this project' });
+});
+
+test('CXA-F350: a lead-tier member’s personal token inherits the member’s project memberships', async ({
+  page,
+}) => {
+  const admin = { Authorization: `Bearer ${await adminToken(page)}` };
+
+  // Provision the lead persona: an upserted TechLead account (idempotent
+  // across boots — create_user upserts hash/role) assigned to the project.
+  const made = await page.request.post('/api/auth/users', {
+    data: { username: LEAD_USER, password: LEAD_PASSWORD, role: 'techlead' },
+    headers: { ...admin, ...CLIENT_XFF },
+  });
+  expect(made.status(), 'lead user upsert').toBe(200);
+  const assigned = await page.request.post(`/api/projects/${PID}/members`, {
+    data: { username: LEAD_USER },
+    headers: admin,
+  });
+  expect(assigned.status(), 'lead assigned to the project').toBe(200);
+
+  // Mint the personal token exactly the way a runner operator does: sign in
+  // as the member, POST /api/auth/my/tokens. The session cookie carries
+  // this mint (bearer callers mint through the same endpoint).
+  await page.context().clearCookies();
+  const login = await page.request.post('/api/auth/login', {
+    data: { username: LEAD_USER, password: LEAD_PASSWORD },
+    headers: CLIENT_XFF,
+  });
+  expect(login.status(), 'lead should log in').toBe(200);
+  const minted = await page.request.post('/api/auth/my/tokens', {
+    data: { label: `f350-lead-${Date.now()}` },
+    headers: CLIENT_XFF,
+  });
+  expect(minted.status(), 'lead personal token mint').toBe(200);
+  const leadToken = (await minted.json()).token;
+  expect(leadToken).toMatch(/^[0-9a-f]{64}$/);
+
+  // The BEARER alone carries the membership: drop the session so the cookie
+  // fallback cannot authenticate, then read the project's state.
+  await page.context().clearCookies();
+  const lead = { Authorization: `Bearer ${leadToken}` };
+  const load = await storeOp(page.request, 'load', lead);
+  expect(
+    load.status,
+    'a lead-tier member’s personal token passes the membership branch',
+  ).toBe(200);
+  expect(Array.isArray(load.body.tickets), 'op=load yields the ticket array')
+    .toBe(true);
+
+  // Live resolution: revoking the membership revokes the token's project
+  // reach on the NEXT call, with no re-mint — the same secret is refused.
+  const removed = await page.request.delete(
+    `/api/projects/${PID}/members/${LEAD_USER}`,
+    { headers: admin },
+  );
+  expect(removed.status(), 'membership removal').toBe(200);
+  const revoked = await storeOp(page.request, 'load', lead);
+  expect(revoked.status, 'the same token after unassignment').toBe(403);
+  expect(revoked.body).toMatchObject({ error: 'not a member of this project' });
+
+  // The gate did not wedge: the admin bearer still reads the project.
+  expect((await storeOp(page.request, 'load', admin)).status).toBe(200);
 });
 
 test('AC3: a runner process with env credentials completes its store round-trip', async ({

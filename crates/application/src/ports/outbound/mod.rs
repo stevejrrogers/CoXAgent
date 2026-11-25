@@ -1,17 +1,23 @@
 //! Outbound ports — interfaces the application needs the outside world to fulfil.
 
+pub mod archive;
 pub mod audit;
 pub mod backup;
+pub mod daily_recovery;
 pub mod deploy;
 pub mod deps;
 pub mod doc_store;
 pub mod engine;
+pub mod fold_freeze_source;
 pub mod forge;
 pub mod git;
 pub mod janitor;
 pub mod kv_doc;
+pub mod merge_lock;
 pub mod notify;
 pub mod outbox;
+pub mod overview_inventory;
+pub mod payments;
 pub mod pr_report;
 pub mod probe;
 pub mod screenshot;
@@ -19,7 +25,8 @@ pub mod state_store;
 pub mod storage;
 pub mod workspace;
 
-pub use audit::{AuditPort, AuditRecord};
+pub use archive::ArchiveStorePort;
+pub use audit::{AuditPort, AuditRecord, AuditVerification};
 pub use backup::{
     archive_sha256, hex_decode, hex_encode, is_safe_archive_path, sha256_hex, validate_archive,
     ArchiveFile, ArchiveManifest, ArchiveRoot, BackupArchivePort, SecretChoice, WorkspaceArchive,
@@ -32,17 +39,26 @@ pub use deploy::{
 pub use deps::{DependencyDiscoveryPort, Lockfile};
 pub use doc_store::DocStorePort;
 pub use engine::{AgentEnginePort, AgentOutcome, AgentRequest, SandboxStatus, Usage};
-pub use forge::{ForgePort, PrFeedback, PullRequest};
+pub use forge::{ForgePort, IssueDraft, PrFeedback, PullRequest};
 pub use git::{GitAuthor, GitPort, SyncBase, WorkingTreeDiff};
 pub use janitor::ProcessJanitorPort;
 pub use kv_doc::KvDocPort;
+pub use merge_lock::{MergeLockHolder, MergeLockPort};
 pub use notify::{ChatNotifier, FanoutNotifier, NotifierPort, NotifyEvent, NullNotifier};
 pub use outbox::{MemoryOutboxStore, OutboxStorePort};
+pub use overview_inventory::{LivePanelInventory, OverviewInventoryPort};
+pub mod fold_drift_source;
+pub use fold_drift_source::FoldDriftSourcePort;
+pub use payments::{
+    ChargeReceipt, ChargeRequest, ChargeStatus, CurrencyCode, PaymentError, PaymentsPort,
+    RefundReceipt,
+};
 pub use pr_report::{NullPrReporter, PrOpen, PrReporterPort, StorePrReporter};
 pub use probe::{ApiProbePort, ApiProof};
 pub use screenshot::ScreenshotPort;
 pub use state_store::{
-    mutate_state, GitCheck, QuarantineEntry, StateStorePort, WorkerCaps, WorkerEntry,
+    mutate_shard, mutate_state, GitCheck, QuarantineEntry, ShardData, ShardKind, StateShard,
+    StateStorePort, WorkerCaps, WorkerEntry,
 };
 pub use storage::StoragePort;
 pub use workspace::{FileMeta, WorkspaceFilesPort};

@@ -2,8 +2,11 @@
 //! the composition root can pick an engine from config without boxing a trait
 //! object. Add a variant here when a new engine adapter lands.
 
+#[cfg(feature = "harxes")]
+use crate::engine::HarxesEngine;
 use crate::engine::{
-    ClaudeEngine, CopilotEngine, HermesEngine, McpAccess, OpencodeEngine, ScriptedEngine,
+    ClaudeEngine, CopilotEngine, HermesEngine, HttpEngine, McpAccess, OpencodeEngine,
+    ScriptedEngine,
 };
 use async_trait::async_trait;
 use coxagent_application::config::{EngineChoice, EngineKind};
@@ -19,6 +22,9 @@ pub enum AnyEngine {
     Hermes(HermesEngine),
     Copilot(CopilotEngine),
     Scripted(ScriptedEngine),
+    Http(HttpEngine),
+    #[cfg(feature = "harxes")]
+    Harxes(HarxesEngine),
 }
 
 impl AnyEngine {
@@ -67,6 +73,13 @@ impl AnyEngine {
                 CopilotEngine::new(choice.model.clone()).with_sandbox(sandbox),
             )),
             EngineKind::Scripted => Ok(Self::Scripted(ScriptedEngine::new())),
+            // Endpoint + key come from COXAGENT_LLM_* (model from the choice);
+            // sandbox is irrelevant (no local file writes).
+            EngineKind::Http => Ok(Self::Http(HttpEngine::from_env(choice.model.clone()))),
+            #[cfg(feature = "harxes")]
+            EngineKind::Harxes => Ok(Self::Harxes(
+                HarxesEngine::new(choice.model.clone()).with_sandbox(sandbox),
+            )),
             other => Err(PortError::Backend(format!(
                 "no adapter for engine {other:?} yet"
             ))),
@@ -83,6 +96,9 @@ impl AgentEnginePort for AnyEngine {
             AnyEngine::Hermes(e) => e.id(),
             AnyEngine::Copilot(e) => e.id(),
             AnyEngine::Scripted(e) => e.id(),
+            AnyEngine::Http(e) => e.id(),
+            #[cfg(feature = "harxes")]
+            AnyEngine::Harxes(e) => e.id(),
         }
     }
 
@@ -93,6 +109,9 @@ impl AgentEnginePort for AnyEngine {
             AnyEngine::Hermes(e) => e.sandbox_status(),
             AnyEngine::Copilot(e) => e.sandbox_status(),
             AnyEngine::Scripted(e) => e.sandbox_status(),
+            AnyEngine::Http(e) => e.sandbox_status(),
+            #[cfg(feature = "harxes")]
+            AnyEngine::Harxes(e) => e.sandbox_status(),
         }
     }
 
@@ -103,6 +122,9 @@ impl AgentEnginePort for AnyEngine {
             AnyEngine::Hermes(e) => e.run(request).await,
             AnyEngine::Copilot(e) => e.run(request).await,
             AnyEngine::Scripted(e) => e.run(request).await,
+            AnyEngine::Http(e) => e.run(request).await,
+            #[cfg(feature = "harxes")]
+            AnyEngine::Harxes(e) => e.run(request).await,
         }
     }
 
@@ -132,6 +154,15 @@ impl AgentEnginePort for AnyEngine {
                     .await
             }
             AnyEngine::Scripted(e) => {
+                e.resume_run(role, session_id, follow_up, work_dir, timeout)
+                    .await
+            }
+            AnyEngine::Http(e) => {
+                e.resume_run(role, session_id, follow_up, work_dir, timeout)
+                    .await
+            }
+            #[cfg(feature = "harxes")]
+            AnyEngine::Harxes(e) => {
                 e.resume_run(role, session_id, follow_up, work_dir, timeout)
                     .await
             }

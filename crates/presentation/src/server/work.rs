@@ -64,6 +64,16 @@ fn provenance_field(
     (!prov.is_empty()).then(|| serde_json::to_value(prov).unwrap_or_default())
 }
 
+/// The project's deploy config, read leniently: a corrupt file degrades to
+/// the default and any link derived from it degrades to null, never fails the
+/// payload that wanted it (the rule `inbox_ep` and this reader share).
+fn config_lenient(path: &std::path::Path) -> Config {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
+        .unwrap_or_default()
+}
+
 /// Full detail for one ticket — including the `design` specs stripped from list
 /// payloads — loaded only when the user opens it.
 pub(super) async fn ticket_detail_ep(
@@ -73,13 +83,8 @@ pub(super) async fn ticket_detail_ep(
     let Some(p) = app.project(&pid).await else {
         return not_found();
     };
-    // The live reproduction link (CXA-F244) needs the project's deploy config;
-    // read it the same way inbox_ep does — a corrupt config degrades to the
-    // default and the link degrades to null, never fails the detail payload.
-    let cfg = std::fs::read_to_string(&p.config_path)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Config>(&t).ok())
-        .unwrap_or_default();
+    // The live reproduction link (CXA-F244) needs the project's deploy config.
+    let cfg = config_lenient(&p.config_path);
     match p.store.load().await {
         Ok(state) => {
             // Artifact existence is storage IO, resolved up front so the
@@ -89,120 +94,131 @@ pub(super) async fn ticket_detail_ep(
                 state.ticket_evidence.get(&id).map(Vec::as_slice),
             )
             .await;
-            state
-                .tickets
-                .iter()
-                .find(|t| t.id().as_str() == id)
-                .map_or_else(not_found, |t| {
-                    let mut v = serde_json::to_value(t).unwrap_or_default();
-                    // Cost-gate surface: the hold estimate (if any) and whether a
-                    // human already approved this ticket to run.
-                    if let Some(obj) = v.as_object_mut() {
-                        // Test-to-AC traceability (CXA-F024): the Test Coverage tab
-                        // renders straight from the aggregate's computed matrix —
-                        // the status logic stays in the domain, not in the view.
-                        obj.insert(
-                            "coverage_matrix".into(),
-                            serde_json::to_value(t.coverage_matrix()).unwrap_or_default(),
-                        );
-                        if let Some(est) = state.cost_holds.get(&id) {
-                            obj.insert("cost_hold".into(), serde_json::json!(est));
-                        }
-                        if let Some(ev) = state.ticket_evidence.get(&id) {
-                            obj.insert(
-                                "evidence".into(),
-                                evidence_items_with_artifacts(ev, &artifacts).into(),
-                            );
-                        }
-                        // Engine & model provenance (CXA-F257): which engine
-                        // and model actually executed each agent step on this
-                        // ticket, chronological — the verify gate approves
-                        // what ran, not what config asked for. Absent when
-                        // empty, so payloads for tickets with no captured
-                        // runs are unchanged for older readers.
-                        if let Some(pv) = provenance_field(&state, &id) {
-                            obj.insert("provenance".into(), pv);
-                        }
-                        // Live reproduction link (CXA-F244): offered exactly when
-                        // the ticket awaits a human verdict (see
-                        // `detail_awaits_verification`), from the one
-                        // resolvability source the F242 design pins
-                        // (deploy.host_port). Null when no port is configured;
-                        // additive to the payload.
-                        if detail_awaits_verification(
-                            t.status(),
-                            state.ticket_evidence.contains_key(&id),
-                        ) {
-                            obj.insert(
-                                "reproduce_url".into(),
-                                serde_json::json!(
-                                    coxagent_application::repro_url::compute_live_repro_url(
-                                        cfg.deploy.host_port
-                                    )
-                                ),
-                            );
-                            // Per-ticket resolved link (CXA-F246): recorded by
-                            // the capture funnel at evidence-collection time,
-                            // so the panel renders the exact link the evidence
-                            // was captured against — null when none recorded.
-                            obj.insert(
-                                "repro_url".into(),
-                                serde_json::json!(state.repro_urls.get(&id)),
-                            );
-                        }
-                        // The gate spine (CXA-F241): every DoD gate decision the
-                        // governance ledger holds for this ticket, chronological —
-                        // the forensic view groups evidence under these. Absent
-                        // when empty, so payloads for ungated tickets are
-                        // unchanged for older readers.
-                        let gates = coxagent_application::forensics::gate_spine(&state, t.id());
-                        if !gates.is_empty() {
-                            obj.insert(
-                                "gates".into(),
-                                serde_json::to_value(gates).unwrap_or_default(),
-                            );
-                        }
-                        if state.cost_approved.contains(&id) {
-                            obj.insert("cost_approved".into(), serde_json::json!(true));
-                        }
-                        // Attachments ride the detail payload: the modal renders
-                        // from here, always fresh — the SSE snapshot path proved
-                        // unreliable as a source (records reached the store but
-                        // never the client's STATE).
-                        if let Some(atts) = state.ticket_attachments.get(&id) {
-                            obj.insert(
-                                "attachments".into(),
-                                serde_json::to_value(atts).unwrap_or_default(),
-                            );
-                        }
-                        // Dependency radar (CXA-F237): why this ticket is not
-                        // running — direct blockers with their LIVE statuses
-                        // (AC1), and every depends_on id absent from the project
-                        // state surfaced as unknown, never treated as satisfied
-                        // (AC3). Pure derivation over the same loaded snapshot.
-                        obj.insert(
-                            "blocked_by".into(),
-                            serde_json::to_value(
-                                coxagent_application::dependency_radar::blocked_by(&state, t.id()),
-                            )
-                            .unwrap_or_default(),
-                        );
-                        let unknown_pairs =
-                            coxagent_application::dependency_radar::unknown_dependencies(&state);
-                        let unknown: Vec<&coxagent_domain::TicketId> = unknown_pairs
-                            .iter()
-                            .filter(|(dep, _)| dep == t.id())
-                            .map(|(_, missing)| missing)
-                            .collect();
-                        if !unknown.is_empty() {
-                            obj.insert(
-                                "unknown_dependencies".into(),
-                                serde_json::to_value(unknown).unwrap_or_default(),
-                            );
-                        }
+            // Hot state first, then the archive cold store on a miss
+            // (CXA-F274) — see archive::resolve_detail for the contract.
+            let resolved =
+                match super::archive::resolve_detail(&state.tickets, &app, &pid, &id).await {
+                    Ok(r) => r,
+                    Err(e) => return internal_error(&e.to_string()),
+                };
+            resolved.map_or_else(not_found, |(t, archived)| {
+                let mut v = serde_json::to_value(&t).unwrap_or_default();
+                // Cost-gate surface: the hold estimate (if any) and whether a
+                // human already approved this ticket to run.
+                if let Some(obj) = v.as_object_mut() {
+                    // Test-to-AC traceability (CXA-F024): the Test Coverage tab
+                    // renders straight from the aggregate's computed matrix —
+                    // the status logic stays in the domain, not in the view.
+                    obj.insert(
+                        "coverage_matrix".into(),
+                        serde_json::to_value(t.coverage_matrix()).unwrap_or_default(),
+                    );
+                    if let Some(est) = state.cost_holds.get(&id) {
+                        obj.insert("cost_hold".into(), serde_json::json!(est));
                     }
-                    Json(v).into_response()
-                })
+                    if let Some(ev) = state.ticket_evidence.get(&id) {
+                        obj.insert(
+                            "evidence".into(),
+                            evidence_items_with_artifacts(ev, &artifacts).into(),
+                        );
+                    }
+                    // Engine & model provenance (CXA-F257): which engine
+                    // and model actually executed each agent step on this
+                    // ticket, chronological — the verify gate approves
+                    // what ran, not what config asked for. Absent when
+                    // empty, so payloads for tickets with no captured
+                    // runs are unchanged for older readers.
+                    if let Some(pv) = provenance_field(&state, &id) {
+                        obj.insert("provenance".into(), pv);
+                    }
+                    // Live reproduction link (CXA-F244): offered exactly when
+                    // the ticket awaits a human verdict (see
+                    // `detail_awaits_verification`), from the one
+                    // resolvability source the F242 design pins
+                    // (deploy.host_port). Null when no port is configured;
+                    // additive to the payload.
+                    if detail_awaits_verification(
+                        t.status(),
+                        state.ticket_evidence.contains_key(&id),
+                    ) {
+                        obj.insert(
+                            "reproduce_url".into(),
+                            serde_json::json!(
+                                coxagent_application::repro_url::compute_live_repro_url(
+                                    cfg.deploy.host_port
+                                )
+                            ),
+                        );
+                        // Per-ticket resolved link (CXA-F246): recorded by
+                        // the capture funnel at evidence-collection time,
+                        // so the panel renders the exact link the evidence
+                        // was captured against — null when none recorded.
+                        obj.insert(
+                            "repro_url".into(),
+                            serde_json::json!(state.repro_urls.get(&id)),
+                        );
+                    }
+                    // The gate spine (CXA-F241): every DoD gate decision the
+                    // governance ledger holds for this ticket, chronological —
+                    // the forensic view groups evidence under these. Absent
+                    // when empty, so payloads for ungated tickets are
+                    // unchanged for older readers.
+                    let gates = coxagent_application::forensics::gate_spine(&state, t.id());
+                    if !gates.is_empty() {
+                        obj.insert(
+                            "gates".into(),
+                            serde_json::to_value(gates).unwrap_or_default(),
+                        );
+                    }
+                    if state.cost_approved.contains(&id) {
+                        obj.insert("cost_approved".into(), serde_json::json!(true));
+                    }
+                    // Attachments ride the detail payload: the modal renders
+                    // from here, always fresh — the SSE snapshot path proved
+                    // unreliable as a source (records reached the store but
+                    // never the client's STATE).
+                    if let Some(atts) = state.ticket_attachments.get(&id) {
+                        obj.insert(
+                            "attachments".into(),
+                            serde_json::to_value(atts).unwrap_or_default(),
+                        );
+                    }
+                    // Dependency radar (CXA-F237): why this ticket is not
+                    // running — direct blockers with their LIVE statuses
+                    // (AC1), and every depends_on id absent from the project
+                    // state surfaced as unknown, never treated as satisfied
+                    // (AC3). Pure derivation over the same loaded snapshot.
+                    obj.insert(
+                        "blocked_by".into(),
+                        serde_json::to_value(coxagent_application::dependency_radar::blocked_by(
+                            &state,
+                            t.id(),
+                        ))
+                        .unwrap_or_default(),
+                    );
+                    let unknown_pairs =
+                        coxagent_application::dependency_radar::unknown_dependencies(&state);
+                    let unknown: Vec<&coxagent_domain::TicketId> = unknown_pairs
+                        .iter()
+                        .filter(|(dep, _)| dep == t.id())
+                        .map(|(_, missing)| missing)
+                        .collect();
+                    if !unknown.is_empty() {
+                        obj.insert(
+                            "unknown_dependencies".into(),
+                            serde_json::to_value(unknown).unwrap_or_default(),
+                        );
+                    }
+                    // Served from the cold store (CXA-F274): the stamp is
+                    // the whole show/hide axis for the read-only dialog —
+                    // absent on hot tickets, so their payloads are
+                    // byte-identical to before.
+                    if archived {
+                        obj.insert("archived".into(), serde_json::json!(true));
+                    }
+                }
+                Json(v).into_response()
+            })
         }
         Err(e) => internal_error(&e.to_string()),
     }
@@ -421,6 +437,9 @@ pub(super) async fn create_ticket(
         has_ui: req.has_ui,
         acceptance_criteria: req.acceptance_criteria.clone(),
         goal,
+        // The dashboard's hand-filed tickets are project-local work; the BA
+        // (not the human form) authors shared-infrastructure tags.
+        service_tag: None,
     };
     match AddTicketUseCase::new(Arc::clone(&p.store))
         .execute(input)
@@ -428,6 +447,33 @@ pub(super) async fn create_ticket(
     {
         Ok(id) => {
             if let Ok(mut state) = p.store.load().await {
+                // Manual subtask (CXA-F381): bind the child to its parent and
+                // inherit the parent's priority unless the form set one. Best
+                // effort — a vanished parent leaves a plain ticket, not a 500.
+                if let Some(pid_raw) = req
+                    .parent_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    let parent = state
+                        .tickets
+                        .iter()
+                        .find(|t| t.id().to_string() == pid_raw)
+                        .map(|t| (t.id().clone(), t.priority()));
+                    if let Some((ptid, pprio)) = parent {
+                        if let Some(child) = state
+                            .tickets
+                            .iter_mut()
+                            .find(|t| t.id().to_string() == id.to_string())
+                        {
+                            let _ = child.set_parent(coxagent_domain::Role::System, ptid);
+                            if req.priority.is_none() {
+                                child.set_priority(coxagent_domain::Role::User, pprio).ok();
+                            }
+                        }
+                    }
+                }
                 state.log_activity("USER", "created ticket", Some(id.to_string()));
                 let _ = p.store.save(&state).await;
             }
@@ -513,6 +559,7 @@ pub(super) async fn approve_cost(
 pub(super) async fn edit_ticket(
     State(app): State<AppState>,
     Path((pid, id)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<EditReq>,
 ) -> axum::response::Response {
     let Some(p) = app.project(&pid).await else {
@@ -524,6 +571,16 @@ pub(super) async fn edit_ticket(
     let Ok(mut state) = p.store.load().await else {
         return internal_error("load failed");
     };
+    // CXA-F420f: a member scoped to specific services may not edit tickets
+    // outside them.
+    let tag = state
+        .ticket(&tid)
+        .and_then(|t| t.service_tag().map(ToOwned::to_owned));
+    if let Some(refusal) =
+        super::services::refuse_outside_member_scope(&app, &headers, &p, tag.as_deref()).await
+    {
+        return refusal;
+    }
     let Some(ticket) = state.ticket_mut(&tid) else {
         return (axum::http::StatusCode::NOT_FOUND, "no such ticket").into_response();
     };
@@ -780,10 +837,74 @@ pub(super) async fn standup_ep(
     }
 }
 
+/// CXA-F356 tier 1: the workspace master switch. Admin-only — it idles every
+/// runner on every machine at its next cycle boundary (drain), and while off no
+/// per-machine switch can start anything. `?reason=` rides into the run-control
+/// UI and the activity feed.
+async fn workspace_control(
+    app: &AppState,
+    p: &super::ProjectHandle,
+    headers: &axum::http::HeaderMap,
+    account: &str,
+    action: &str,
+    q: &std::collections::HashMap<String, String>,
+) -> axum::response::Response {
+    let is_admin = match app.auth.clone() {
+        None => true, // open mode: single-user local
+        Some(auth) => resolve_principal(&auth, headers).await.is_some_and(|u| {
+            matches!(
+                u.role,
+                coxagent_application::auth::AuthRole::Super
+                    | coxagent_application::auth::AuthRole::Admin
+            )
+        }),
+    };
+    if !is_admin {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "only an admin can pause or resume the whole workspace"
+            })),
+        )
+            .into_response();
+    }
+    let running = action == "workspace-resume";
+    match p.store.load().await {
+        Ok(mut s) => {
+            s.workspace_run = coxagent_application::state::WorkspaceRun {
+                running,
+                by: account.to_owned(),
+                at: coxagent_application::state::now_rfc3339(),
+                reason: q.get("reason").cloned().unwrap_or_default(),
+            };
+            let verb = if running {
+                "resumed the workspace".to_owned()
+            } else if s.workspace_run.reason.is_empty() {
+                "paused the workspace (drain)".to_owned()
+            } else {
+                format!(
+                    "paused the workspace (drain) — \"{}\"",
+                    s.workspace_run.reason
+                )
+            };
+            s.log_activity(account, &verb, None);
+            match p.store.save(&s).await {
+                Ok(()) => Json(serde_json::json!({
+                    "ok": true, "workspace_run": s.workspace_run
+                }))
+                .into_response(),
+                Err(e) => internal_error(&e.to_string()),
+            }
+        }
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
 pub(super) async fn control_ep(
     State(app): State<AppState>,
     Path((pid, action)): Path<(String, String)>,
     headers: axum::http::HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> axum::response::Response {
     let Some(p) = app.project(&pid).await else {
         return not_found();
@@ -820,8 +941,28 @@ pub(super) async fn control_ep(
             })
         }
     };
+    if action == "workspace-pause" || action == "workspace-resume" {
+        return workspace_control(&app, &p, &headers, &account, &action, &q).await;
+    }
     match action.as_str() {
         "resume" => {
+            // CXA-F356: while the workspace master switch is off, a per-machine
+            // Start would silently idle at the gate and read as "it ignored
+            // me" — refuse loudly with who paused it instead.
+            if let Ok(s) = p.store.load().await {
+                if !s.workspace_run.running {
+                    let by = s.workspace_run.by;
+                    return (
+                        axum::http::StatusCode::CONFLICT,
+                        Json(serde_json::json!({
+                            "error": format!(
+                                "the workspace is paused by {by} — resume the workspace first"
+                            )
+                        })),
+                    )
+                        .into_response();
+                }
+            }
             if live && !owns {
                 // Someone else's run is live: just start MY operator.
                 let _ = p.store.set_desired(&operator, true).await;

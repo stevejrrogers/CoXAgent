@@ -38,8 +38,25 @@ pub(super) async fn project_forge_account(app: &AppState, pid: &str) -> Option<S
 /// order, then the registered projects that failed to load — flagged `broken`
 /// with the reason, so a config error is visible in the dashboard instead of
 /// only in the hub log (COX-B043).
-pub(super) async fn list_projects(State(app): State<AppState>) -> impl IntoResponse {
-    let order = app.order.read().await.clone();
+///
+/// CXA-B141: the registry is enumerated PER CALLER. Super/Admin (and open
+/// mode, when no auth is configured) see every project; every other signed-in
+/// role — member tier, the lead tier, viewers — sees only its assigned
+/// projects. This is the SAME per-project membership rule `auth_mw` enforces
+/// on the `/api/projects/:pid/*` reads, so the list can never name a project
+/// the same account would be 403ed for opening (a bare list used to hand out
+/// every tenant's ids, names and sizes to any signed-in account).
+pub(super) async fn list_projects(
+    State(app): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let principal = match &app.auth {
+        Some(auth) => resolve_principal(auth, &headers).await,
+        // Open mode (no accounts configured): the operator sees everything.
+        None => None,
+    };
+    let registered = app.order.read().await.clone();
+    let order = river_scope(principal.as_ref(), &registered);
     let mut out = Vec::new();
     for id in &order {
         if let Some(p) = app.project(id).await {
@@ -57,7 +74,18 @@ pub(super) async fn list_projects(State(app): State<AppState>) -> impl IntoRespo
             }));
         }
     }
-    out.extend(broken_entries(&app.broken.read().await));
+    // Broken projects are not in the live registry, so their visibility is
+    // decided against the caller's assignment list alone (`may_see_broken`) —
+    // the reason text and the config path are not other teams' business either.
+    let visible_broken: Vec<BrokenProject> = app
+        .broken
+        .read()
+        .await
+        .iter()
+        .filter(|b| may_see_broken(principal.as_ref(), &b.id))
+        .cloned()
+        .collect();
+    out.extend(broken_entries(&visible_broken));
     Json(out)
 }
 
@@ -73,56 +101,22 @@ fn factory_error_response(e: &FactoryError) -> axum::response::Response {
     }
 }
 
-/// CXA-B138: the alias becomes the workspace directory id (`base.join(id)`),
-/// so a path-traversing alias would scaffold — and DELETE rm -rf — outside
-/// the workspace base. Refuse it HERE, before the factory touches the
+/// CXA-B138/CXA-B140/CXA-B147: the alias becomes the workspace directory id
+/// (`base.join(id)`), so a path-traversing alias would scaffold — and DELETE
+/// rm -rf — outside the workspace base, a control character in it mangles
+/// every listing, and an over-long one dies in `create_dir_all` with
+/// ENAMETOOLONG (os error 36) — a pure request-validation failure that must
+/// be a 400, never a 500. Refuse it HERE, before the factory touches the
 /// filesystem. (Empty/absent keeps the derive-from-name fallback.)
 fn refused_alias(alias: Option<&String>) -> Option<axum::response::Response> {
     let alias = alias.map(String::as_str).filter(|a| !a.is_empty())?;
-    (!coxagent_application::state::is_safe_workspace_id(alias))
-        .then(|| bad_request_error("alias must not contain '/', '\\', '..' or leading dots"))
-}
-
-/// Validate brownfield import path: must be under the hub's workspace root
-/// or under /tmp (safe sandbox). Reject paths pointing to system directories.
-fn refused_import_path(existing: Option<&String>) -> Option<axum::response::Response> {
-    let existing = existing?;
-    if existing.trim().is_empty() {
-        return None;
-    }
-    let p = std::path::Path::new(existing.trim());
-    // Resolve to absolute canonical path to prevent symlink tricks.
-    let real = p.canonicalize().ok()?;
-    // Allow under /tmp or under $HOME (typical user repos).
-    // Block system directories.
-    let path_str = real.to_string_lossy();
-    // Block if path equals a blocked directory, or if it starts with
-    // a blocked directory plus '/', to catch `/private/etc/foo` etc.
-    let blocked_prefixes = [
-        "/etc",
-        "/private/etc",
-        "/root",
-        "/var/run",
-        "/var/log",
-        "/usr/lib",
-        "/usr/sbin",
-        "/bin",
-        "/sbin",
-        "/dev",
-        "/proc",
-        "/sys",
-    ];
-    let blocked = blocked_prefixes.iter().any(|pfx| {
-        path_str == *pfx
-            || path_str.starts_with(pfx)
-                && path_str.as_bytes().get(pfx.len()).copied() == Some(b'/')
-    });
-    blocked.then(|| {
-        (
-            StatusCode::FORBIDDEN,
-            "cannot import from this path".to_owned(),
-        )
-            .into_response()
+    (!coxagent_application::state::is_safe_workspace_id(alias)).then(|| {
+        // The reason comes from the shared predicate so the message names the
+        // actual defect — length vs separators — instead of one stale string.
+        bad_request_error(&format!(
+            "alias {}",
+            coxagent_application::state::workspace_id_refusal_reason(alias)
+        ))
     })
 }
 
@@ -172,9 +166,23 @@ pub(super) async fn create_project(
     if let Some(refusal) = refused_import_path(req.existing.as_ref()) {
         return refusal;
     }
+    // CXA-B145: the path must not be a codebase a registered project already
+    // owns — two runners over one tree corrupt each other.
+    if let Some(refusal) = refused_import_owned_by_registered(&app, req.existing.as_ref()).await {
+        return refusal;
+    }
     let handle = match factory(NewProjectReq {
         name,
-        alias: req.alias,
+        // CXA-B146: the alias is trimmed like every other optional input
+        // (space/existing/git_url/goal above) — a blank one is absent, so the
+        // port's derive-from-name fallback applies and a whitespace-only or
+        // padded alias never reaches the workspace id. The refusal checks
+        // above deliberately run on the RAW alias: trimming first could
+        // smuggle `"trailing\n"` through as `"trailing"`.
+        alias: req
+            .alias
+            .map(|a| a.trim().to_owned())
+            .filter(|a| !a.is_empty()),
         existing: req
             .existing
             .filter(|s| !s.trim().is_empty())

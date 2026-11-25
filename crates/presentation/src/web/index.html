@@ -95,6 +95,7 @@
     <nav class="nav" id="ws-nav">
       <a data-v="home" id="nav-home" onclick="nav('home')"><i class="ti ti-home"></i> Home</a>
       <a data-v="river" onclick="nav('river')"><i class="ti ti-ripple"></i> Fleet river</a>
+      <a data-v="dupes" onclick="nav('dupes')"><i class="ti ti-copy"></i> Dupes radar</a>
       <a data-v="overview" class="on" onclick="nav('overview')"><i class="ti ti-layout-dashboard"></i> Overview</a>
       <a data-v="team" onclick="nav('team')"><i class="ti ti-robot"></i> Agents</a>
       <a data-v="inbox" onclick="nav('inbox')"><i class="ti ti-inbox"></i> Inbox <span id="inbox-badge" style="display:none;margin-left:auto;background:var(--red);color:#fff;border-radius:9px;font-size:10px;font-weight:700;padding:1px 6px;line-height:14px">0</span></a>
@@ -157,6 +158,8 @@
         <span class="rp-lbl" id="runlbl">idle</span>
         <button class="rp-ctl rp-go" id="ctl-primary" onclick="toggleRun()" title="Start"><i class="ti ti-player-play" id="ctl-primary-ic"></i></button>
         <button class="rp-ctl" id="ctl-step" onclick="ctl('step')" title="Step one cycle"><i class="ti ti-player-track-next"></i></button>
+        <button class="rp-ctl" id="ctl-menu" onclick="toggleRunMenu(event)" title="Run control — workspace &amp; machines"><i class="ti ti-chevron-down"></i></button>
+        <div class="runmenu" id="runmenu"></div>
       </div>
       <div class="tb-div"></div>
       <button class="iconbtn" onclick="openCmdk()" title="Search &amp; jump — ⌘/"><i class="ti ti-search"></i></button>
@@ -195,28 +198,37 @@
         </div>
       </div>
       <div class="view" id="view-river"><div id="river-body" style="max-width:900px"></div></div>
+      <div class="view" id="view-dupes"><div id="dupes-body" style="max-width:900px"></div></div>
       <div class="view on" id="view-overview">
+        <!-- Above the fold: does the project need me, and is the team moving?
+             (CXA-F383 declutter — everything diagnostic folds below.) -->
         <div id="ov-drain"></div>
         <div id="ov-alerts"></div>
-        <div id="ov-drift"></div>
-        <div id="ov-preflight"></div>
-        <div id="ov-goal"></div>
+        <div id="ov-working"></div>
         <div class="kpis" id="kpis"></div>
-        <div id="ov-velocity"></div>
         <div id="ov-health"></div>
-        <div id="ov-cycle-perf"></div>
-        <div id="ov-attention"></div>
-        <div id="ov-deploy"></div>
-        <div class="row2" id="ov-charts"></div>
-        <div id="ov-design"></div>
         <div class="row2">
           <div class="panel"><h4><i class="ti ti-activity" style="color:var(--accent2)"></i> Recent activity <span class="mo" onclick="nav('activity')">view all</span></h4><div id="ov-activity"></div></div>
           <div class="panel"><h4><i class="ti ti-history" style="color:var(--accent2)"></i> Releases</h4><div id="ov-changelog"></div></div>
         </div>
+        <details class="ov-diag" id="ov-diag">
+          <summary onclick="OV_DIAG_TOUCHED=true"><i class="ti ti-stethoscope"></i> Diagnostics &amp; gates <span class="ov-diag-hint">drift · go-live · goal · velocity · cycle grades · governance · lessons · deploys · charts · design system</span></summary>
+          <div id="ov-drift"></div>
+          <div id="ov-preflight"></div>
+          <div id="ov-goal"></div>
+          <div id="ov-velocity"></div>
+          <div id="ov-cycle-perf"></div>
+          <div id="ov-attention"></div>
+          <div id="ov-lessons"></div>
+          <div id="ov-deploy"></div>
+          <div class="row2" id="ov-charts"></div>
+          <div id="ov-design"></div>
+        </details>
       </div>
       <div class="view" id="view-team">
         <div class="kpis" id="team-summary"></div>
         <div id="team-liveness"></div>
+        <div id="team-enginehealth"></div>
         <div id="team-online"></div>
         <div id="team-dupwarn"></div>
         <div id="team-sessions"></div>
@@ -366,9 +378,20 @@
         <div class="panel" style="margin-top:12px"><div id="people-body"></div></div>
       </div>
       <div class="view" id="view-audit">
-        <div class="filters"><span style="font-size:12px;color:var(--muted)">Security audit — authenticated mutations & sign-ins</span>
-          <div style="flex:1"></div><a onclick="window.open('/api/audit-log')" class="fchip" style="text-decoration:none;cursor:pointer"><i class="ti ti-download" style="font-size:14px"></i> Export</a></div>
-        <div class="panel"><div id="audit-body"></div></div>
+        <div class="filters">
+          <input id="audit-q" placeholder="filter by user or action…" style="background:var(--card);border:1px solid var(--border);border-radius:9px;padding:6px 11px;font-size:12px;color:var(--text);font-family:inherit;width:210px" oninput="AUDIT_PAGE=0;renderAuditRows()">
+          <select id="audit-kind" onchange="AUDIT_PAGE=0;renderAuditRows()" style="background:var(--card);border:1px solid var(--border);border-radius:9px;padding:6px 9px;font-size:12px;color:var(--text);font-family:inherit">
+            <option value="">all actions</option><option value="login">sign-ins</option><option value="mutation">mutations</option><option value="fail">failures only</option>
+          </select>
+          <select id="audit-range" onchange="AUDIT_PAGE=0;renderAuditRows()" style="background:var(--card);border:1px solid var(--border);border-radius:9px;padding:6px 9px;font-size:12px;color:var(--text);font-family:inherit">
+            <option value="">all time</option><option value="1">last 24h</option><option value="7">last 7 days</option><option value="30">last 30 days</option>
+          </select>
+          <span id="audit-count" style="font-size:11.5px;color:var(--dim)"></span>
+          <div style="flex:1"></div>
+          <a onclick="exportAuditCsv()" class="fchip" style="text-decoration:none;cursor:pointer"><i class="ti ti-download" style="font-size:14px"></i> CSV</a>
+          <a onclick="window.open('/api/audit-log')" class="fchip" style="text-decoration:none;cursor:pointer"><i class="ti ti-braces" style="font-size:14px"></i> JSON</a></div>
+        <div class="panel"><div id="audit-body"></div>
+          <div id="audit-pager" style="display:flex;justify-content:center;gap:8px;padding:10px 0 2px"></div></div>
       </div>
       <div class="view" id="view-access">
         <div class="acard">
@@ -436,6 +459,9 @@
                 <button class="chanadd" onclick="newFolder('')" title="New folder"><i class="ti ti-folder-plus"></i></button>
                 <button class="chanadd" onclick="newDoc()" title="New page"><i class="ti ti-plus"></i></button>
               </div>
+            </div>
+            <div class="docsearch"><i class="ti ti-search"></i>
+              <input id="doc-search" type="text" placeholder="Search titles &amp; bodies" aria-label="Search wiki pages" oninput="docSearchFilter(this.value)" autocomplete="off">
             </div>
             <div id="docs-list"></div>
           </div>
@@ -598,6 +624,7 @@
       <div class="pfnav">
         <button id="pt-status" class="on" onclick="profileTab('status')"><i class="ti ti-mood-smile"></i> Status</button>
         <button id="pt-profile" onclick="profileTab('profile')"><i class="ti ti-user"></i> Profile</button>
+        <button id="pt-keys" onclick="profileTab('keys')"><i class="ti ti-key"></i> API keys</button>
         <button id="pt-prefs" onclick="profileTab('prefs')"><i class="ti ti-adjustments"></i> Preferences</button>
       </div>
       <div class="pfpane">
@@ -625,6 +652,17 @@
           <div class="fr"><span class="lbl">New password</span><input id="pp-pw" type="password" placeholder="leave empty to keep" style="flex:1"></div>
           <div id="pp-note" style="font-size:12px;margin:6px 0"></div>
           <div style="display:flex;justify-content:flex-end"><button class="save pf-btn" onclick="savePopupProfile()"><i class="ti ti-device-floppy"></i> Save profile</button></div>
+        </div>
+        <div id="pp-keys" hidden>
+          <div class="msub" style="margin:0 0 10px">Your own LLM provider key (BYOK). Your requests stop competing for the project pool's rate limits. Keys are verified live before saving and are never shown again — only the last 4 characters.</div>
+          <div id="pk-list" style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px"></div>
+          <div style="font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--dim);margin-bottom:7px">Add a key</div>
+          <div class="fr"><span class="lbl">Base URL</span><input id="pk-url" placeholder="https://api.example.com/v1" style="flex:1"></div>
+          <div class="fr"><span class="lbl">API key</span><input id="pk-key" type="password" placeholder="sk-…" style="flex:1" autocomplete="off"></div>
+          <div class="fr"><span class="lbl">Model</span><input id="pk-model" placeholder="e.g. GLM-5.3" style="flex:1"></div>
+          <div class="fr"><span class="lbl">Label</span><input id="pk-label" placeholder="optional — defaults to the host" style="flex:1"></div>
+          <div id="pk-note" style="font-size:12px;margin:6px 0"></div>
+          <div style="display:flex;justify-content:flex-end"><button id="pk-add" class="save pf-btn" onclick="addMyKey()"><i class="ti ti-plug-connected"></i> Test &amp; save</button></div>
         </div>
         <div id="pp-prefs" hidden>
           <div class="fr"><span class="lbl">Desktop notifications</span><select id="ppf-desktop" onchange="savePopupPrefs()"><option value="on">on</option><option value="off">off</option></select></div>
@@ -790,6 +828,11 @@
   </div></div>
 
 <script src="/assets/js/mermaid.min.js"></script>
+<script src="/assets/js/terminal_state.js"></script>
+<script src="/assets/js/overview_vm.js"></script>
+<script src="/assets/js/overview_states.js"></script>
+<script src="/assets/js/kpis.js"></script>
+<script src="/assets/js/copy.js"></script>
 <script src="/assets/js/core.js"></script>
 <script src="/assets/js/manage.js"></script>
 <script src="/assets/js/home.js"></script>
@@ -800,8 +843,10 @@
 <script src="/assets/js/inbox.js"></script>
 <script src="/assets/js/drift.js"></script>
 <script src="/assets/js/alerts.js"></script>
+<script src="/assets/js/lessons.js"></script>
 <script src="/assets/js/river.js"></script>
 <script src="/assets/js/approval_policy.js"></script>
+<script src="/assets/js/services.js"></script>
 <script src="/assets/js/shell.js"></script>
 </body>
 </html>

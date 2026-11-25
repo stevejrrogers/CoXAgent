@@ -207,6 +207,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
                         has_ui: false,
                         acceptance_criteria: vec![format!("App answers on 127.0.0.1:{port} again")],
                         goal: None,
+                        service_tag: None,
                     })
                     .await;
                 self.notify(

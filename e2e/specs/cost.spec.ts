@@ -34,8 +34,12 @@ test('the cost view draws all four panels plus KPI labels', async ({ page }) => 
   // must render (one per day) with the day-range footer — not the empty
   // state, and never a blank panel (a blank panel is how a JS error
   // presents here).
-  await expect(page.locator('#cost-trend div[title*="2026-08-27"]')).toHaveCount(1);
-  await expect(page.locator('#cost-trend')).toContainText('2026-08-27');
+  // The fixture's spend days are rewritten RELATIVE to today at serve time
+  // (run-server.sh freshen step — frozen dates rotted every clock-window
+  // assertion), so assert on the oldest seeded day computed the same way.
+  const oldestDay = new Date(Date.now() - 3 * 864e5).toISOString().slice(0, 10);
+  await expect(page.locator(`#cost-trend div[title*="${oldestDay}"]`)).toHaveCount(1);
+  await expect(page.locator('#cost-trend')).toContainText(oldestDay);
   await expect(page.locator('#cost-trend')).not.toContainText('no spend recorded');
   // Token-saver shows actual seeded compression stats in this fixture.
   await expect(page.locator('#cost-tokensaver')).toContainText('compressed');

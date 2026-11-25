@@ -70,7 +70,38 @@ impl SprintPolicy {
     }
 }
 
+/// A sprint whose every committed ticket reached a terminal state (or left
+/// the board) is DONE — the window is only the re-plan cap for a sprint that
+/// stalls. An empty commitment list proves nothing and waits for the window.
+fn all_committed_done(state: &ProjectState, s: &Sprint) -> bool {
+    use coxagent_domain::ticket::Status;
+    !s.committed.is_empty()
+        && s.committed.iter().all(|id| {
+            state
+                .tickets
+                .iter()
+                .find(|t| t.id().as_str() == id.as_str())
+                .map_or(true, |t| {
+                    matches!(
+                        t.status(),
+                        Status::Documented | Status::Verified | Status::Rejected
+                    )
+                })
+        })
+}
+
 pub fn advance(state: &mut ProjectState, cycle: u64, policy: SprintPolicy) -> Option<u32> {
+    // Finishing the work ends the sprint — cycles are the stall cap, not the
+    // definition of done (Steve: "sprint xong là ticket xong hết chứ").
+    if let Some(s) = &state.sprint {
+        if all_committed_done(state, s) {
+            let length = match policy.window {
+                SprintWindow::Cycles(len) => len,
+                SprintWindow::Days(_) => s.length_cycles,
+            };
+            return Some(roll_over(state, cycle, length, policy.bug_burn_floor));
+        }
+    }
     let need_open = match &state.sprint {
         None => true,
         Some(s) => match policy.window {
@@ -252,6 +283,43 @@ pub fn refill_empty_scope(state: &mut ProjectState) -> usize {
             sprint.committed = backlog;
         }
         return n;
+    }
+    // Case 3: committed and non-empty, but NOTHING in it can currently make
+    // progress — every committed feature is dependency-blocked and every
+    // committed bug is in a status no lane claims. Scrum mode works only
+    // committed tickets, so an unsatisfiable commitment starves DEV and the
+    // sprint never completes (deadlock, live 2026-10-27: sprint #656 sat on 6
+    // unworkable committed tickets for hours — misfiled `Ready` bugs plus
+    // features whose deps were on-hold / not committed). Pull in one workable
+    // ready ticket so DEV is not starved behind a commitment that can never
+    // advance. Checked before the feature-reservation case: "nothing workable"
+    // is the more general starvation and must win even when a (blocked) feature
+    // is present.
+    let mut workable: Vec<TicketId> = crate::selection::ready_feature_candidates(state);
+    workable.extend(crate::selection::open_bug_candidates(state));
+    let committed_can_progress = state.sprint.as_ref().is_some_and(|s| {
+        s.committed.iter().any(|id| {
+            workable.contains(id)
+                || state
+                    .ticket(id)
+                    .is_some_and(|t| t.status() == Status::InProgress)
+        })
+    });
+    if !committed_can_progress {
+        let pick = {
+            let committed = state
+                .sprint
+                .as_ref()
+                .map(|s| s.committed.clone())
+                .unwrap_or_default();
+            workable.into_iter().find(|id| !committed.contains(id))
+        };
+        if let Some(id) = pick {
+            if let Some(sprint) = &mut state.sprint {
+                sprint.committed.push(id);
+                return 1;
+            }
+        }
     }
     // Case 2: committed but feature-less — reserve one ready feature (the
     // live starvation: sprint #561 was bug-only while 44 features sat Ready).
@@ -773,6 +841,49 @@ mod tests {
             "committed set must now hold the ready feature"
         );
         // Idempotent: a sprint that already has feature scope is left alone.
+        assert_eq!(refill_empty_scope(&mut state), 0);
+    }
+
+    #[test]
+    fn an_all_blocked_committed_set_refills_a_workable_ready_ticket() {
+        use coxagent_domain::Role;
+        // The sprint #656 deadlock shape: a committed feature blocked by an
+        // unfinished dependency (dep is Pending, not Done) — unworkable — while
+        // a workable ready feature sits OUTSIDE the sprint. The committed set
+        // HAS a feature, so the bug-only case returns 0 and starves DEV; Case 3
+        // must still refill because nothing committed can make progress.
+        let mut blocked = ready_feature("F-BLK");
+        blocked
+            .add_dependency(Role::Sa, TicketId::new("F-DEP").expect("id"))
+            .expect("dep");
+        let mut state = ProjectState {
+            tickets: vec![blocked, feature("F-DEP"), ready_feature("F-GOOD")],
+            ..ProjectState::default()
+        };
+        state.sprint = Some(Sprint {
+            number: 1,
+            goal: "blocked".into(),
+            started_cycle: 1,
+            length_cycles: 10,
+            committed: vec![TicketId::new("F-BLK").expect("id")],
+            started_at: crate::state::now_rfc3339(),
+            bug_burn_floor: None,
+        });
+        assert_eq!(
+            refill_empty_scope(&mut state),
+            1,
+            "an all-blocked committed set must pull in a workable ready ticket"
+        );
+        assert!(
+            state
+                .sprint
+                .as_ref()
+                .expect("sprint")
+                .committed
+                .contains(&TicketId::new("F-GOOD").expect("id")),
+            "the workable ready feature must be pulled into scope"
+        );
+        // A workable ticket is now committed → idempotent.
         assert_eq!(refill_empty_scope(&mut state), 0);
     }
 

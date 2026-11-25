@@ -164,3 +164,42 @@ fn the_raw_store_rpc_is_not_an_ordinary_write() {
     assert!(!write_gate_ok(AuthRole::Fe, "/api/pr-report"));
     assert!(write_gate_ok(AuthRole::Admin, "/api/pr-report"));
 }
+
+#[test]
+fn service_management_writes_require_manage_not_mere_write() {
+    use super::auth::{is_service_mgmt_path, write_gate_ok};
+    // These endpoints clone arbitrary git URLs and run `sh -c` probe commands;
+    // a member-tier writer must NOT reach them (RCE + authz escalation).
+    for p in [
+        "/api/projects/cxa/services",
+        "/api/projects/cxa/services/scan",
+        "/api/projects/cxa/services/retag",
+        "/api/projects/cxa/services/assignments/alice",
+        "/api/projects/cxa/services/hub/status",
+    ] {
+        assert!(
+            is_service_mgmt_path(p),
+            "should be a service-mgmt path: {p}"
+        );
+        assert!(
+            !write_gate_ok(AuthRole::Fe, p),
+            "member-tier must be refused service management: {p}"
+        );
+        assert!(
+            !write_gate_ok(AuthRole::Be, p),
+            "member-tier must be refused service management: {p}"
+        );
+        assert!(
+            write_gate_ok(AuthRole::Admin, p),
+            "admin must be allowed service management: {p}"
+        );
+    }
+    // A ticket write under the same project is NOT service management.
+    assert!(!is_service_mgmt_path("/api/projects/cxa/ticket/CXA-1/edit"));
+    assert!(write_gate_ok(
+        AuthRole::Fe,
+        "/api/projects/cxa/ticket/CXA-1/edit"
+    ));
+    // "servicesX" must not be mistaken for the services tree.
+    assert!(!is_service_mgmt_path("/api/projects/cxa/servicesX"));
+}

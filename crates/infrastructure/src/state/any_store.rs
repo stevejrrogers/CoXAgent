@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use coxagent_application::ports::outbound::StateStorePort;
-use coxagent_application::ports::outbound::{WorkerCaps, WorkerEntry};
+use coxagent_application::ports::outbound::{ShardKind, StateShard, WorkerCaps, WorkerEntry};
 use coxagent_application::state::ProjectState;
 use coxagent_application::PortError;
 use coxagent_domain::TicketId;
@@ -54,6 +54,38 @@ impl StateStorePort for AnyStateStore {
             Self::Json(s) => s.current_version().await,
             Self::Sql(s) => s.current_version().await,
             Self::Rest(s) => s.current_version().await,
+        }
+    }
+
+    // Shard ops are forwarded EXPLICITLY (CXA-C019b): left at the trait
+    // defaults they would load/save the whole document through the enum even
+    // when the SQL backend could serve ONE shard column — the shard-native
+    // reads would silently go full-document.
+    async fn load_shard(&self, kind: ShardKind) -> Result<StateShard, PortError> {
+        match self {
+            Self::Json(s) => s.load_shard(kind).await,
+            Self::Sql(s) => s.load_shard(kind).await,
+            Self::Rest(s) => s.load_shard(kind).await,
+        }
+    }
+
+    async fn save_shard(&self, shard: &StateShard) -> Result<(), PortError> {
+        match self {
+            Self::Json(s) => s.save_shard(shard).await,
+            Self::Sql(s) => s.save_shard(shard).await,
+            Self::Rest(s) => s.save_shard(shard).await,
+        }
+    }
+
+    async fn save_shard_expecting(
+        &self,
+        shard: &StateShard,
+        expected_revision: Option<i64>,
+    ) -> Result<(), PortError> {
+        match self {
+            Self::Json(s) => s.save_shard_expecting(shard, expected_revision).await,
+            Self::Sql(s) => s.save_shard_expecting(shard, expected_revision).await,
+            Self::Rest(s) => s.save_shard_expecting(shard, expected_revision).await,
         }
     }
 

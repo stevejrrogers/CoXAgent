@@ -18,6 +18,15 @@ use crate::state::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// The reactions a user may toggle (CXA-F367). The ticket fixes the count at
+/// five; the glyphs are the product choice. Enforced here in the aggregate —
+/// not just in the picker — so a crafted request cannot mint a sixth pill.
+pub const REACTION_EMOJIS: &[&str] = &["👍", "❤️", "🎉", "👀", "✅"];
+
+/// A channel pins at most this many messages (CXA-F367): the pin bar is a
+/// summary of what matters, not an index. Enforced in `syschat_pin_ep`.
+pub const MAX_PINS_PER_CHANNEL: usize = 5;
+
 /// An incoming webhook: a secret token that lets an external system post to a
 /// channel without a login.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -264,8 +273,13 @@ impl SystemChat {
     }
 
     /// Toggle `user`'s `emoji` reaction on message `id`. Returns the updated
-    /// message (so the caller can broadcast it), or `None` if not found.
+    /// message (so the caller can broadcast it), or `None` if not found or the
+    /// emoji is outside [`REACTION_EMOJIS`] — a reaction the system does not
+    /// offer leaves the message untouched.
     pub fn react(&mut self, id: &str, user: &str, emoji: &str) -> Option<ChatMsg> {
+        if !REACTION_EMOJIS.contains(&emoji) {
+            return None;
+        }
         let msg = self.chat.iter_mut().find(|m| m.id == id)?;
         if let Some(r) = msg.reactions.iter_mut().find(|r| r.emoji == emoji) {
             if let Some(pos) = r.users.iter().position(|u| u == user) {
@@ -493,7 +507,7 @@ impl SystemChat {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatContext, ProjectRef, SystemChat, UserRef};
+    use super::{ChatContext, ProjectRef, SystemChat, UserRef, GENERAL_CHANNEL};
 
     fn ctx() -> ChatContext {
         ChatContext {
@@ -572,5 +586,18 @@ mod tests {
         assert!(sc.can_view("war-room", "bob", &c));
         // can't collide with a project channel name
         assert!(sc.create_channel("cxc", "alice", &c).is_err());
+    }
+
+    #[test]
+    fn react_rejects_emoji_outside_the_declared_set() {
+        let mut sc = SystemChat::default();
+        let id = sc.post("alice", "hi room", GENERAL_CHANNEL, Vec::new());
+        // An undeclared emoji is refused: no pill, no state change. The picker
+        // limits the UI; the aggregate enforces the rule (CXA-F367).
+        assert!(sc.react(&id, "alice", "🦄").is_none());
+        assert!(sc.chat[0].reactions.is_empty());
+        // A declared emoji toggles normally.
+        assert!(sc.react(&id, "alice", "🎉").is_some());
+        assert_eq!(sc.chat[0].reactions.len(), 1);
     }
 }

@@ -62,7 +62,7 @@ async function saveSettings(){
   // Track engine config BEFORE changes for comparison
   const origEngine=JSON.stringify(window._cfg?.engine||{});
   
-  function mdl(id){const provEl=document.getElementById("mdl-prov-"+id);if(provEl)return provEl.value+"/"+(val("mdl-"+id)||"");return val("mdl-"+id)||"";}
+  function mdl(id){const provEl=document.getElementById("mdl-prov-"+id);if(provEl&&provEl.value)return provEl.value+"/"+(val("mdl-"+id)||"");return val("mdl-"+id)||"";}
   cfg.engine.default={engine:val("eng-default"),model:mdl("default")};
   const per={};ROLES.forEach(r=>{const e=val("eng-"+r),m=mdl(r);if(e)per[r]={engine:e,model:m||"sonnet"};});cfg.engine.per_role=per;
   cfg.engine.fallbacks=(val("eng-fallbacks")||"").split("\n").map(l=>l.trim()).filter(Boolean).map(l=>{const p=l.split(/\s+/);return{engine:p[0],model:p.slice(1).join(" ")||"sonnet"};}).filter(f=>f.engine);
@@ -123,11 +123,17 @@ async function setPriority(id,p){
 }
 function close_(id){document.getElementById(id).classList.remove("open");}
 function setConn(on){document.getElementById("conn").className="dot "+(on?"live":"off");document.getElementById("connlbl").textContent=on?"live":"reconnecting";}
-function renderRunner(r){if(!r)return;window.RUNNER=r;const running=r.mode==="running";const c=running?"live":(r.mode==="paused"?"paused":"off");
+function renderRunner(r){if(!r)return;window.RUNNER=r;const running=r.mode==="running";
+  // CXA-F356 tier 1: the workspace master switch outranks everything — when it
+  // is off the pill says so (with who/why), instead of a "running" label over a
+  // fleet the gate is quietly idling.
+  const ws=(window.STATE&&window.STATE.workspace_run&&window.STATE.workspace_run.running===false)?window.STATE.workspace_run:null;
+  const c=ws?"paused":(running?"live":(r.mode==="paused"?"paused":"off"));
   const dot=document.getElementById("runmode");if(dot)dot.className="dot "+c;
   const lbl=document.getElementById("runlbl");
-  if(lbl)lbl.textContent=running?(r.active_role?r.active_role.replace(/_/g,'-'):("cycle "+r.cycle)):(r.cycle>0?("paused · "+r.cycle):"idle");
-  const pill=document.getElementById("runpill");if(pill)pill.title=(running&&r.active_note)?(r.active_role+" — "+r.active_note):(r.last_summary||(running?"running":(r.cycle>0?"paused":"idle")));
+  if(lbl)lbl.textContent=ws?"paused (workspace)":(running?(r.active_role?r.active_role.replace(/_/g,'-'):("cycle "+r.cycle)):(r.cycle>0?("paused · "+r.cycle):"idle"));
+  const pill=document.getElementById("runpill");if(pill)pill.title=ws?("workspace paused by "+(ws.by||"admin")+(ws.reason?(" — "+ws.reason):"")):((running&&r.active_note)?(r.active_role+" — "+r.active_note):(r.last_summary||(running?"running":(r.cycle>0?"paused":"idle"))));
+  if(document.getElementById("runmenu")?.classList.contains("open"))renderRunMenu();
   // Go-live preflight (CXA-F239): fetched once per project (and re-fetched on
   // every project switch); the primary Resume/Step affordance only renders
   // when every hard-gate item is ok — warn informs, blocked suppresses.
@@ -148,7 +154,58 @@ function renderRunner(r){if(!r)return;window.RUNNER=r;const running=r.mode==="ru
     prim.style.display=pfBlocked?"none":"";}
   const step=document.getElementById("ctl-step");if(step)step.style.display=((running&&mine)||pfBlocked)?"none":"";}
 function toggleRun(){const r=window.RUNNER;const mine=!r||!r.operator||!ME||!ME.auth||ME.username===r.operator||ME.role==="super"||ME.role==="admin";ctl((r&&r.mode==="running"&&mine)?"pause":"resume");}
-async function ctl(a){try{renderRunner(await(await fetch(api("/control/"+a),{method:"POST"})).json());}catch(e){}}
+async function ctl(a){try{const res=await fetch(api("/control/"+a),{method:"POST"});const j=await res.json();
+  if(!res.ok){toasty(j.error||"refused","err");return;}
+  if(j.mode)renderRunner(j);}catch(e){}}
+// ── CXA-F356: scoped run control (workspace ∧ machine) ─────────────────────
+// One dropdown, ordered by relevance to the person clicking: the workspace
+// master switch (admin), MY machine, then every other machine in the fleet.
+// The effective state of a machine = workspace ∧ its own switch; when the
+// workspace is off, machine rows show why instead of pretending they can run.
+function isAdmin(){return !ME||!ME.auth||ME.role==="super"||ME.role==="admin";}
+function toggleRunMenu(ev){if(ev)ev.stopPropagation();const m=document.getElementById("runmenu");if(!m)return;
+  const open=!m.classList.contains("open");m.classList.toggle("open",open);
+  if(open){renderRunMenu();
+    // Refresh the fleet registry so the machine list is current, then re-render.
+    fetch(api("/workers")).then(r=>r.json()).then(ws=>{window.WORKERS=Array.isArray(ws)?ws:[];renderRunMenu();}).catch(()=>{});
+    setTimeout(()=>document.addEventListener("click",closeRunMenu,{once:true}),0);}}
+function closeRunMenu(){const m=document.getElementById("runmenu");if(m)m.classList.remove("open");}
+async function wsCtl(on){let q="";
+  if(!on){const why=prompt("Lý do tạm dừng (hiện trong river) — có thể bỏ trống:","");if(why===null)return;
+    q=why?("?reason="+encodeURIComponent(why)):"";}
+  try{const res=await fetch(api("/control/workspace-"+(on?"resume":"pause")+q),{method:"POST"});
+    const j=await res.json();if(!res.ok){toasty(j.error||"refused","err");return;}
+    if(window.STATE)window.STATE.workspace_run=j.workspace_run;renderRunner(window.RUNNER||{mode:"paused",cycle:0});renderRunMenu();
+    toasty(on?"workspace resumed":"workspace paused (drain) — agents finish current work then idle","ok");}catch(e){}}
+async function opCtl(op,a){try{const res=await fetch(api("/operators/"+encodeURIComponent(op)+"/"+a),{method:"POST"});
+    const j=await res.json().catch(()=>({}));if(!res.ok){toasty(j.error||"refused","err");return;}
+    toasty(a==="pause"?(op+" sẽ nghỉ ở cycle kế tiếp"):(op+" started"),"ok");renderRunMenu();}catch(e){}}
+function renderRunMenu(){const m=document.getElementById("runmenu");if(!m)return;
+  const ws=window.STATE&&window.STATE.workspace_run;const wsOn=!ws||ws.running!==false;
+  const admin=isAdmin();const me=(ME&&ME.username)||"user";
+  const r=window.RUNNER||{};const myOp=r.operator?(r.operator+"@"+(r.host||"")):null;
+  const sw=(on,dis,fn)=>`<button class="rm-sw${on?" on":""}" ${dis?"disabled":""} onclick="event.stopPropagation();${fn}"></button>`;
+  const wsMeta=ws&&!wsOn?("paused by "+esc(ws.by||"admin")+(ws.reason?(" — “"+esc(ws.reason)+"”"):"")):"máy con không tự bật khi tầng này tắt";
+  let h=`<div class="rm-row"><i class="ti ti-world" style="color:var(--accent2);font-size:15px"></i>
+    <div class="rm-name"><b>Workspace</b><span>${wsMeta}</span></div>
+    ${admin?"":'<i class="ti ti-lock" style="color:var(--dim);font-size:12px" title="chỉ admin"></i>'}
+    ${sw(wsOn,!admin,"wsCtl("+(!wsOn)+")")}</div>
+    <div style="height:1px;background:var(--border);margin:5px 8px"></div>`;
+  const running=r.mode==="running";
+  const mineOwns=!r.operator||me===r.operator||admin;
+  h+=`<div class="rm-row mine"><i class="ti ti-device-laptop" style="color:var(--accent2);font-size:15px"></i>
+    <div class="rm-name"><b>Máy của tôi${r.operator&&r.operator!==me?"":""}</b><span>${running?esc((r.active_role||"running").replace(/_/g,"-")):(wsOn?"idle":"chờ workspace bật lại")}</span></div>
+    ${sw(running,!wsOn&&!running,"toggleRunMenuNoop();toggleRun()")}</div>`;
+  const others=(window.WORKERS||[]).filter(w=>{const id=w.worker||w.id||"";return id&&id!==myOp&&!(r.operator&&id.startsWith(r.operator+"@"));});
+  if(others.length){h+='<div class="rm-sub">Máy khác · '+others.length+'</div>';
+    for(const w of others){const id=esc(w.worker||w.id||"?");const acct=(w.worker||"").split("@")[0];
+      const may=admin||acct.toLowerCase()===me.toLowerCase();
+      h+=`<div class="rm-row"><span class="dot live" style="flex:none"></span>
+        <div class="rm-name"><b>${id}</b><span>${esc((w.role||"idle").replace(/_/g,"-"))}${w.ticket?(" · "+esc(w.ticket)):""}</span></div>
+        <button class="rm-sw on" ${may?"":"disabled"} title="${may?"pause máy này":"chỉ admin hoặc chủ máy"}" onclick="event.stopPropagation();opCtl('${id}','pause')"></button></div>`;}}
+  h+='<div class="rm-note">Hiệu lực = Workspace ∧ Máy · mọi thao tác đều ghi vào activity</div>';
+  m.innerHTML=h;}
+function toggleRunMenuNoop(){/* keep the menu open while the primary toggle runs */}
 // ── Go-live readiness preflight (CXA-F239) ────────────────────────────────
 // One fetch per project; the verdict gates the runpill affordances (see
 // renderRunner) and the Overview panel lists every line item with its own
@@ -218,8 +275,44 @@ function buildDocTree(){
 }
 // Every folder path (for the "move page" picker).
 function allFolderPaths(){const s=new Set(DOC_FOLDERS||[]);for(const d of DOCS){const f=(d.folder||"").trim();if(f){let acc="";for(const p of f.split("/")){acc=acc?acc+"/"+p:p;s.add(acc);}}}return [...s].sort();}
+// The rail's search filter (CXA-F364): while a query is set the tree is
+// replaced by the matched pages (server search over titles+bodies, matches
+// highlighted); clearing the box redraws the FULL tree again.
+let DOC_Q="";
+// Case-insensitive <mark> highlight of `term` inside `text`, escaping every
+// piece (mark on the RAW text, then escape — never inside an entity).
+function hl(text,term){
+  if(!term)return esc(text);
+  const re=new RegExp("("+term.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")+")","ig");
+  return text.split(re).map((part,i)=>i%2?"<mark>"+esc(part)+"</mark>":esc(part)).join("");
+}
+async function docSearchFilter(q){
+  DOC_Q=q||"";
+  const box=document.getElementById("docs-list");if(!box)return;
+  const term=DOC_Q.trim();
+  if(!term){renderDocsList();return;} // clearing restores the tree
+  try{
+    const hits=await(await fetch(api("/wiki/search?q="+encodeURIComponent(term)))).json();
+    if(term!==DOC_Q.trim())return; // a newer keystroke already owns the box
+    if(!Array.isArray(hits)||!hits.length){
+      box.innerHTML='<div class="empty" style="padding:14px 8px;font-size:12px">No pages match “'+esc(term)+'”.</div>';
+      return;
+    }
+    box.innerHTML=hits.map(h=>`<div class="docitem docsearch-hit${h.id===DOC_CUR?' on':''}" onclick="openDoc('${esc(h.id)}')" title="${esc(h.folder)}">
+      <i class="ti ti-file-text dfi" style="opacity:.55"></i><span class="dsh-t">${hl(h.title,term)}</span>
+      <span class="dsh-s">${hl(h.snippet,term)}</span></div>`).join("");
+  }catch(e){
+    // Same staleness rule as the success path: a newer keystroke (or a clear,
+    // which already restored the tree) owns the box — never overwrite it.
+    if(term!==DOC_Q.trim())return;
+    // A failed search must NOT fall back to renderDocsList: with a filter set
+    // that re-enters this handler and loops. Show the honest error state.
+    box.innerHTML='<div class="empty" style="padding:14px 8px;font-size:12px">Search failed — try again.</div>';
+  }
+}
 function renderDocsList(){
   const box=document.getElementById("docs-list");if(!box)return;
+  if(DOC_Q&&DOC_Q.trim()){docSearchFilter(DOC_Q);return;}
   const root=buildDocTree(),exp=docExp();
   const node=(n,depth)=>{let h="";
     for(const fn of Object.keys(n.folders).sort((a,b)=>a.localeCompare(b))){const f=n.folders[fn];const open=exp.has(f.path);const pad=8+depth*13;
@@ -295,8 +388,60 @@ function renderDocMain(){
   const meta=d.updated_by?`<span class="doc-meta">Updated by ${esc(d.updated_by)}${d.updated_at?" · "+esc(d.updated_at.slice(0,10)):""}</span>`:"";
   const crumb=docFolder(d).split("/").map(esc).join(' <i class="ti ti-chevron-right" style="font-size:11px;opacity:.5"></i> ');
   const actions=canEdit?`<div style="display:flex;gap:6px"><button class="gc-btn" onclick="askAiEdit()" title="Ask the DOCS agent to revise this page"><i class="ti ti-sparkles"></i> Ask AI</button><button class="gc-btn" onclick="moveDoc('${esc(d.id)}')" title="Move to another folder"><i class="ti ti-folder-symlink"></i> Move</button><button class="gc-btn" onclick="DOC_EDIT=true;renderDocMain()"><i class="ti ti-pencil"></i> Edit</button></div>`:"";
-  el.innerHTML=`<div class="doc-head"><div><span class="doc-cat-tag ${esc(d.category)}">${crumb}</span><h2>${esc(d.title)}</h2>${meta}</div>${actions}</div><div class="doc-body md">${mdRender(d.body)}</div>`;
+  el.innerHTML=`<div class="doc-head"><div><span class="doc-cat-tag ${esc(d.category)}">${crumb}</span><h2>${esc(d.title)}</h2>${meta}</div>${actions}</div>
+    <div class="doc-cols" id="doc-cols"><div class="doc-body md">${mdRender(d.body)}</div></div>
+    <div class="doc-backlinks" id="doc-backlinks" style="display:none"></div>`;
+  const body=el.querySelector(".doc-body");
+  const toc=buildToc(body);
+  if(toc)el.querySelector("#doc-cols").appendChild(toc);
+  wireTocScroll(el);
   renderMermaidIn(el);
+  renderDocBacklinks(d.id);
+}
+// ── Auto table of contents (CXA-F364) ───────────────────────────────────────
+// Pages with 3+ anchored headings get a sticky TOC in the right margin that
+// highlights the section being read; shorter pages render none.
+const TOC_MIN_HEADINGS=3;
+let DOC_TOC_IO=null;
+function buildToc(bodyEl){
+  const heads=[...bodyEl.querySelectorAll("h1[id],h2[id],h3[id],h4[id]")];
+  if(heads.length<TOC_MIN_HEADINGS)return null;
+  const toc=document.createElement("aside");
+  toc.className="doc-toc";toc.id="doc-toc";
+  toc.innerHTML='<div class="doc-toc-t">On this page</div>'+heads.map(h=>
+    `<a class="doc-toc-l lv${h.tagName[1]}" href="#${esc(h.id)}" data-anchor="${esc(h.id)}">${esc(h.textContent)}</a>`).join("");
+  return toc;
+}
+// Scroll-track the reading position: the topmost heading inside the viewport
+// band marks its TOC link active. Re-wired on every reader render.
+function wireTocScroll(scope){
+  if(DOC_TOC_IO){DOC_TOC_IO.disconnect();DOC_TOC_IO=null;}
+  const links=[...scope.querySelectorAll(".doc-toc-l")];if(!links.length)return;
+  const setActive=id=>links.forEach(l=>l.classList.toggle("on",l.dataset.anchor===id));
+  setActive(links[0].dataset.anchor);
+  // Clicking a TOC link marks it read immediately — the observer below only
+  // reports intersections, and a jump-scroll can leave every heading outside
+  // its band for a frame.
+  links.forEach(l=>l.addEventListener("click",()=>setActive(l.dataset.anchor)));
+  DOC_TOC_IO=new IntersectionObserver(es=>{
+    for(const e of es){if(e.isIntersecting)setActive(e.target.id);}
+  },{root:document.getElementById("docs-main"),rootMargin:"-10% 0px -78% 0px",threshold:0});
+  links.forEach(l=>{const h=document.getElementById(l.dataset.anchor);if(h)DOC_TOC_IO.observe(h);});
+}
+// ── Backlinks footer (CXA-F364) ─────────────────────────────────────────────
+// "Referenced by": every wiki page and ticket whose text mentions this page.
+// When nothing references it the footer stays hidden — no empty-state box.
+function renderDocBacklinks(id){
+  const foot=document.getElementById("doc-backlinks");if(!foot)return;
+  foot.innerHTML="";foot.style.display="none";
+  fetch(api("/docs/"+encodeURIComponent(id)+"/backlinks")).then(r=>r.json()).then(links=>{
+    if(!Array.isArray(links)||!links.length)return;
+    foot.innerHTML=`<div class="doc-bl-t"><i class="ti ti-link"></i> Referenced by (${links.length})</div>`+
+      links.map(l=>l.kind==="ticket"
+        ?`<a class="doc-bl-i" onclick="showTicket('${esc(l.id)}')" title="Open ticket"><i class="ti ti-ticket"></i> ${esc(l.title)}<span class="doc-bl-sub">${esc(l.id)}</span></a>`
+        :`<a class="doc-bl-i" onclick="openDoc('${esc(l.id)}')" title="Open page"><i class="ti ti-file-text"></i> ${esc(l.title)}${l.sub?`<span class="doc-bl-sub">${esc(l.sub)}</span>`:""}</a>`).join("");
+    foot.style.display="block";
+  }).catch(()=>{});
 }
 async function newDoc(folder){
   const title=await coxModal({title:"New page",message:"Title for the new page.",input:{placeholder:"Page title"},confirmText:"Next"});if(!title||!title.trim())return;

@@ -14,8 +14,8 @@
 //! # Constants
 //! | Name | Value | Meaning |
 //! |---|---|---|
-//! | `AUTH_RATE_MAX` | 20 | Max requests per window |
-//! | `AUTH_RATE_WINDOW` | 60 s | Sliding window length |
+//! | `AUTH_RATE_MAX` | 20 | Max requests per window (env-overridable) |
+//! | `AUTH_RATE_WINDOW` | 60 s | Sliding window length (env-overridable) |
 
 use axum::extract::{ConnectInfo, Request};
 use axum::http::StatusCode;
@@ -30,6 +30,36 @@ use std::time::{Duration, Instant};
 pub const AUTH_RATE_MAX: usize = 20;
 /// Sliding-window length for the auth rate limiter.
 pub const AUTH_RATE_WINDOW: Duration = Duration::from_secs(60);
+
+/// Parse an unsigned integer env var, trimming whitespace; `None` when absent
+/// or not a valid number — a malformed override must never wedge the limiter.
+fn env_usize(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+}
+
+/// The effective auth rate limit: the `AUTH_RATE_MAX` env var when it names a
+/// positive count, else the [`AUTH_RATE_MAX`] default. Many-independent-
+/// client topologies (CI fixtures behind one proxy IP) raise it instead of
+/// starving logins into a 429 storm.
+#[must_use]
+pub fn auth_rate_max() -> usize {
+    match env_usize("AUTH_RATE_MAX") {
+        Some(max) if max > 0 => max,
+        _ => AUTH_RATE_MAX,
+    }
+}
+
+/// The effective sliding-window length: the `AUTH_RATE_WINDOW` env var
+/// (whole seconds) when positive, else the [`AUTH_RATE_WINDOW`] default.
+#[must_use]
+pub fn auth_rate_window() -> Duration {
+    match env_usize("AUTH_RATE_WINDOW") {
+        Some(secs) if secs > 0 => Duration::from_secs(secs as u64),
+        _ => AUTH_RATE_WINDOW,
+    }
+}
 
 /// Sliding-window rate limiter keyed by arbitrary string identities.
 ///
@@ -225,5 +255,59 @@ mod tests {
             rl.check("eve", MAX, WINDOW, now),
             "eve should be allowed; buckets must be independent"
         );
+    }
+
+    /// Serializes the env-var tests: process env is global state, and two
+    /// parallel tests writing the same variables would race (CXA-F350).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Sets one env var for the test's duration, removing it on drop so a
+    /// later test in another suite binary never inherits the override.
+    struct EnvVar(&'static str);
+
+    impl EnvVar {
+        fn set(name: &'static str, value: &str) -> Self {
+            std::env::set_var(name, value);
+            Self(name)
+        }
+    }
+
+    impl Drop for EnvVar {
+        fn drop(&mut self) {
+            std::env::remove_var(self.0);
+        }
+    }
+
+    #[test]
+    fn valid_env_overrides_configure_the_limiter() {
+        let _serial = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _max = EnvVar::set("AUTH_RATE_MAX", "77");
+        let _window = EnvVar::set("AUTH_RATE_WINDOW", "11");
+        assert_eq!(auth_rate_max(), 77);
+        assert_eq!(auth_rate_window(), Duration::from_secs(11));
+    }
+
+    #[test]
+    fn malformed_or_non_positive_overrides_fall_back_to_the_defaults() {
+        let _serial = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Absent, empty, non-numeric, and non-positive values must all yield
+        // the built-in defaults — a bad override must never wedge auth
+        // entirely.
+        assert_eq!(auth_rate_max(), AUTH_RATE_MAX);
+        assert_eq!(auth_rate_window(), AUTH_RATE_WINDOW);
+        for bad in ["", "   ", "soon", "-3", "0"] {
+            let _max = EnvVar::set("AUTH_RATE_MAX", bad);
+            let _window = EnvVar::set("AUTH_RATE_WINDOW", bad);
+            assert_eq!(auth_rate_max(), AUTH_RATE_MAX, "max fallback for {bad:?}");
+            assert_eq!(
+                auth_rate_window(),
+                AUTH_RATE_WINDOW,
+                "window fallback for {bad:?}"
+            );
+        }
     }
 }

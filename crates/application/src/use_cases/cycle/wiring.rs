@@ -70,6 +70,13 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         .with_context(Some(self.context.clone()))
     }
 
+    /// Bind every DEV leg this runner spawns to one service (CXA-F420a.2).
+    #[must_use]
+    pub fn with_service(mut self, service: Option<String>) -> Self {
+        self.service = service;
+        self
+    }
+
     pub(super) fn dev(&self, mode: DevMode) -> RunDevUseCase<S, E> {
         RunDevUseCase::new(
             Arc::clone(&self.store),
@@ -84,6 +91,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
         .with_git(self.git.clone())
         .with_files(self.files.clone())
         .with_context(Some(self.context.clone()))
+        .with_service(self.service.clone())
     }
 
     pub(super) fn test(&self) -> RunTestUseCase<S, E> {

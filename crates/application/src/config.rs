@@ -28,6 +28,13 @@ pub enum EngineKind {
     Copilot,
     /// Deterministic offline engine for demos/tests (writes real code, no LLM).
     Scripted,
+    /// Harxes — in-process embedded engine (`harxes-core` crate, CXA-F372):
+    /// no child process, cancel-safe, typed infra-fault errors.
+    Harxes,
+    /// Any OpenAI-compatible `/chat/completions` HTTP gateway (in-process, no
+    /// CLI). Text-completion only for now — serves chat/planning/review/docs
+    /// roles; not yet a coding engine. Endpoint + key via `COXAGENT_LLM_*`.
+    Http,
 }
 
 impl EngineKind {
@@ -42,7 +49,23 @@ impl EngineKind {
             EngineKind::Codex => "codex",
             EngineKind::Copilot => "copilot",
             EngineKind::Scripted => "scripted",
+            EngineKind::Harxes => "harxes",
+            EngineKind::Http => "http",
         }
+    }
+
+    /// Whether this engine runs by spawning an external CLI binary (named by
+    /// [`as_binary`](Self::as_binary) on `PATH`) rather than in-process. The
+    /// in-process engines — Harxes (`harxes-core`) and Scripted — have no
+    /// binary to find, so callers must NOT treat a missing `as_binary()` name
+    /// as "not installed" for them. Used to drop a CLI fallback whose binary is
+    /// absent from the failover chain instead of letting it fail on every spawn.
+    #[must_use]
+    pub fn spawns_binary(self) -> bool {
+        !matches!(
+            self,
+            EngineKind::Harxes | EngineKind::Scripted | EngineKind::Http
+        )
     }
 
     /// All known engines, for discovery.
@@ -55,6 +78,8 @@ impl EngineKind {
             EngineKind::Gemini,
             EngineKind::Codex,
             EngineKind::Copilot,
+            EngineKind::Harxes,
+            EngineKind::Http,
         ]
     }
 }
@@ -832,6 +857,14 @@ pub struct GitConfig {
     /// Default 4. 0 = never surface the skip (old behaviour).
     #[serde(default = "default_review_max_skips")]
     pub review_max_skips: u32,
+    /// How many consecutive review rounds a kept-OPEN hold may be re-logged
+    /// identically (same reason, unchanged head) before the SAME cycle forces
+    /// a terminal decision: land the PR when it is safe to land, otherwise
+    /// close it. The counter lives in `pr_open_holds` (CXA-C026) — without it
+    /// a PR like #605 re-recorded "kept OPEN" eleven cycles in a row.
+    /// Default 3. 0 = holds never expire (the old behaviour).
+    #[serde(default = "default_hold_max_rounds")]
+    pub hold_max_rounds: u32,
     /// How long (hours) a mergeable CLEAN PR may sit open with NO review
     /// verdict before the runner stops waiting for the SA and verifies +
     /// merges it itself (an anti-starvation deadline, only when `auto_merge`
@@ -843,6 +876,10 @@ pub struct GitConfig {
 
 fn default_review_max_skips() -> u32 {
     4
+}
+
+fn default_hold_max_rounds() -> u32 {
+    3
 }
 
 fn default_review_deadline_hours() -> u32 {
@@ -883,6 +920,7 @@ impl Default for GitConfig {
             max_changed_lines: default_max_changed_lines(),
             server_url: String::new(),
             review_max_skips: default_review_max_skips(),
+            hold_max_rounds: default_hold_max_rounds(),
             review_deadline_hours: default_review_deadline_hours(),
         }
     }
@@ -1040,11 +1078,216 @@ pub struct Config {
     /// and files remediation tickets against a master 'Dependency Audit' epic.
     #[serde(default)]
     pub deps: DepsConfig,
+    /// Code services this project owns (CXA-F420). Empty = legacy single-repo
+    /// project; [`Config::effective_services`] applies the silent migration.
+    #[serde(default)]
+    pub services: Vec<ServiceConfig>,
+}
+
+/// One code service a project owns (CXA-F420): the unit of code ownership
+/// and gating. A legacy single-repo project is one implicit service — see
+/// [`Config::effective_services`] (rule R1 of the spec: migration is silent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServiceConfig {
+    /// Unique name within the project; the value tickets carry in
+    /// `service_tag` (R2).
+    pub name: String,
+    /// Git remote of the service's repository ("" = the project's own repo).
+    #[serde(default)]
+    pub repo: String,
+    /// Hub-managed clone this service's worktrees are cut from ("" = the
+    /// project's default `work_dir`).
+    #[serde(default)]
+    pub work_dir: String,
+    /// Monorepo folders this service owns (R4). Empty = the whole repo.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// Build command the probe/gate runs ("" = project default).
+    #[serde(default)]
+    pub build_cmd: String,
+    /// Test command the probe/gate runs ("" = project default).
+    #[serde(default)]
+    pub test_cmd: String,
+    /// Lifecycle: `onboarding | active | needs-setup | paused | archived`.
+    /// Only `active` services receive tickets and worktrees.
+    #[serde(default = "default_service_status")]
+    pub status: String,
+}
+
+impl Default for ServiceConfig {
+    /// The zero service is NOT a valid ticket target — `name` must be set by
+    /// the caller; the serde container default keeps document round-trips.
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            repo: String::new(),
+            work_dir: String::new(),
+            scopes: Vec::new(),
+            build_cmd: String::new(),
+            test_cmd: String::new(),
+            status: default_service_status(),
+        }
+    }
+}
+
+fn default_service_status() -> String {
+    "active".to_owned()
+}
+
+impl Config {
+    /// The services this project runs, with the R1 silent migration applied:
+    /// a document without a `services` section IS a one-service project whose
+    /// implicit service ("main") inherits the legacy project-level settings.
+    /// `default_work_dir` is the project's managed clone, which the config
+    /// document itself does not know (it lives in the hub registry).
+    #[must_use]
+    pub fn effective_services(&self, default_work_dir: &str) -> Vec<ServiceConfig> {
+        if self.services.is_empty() {
+            return vec![ServiceConfig {
+                name: "main".to_owned(),
+                repo: String::new(),
+                work_dir: default_work_dir.to_owned(),
+                scopes: Vec::new(),
+                build_cmd: String::new(),
+                test_cmd: String::new(),
+                status: "active".to_owned(),
+            }];
+        }
+        self.services.clone()
+    }
+
+    /// Resolve a ticket's `service_tag` to its service (R2). An absent or
+    /// unknown tag belongs to the FIRST service — legacy tickets keep working
+    /// unchanged, and a typo'd tag degrades to the default repo instead of
+    /// stranding the ticket.
+    #[must_use]
+    pub fn resolve_service<'a>(
+        services: &'a [ServiceConfig],
+        tag: Option<&str>,
+    ) -> Option<&'a ServiceConfig> {
+        let active = |s: &&ServiceConfig| s.status == "active";
+        match tag {
+            Some(t) => services
+                .iter()
+                .find(|s| s.name == t && s.status == "active")
+                .or_else(|| services.iter().find(active)),
+            None => services.iter().find(active),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spawns_binary_is_true_for_cli_engines_and_false_for_in_process() {
+        // The six CLI engines run by spawning a binary on PATH, so a missing
+        // binary means "not installed" (drop it from failover). Harxes and
+        // Scripted run in-process — they must never be treated as missing.
+        for k in [
+            EngineKind::Opencode,
+            EngineKind::Claude,
+            EngineKind::Hermes,
+            EngineKind::Gemini,
+            EngineKind::Codex,
+            EngineKind::Copilot,
+        ] {
+            assert!(k.spawns_binary(), "{k:?} should spawn a binary");
+        }
+        assert!(!EngineKind::Harxes.spawns_binary());
+        assert!(!EngineKind::Scripted.spawns_binary());
+    }
+
+    #[test]
+    fn legacy_document_is_one_implicit_active_service() {
+        // R1: a coxagent.json written before CXA-F420 has no `services`
+        // section; it must load as one active "main" service carrying the
+        // project's default work_dir — silently, with no migration step.
+        let cfg: Config = serde_json::from_str("{}").expect("empty doc loads");
+        assert!(cfg.services.is_empty());
+        let eff = cfg.effective_services("/hub/cxa/codebase");
+        assert_eq!(eff.len(), 1);
+        assert_eq!(eff[0].name, "main");
+        assert_eq!(eff[0].work_dir, "/hub/cxa/codebase");
+        assert_eq!(eff[0].status, "active");
+    }
+
+    #[test]
+    fn declared_services_round_trip_and_default_to_active() {
+        let doc = r#"{"services":[
+            {"name":"hub","work_dir":"/w/hub"},
+            {"name":"engine","repo":"git@x:org/engine.git","status":"needs-setup"}
+        ]}"#;
+        let cfg: Config = serde_json::from_str(doc).expect("doc loads");
+        let eff = cfg.effective_services("/ignored");
+        assert_eq!(eff.len(), 2);
+        assert_eq!(eff[0].status, "active", "status defaults to active");
+        assert_eq!(eff[1].status, "needs-setup");
+    }
+
+    #[test]
+    fn resolve_service_honors_tag_and_degrades_safely() {
+        let services = vec![
+            ServiceConfig {
+                name: "hub".into(),
+                status: "active".into(),
+                ..blank_service()
+            },
+            ServiceConfig {
+                name: "engine".into(),
+                status: "active".into(),
+                ..blank_service()
+            },
+            ServiceConfig {
+                name: "paused-one".into(),
+                status: "paused".into(),
+                ..blank_service()
+            },
+        ];
+        // Tagged → its service.
+        let hit = Config::resolve_service(&services, Some("engine")).expect("engine");
+        assert_eq!(hit.name, "engine");
+        // Untagged (legacy ticket) → first ACTIVE service.
+        assert_eq!(
+            Config::resolve_service(&services, None).unwrap().name,
+            "hub"
+        );
+        // Unknown tag degrades to the default service, never strands.
+        assert_eq!(
+            Config::resolve_service(&services, Some("typo"))
+                .unwrap()
+                .name,
+            "hub"
+        );
+        // A paused service is never resolved, even when tagged directly.
+        assert_eq!(
+            Config::resolve_service(&services, Some("paused-one"))
+                .unwrap()
+                .name,
+            "hub"
+        );
+        // No active services at all → None (caller decides what to do).
+        let all_paused = vec![ServiceConfig {
+            name: "x".into(),
+            status: "paused".into(),
+            ..blank_service()
+        }];
+        assert!(Config::resolve_service(&all_paused, None).is_none());
+    }
+
+    fn blank_service() -> ServiceConfig {
+        ServiceConfig {
+            name: String::new(),
+            repo: String::new(),
+            work_dir: String::new(),
+            scopes: Vec::new(),
+            build_cmd: String::new(),
+            test_cmd: String::new(),
+            status: String::new(),
+        }
+    }
 
     #[test]
     fn cut_only_verified_defaults_on_and_survives_old_documents() {

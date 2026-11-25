@@ -217,7 +217,7 @@ derived image to run real agents in the container.
 
 ```sh
 export COXAGENT_ADMIN_USER=root COXAGENT_ADMIN_PASSWORD='••••••••'
-export COXAGENT_DB_DSN='postgres://user:pass@host:5432/coxagent'    # state, chat, audit
+export COXAGENT_DB_DSN='postgres://<db-user>:<db-password>@<db-host>:5432/coxagent'  # state, chat, audit
 export COXAGENT_AUTH_DSN="$COXAGENT_DB_DSN"                         # accounts in Postgres
 export COXAGENT_REDIS_URL='redis://host:6379'                      # sessions + coordination
 export COXAGENT_MONGO_URL='mongodb://host:27017'                   # docs (optional)
@@ -260,6 +260,75 @@ file and restart the hub.
 
 ```sh
 cargo test && cargo clippy --all-targets && cargo fmt --all
-# Postgres adapter contract (needs a database):
-COXAGENT_TEST_PG_DSN='postgres://…' cargo test -p coxagent-infrastructure --test sql_store_contract
+# Postgres-backed integration suites: each test provisions its own ephemeral
+# Postgres/Redis through the shared compose fixture (needs docker; without it
+# the suites skip explicitly, and an exported DSN is refused fail-closed):
+cargo test -p coxagent-infrastructure \
+  --test sql_store_contract --test kv_doc_contract \
+  --test distributed_coord --test sql_auth_token_harvest
 ```
+
+### Integration test environment (fail-closed)
+
+The Postgres/Redis integration tests (`sql_store_contract`, `kv_doc_contract`,
+`sql_auth_token_harvest`, `distributed_coord`) share one fail-closed test
+database policy in `crates/infrastructure/tests/common/mod.rs`. Every test
+claims its OWN ephemeral Postgres + Redis from the shared compose fixture
+(`crates/infrastructure/tests/common/test-pg.compose.yml`) — no manually
+exported `COXAGENT_TEST_PG_DSN` is needed. This supersedes the CXA-F326
+exported-DSN guard and closes the incident behind both tickets: an exported
+DSN once pointed at the production store and was filled with `test-<pid>`
+rows. Instead of probing whether an operator-supplied URL *looks* safe, the
+suites **refuse any exported DSN or Redis URL fail-closed** and never dial an
+operator-provided database at all, so there is no live-hub heuristic left to
+misclassify.
+
+- With docker, a fixture stack that fails to come up fails RED naming the
+  fixture — a needed-but-absent database is never silently green.
+- Without docker the suites skip explicitly, with the reason visible in the
+  run summary — the only lawful green non-run.
+- Never point anything at a deployed hub or at the standing `cox-infra` stack
+  (`deploy/local-infra/docker-compose.yml` serves the real `coxagent`
+  database): the fixture cannot reach them, because it accepts no external
+  target.
+
+A run killed outright (SIGKILL) is the one residue path; its compose projects
+are all named `cox-test-deps-*` — `docker ps -a --filter name=cox-test-deps-`
+finds them and `docker compose -p <project> down -v` removes them.
+
+CI runs the same suites in the `integration` job; the fixture provisions the
+ephemeral pair per test, so the job exports no database env vars at all.
+
+## Pre-deploy container build gate (CXA-B313)
+
+Before pushing or deploying, prove the compose stack still builds:
+
+    scripts/docker-build-check.sh              # config check + cached build
+    scripts/docker-build-check.sh --no-cache   # cold build, what CI runs
+
+It runs `docker compose config -q` then `docker compose build`; on failure it
+prints the real tail of the build log to stdout (never a docker-desktop://
+dashboard link) and exits non-zero. A second consecutive run after an unrelated
+source edit finishes in minutes because dependency layers are cached — the
+Dockerfile copies manifests/lockfiles first and uses BuildKit cache mounts.
+Base images are pinned by digest; re-pin deliberately via the command noted at
+the top of `Dockerfile`.
+
+## Domain contract docs (CXA-B254)
+
+The wire surface of `coxagent-domain` — every documented enum's serialized
+tags, each DTO's required-vs-defaulted fields and unknown-key policy, and the
+golden fixtures that pin them — is rendered into a **generated** markdown page:
+[`crates/domain/docs/wiki/engineering/cxa-b254-contract-surface.md`](crates/domain/docs/wiki/engineering/cxa-b254-contract-surface.md).
+
+It comes from one single source of truth (`crates/domain/tests/contract_surface/mod.rs`),
+the same tables the CXA-B287 contract guards enforce, so the docs cannot drift
+from what the guards prove. When you change any domain DTO / enum / envelope:
+
+```sh
+cargo test -p coxagent-domain --test contract_docs_b288 write_contract_doc_file
+```
+
+then commit the regenerated file together with your DTO change. CI (and plain
+`cargo test -p coxagent-domain`) fails if the checked-in copy no longer matches
+what the generator would produce.

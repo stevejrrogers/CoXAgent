@@ -12,10 +12,13 @@ mod drift;
 mod goals;
 mod governance;
 mod integrity;
+mod lessons;
 mod ops;
 mod outbox;
 mod provenance;
+mod shards;
 mod work;
+mod workspace_id;
 
 pub use chat::*;
 pub use docs::*;
@@ -23,10 +26,13 @@ pub use drift::*;
 pub use goals::*;
 pub use governance::*;
 pub use integrity::*;
+pub use lessons::*;
 pub use ops::*;
 pub use outbox::*;
 pub use provenance::*;
+pub use shards::*;
 pub use work::*;
+pub use workspace_id::*;
 
 /// Current on-disk schema version. Bumped when the serialized shape changes;
 /// the store refuses to silently load a newer version than it understands.
@@ -41,6 +47,36 @@ pub struct ActivityEntry {
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,
+}
+
+/// The workspace master run switch (CXA-F356): one flag every runner on every
+/// machine honours at its cycle boundary. `running` defaults to `true` so
+/// existing states load unchanged; the attribution fields are empty until an
+/// admin first flips it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceRun {
+    /// `false` = the whole workspace is paused (drain: in-flight work finishes).
+    pub running: bool,
+    /// Who flipped it last (username), for the "paused by X" attribution line.
+    #[serde(default)]
+    pub by: String,
+    /// RFC3339 timestamp of the last flip.
+    #[serde(default)]
+    pub at: String,
+    /// Optional human reason, surfaced in the run-control UI and audit line.
+    #[serde(default)]
+    pub reason: String,
+}
+
+impl Default for WorkspaceRun {
+    fn default() -> Self {
+        Self {
+            running: true,
+            by: String::new(),
+            at: String::new(),
+            reason: String::new(),
+        }
+    }
 }
 
 /// Keep the activity feed bounded.
@@ -204,6 +240,19 @@ pub struct ProjectState {
     /// the team actually improves over time (kept bounded, newest last).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lessons: Vec<String>,
+    /// Per-lesson efficacy ledger (CXA-F306): recorded-at, re-recordings,
+    /// recurrences anchored to their incidents, escalation. Bounded at
+    /// [`lessons::MAX_LESSON_RECORDS`]; see [`lessons::LessonRecord`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lesson_records: Vec<LessonRecord>,
+    /// Incident→lesson matches a reviewer dismissed (CXA-F306 AC3) — persisted
+    /// so a dismissed match never increments a recurrence count again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dismissed_matches: Vec<DismissedMatch>,
+    /// UTC day (`YYYY-MM-DD`) the CXA-F306 lesson-efficacy sweep last ran, so
+    /// the daily forcing sweep files each repeater's structural ticket once.
+    #[serde(default)]
+    pub lesson_sweep_day: String,
     /// The team's durable decisions & conventions (ADR-style one-liners): the
     /// architecture calls, tech choices, and "how we do X" every agent should
     /// honour — so parallel LLM calls stay consistent instead of contradicting.
@@ -253,6 +302,12 @@ pub struct ProjectState {
     /// merge/close.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub pr_review_skips: std::collections::BTreeMap<u64, u32>,
+    /// The kept-OPEN review hold currently being counted per open PR
+    /// (CXA-C026): identical hold + unchanged head for `git.hold_max_rounds`
+    /// rounds forces a terminal decision (land or close) instead of re-logging
+    /// the hold forever. One entry per open PR; cleared on merge/close.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub pr_open_holds: std::collections::BTreeMap<u64, PrOpenHold>,
     /// Engine conversation id of the last fix run per PR — the next fix round
     /// RESUMES that conversation (the agent still has the branch, the feedback
     /// and its own changes in context) instead of starting cold. Dropped with
@@ -422,10 +477,21 @@ pub struct ProjectState {
     /// daily ceremony is not repeated every cycle.
     #[serde(default)]
     pub daily_jobs: std::collections::BTreeMap<String, String>,
+    /// Per-user service scope (CXA-F420f): username → services they work on.
+    /// Missing/empty = all services, so legacy projects change nothing.
+    #[serde(default)]
+    pub member_services: std::collections::BTreeMap<String, Vec<String>>,
     /// Whether the Ops/SRE monitor currently sees the deployed app as down —
     /// tracked so it files exactly one bug per outage and can announce recovery.
     #[serde(default)]
     pub ops_down: bool,
+    /// The workspace-wide master run switch (CXA-F356 tier 1). When off, every
+    /// runner on every machine idles at its next cycle boundary (drain
+    /// semantics: in-flight work finishes, nothing new starts) regardless of
+    /// each operator's own desired flag — and per-machine switches cannot
+    /// override it. Admin-only to flip; who/when/why is kept for the UI.
+    #[serde(default)]
+    pub workspace_run: WorkspaceRun,
     /// Consecutive unhealthy Ops-monitor probes (one per leader cycle) for the
     /// current outage — CXA-F240's "N consecutive checks" trigger: the
     /// live-health auto-rollback fires when this reaches
@@ -541,6 +607,7 @@ impl Default for ProjectState {
     fn default() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
+            workspace_run: WorkspaceRun::default(),
             queue_recovery: false,
             last_memory_hygiene_day: String::new(),
             jobs: Vec::new(),
@@ -577,6 +644,9 @@ impl Default for ProjectState {
             doc_refresh: std::collections::BTreeMap::new(),
             cycle_scores: Vec::new(),
             lessons: Vec::new(),
+            lesson_records: Vec::new(),
+            dismissed_matches: Vec::new(),
+            lesson_sweep_day: String::new(),
             decisions: Vec::new(),
             refactor_mode: false,
             sprint_cycle: 0,
@@ -585,6 +655,7 @@ impl Default for ProjectState {
             last_digest_day: String::new(),
             pr_fix_attempts: std::collections::BTreeMap::new(),
             pr_review_skips: std::collections::BTreeMap::new(),
+            pr_open_holds: std::collections::BTreeMap::new(),
             pr_sessions: std::collections::BTreeMap::new(),
             ticket_sessions: std::collections::BTreeMap::new(),
             cost_holds: std::collections::BTreeMap::new(),
@@ -613,6 +684,7 @@ impl Default for ProjectState {
             questions: Vec::new(),
             engine_incidents: Vec::new(),
             daily_jobs: std::collections::BTreeMap::new(),
+            member_services: std::collections::BTreeMap::new(),
             ops_down: false,
             ops_down_streak: 0,
             spend_today_usd: 0.0,
@@ -1155,20 +1227,7 @@ impl ProjectState {
             .count()
     }
 
-    /// Record a retro lesson (deduped, newest last, capped at 12).
-    pub fn add_lesson(&mut self, lesson: &str) {
-        let lesson = lesson.trim();
-        if lesson.is_empty() || self.lessons.iter().any(|l| l == lesson) {
-            return;
-        }
-        self.lessons.push(lesson.to_owned());
-        let overflow = self.lessons.len().saturating_sub(12);
-        if overflow > 0 {
-            self.lessons.drain(0..overflow);
-        }
-    }
-
-    /// Record a durable team decision / convention (deduped, newest last, capped
+    /// Record a team decision / convention (deduped, newest last, capped
     /// at 20). Trimmed to one line so it reads as an ADR entry.
     pub fn add_decision(&mut self, decision: &str) {
         let d = decision.trim().replace('\n', " ");
@@ -1574,35 +1633,6 @@ pub fn unix_now_secs() -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
-/// Derive a short uppercase alias from a project name: its capital letters
-/// (`CoXChat` -> `CXC`), else the first three alphanumerics uppercased.
-#[must_use]
-pub fn derive_alias(name: &str) -> String {
-    let caps: String = name.chars().filter(char::is_ascii_uppercase).collect();
-    if caps.len() >= 2 {
-        return caps.chars().take(4).collect();
-    }
-    name.chars()
-        .filter(char::is_ascii_alphanumeric)
-        .take(3)
-        .collect::<String>()
-        .to_uppercase()
-}
-
-/// CXA-B138: a project alias becomes a workspace directory id under the hub's
-/// workspace base (`base.join(id)`), so any path separator or dot component
-/// lets an alias like `../name` scaffold — and DELETE `rm -rf` — OUTSIDE the
-/// base. A safe id is a single non-hidden path component: never empty, no '/',
-/// no '\', no ".." anywhere, no leading dot.
-#[must_use]
-pub fn is_safe_workspace_id(id: &str) -> bool {
-    !id.is_empty()
-        && !id.contains('/')
-        && !id.contains('\\')
-        && !id.contains("..")
-        && !id.starts_with('.')
-}
-
 impl ProjectState {
     /// Find a ticket by id.
     #[must_use]
@@ -1765,47 +1795,7 @@ mod dependency_tests {
 }
 
 #[cfg(test)]
-mod alias_tests {
-    use super::{derive_alias, is_safe_workspace_id};
-
-    #[test]
-    fn derives_from_capitals() {
-        assert_eq!(derive_alias("CoXChat"), "CXC");
-        assert_eq!(derive_alias("CoXAgent"), "CXA");
-    }
-
-    /// CXA-B138: every traversal shape the ticket names must be refused —
-    /// an unsafe id would be `base.join`-ed outside the workspace base.
-    #[test]
-    fn path_traversing_ids_are_never_safe() {
-        for id in [
-            "../qatrav-esc",
-            "..\\qatrav",
-            "qa/../x",
-            "a\\b",
-            "..",
-            ".",
-            ".hidden",
-            "",
-        ] {
-            assert!(!is_safe_workspace_id(id), "{id:?} must be refused");
-        }
-    }
-
-    /// Ordinary single-component ids — the only kind onboarding may use.
-    #[test]
-    fn plain_component_ids_are_safe() {
-        for id in ["qatrav", "QATRAV", "qa-trav_2", "cxa"] {
-            assert!(is_safe_workspace_id(id), "{id:?} must be accepted");
-        }
-    }
-
-    #[test]
-    fn falls_back_to_first_letters() {
-        assert_eq!(derive_alias("quotes"), "QUO");
-        assert_eq!(derive_alias("my app"), "MYA");
-    }
-
+mod state_bound_tests {
     #[test]
     fn journal_note_bounded_and_capped() {
         let mut st = super::ProjectState::default();

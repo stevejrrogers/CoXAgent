@@ -87,6 +87,9 @@ test('a failed deploy shows its bundle with the real compose error beside the ro
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
   try {
     await openApp(page);
+    // CXA-F383: diagnostic panels fold behind the Diagnostics disclosure —
+    // open it before asserting on their content.
+    await page.evaluate(() => { const d = document.getElementById('ov-diag') as HTMLDetailsElement | null; if (d) d.open = true; });
 
     // The bundle is visible: the real compose error text renders (the summary
     // only ever said "exit 1", so this discriminates the bundle).

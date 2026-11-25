@@ -281,8 +281,17 @@
       "folder": "guides",
       "category": "product",
       "title": "Deploy health gate",
-      "body": "# Deploy health gate\n\nThe deploy is only successful once the health endpoint answers on the published port.\n",
+      "body": "# Deploy health gate\n\nThe deploy is only successful once the health endpoint answers on the published port.\n\n## Probe window\n\nThe probe must answer within the deploy timeout window; three retries, then the deploy fails.\n\n## Recovery\n\nA failed probe rolls the deploy back. The manual steps live in the Rollout runbook page.\n\n## Notes\n\nThe gate runs after publish and before the announce step.\n",
       "updated_at": "2026-07-31T21:00:12.704874Z",
+      "updated_by": "user"
+    },
+    {
+      "id": "rollout-runbook",
+      "folder": "guides",
+      "category": "product",
+      "title": "Rollout runbook",
+      "body": "# Rollout runbook\n\nManual steps for a deploy that failed its health gate.\n\n## First response\n\nRead the Deploy health gate page first, then confirm which probe failed.\n\n## Rollback\n\nRedeploy the previous release; the gate reruns automatically.\n",
+      "updated_at": "2026-07-31T21:10:00Z",
       "updated_by": "user"
     }
   ],

@@ -18,3 +18,12 @@ scripts/harness/
 **/.env
 !**/.env.example
 admin-password
+
+# CXA-B313: dependency caches and host tooling state — the image builds from
+# manifests + lockfiles, never from a host-populated cache, so excluding these
+# keeps the context identical to what CI builds with.
+**/node_modules/
+.npmrc
+e2e/test-results/
+e2e/playwright-report/
+coverage/

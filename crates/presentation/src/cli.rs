@@ -22,6 +22,11 @@ pub enum Command {
     Report,
     /// List agent engine CLIs detected on this machine's PATH.
     Discover,
+    /// Read-only preflight: report whether this machine can actually run the
+    /// hub — at least one agent engine on PATH, the git/gh/docker tooling the
+    /// flow needs, and a sandbox backend — as a PASS/WARN/FAIL checklist.
+    /// Runs nothing and touches no state or secrets; safe before a deploy.
+    Doctor,
     /// Detect this machine's agent engine CLIs and report them to a hub, so its
     /// dashboard shows them even before any runner cycle starts.
     Probe {
@@ -153,6 +158,14 @@ pub enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Security-audit trail tools.
+    Audit {
+        #[command(subcommand)]
+        action: AuditAction,
+        /// Hub directory holding coordination.json (for the DB DSN).
+        #[arg(long, default_value = ".", global = true)]
+        hub_dir: PathBuf,
+    },
     /// Query the code knowledge graph (for agents + humans): symbol search,
     /// impact/references, callers, and file dependencies.
     Codegraph {
@@ -163,6 +176,15 @@ pub enum Command {
         #[arg(long, default_value = ".", global = true)]
         work_dir: PathBuf,
     },
+}
+
+/// Security-audit subcommands.
+#[derive(Subcommand, Debug)]
+pub enum AuditAction {
+    /// Verify the tamper-evidence hash chain of the persisted audit trail and
+    /// print whether it is intact. Exits non-zero if a row was edited, deleted,
+    /// reordered, or truncated out of band — cron/CI can alarm on that.
+    Verify,
 }
 
 /// Code-graph query subcommands.

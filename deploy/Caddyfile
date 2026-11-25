@@ -1,4 +1,11 @@
-# Local dev: plain HTTP, no TLS.
-:80 {
+# Front door for the single-host deploy (docker-compose.yml mounts this and
+# already publishes 443 + injects $DOMAIN).
+#
+# With DOMAIN set to a public hostname, Caddy provisions a TLS certificate
+# automatically (ACME/Let's Encrypt), serves HTTPS on 443, and redirects 80→443
+# — so session bearer tokens are never sent in clear text. With DOMAIN unset it
+# falls back to plain HTTP on :80, which is ONLY for local development: never
+# expose the hub on a network without DOMAIN set.
+{$DOMAIN::80} {
 	reverse_proxy app:4000
 }

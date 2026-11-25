@@ -36,7 +36,27 @@ pub(crate) fn live_path(work_dir: &Path, role: &str, label: Option<&str>) -> Opt
         })
         .filter(|s| !s.is_empty())
         .map_or_else(String::new, |s| format!("__{s}"));
-    Some(dir.join(format!("{role}{label_part}{suffix}.log")))
+    // Two concurrent runs of the same role+ticket used to interleave into one
+    // file (unreadable). If the base name was written to in the last 10
+    // minutes by SOMEONE ELSE, take a numbered sibling instead.
+    let base = dir.join(format!("{role}{label_part}{suffix}.log"));
+    let fresh = |p: &Path| {
+        std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|e| e.as_secs() < 600)
+    };
+    if !fresh(&base) {
+        return Some(base);
+    }
+    for n in 2..=9 {
+        let alt = dir.join(format!("{role}{label_part}{suffix}-{n}.log"));
+        if !fresh(&alt) {
+            return Some(alt);
+        }
+    }
+    Some(base)
 }
 
 /// Append one work-log line to a live file, best-effort (a live log is a nicety,

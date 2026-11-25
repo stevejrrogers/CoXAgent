@@ -168,10 +168,12 @@ impl JsonStateStore {
     /// refuses a corrupted post-state and quarantines its payload.
     fn write_locked(&self, state: &ProjectState) -> Result<(), PortError> {
         // gate_save may HEAL (drop dangling ticket-keyed entries) — work on a
-        // clone so the healed shape is what gets persisted.
+        // clone so the healed shape is what gets persisted. The JSON store's
+        // ledger is the file-backed one; the recorded entry needs no further
+        // persistence here.
         let mut state = state.clone();
         let state = {
-            gate_save(&mut state, &self.quarantine)?;
+            gate_save(&mut state, &self.quarantine).map_err(|refused| refused.error)?;
             &state
         };
 

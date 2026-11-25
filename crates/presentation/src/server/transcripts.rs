@@ -93,6 +93,57 @@ pub(super) fn transcripts_dir(p: &ProjectHandle) -> PathBuf {
         .join("transcripts")
 }
 
+/// GET `/api/projects/:pid/agent-liveness` — ground truth of who is working
+/// RIGHT NOW, read from the live-log files' mtimes (CXA-F386). The worker
+/// registry only updates at claim boundaries, so an in-process engine mid-run
+/// looked idle from outside while its live file grew every second. Returns
+/// entries whose file was written in the last 10 minutes.
+pub(super) async fn agent_liveness_ep(
+    State(app): State<AppState>,
+    Path(pid): Path<String>,
+) -> axum::response::Response {
+    let Some(p) = app.project(&pid).await else {
+        return not_found();
+    };
+    let base = p.config_path.parent().unwrap_or(&p.config_path);
+    let live_dir = base.join("logs").join("live");
+    let now = std::time::SystemTime::now();
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&live_dir) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            let Some(stem) = name.strip_suffix(".log") else {
+                continue;
+            };
+            let Ok(meta) = e.metadata() else { continue };
+            let age = meta
+                .modified()
+                .ok()
+                .and_then(|m| now.duration_since(m).ok())
+                .map_or(u64::MAX, |d| d.as_secs());
+            if age > 600 || meta.len() < 60 {
+                continue; // stale, or a bare header (a run that never streamed)
+            }
+            // `<role>__<label>__<account>` | `<role>__<account>` | `<role>` —
+            // fields join on DOUBLE underscore; role keys keep their single one.
+            let parts: Vec<&str> = stem.split("__").collect();
+            let (role, label) = match parts.as_slice() {
+                [r, l, _acct] => (*r, Some(*l)),
+                [r, _acct] => (*r, None),
+                [r] => (*r, None),
+                _ => continue,
+            };
+            out.push(serde_json::json!({
+                "role": role,
+                "ticket": label,
+                "age_secs": age,
+            }));
+        }
+    }
+    out.sort_by_key(|v| v["age_secs"].as_u64().unwrap_or(u64::MAX));
+    Json(out).into_response()
+}
+
 #[derive(serde::Deserialize)]
 pub(super) struct AgentLogQuery {
     role: String,

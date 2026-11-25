@@ -279,6 +279,7 @@ async fn op_acquire_operator(p: &ProjectHandle, args: &Args) -> Response {
 /// authenticated-but-outsider session must be refused by the endpoint itself
 /// instead of being forwarded to the store adapter. Shared by the POST
 /// runner surface and the GET audit surface so both stay in lockstep.
+#[allow(clippy::result_large_err)] // axum Response<Body> is ~128B; boxing it would ripple every handler return site
 async fn authorize_store_call(
     app: &super::AppState,
     pid: &str,

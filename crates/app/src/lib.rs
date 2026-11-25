@@ -106,6 +106,16 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
             Ok(render_report(&state))
         }
         Command::Discover => Ok(render_discovery()),
+        Command::Doctor => {
+            // Advisory report, but exit nonzero on a BLOCKING failure so a
+            // deploy/install script can gate on `coxagent doctor` (0 = ready or
+            // degraded-with-warnings, 2 = blocking issue). It never changes
+            // anything — print the checklist, flush, then set the exit code.
+            let (report, ready) = render_doctor();
+            print!("{report}");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            std::process::exit(if ready { 0 } else { 2 });
+        }
         Command::Probe { hub, project } => run_probe(&hub, &project).await,
         Command::Onboard {
             name,
@@ -188,7 +198,10 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
                 .ok()
                 .and_then(|v| v.trim().parse::<u16>().ok())
                 .unwrap_or(port);
-            serve_with_runner(&args.state_dir, work_dir, port).await?;
+            // Box::pin: the serve future crossed the large-future bound when
+            // ProjectState grew its CXA-F306 lesson-efficacy fields — boxing
+            // keeps the branch under it (the cycle/mod.rs convention).
+            Box::pin(serve_with_runner(&args.state_dir, work_dir, port)).await?;
             Ok(String::new())
         }
         Command::Hub { registry, port } => {
@@ -241,6 +254,46 @@ async fn run() -> Result<String, Box<dyn std::error::Error>> {
                 max_cycles,
             ))
             .await
+        }
+        Command::Audit { action, hub_dir } => {
+            // coordination.json carries the DB DSN that build_audit reads.
+            load_coordination(&hub_dir);
+            match action {
+                coxagent_presentation::AuditAction::Verify => {
+                    let audit = build_audit().await;
+                    let v = audit.verify().await?;
+                    // Print the verdict, flush, then exit — nonzero on tampering
+                    // so cron/CI can alarm (mirrors `doctor`'s exit-code gate).
+                    let (line, code) = if !v.supported {
+                        (
+                            format!(
+                                "audit: no verifiable integrity chain ({})",
+                                v.detail.as_deref().unwrap_or("unsupported backend")
+                            ),
+                            0,
+                        )
+                    } else if v.intact {
+                        (format!("audit: OK — {} rows, chain intact", v.verified), 0)
+                    } else {
+                        (
+                            format!(
+                                "audit: TAMPERING DETECTED — chain breaks at row {} of {}{}",
+                                v.broken_at
+                                    .map_or_else(|| "?".to_owned(), |i| i.to_string()),
+                                v.verified,
+                                v.detail
+                                    .as_deref()
+                                    .map(|d| format!(": {d}"))
+                                    .unwrap_or_default()
+                            ),
+                            2,
+                        )
+                    };
+                    println!("{line}");
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                    std::process::exit(code);
+                }
+            }
         }
         Command::Codegraph { query, work_dir } => codegraph_query(&work_dir, &query).await,
         Command::Compress {
@@ -313,6 +366,42 @@ const SHIM_CMDS: &[&str] = &[
 const EXACT_AWARE_CMDS: &[&str] = &["git"];
 
 #[cfg(test)]
+mod doctor_tests {
+    use super::render_doctor;
+
+    #[test]
+    fn doctor_renders_all_sections_and_a_verdict_without_panicking() {
+        // Host-agnostic: engine/tooling presence varies per machine, so assert
+        // the report's shape, not its contents — every run must produce the
+        // three sections and exactly one VERDICT line, and never panic.
+        let (out, ready) = render_doctor();
+        assert!(
+            out.contains("Engines (PATH):"),
+            "missing Engines section:\n{out}"
+        );
+        assert!(out.contains("Tooling ("), "missing Tooling section:\n{out}");
+        assert!(out.contains("Sandbox:"), "missing Sandbox section:\n{out}");
+        assert_eq!(
+            out.matches("VERDICT:").count(),
+            1,
+            "expected exactly one verdict line:\n{out}"
+        );
+        // The verdict is one of the three known outcomes.
+        assert!(
+            out.contains("VERDICT: READY") || out.contains("VERDICT: NOT READY"),
+            "unrecognized verdict:\n{out}"
+        );
+        // `ready` must agree with the verdict text: NOT READY <=> !ready, and a
+        // warnings-only "READY (degraded)" still counts as ready (exit 0).
+        assert_eq!(
+            ready,
+            !out.contains("VERDICT: NOT READY"),
+            "ready flag disagrees with verdict:\n{out}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod project_id_tests {
     use super::project_id_for;
     use std::path::Path;
@@ -348,7 +437,7 @@ mod project_id_tests {
 #[cfg(test)]
 mod onboard_error_classification_tests {
     use super::classify_onboard_error;
-    use crate::onboard::OnboardConflict;
+    use crate::onboard::{OnboardConflict, OnboardMissingPath};
     use coxagent_presentation::FactoryErrorKind;
 
     #[test]
@@ -365,6 +454,26 @@ mod onboard_error_classification_tests {
         assert_eq!(
             mapped.message,
             "workspace already has tickets; refusing to re-onboard"
+        );
+    }
+
+    /// CXA-B157: a user-supplied `existing` path that does not exist can never
+    /// succeed as issued — the classifier must hand the API 400 material, and
+    /// the operator-facing message must survive the mapping.
+    #[test]
+    fn a_missing_codebase_path_is_classified_as_a_bad_request() {
+        let err: Box<dyn std::error::Error> = Box::new(OnboardMissingPath(
+            "codebase path does not exist: /tmp/definitely-not-there-qa".into(),
+        ));
+        let mapped = classify_onboard_error(err.as_ref());
+        assert_eq!(
+            mapped.kind,
+            FactoryErrorKind::BadRequest,
+            "a nonexistent codebase path is the client's bad input (400), not a 500 fault"
+        );
+        assert_eq!(
+            mapped.message,
+            "codebase path does not exist: /tmp/definitely-not-there-qa"
         );
     }
 
@@ -429,23 +538,137 @@ mod onboard_scaffold_cleanup_tests {
         );
     }
 
-    /// A brownfield adoption of a missing codebase fails inside
-    /// `onboard::brownfield`, after the store was built — the same cleanup
-    /// must apply to every error path, not just the URL check.
+    /// CXA-B157 regression, at the port: a brownfield adoption of a missing
+    /// codebase is the CLIENT's bad input — classified bad-request (400), not
+    /// a 500 fault — and still leaves no debris behind.
     #[tokio::test]
-    async fn a_brownfield_onboard_of_a_missing_codebase_leaves_no_debris() {
+    async fn a_brownfield_onboard_of_a_missing_codebase_is_bad_request_and_leaves_no_debris() {
         let base = tempfile::tempdir().expect("tmp");
         let registry = base.path().join("registry.json");
         let req = NewProjectReq {
             existing: Some(PathBuf::from("/nonexistent/qab136/codebase")),
             ..request("QAB136")
         };
-        assert!(Box::pin(onboard_project(base.path(), &registry, req, None))
-            .await
-            .is_err());
+        let Err(err) = Box::pin(onboard_project(base.path(), &registry, req, None)).await else {
+            panic!("a nonexistent codebase path must refuse the onboarding");
+        };
+        assert_eq!(
+            err.kind,
+            FactoryErrorKind::BadRequest,
+            "a missing codebase path is the client's bad input (400), not a 409 conflict or a \
+             500 fault"
+        );
+        assert!(
+            err.message.contains("codebase path does not exist"),
+            "the operator-facing refusal must survive the classification: {:?}",
+            err.message
+        );
         assert!(
             !base.path().join("qab136").exists(),
             "the failed adoption must not leave the scaffolded workspace behind"
+        );
+        assert_eq!(
+            unique_id(base.path(), "qab136"),
+            "qab136",
+            "the id must be free again — no `-2` suffix on the next recreate"
+        );
+    }
+
+    /// CXA-B147 regression, at the port: a 300-char alias is a legal string
+    /// but an impossible directory name — it must be refused as the CLIENT's
+    /// bad input (bad-request/400 material), never reach the filesystem, and
+    /// leave no debris behind.
+    #[tokio::test]
+    async fn an_over_long_alias_is_bad_request_and_leaves_no_debris() {
+        let base = tempfile::tempdir().expect("tmp");
+        let registry = base.path().join("registry.json");
+        let alias = "a".repeat(300);
+        let Err(err) = Box::pin(onboard_project(
+            base.path(),
+            &registry,
+            request(&alias),
+            None,
+        ))
+        .await
+        else {
+            panic!("an over-long alias must refuse the onboarding");
+        };
+        assert_eq!(
+            err.kind,
+            FactoryErrorKind::BadRequest,
+            "an over-long alias is the client's bad input (400), not a 409 conflict or a \
+             500 'File name too long' fault"
+        );
+        assert!(
+            err.message.contains("bytes"),
+            "the operator-facing refusal must name the length defect: {:?}",
+            err.message
+        );
+        assert!(
+            !base.path().join(&alias).exists(),
+            "the refused onboarding must not scaffold anything"
+        );
+        assert_eq!(
+            std::fs::read_dir(base.path()).expect("tmp base").count(),
+            0,
+            "the guard fires before any filesystem work — the base stays empty"
+        );
+    }
+}
+
+/// CXA-B142: a valid-scheme git URL that fails to clone (unresolvable host,
+/// refused connection, auth rejection) is the CLIENT's bad input — the request
+/// can never succeed as issued — so it must be classified bad-request (400),
+/// not a server fault, and the raw git stderr must stay out of the response
+/// body (it would hand any write-tier account a DNS-probe oracle).
+#[cfg(test)]
+mod onboard_clone_failure_tests {
+    use super::{onboard_project, unique_id};
+    use coxagent_presentation::{FactoryErrorKind, NewProjectReq};
+
+    fn request(url: &str) -> NewProjectReq {
+        NewProjectReq {
+            name: "QA B142 Clone".to_owned(),
+            alias: Some("QAB142".to_owned()),
+            git_url: Some(url.to_owned()),
+            ..Default::default()
+        }
+    }
+
+    /// A scheme-valid URL git can never clone. Loopback port 1: connection
+    /// refused instantly, deterministically, with no DNS and no network.
+    #[tokio::test]
+    async fn a_clone_failure_is_bad_request_and_never_leaks_git_stderr() {
+        let base = tempfile::tempdir().expect("tmp");
+        let registry = base.path().join("registry.json");
+        let Err(err) = Box::pin(onboard_project(
+            base.path(),
+            &registry,
+            request("http://127.0.0.1:1/no-such-repo.git"),
+            None,
+        ))
+        .await
+        else {
+            panic!("an unclonable git URL must refuse the onboarding");
+        };
+        assert_eq!(
+            err.kind,
+            FactoryErrorKind::BadRequest,
+            "a failed clone of the client's URL is bad input (400), not a 500 fault"
+        );
+        assert!(
+            !err.message.contains("127.0.0.1") && !err.message.contains("fatal"),
+            "the response must not echo git's raw stderr: {:?}",
+            err.message
+        );
+        assert!(
+            !base.path().join("qab142").exists(),
+            "the failed clone must not leave the scaffolded workspace behind (CXA-B136)"
+        );
+        assert_eq!(
+            unique_id(base.path(), "qab142"),
+            "qab142",
+            "the id must be free again — no `-2` suffix on the next recreate"
         );
     }
 }
@@ -535,6 +758,183 @@ mod onboard_alias_traversal_tests {
             !registry.exists(),
             "no refused attempt may register anything"
         );
+    }
+
+    /// CXA-B140: every control-character shape the ticket names is refused at
+    /// the port the same way — nothing scaffolded, nothing registered.
+    #[tokio::test]
+    async fn every_control_character_shape_is_refused_as_bad_request() {
+        let base = tempfile::tempdir().expect("tmp");
+        let registry = base.path().join("registry.json");
+        for alias in ["bad\nid", "a\u{8}", "bad\rid", "bad\tid", "trailing\n"] {
+            let Err(err) = Box::pin(onboard_project(
+                base.path(),
+                &registry,
+                request(alias),
+                None,
+            ))
+            .await
+            else {
+                panic!("alias {alias:?} must refuse the onboarding");
+            };
+            assert_eq!(
+                err.kind,
+                FactoryErrorKind::BadRequest,
+                "alias {alias:?} must classify bad-request"
+            );
+        }
+        let created: Vec<String> = std::fs::read_dir(base.path())
+            .expect("base listing")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            created.is_empty(),
+            "no refused attempt may scaffold anything: {created:?}"
+        );
+        assert!(
+            !registry.exists(),
+            "no refused attempt may register anything"
+        );
+    }
+}
+
+/// CXA-B146: the alias is trimmed like every other input — a whitespace-only
+/// alias used to pass the safety guard and become the project id AND workspace
+/// directory name (`"   "`, deletable only via percent-encoded DELETE).
+#[cfg(test)]
+mod onboard_alias_trim_tests {
+    use super::{normalize_alias, onboard_project};
+    use coxagent_presentation::{FactoryErrorKind, NewProjectReq};
+
+    fn request(name: &str, alias: &str) -> NewProjectReq {
+        NewProjectReq {
+            name: name.to_owned(),
+            alias: Some(alias.to_owned()),
+            ..Default::default()
+        }
+    }
+
+    /// The ticket's repro, at the decision point: a blank alias normalizes to
+    /// absent, so the derive-from-name fallback applies and it can never
+    /// become an id. NBSP pins the Unicode-whitespace boundary.
+    #[test]
+    fn a_whitespace_only_alias_is_normalized_to_absent() {
+        for alias in ["   ", " \t\n", "\u{a0}"] {
+            assert_eq!(
+                normalize_alias(Some(alias.to_owned())),
+                None,
+                "{alias:?} must normalize to absent"
+            );
+        }
+        assert_eq!(normalize_alias(Some(String::new())), None);
+        assert_eq!(normalize_alias(None), None);
+    }
+
+    /// A padded alias keeps its content, minus the surrounding whitespace —
+    /// interior whitespace is content, not padding.
+    #[test]
+    fn a_padded_alias_is_trimmed_to_its_content() {
+        assert_eq!(
+            normalize_alias(Some("  QATRAV  ".to_owned())),
+            Some("QATRAV".to_owned())
+        );
+        assert_eq!(
+            normalize_alias(Some("qa trav".to_owned())),
+            Some("qa trav".to_owned())
+        );
+    }
+
+    /// End to end at the port: whatever the scaffold's fate in this
+    /// environment (it refuses inside agent worktrees, and any failure cleans
+    /// up after itself), no whitespace-named directory may ever be created or
+    /// left behind — the id is the one derived from the name (`QA Space` →
+    /// `QAS` → `qas`).
+    #[tokio::test]
+    async fn a_whitespace_only_alias_never_becomes_the_workspace_directory() {
+        let base = tempfile::tempdir().expect("tmp");
+        let registry = base.path().join("registry.json");
+        let _ = Box::pin(onboard_project(
+            base.path(),
+            &registry,
+            request("QA Space", "   "),
+            None,
+        ))
+        .await;
+        let created: Vec<String> = std::fs::read_dir(base.path())
+            .expect("base listing")
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            created.iter().all(|d| d == "qas"),
+            "the workspace id must derive from the name (qas), never the blank alias: {created:?}"
+        );
+        assert!(
+            !created.iter().any(|d| d.trim().is_empty()),
+            "a whitespace-named directory must never exist: {created:?}"
+        );
+    }
+
+    /// Same pin for a padded alias: its spaces must not reach the id.
+    #[tokio::test]
+    async fn a_padded_alias_trims_before_it_becomes_the_id() {
+        let base = tempfile::tempdir().expect("tmp");
+        let registry = base.path().join("registry.json");
+        let _ = Box::pin(onboard_project(
+            base.path(),
+            &registry,
+            request("QA Trav", "  QATRAV  "),
+            None,
+        ))
+        .await;
+        let created: Vec<String> = std::fs::read_dir(base.path())
+            .expect("base listing")
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            created.iter().all(|d| d == "qatrav"),
+            "the id must be the trimmed, lowercased alias: {created:?}"
+        );
+    }
+
+    /// Trimming must not defeat the safety guard: the padding hides the
+    /// leading dot from the raw guard, and the trimmed `.hidden` would
+    /// scaffold a HIDDEN workspace directory. The guard on the trimmed seed
+    /// must refuse it before anything is created or registered.
+    #[tokio::test]
+    async fn a_padded_leading_dot_alias_is_refused_not_scaffolded_hidden() {
+        let base = tempfile::tempdir().expect("tmp");
+        let registry = base.path().join("registry.json");
+        let Err(err) = Box::pin(onboard_project(
+            base.path(),
+            &registry,
+            request("QA Trav", " .hidden "),
+            None,
+        ))
+        .await
+        else {
+            panic!("a padded leading-dot alias must refuse the onboarding");
+        };
+        assert_eq!(
+            err.kind,
+            FactoryErrorKind::BadRequest,
+            "a hidden-dir id is client input, not a server fault"
+        );
+        let created: Vec<String> = std::fs::read_dir(base.path())
+            .expect("base listing")
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            created.is_empty(),
+            "no workspace may be scaffolded, hidden or not: {created:?}"
+        );
+        assert!(!registry.exists(), "the registry must not gain an entry");
     }
 }
 
@@ -725,6 +1125,7 @@ async fn serve_with_runner(
         hub_dir: Some(state_dir.parent().unwrap_or(state_dir).to_path_buf()),
         storage: build_storage().await,
         doc_store: build_doc_store().await,
+        archive_store: build_archive_store().await,
         syschat_store: build_syschat_store(state_dir.parent().unwrap_or(state_dir)).await,
         ..Default::default()
     };
@@ -891,6 +1292,7 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
             coverage: coxagent_application::config::CoverageConfig::default(),
             artifacts: coxagent_application::config::ArtifactsConfig::default(),
             deps: DepsConfig::default(),
+            services: Vec::new(),
         },
         logs_dir(&base),
         None,
@@ -913,6 +1315,7 @@ pub async fn run_hub(registry: &Path, mut port: u16) -> Result<(), Box<dyn std::
         hub_dir: Some(base.clone()),
         storage: build_storage().await,
         doc_store: build_doc_store().await,
+        archive_store: build_archive_store().await,
         syschat_store: build_syschat_store(&base).await,
         broken,
         // CXA-B114: recovered projects arrive here and join the live registry
@@ -942,13 +1345,27 @@ fn remove_from_registry(registry_path: &Path, id: &str) -> Result<(), String> {
 
 /// Map an onboarding failure onto the factory's classified error (CXA-B129):
 /// the typed "workspace already has tickets" conflict becomes 409 material at
-/// the API; everything else stays a server fault.
+/// the API, the typed missing-codebase-path refusal becomes 400 material
+/// (CXA-B157, same client-input class as the B139/B142 refusals); everything
+/// else stays a server fault.
 fn classify_onboard_error(e: &(dyn std::error::Error + 'static)) -> FactoryError {
     if let Some(message) = onboard::conflict_message(e) {
         FactoryError::conflict(message)
+    } else if let Some(message) = onboard::missing_path_message(e) {
+        // CXA-B157: a user-supplied codebase path that does not exist can
+        // never succeed as issued — the CLIENT's bad input (400), not a
+        // server fault.
+        FactoryError::bad_request(message)
     } else {
         FactoryError::internal(e.to_string())
     }
+}
+
+/// CXA-B146: an alias is trimmed like every other input — a blank one is
+/// absent. Pure, so the whitespace-only repro (`"   "` becoming the workspace
+/// id) is decided here, testable without touching the filesystem.
+fn normalize_alias(alias: Option<String>) -> Option<String> {
+    alias.map(|a| a.trim().to_owned()).filter(|a| !a.is_empty())
 }
 
 /// Scaffold a new project workspace under `base`, seed it, append it to the hub
@@ -960,17 +1377,42 @@ async fn onboard_project(
     req: coxagent_presentation::NewProjectReq,
     auth: Option<&Arc<dyn coxagent_application::auth::AuthPort>>,
 ) -> Result<coxagent_presentation::ProjectHandle, FactoryError> {
+    let mut req = req;
+    let raw_seed = req
+        .alias
+        .clone()
+        .unwrap_or_else(|| coxagent_application::state::derive_alias(req.name.trim()));
+    // CXA-B138/CXA-B140/CXA-B147: the id becomes the workspace directory
+    // (`base.join(id)`), so a path-traversing alias must be refused before ANY
+    // filesystem work, a control character in it would mangle listings and
+    // be non-obviously deletable, and an over-long one dies in `create_dir_all`
+    // with ENAMETOOLONG — the HTTP layer rejects all three first; this keeps
+    // the port itself safe for every caller. This guard runs on the
+    // UNTRIMMED seed: trimming first could smuggle `"trailing\n"` through as
+    // `"trailing"`. (An empty seed keeps the unique_id "project" fallback.)
+    if !raw_seed.is_empty() && !coxagent_application::state::is_safe_workspace_id(&raw_seed) {
+        return Err(FactoryError::bad_request(format!(
+            "alias {raw_seed:?} {}",
+            coxagent_application::state::workspace_id_refusal_reason(&raw_seed)
+        )));
+    }
+    // CXA-B146: the alias is trimmed like every other input — a blank one is
+    // absent, so the derive-from-name fallback applies and a whitespace-only
+    // or padded alias can never become the workspace id (or the persisted
+    // ticket alias used by greenfield/brownfield below).
+    req.alias = normalize_alias(req.alias.take());
     let derived = req
         .alias
         .clone()
         .unwrap_or_else(|| coxagent_application::state::derive_alias(req.name.trim()));
-    // CXA-B138: the id becomes the workspace directory (`base.join(id)`), so a
-    // path-traversing alias must be refused before ANY filesystem work — the
-    // HTTP layer rejects it first; this keeps the port itself safe for every
-    // caller. (An empty derived id keeps the unique_id "project" fallback.)
+    // The trim above can itself produce a value the first guard never saw:
+    // padding hides a leading dot from it (`" .hidden "` is trim-safe raw but
+    // becomes the HIDDEN directory `.hidden`). Guard the seed that will
+    // actually become the id.
     if !derived.is_empty() && !coxagent_application::state::is_safe_workspace_id(&derived) {
         return Err(FactoryError::bad_request(format!(
-            "alias {derived:?} must not contain '/', '\\', '..' or leading dots"
+            "alias {derived:?} {}",
+            coxagent_application::state::workspace_id_refusal_reason(&derived)
         )));
     }
     let id = unique_id(base, &derived.to_lowercase());
@@ -982,7 +1424,18 @@ async fn onboard_project(
     // scaffold again: a surviving empty dir keeps the derived id occupied
     // (forcing `-2`-suffixed recreates) and reads as a real project to ops
     // (CXA-B136).
-    let outcome = scaffold_onboarded_project(base, registry_path, &proj_dir, &id, req, auth).await;
+    // Box::pin: same large-future bound as the serve branch above — the
+    // scaffold future grew past 16KB when ProjectState gained the CXA-F306
+    // lesson-efficacy fields.
+    let outcome = Box::pin(scaffold_onboarded_project(
+        base,
+        registry_path,
+        &proj_dir,
+        &id,
+        req,
+        auth,
+    ))
+    .await;
     if outcome.is_err() && proj_dir.exists() {
         if let Err(e) = std::fs::remove_dir_all(&proj_dir) {
             tracing::warn!(
@@ -1042,11 +1495,23 @@ async fn scaffold_onboarded_project(
                 .await
                 .map_err(|e| FactoryError::internal(format!("spawn git clone: {e}")))?;
             if !out.status.success() {
-                let err = String::from_utf8_lossy(&out.stderr);
-                return Err(FactoryError::internal(format!(
-                    "git clone failed: {}",
-                    err.lines().last().unwrap_or("unknown error")
-                )));
+                // CXA-B142: a failed clone of a user-supplied URL is the
+                // CLIENT's bad input — the request can never succeed as
+                // issued — so it must be classified as a bad request (400),
+                // one layer deeper than the scheme check above. The raw git
+                // stderr must not reach the response body either: it would
+                // hand any write-tier account a DNS-probe oracle against
+                // internal names. The detail goes to the hub log for the
+                // operator instead (git's stderr already redacts embedded
+                // credentials, the raw URL is deliberately NOT logged).
+                tracing::warn!(
+                    "onboard: git clone of the supplied URL failed ({}): {}",
+                    out.status,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+                return Err(FactoryError::bad_request(
+                    "git clone failed: the supplied git URL could not be cloned; check the URL and any credentials (details are in the hub log)",
+                ));
             }
             Some(wd)
         }
@@ -1150,6 +1615,24 @@ fn build_failover(
         sandbox,
     )?];
     for fb in fallbacks {
+        // A configured CLI fallback whose binary is not installed is a DEAD
+        // leg: `from_choice` succeeds (binary resolution is deferred to spawn),
+        // so it silently joins the chain and then fails `spawn <engine>: No
+        // such file or directory` on EVERY run — polluting the log and counting
+        // toward the "infrastructure appears DOWN" pause when the primary flaps.
+        // Drop it at build time with one warning. In-process engines (Harxes,
+        // Scripted) spawn no binary, so they are never filtered this way.
+        if fb.engine.spawns_binary()
+            && coxagent_infrastructure::engine::registry::resolve_binary(fb.engine.as_binary())
+                .is_none()
+        {
+            tracing::warn!(
+                "skipping fallback engine {:?}: binary '{}' not found on PATH",
+                fb.engine,
+                fb.engine.as_binary()
+            );
+            continue;
+        }
         match AnyEngine::from_choice(fb, mcp.cloned()) {
             Ok(e) => engines.push(e),
             Err(e) => tracing::warn!("skipping fallback engine {:?}: {e}", fb.engine),
@@ -1545,11 +2028,16 @@ async fn run_loop(
         // Honour this operator's per-user Start/Stop from the web: idle (without
         // exiting) when the user has stopped it — or, for an app-spawned operator,
         // until they first Start it — so no one's credentials are spent unbidden.
-        let idle_now = match store.get_desired(&operator).await {
-            Ok(Some(true)) => false,
-            Ok(Some(false)) => true,
-            _ => wait_for_start,
+        // CXA-F356: the workspace master switch outranks the per-operator flag —
+        // read fresh each cycle so an admin's workspace-pause reaches every
+        // machine within one interval (fail-open on a store blip).
+        let desired = store.get_desired(&operator).await.ok().flatten();
+        let ws_running = match store.load().await {
+            Ok(s) => s.workspace_run.running,
+            Err(_) => true,
         };
+        let idle_now =
+            !coxagent_application::use_cases::cycle_may_run(ws_running, desired, wait_for_start);
         if idle_now {
             shutdown.sleep_or_shutdown(sleep).await;
             continue;
@@ -2076,6 +2564,101 @@ fn render_discovery() -> String {
         let _ = writeln!(out, "  {:<10} {}", d.kind.as_binary(), d.path.display());
     }
     out
+}
+
+/// Read-only preflight (`coxagent doctor`): does this machine have what the hub
+/// needs to actually RUN — an agent engine, the git/gh/docker tooling the flow
+/// calls, and a sandbox backend — rendered as a PASS/WARN/FAIL checklist.
+///
+/// The failures this catches are exactly the ones that otherwise surface only
+/// as opaque per-run errors in the hub log (no engine on PATH, a fallback whose
+/// binary is missing, `gh` absent so PRs never open, `docker` absent so the
+/// backend never boots). It runs nothing, opens no network, and reads no
+/// secrets — safe to run before a deploy or when something looks wedged.
+///
+/// Returns `(report, ready)` where `ready` is false only when a BLOCKING
+/// (FAIL) check tripped; warnings keep `ready` true. The caller turns `ready`
+/// into the process exit code so `coxagent doctor` can gate a deploy script.
+fn render_doctor() -> (String, bool) {
+    use coxagent_infrastructure::engine::discover_tooling;
+    let mut out = String::from("CoXAgent doctor — can this machine run the hub?\n\n");
+    let mut fail = 0u32;
+    let mut warn = 0u32;
+
+    // Engines: at least one agent CLI (or the in-process Harxes) must be
+    // reachable, or the hub has nothing to run and every cycle fails.
+    let engines = discover();
+    out.push_str("Engines (PATH):\n");
+    if engines.is_empty() {
+        fail += 1;
+        out.push_str(
+            "  [FAIL] no agent engine on PATH — the hub cannot run any role. Install one \
+             (opencode/claude/...) or ensure the harxes engine binary is reachable.\n",
+        );
+    } else {
+        for d in &engines {
+            let _ = writeln!(
+                out,
+                "  [PASS] {:<10} {}",
+                d.kind.as_binary(),
+                d.path.display()
+            );
+        }
+    }
+
+    // Tooling the flow calls directly: git is load-bearing (branch/commit);
+    // gh/glab open PRs; docker boots the backend; bwrap confines sandboxed
+    // writes on Linux. Missing git is a FAIL; the rest are WARN (the hub
+    // degrades — no PRs / no backend / unsandboxed — but still boots).
+    let tooling = discover_tooling();
+    let _ = writeln!(out, "\nTooling ({}):", tooling.os);
+    for t in &tooling.tools {
+        if t.present {
+            let _ = writeln!(out, "  [PASS] {:<7} {}", t.name, t.path);
+        } else if t.name == "git" {
+            fail += 1;
+            let _ = writeln!(
+                out,
+                "  [FAIL] {:<7} missing — {} — install: {}",
+                t.name, t.purpose, t.install
+            );
+        } else {
+            warn += 1;
+            let _ = writeln!(
+                out,
+                "  [WARN] {:<7} missing — {} — install: {}",
+                t.name, t.purpose, t.install
+            );
+        }
+    }
+
+    // Sandbox backend: only relevant when workflow.sandbox is on, so its
+    // absence is a WARN (agents then run unsandboxed), never a hard FAIL.
+    let sandbox = coxagent_infrastructure::proc::sandbox_status(true);
+    out.push_str("\nSandbox:\n");
+    match sandbox {
+        SandboxStatus::Unavailable(why) | SandboxStatus::Denied(why) => {
+            warn += 1;
+            let _ = writeln!(
+                out,
+                "  [WARN] no sandbox backend ({why}) — agents run unsandboxed when \
+                 workflow.sandbox is on",
+            );
+        }
+        other => {
+            let _ = writeln!(out, "  [PASS] sandbox backend ok ({other:?})");
+        }
+    }
+
+    let verdict = if fail > 0 {
+        format!("\nVERDICT: NOT READY — {fail} blocking issue(s), {warn} warning(s).\n")
+    } else if warn > 0 {
+        format!("\nVERDICT: READY (degraded) — 0 blocking, {warn} warning(s).\n")
+    } else {
+        "\nVERDICT: READY — all checks passed.\n".to_owned()
+    };
+    out.push_str(&verdict);
+    (out, fail == 0)
 }
 
 /// Real-server regression coverage for the bug caught in review: `/api/mcp`

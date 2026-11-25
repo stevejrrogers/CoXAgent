@@ -126,8 +126,17 @@ pub fn field_permitted(actor: Role, field: &str) -> bool {
         // never re-point an association — the shared creation path binds the
         // declared goal under System's bookkeeping authority.
         "goal_id" => matches!(actor, Role::Po | Role::User),
-        // SA owns technical design and dependency graph.
-        "design.technical" | "depends_on" => actor == Role::Sa,
+        // The bounded-context service tag is requirements scope (CXA-F253):
+        // the BA stamps it when filing shared-infrastructure work, the PO may
+        // amend — the same authority that owns `clarify`. Agents never
+        // relabel work, or the duplicate radar's carve-out becomes a dodge.
+        // The SA joined with CXA-F420c: splitting an oversize ticket along a
+        // service boundary is an architecture decision, and each minted
+        // subtask carries the service its code lives in.
+        "service_tag" => matches!(actor, Role::Ba | Role::Po | Role::User | Role::Sa),
+        // SA owns technical design and dependency graph — parent links are
+        // part of that graph (an oversize ticket split into subtasks).
+        "design.technical" | "depends_on" | "parent_id" => actor == Role::Sa,
         // PD owns UX; SA may cover it when PD is disabled.
         "design.ux" => matches!(actor, Role::Pd | Role::Sa),
         _ => false,
@@ -278,6 +287,16 @@ mod tests {
         assert!(!field_permitted(Role::DevFeature, "priority"));
         assert!(field_permitted(Role::Po, "priority"));
         assert!(field_permitted(Role::User, "priority"));
+    }
+
+    #[test]
+    fn service_tag_is_ba_po_scope_not_dev() {
+        assert!(field_permitted(Role::Ba, "service_tag"));
+        assert!(field_permitted(Role::Po, "service_tag"));
+        assert!(field_permitted(Role::User, "service_tag"));
+        assert!(!field_permitted(Role::DevFeature, "service_tag"));
+        assert!(!field_permitted(Role::DevBug, "service_tag"));
+        assert!(field_permitted(Role::System, "service_tag"));
     }
 
     #[test]

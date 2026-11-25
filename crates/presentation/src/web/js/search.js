@@ -38,7 +38,7 @@ function gsChips(){
   const chip=(k,label)=>`<button type="button" class="cs-chip${GS_KIND===k?" on":""}" onclick="gsScope('${k}')">${label}</button>`;
   box.innerHTML=chip("all","All")+chip("ticket","Tickets")+chip("page","Wiki")+chip("chat","Chat");
 }
-function gsScope(k){GS_KIND=k;GS_SEL=-1;gsRender();}
+function gsScope(k){GS_KIND=k;GS_SEL=-1;chatSearchRun();}
 
 // oninput handler (index.html): client legs render instantly, the server pass
 // refines debounced. Short queries never fetch (AC4) — the explicit hint shows.
@@ -89,6 +89,13 @@ function gsClientHits(q){
 
 function gsRender(){
   const list=document.getElementById("chatsearch-list");
+  // Read the LIVE input, not only the cached query: any render path that
+  // fires while the cache is stale (a missed input event, a scope-chip
+  // click racing the debounce) used to show "type at least 2 characters"
+  // over a fully typed query (CXA-B170). Self-heal by kicking the search.
+  const inp=document.getElementById("chatsearch-input");
+  const liveQ=inp?inp.value.trim():GS_Q;
+  if(liveQ!==GS_Q){chatSearchRun();return;}
   const q=GS_Q;
   // AC4: an explicit empty state for short queries — never a blank panel.
   if(q.length<2){

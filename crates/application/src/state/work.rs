@@ -242,6 +242,31 @@ pub struct PrReview {
     pub latency_secs: Option<u64>,
 }
 
+/// One kept-OPEN review hold being counted toward its one-round expiry
+/// (CXA-C026). The SA's request-changes are head-sha deduped, but the two
+/// "kept OPEN" holds run before that guard and never record a review — so a
+/// PR like #605 re-logged the identical hold eleven cycles in a row with no
+/// counter and no terminal exit. This record IS the counter: one per open PR,
+/// counting identical holds while the head stays put, cleared the moment the
+/// PR merges or closes for any reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrOpenHold {
+    /// The hold being counted. A different reason is a different hold — the
+    /// chain restarts, because the situation changed and deserves fresh rounds.
+    pub reason: String,
+    /// Consecutive rounds this exact hold has now been recorded (1-based; the
+    /// first identical hold is round 1).
+    pub rounds: u32,
+    /// Head commit the rounds were counted against — a push resets the count,
+    /// because new code is new information for the reviewer.
+    #[serde(default)]
+    pub head_sha: String,
+    /// RFC3339 stamp of the first round — how long this has actually dragged.
+    pub first_at: String,
+    /// RFC3339 stamp of the most recent round.
+    pub last_at: String,
+}
+
 /// One ticket attachment (a PD design image, a screenshot): the record the UI
 /// lists. The bytes live in blob storage (`StoragePort`) under `key`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -356,6 +381,25 @@ pub struct Tuning {
     /// no numeric gate — the mode then holds until switched off by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub burn_until_bugs_le: Option<u32>,
+    /// Targeted bug burn (CXA-F415): the at-most-8 High-severity Open bugs
+    /// the operator committed to fix during this burn. Admission validation
+    /// is a pure function over the ticket list (see the selection module);
+    /// these are the surviving ids only. Empty = classic F030 whole-backlog
+    /// burn with no per-ticket commitment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub committed_bug_ids: Vec<String>,
+    /// RFC3339 UTC instant when the targeted burn self-expires (`now` + the
+    /// operator's window). Absent on pre-F415 records, which load unchanged —
+    /// additive-only persistence, no migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burn_deadline: Option<String>,
+    /// Why the operator armed this burn ("billing cluster sev-1/2 sprint") —
+    /// surfaced verbatim as the board banner's why-string.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub burn_reason: String,
+    /// Who armed it (authenticated principal) — attribution for the banner.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub burn_armed_by: String,
     /// The day (`YYYY-MM-DD`) tuning was last evaluated.
     #[serde(default)]
     pub last_eval_day: String,
@@ -368,6 +412,10 @@ impl Tuning {
             && !self.skip_ba
             && !self.burn_mode
             && self.burn_until_bugs_le.is_none()
+            && self.committed_bug_ids.is_empty()
+            && self.burn_deadline.is_none()
+            && self.burn_reason.is_empty()
+            && self.burn_armed_by.is_empty()
             && self.last_eval_day.is_empty()
     }
 }
@@ -659,5 +707,38 @@ mod burn_mode_tests {
         let doc = serde_json::to_value(&s).expect("serialize");
         assert_eq!(doc["tuning"]["burn_mode"], serde_json::json!(true));
         assert_eq!(doc["tuning"]["burn_until_bugs_le"], serde_json::json!(2));
+    }
+
+    // CXA-F448 billing bug 3 regression: per-operator accounting is polluted
+    // when a zero-cost, zero-run ceremony cycle folds an empty row for the
+    // worker into `by_operator` (drain_meter now skips the fold; see scrum.rs).
+    #[test]
+    fn f448_zero_cost_ceremony_drain_adds_nothing_to_by_operator() {
+        use crate::use_cases::cycle::{cycle_tests as ct, RunCycleUseCase};
+        use crate::{Config, Spend};
+        use std::sync::Arc;
+
+        let meter = Arc::new(std::sync::Mutex::new(Spend::default()));
+        let mut uc = RunCycleUseCase::new(
+            Arc::new(ct::MemStore::default()),
+            Arc::new(ct::RoleAwareEngine),
+            Config::default(),
+            std::env::temp_dir().join(format!("f448op-{}", std::process::id())),
+            "goal".to_owned(),
+        )
+        .with_meter(Arc::clone(&meter));
+        uc.set_worker("alice@host");
+
+        let mut state = ProjectState::default();
+        let (cost, runs, _) = uc.drain_meter(&mut state);
+
+        // Zero-cost ceremony run: nothing metered, no operator row materialised.
+        assert_eq!((cost, runs), (0.0, 0));
+        assert!(
+            !state.spend.by_operator.contains_key("alice@host"),
+            "empty ceremony cycle must not create a 0.0 by_operator row"
+        );
+        // avg_role_cost stays None at 0 runs — unchanged contract.
+        assert_eq!(Spend::avg_role_cost(&state.spend, "dev"), None);
     }
 }
