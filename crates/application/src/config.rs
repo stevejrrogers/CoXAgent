@@ -872,6 +872,41 @@ pub struct GitConfig {
     /// gates before landing. 0 = disabled (never auto-land a never-reviewed PR).
     #[serde(default = "default_review_deadline_hours")]
     pub review_deadline_hours: u32,
+    /// Verify-and-merge critical-section lock (CXA-F394b): serialise the
+    /// SA verify-then-merge window per target branch behind a lease so
+    /// concurrent runners cannot interleave merge commits against stale
+    /// trees. On by default — this closes a correctness race; operators who
+    /// want the old free-for-all turn it off explicitly.
+    #[serde(default)]
+    pub merge_lock: MergeLockConfig,
+}
+
+/// `git.merge_lock` — the branch-level merge lease (CXA-F394b). Missing key
+/// ⇒ defaults ⇒ the lock is ON; rollback is `enabled: false`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct MergeLockConfig {
+    /// Take the merge lease before verifying/merging a PR (default on).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Lease TTL in seconds. Clamped at use time into the gate's
+    /// `MIN_LEASE_SECS..MAX_LEASE_SECS` window; the bound also caps the
+    /// damage if a runner dies mid-merge holding the lock. Default 300.
+    #[serde(default = "default_merge_lock_ttl")]
+    pub ttl_secs: u64,
+}
+
+impl Default for MergeLockConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            ttl_secs: 300,
+        }
+    }
+}
+
+fn default_merge_lock_ttl() -> u64 {
+    300
 }
 
 fn default_review_max_skips() -> u32 {
@@ -922,6 +957,7 @@ impl Default for GitConfig {
             review_max_skips: default_review_max_skips(),
             hold_max_rounds: default_hold_max_rounds(),
             review_deadline_hours: default_review_deadline_hours(),
+            merge_lock: MergeLockConfig::default(),
         }
     }
 }

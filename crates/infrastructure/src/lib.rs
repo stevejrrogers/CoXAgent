@@ -2,7 +2,9 @@
 //! ports (state stores, engines, deploy, git, event bus). M0 ships the JSON
 //! state store.
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+// In-process adapters: a poisoned lock is unrecoverable for this process, so
+// expect() is the honest failure mode in non-test code too.
 
 pub mod archive_memory;
 pub mod archive_mongo;
@@ -15,6 +17,7 @@ pub mod db_dump;
 pub mod deploy;
 pub mod deps_discovery;
 pub mod docs_store;
+pub mod email_stub;
 pub mod engine;
 pub mod forge;
 pub mod git;
@@ -44,6 +47,7 @@ pub use cleanup::OsProcessJanitor;
 pub use deploy::DockerComposeDeploy;
 pub use deps_discovery::FsLockfileDiscovery;
 pub use docs_store::MongoDocStore;
+pub use email_stub::{CapturedEmail, FailureScript, StubMailer};
 pub use engine::{
     discover, discover_opencode_models, discover_tooling, AnyEngine, ClaudeEngine, DetectedEngine,
     DetectedTool, MockEngine, OpencodeEngine, Tooling,

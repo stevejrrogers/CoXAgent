@@ -2,97 +2,93 @@ FOLDER: -
 
 # Editable Prompt System with Per-Project Override
 
-**Keywords:** prompt, system prompt, role prompt, per-project override, prompts/*.md, editable prompts, BASE, ENGINEERING_STANDARDS, system_prompt(), workspace override
+**Keywords:** prompt, system prompt, role prompt, per-project override, prompts/*.md, editable prompts, BASE, ENGINEERING_STANDARDS, compose_role_system(), prompts_resolve, workspace override
 
 ## Overview
 
-The Editable Prompt System is the layer that builds every agent's system prompt from one shared source of truth in `crates/application/src/prompts.rs`. Today it ships embedded default role prompts — shared preamble `BASE`, process law `PROCESS_INVARIANTS`, house rules `ENGINEERING_STANDARDS`, plus one section per role (BA / SA / PO / SM / PD / DEV / TEST / DOCS) — composed by the free function `system_prompt(role_section)`.
-
-The **per-project override**, letting a workspace replace those defaults with its own files under `<workspace>/prompts/*.md`, is declared as the next milestone in the module doc but is **not yet implemented**: every call site still passes an embedded constant directly. This page documents what exists today and marks exactly where the override plugs in.
+The Editable Prompt System builds every agent's system prompt from one shared source of truth in `crates/application/src/prompts.rs`: shared preamble `BASE`, process law `PROCESS_INVARIANTS`, house rules `ENGINEERING_STANDARDS`, plus one section per role. As of CXA-F445 (split out of CXA-F414) the **per-project override is real**: a workspace can replace any single role's body by dropping a Markdown file at `<workspace>/prompts/<role>.md`. Everything goes through one pure resolver, `coxagent_application::prompts_resolve`.
 
 ## How it works
 
-All default role text lives as Rust constants at the top of `crates/application/src/prompts.rs`: preamble `BASE` (line 6), process law `PROCESS_INVARIANTS` (line 23), standards `ENGINEERING_STANDARDS` (line 60), then one section per role (`BA` at 130, `SA` at 151, `PD` at 188, `DEV` at 204, `TEST` at 243, `DOCS` at 261) plus repair modes such as `DEV_HEAL` (line 228).
+1. **Embedded defaults** live as public Rust constants at the top of `crates/application/src/prompts.rs`: `BASE` (line 6), `PROCESS_INVARIANTS` (23), `ENGINEERING_STANDARDS` (60), then role sections (`BA` 130, `SA` 151, `PD` 188, `DEV` 204, `TEST` 243, `DOCS` 261, repair mode `DEV_HEAL` 228).
+2. **Pure resolution** lives in `crates/application/src/prompts_resolve.rs` (exported as `prompts_resolve` in `lib.rs`). The contract:
+   - `KNOWN_ROLE_KEYS: &[&str] = &["po","sm","ba","sa","pd","dev","dev-heal","test","docs"]`; `is_valid_role_key(key)` gates everything.
+   - `load_role_override(files, work_dir, prompts_subdir, role_key) -> Option<String>` reads `<work_dir>/<prompts_subdir>/<role_key>.md` **through the outbound port** `WorkspaceFilesPort` (`crates/application/src/ports/outbound/workspace.rs`) — no direct `std::fs` in application code, keeping the hexagonal gate green. A blank/whitespace-only file counts as ABSENT (`Some` never carries an empty body), so the embedded default wins instead of an empty section leaking into every run.
+   - `resolve_role_body(embedded, loaded_override) -> Cow<str>` is the pure precedence decision: non-blank override wins per role, otherwise the embedded constant.
+   - `compose_role_system(files, work_dir, prompts_subdir, role_key) -> String` composes `format!("{BASE}\n\n{ENGINEERING_STANDARDS}\n\n{body}")`. Those two invariants ALWAYS survive — an override replaces only its own role's section, never the base rules or standards.
+3. **IO happens only in the infrastructure adapter** `FsWorkspaceFiles` (`crates/infrastructure/src/workspace_files.rs`); tests inject an in-memory double implementing `WorkspaceFilesPort`.
+4. **Task-prompt blocks** are unchanged: deterministic context appended by the helpers in prompts.rs (`repo_map_block`, `focus_block`, `knowledge_block`, `deploy_constraints(&DeployConfig)`, `design_constraints(Option<&DesignSystem>)`, `human_steering_block`, `ticket_brief_block` / `extract_brief_notes` / const `BRIEF_PROTOCOL`, `ask_protocol_block`, team-memory variants) — each returning an empty string when nothing applies. Overrides affect SYSTEM prompts only, never these task blocks.
+5. The four correctness contracts g1–g4 are regression-tested in `crates/application/tests/prompts_resolve.rs` (CXA-F022): missing file ⇒ embedded wins; stray/non-role key ⇒ rejected, never injected; blank file ⇒ treated as absent; `BASE` + `ENGINEERING_STANDARDS` survive role replacement.
 
-The single composer is:
-
-```rust
-pub fn system_prompt(role_section: &str) -> String {
-    format!("{BASE}\n\n{ENGINEERING_STANDARDS}\n\n{role_section}")
-}
-```
-
-So every run's system prompt = preamble + standards + one caller-selected role section. Roughly seventy-five call sites across the application and presentation crates pass an embedded constant into `system_prompt(...)` or directly into an engine request — e.g. `run_dev/mod.rs:683` uses DEV for feature work and DEV_HEAL when repairing a build; `run_ba.rs:131` uses BA then PO; forged-review paths use SA; QA uses TEST; docs phases use DOCS. None reads a file or consults project config for prompt text today.
-
-On top of those static sections deterministic context **blocks** are appended to *task* prompts by helpers also living in prompts.rs: repo map (`repo_map_block`), code-graph focus (`focus_block`), team knowledge (`knowledge_block`, folding wiki + repo docs + prior fixes), deploy constraints (`deploy_constraints(&DeployConfig)` returns a host-port rule only when one is assigned), design-system guidance (`design_constraints`) only when populated, human steering on this ticket (`human_steering_block`), ticket journal brief and handoff notes (`ticket_brief_block`, `extract_brief_notes`, const BRIEF_PROTOCOL), ask protocol (`ask_protocol_block`) and team memory — each returning empty string when nothing applies. The DEV briefing path wires most of these together in [`build_request()`](crates/application/src/use_cases/run_dev/briefing.rs).
+Note on coverage: per-role override resolution ships and is gate-tested at the resolver level; call sites still mostly pass embedded constants into `system_prompt(role_section)` directly (~75 across application/presentation, e.g. `run_dev/mod.rs:683` picks DEV vs DEV_HEAL, `run_ba.rs:131` BA then PO, review uses SA, QA TEST, docs DOCS). Wiring individual phase briefings through `compose_role_system(...)` is the remaining incremental migration. Also note `embedded_for()` currently maps bodies for ba/sa/pd/dev(+dev-heal)/test/docs; `po` and `sm` accept overrides over an empty embedded default.
 
 ## Usage
 
-There is no operator-facing usage yet because editing is not implemented; every agent run uses the embedded defaults automatically. To observe which prompt a phase used:
-
-1. Run a cycle phase (dev / test / docs / review).
-2. Read that engine's invocation log or transcript. Each request carries `system_prompt` and `task_prompt` as separate fields on `AgentRequest`; adapters forward them verbatim (OpenCode, Hermes) or concatenate them (Copilot) — see the Interface section.
-
-Start the hub with defaults:
-
-```
-coxagent serve          # binds COXAGENT_PORT or deploy.host_port
-# first BA cycle runs with:
-#   system_prompt = BASE + ENGINEERING_STANDARDS + BA     (all embedded)
-```
-
-What an eventual per-project override would add, so future milestones pick it up instead of the embedded BA section:
+To give your workspace a custom analyst persona:
 
 ```bash
 mkdir -p <workspace>/prompts
-cat > <workspace>/prompts/BA.md <<'EOF'
+cat > <workspace>/prompts/ba.md <<'EOF'
 You are our analyst; answer strictly as JSON.
 EOF
 ```
 
+The next BA ceremony loads that body through `compose_role_system(Some(&files), work_dir, "prompts", "ba")`; the file is optional per role — roles without a `.md` keep their embedded text.
+
+Filename MUST be lowercase kebab-case matching a `KNOWN_ROLE_KEYS` entry exactly: `po.md`, `sm.md`, `ba.md`, `sa.md`, `pd.md`, `dev.md`, `dev-heal.md`, `test.md`, `docs.md`. No endpoint or CLI flag exposes editing today; you edit files under version control like any other project content.
+
+To observe which prompt a phase used: run a cycle phase and read that engine's invocation log/transcript — each request carries separate `system_prompt` and `task_prompt` fields on [`AgentRequest`](crates/application/src/ports/outbound/engine.rs).
+
 ## Interface
 
-Today this surface is pure Rust over embedded strings; there are no endpoints or CLI flags specific to this feature.
+Rust surface (crate `coxagent_application::prompts_resolve`):
 
-- Embedded constants: `BASE`, `PROCESS_INVARIANTS`, `ENGINEERING_STANDARDS`, plus one section per role (`BA`, `SA`, `PO`, `SM`, `PD`, `DEV`, `DEV_HEAL`, `TEST`, `DOCS`), all public in prompts.rs.
-- Composer function: [`system_prompt(role_section: &str) -> String`](crates/application/src/prompts.rs).
-- Task-prompt block builders (each returns an empty string when nothing applies): [`deploy_constraints(&DeployConfig)`], [`design_constraints(Option<&DesignSystem>)`], [`repo_map_block(...)`], [`focus_block(...)`], [`knowledge_block(...)`], [`human_steering_block(state, ticket)`], [`ticket_brief_block(state, ticket)`], [`ask_protocol_block(state, ticket)`], and the team-memory variants — all defined in prompts.rs.
-- Engine port carrying it end-to-end: the struct field on [`AgentRequest`](crates/application/src/ports/outbound/engine.rs) — one invocation of an agent carries both a composed system prompt and a task prompt into a working directory.
+- `pub const KNOWN_ROLE_KEYS: &[&str]` — the nine valid role keys above.
+- `pub fn is_valid_role_key(key: &str) -> bool`
+- `pub async fn load_role_override(files: Option<&dyn WorkspaceFilesPort>, work_dir: &Path, prompts_subdir: &str, role_key: &str) -> Option<String>`
+- `pub fn resolve_role_body<'a>(embedded_body: &'a str, loaded_override: Option<&'a str>) -> Cow<'a, str>` — pure, trivially unit-testable precedence rule.
+- `pub async fn compose_role_system(files: Option<&dyn WorkspaceFilesPort>, work_dir: &Path, prompts_subdir: &str, role_key: &str) -> String`
 
-Adapters that consume the field: OpenCode/Hermes forward both verbatim; Claude appends MCP-hint text when configured; Copilot concatenates system + task into one block.
+Still in `prompts.rs`: `pub fn system_prompt(role_section: &str) -> String` (direct, un-overridden composition used by existing call sites) and every task-prompt block builder listed above. Embedded constants remain public: `BASE`, `PROCESS_INVARIANTS`, `ENGINEERING_STANDARDS`, plus `BA`, `SA`, `PO`, `SM`, `PD`, `DEV`, `DEV_HEAL`, `TEST`, `DOCS`.
+
+Outbound port: trait `WorkspaceFilesPort` (`read`, `write`, `list`, `stat`, …) in `crates/application/src/ports/outbound/workspace.rs`; adapter `FsWorkspaceFiles` in `crates/infrastructure/src/workspace_files.rs`. Engine adapters consuming the composed field: OpenCode/Hermes forward both verbatim; Claude appends MCP-hint text when configured; Copilot concatenates system + task.
+
+No HTTP endpoints or CLI flags are specific to this feature.
 
 ## Configuration
 
-No configuration key exists yet for custom prompt files or for enabling overrides — those settings ship together with implementation. The settings below alter generated prompt content today:
+| Setting | Location | Default | Effect |
+|---|---|---|---|
+| `<work_dir>/<prompts_subdir>/<role_key>.md` files | workspace filesystem | none present | Non-blank body replaces that ONE role's embedded section; blank/missing ⇒ embedded default |
+| `prompts_subdir` argument | caller of `compose_role_system` | `"prompts"` | Relative subdirectory searched inside the project working dir |
+| `workflow.language` | coxagent.json, enum `"en"` \| `"vi"` | `"en"` | `Language::reply_directive()` returns a Vietnamese directive appended to ceremony prompts when `vi` |
+| `workflow.token_saver` | coxagent.json bool | `true` | Compresses large diff/log embeds and requests terse output in composed prompts |
 
-| Setting | Type / location | Default | Effect on generated content |
-|---------|-----------------|---------|------------------------------|
-| `workflow.language` | enum `Language` (`"en"` \| `"vi"`) in coxagent.json | `en` | `Language::reply_directive()` returns a Vietnamese directive appended to ceremony prompts when set to `vi`; empty for English |
-| `workflow.token_saver` | bool in coxagent.json (serde default true) | `true` (`on`) | compresses large diff/log embeds and requests terse output, trimming tokens in composed prompts |
-
-The role sections themselves are not configurable at runtime.
+There is no on/off switch for overrides: a file present = active, absent = inert.
 
 ## Edge cases and limits
 
-Because the override milestone is not landed, this capability deliberately does NOT happen yet; each statement below is the target contract an implementer should satisfy:
-
-- **No disk load occurs at runtime.** No file under `<workspace>/prompts/*.md` is read today; nothing depends on a custom prompt file existing, so missing files cannot break a run.
-- **Unknown roles.** When overrides are added, any file whose base name does not match a known embedded role (BA, SA, PO, SM, PD, DEV, DEV_HEAL, TEST, DOCS) should be rejected or ignored rather than injected as prompt text; prefer failing loudly over silently absorbing an unexpected file.
-- **Malformed content.** A hand-written `.md` may be empty or contain only whitespace — the resolution rule must define whether that counts as "present" (override with blank) or "absent" (fall back to embedded). Undefined behavior here would silently weaken every agent of that role.
-- **Precedence stays explicit.** Override wins per role; the shared `BASE` / `ENGINEERING_STANDARDS` sections keep their process-law invariants even when a role body is replaced — otherwise an override could strip mandatory house rules.
-- The full override surface fails today by construction (compiler constant paths), so there is no runtime error path to observe until implementation lands.
+- **Blank file = absent** (`g3`): whitespace-only `ba.md` does NOT blank the BA prompt; the embedded body wins.
+- **Unknown/stale filenames are ignored, not injected** (`g2`): `prompts/README.md` or a typo'd key loads nothing — deliberately preferred over silently absorbing unexpected text into a system prompt.
+- **Invariants cannot be stripped** (`g4`): `BASE` opens every composed prompt and `ENGINEERING_STANDARDS` follows it even when only the role body is replaced. Do not put per-workspace process-law edits in role files; they belong upstream in the repo's prompt sources.
+- **Read-only per run, resolved per composition**: nothing caches; an edited `.md` takes effect on the next agent run without restart, but there is no hot-reload notification.
+- **Only system prompts** are overridable — task-prompt blocks (repo map, briefs, ask protocol…) stay code-generated.
+- Missing/unavailable `WorkspaceFilesPort` (`None`) degrades gracefully to full embedded behaviour, so a tool-less test harness cannot break prompt generation.
+- Deliberately does NOT do: nested/per-agent-variant overrides, per-role multiple files, templating/includes between files, or validation beyond blankness of override content.
 
 ## Code map
 
-- `crates/application/src/prompts.rs` — embedded default prompts (`BASE`, `PROCESS_INVARIANTS`, `ENGINEERING_STANDARDS`, per-role sections), the `system_prompt(role_section)` composer, and every task-prompt block builder (`deploy_constraints`, `design_constraints`, `repo_map_block`, `focus_block`, `knowledge_block`, `human_steering_block`, `ticket_brief_block`, `ask_protocol_block`, team memory). This is where an override loader for `<workspace>/prompts/*.md` would live.
-- `crates/application/src/config.rs` — per-project config structs; holds the two prompt-affecting settings (`workflow.language` → `Language::reply_directive()`, `workflow.token_saver`) and is where an override-on/path key would be added.
-- `crates/application/src/config_parse.rs` — strict JSON parse of coxagent.json; validates config that could carry future override settings.
-- `crates/application/src/ports/outbound/engine.rs` — defines `AgentRequest` (system + task prompt fields, role, work_dir, timeout) that every engine consumes.
-- `crates/application/src/use_cases/run_dev/briefing.rs` — DEV-run briefing: `build_request()` calls each block builder then assigns the composed system prompt into an `AgentRequest`.
-- Engine adapters consuming the field (in `crates/infrastructure/src/engine/`): `claude.rs`, `opencode.rs`, `hermes.rs`, `copilot.rs`, plus harness/metering wrappers.
+- `crates/application/src/prompts.rs` — embedded defaults (`BASE`, `PROCESS_INVARIANTS`, `ENGINEERING_STANDARDS`, per-role sections), `system_prompt(...)`, every task-prompt block builder.
+- `crates/application/src/prompts_resolve.rs` — THE override resolver: `KNOWN_ROLE_KEYS`, `is_valid_role_key`, `file_for`, `embedded_for`, `load_role_override`, `resolve_role_body`, `compose_role_system`.
+- `crates/application/tests/prompts_resolve.rs` — regression tests g1–g4 gating the four correctness contracts (with an in-memory `WorkspaceFilesPort` double).
+- `crates/application/src/ports/outbound/workspace.rs` — `WorkspaceFilesPort` + `FileMeta`; the port all prompt-file IO flows through.
+- `crates/infrastructure/src/workspace_files.rs` — `FsWorkspaceFiles`, the real-filesystem adapter.
+- `crates/application/src/lib.rs` — `pub mod prompts_resolve;` re-export (line 46).
+- `crates/application/src/config.rs` / `config_parse.rs` — the prompt-affecting settings `workflow.language` / `workflow.token_saver`.
+- `crates/application/src/use_cases/run_dev/briefing.rs` — DEV briefing `build_request()`: where phase compositions get wired onto `AgentRequest`.
+- `crates/infrastructure/src/engine/{claude,opencode,hermes,copilot}.rs` — adapters carrying system/task prompts end-to-end.
 
 ## Related
 
-- [docs/CXA-F003.md](CXA-F003.md) — same doc convention; shows how a verified feature page is written.
-- The embedded DOCS role prompt itself defines this exact page skeleton and lives in prompts.rs (search for the Tech Writer section).
-- Engine-model per-role override (`EngineMapping::per_role` / `resolve()`), an unrelated but similarly-named "override" feature in config.rs — do not confuse it with prompt-text overrides.
+- [docs/CXA-F003.md](CXA-F003.md) — doc-convention reference; the DOCS role prompt in prompts.rs defines this exact skeleton.
+- CXA-F414 (parent ticket, split); CXA-F445 (this: extracted per-project override into `prompts_resolve.rs`); CXA-F022 (regression contracts g1–g4); EngineMapping::per_role / resolve() in config.rs — unrelated same-named engine-model override, do not confuse.

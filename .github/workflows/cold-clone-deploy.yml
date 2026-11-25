@@ -1,0 +1,67 @@
+# Cold-clone compile + test for the DEPLOY platform triple on every PR
+# (GATE-590C70).
+#
+# Why cold: the merge-gate jobs in ci.yml ride Swatinem/rust-cache, so a PR
+# that breaks something cache-free compilation catches (a bad Cargo.toml pin,
+# a dropped feature, a platform-conditional dependency, lockfile drift against
+# --locked) sails through green and detonates on the next uncached build —
+# after the merge. This job checks out pristine and mounts NO cache by
+# design: what compiles here is exactly what a first-time contributor — and
+# the deploy Docker builder — will see.
+#
+# Single source of truth: the package set is grepped out of deploy/Dockerfile's
+# builder command (same command, same flags: --release --locked), so this gate
+# can never drift from the image the deploy pipeline actually ships.
+#
+# Cost note: unlike ci.yml (which intentionally runs once per merge), this is
+# the one workflow allowed to burn release-profile minutes per PR — it is the
+# regression guard FOR the deploy builder, and CXA-B006/B008 history shows a
+# red deploy build discovered post-merge costs far more than the minutes here.
+#
+# Branch protection on main must require this status check, by its check-run
+# display name exactly:
+#   - cold-clone deploy build+test (no cache, deploy/Dockerfile package set)
+# cold_clone_deploy_gate.rs fails if a name drifts or this documentation
+# disappears, so a rename can never silently dangle a required check.
+name: Cold-clone deploy gate
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  # Same Harxes-over-HTTPS rewrite as ci.yml's `check` job — even a fresh
+  # checkout cannot fetch the ssh://-shaped harxes-core workspace dependency
+  # without a deploy key; route it over HTTPS before any cargo step.
+  HARXES_REPO_URL: ssh://git@github.com/stevejrrogers/Harxes.git
+
+jobs:
+  cold-clone:
+    name: cold-clone deploy build+test (no cache, deploy/Dockerfile package set)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      # actions/checkout performs a pristine clone of the merge commit — the
+      # cold half of this gate. No cache action appears below, deliberately;
+      # the wiring guard fails the build if one ever sneaks back in.
+      - uses: actions/checkout@v4
+      - name: Route harxes-core fetches over HTTPS (no deploy key on runners)
+        run: git config --global url."https://github.com/stevejrrogers/Harxes.git".insteadOf "$HARXES_REPO_URL"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Read the deploy package set from deploy/Dockerfile (single source of truth)
+        run: |
+          set -euo pipefail
+          LINE="$(grep -m1 'cargo build --release --locked' deploy/Dockerfile)"
+          DEPLOY_PACKAGES="$(printf '%s\n' "$LINE" | sed 's/^.*cargo build --release --locked//')"
+          if [ -z "$DEPLOY_PACKAGES" ]; then
+            echo "::error::deploy/Dockerfile carries no 'cargo build --release --locked -p …' package set — the deploy gate cannot know what to build"
+            exit 1
+          fi
+          echo "Deploy package set:$DEPLOY_PACKAGES"
+          echo "DEPLOY_PACKAGES=$DEPLOY_PACKAGES" >> "$GITHUB_ENV"
+      - name: Compile the deploy package set, cold (docker-builder parity: --release --locked)
+        run: cargo build --release --locked $DEPLOY_PACKAGES
+      - name: Test the deploy package set, cold (--locked)
+        run: cargo test --locked $DEPLOY_PACKAGES

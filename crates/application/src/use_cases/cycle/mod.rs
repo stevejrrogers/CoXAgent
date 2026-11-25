@@ -175,6 +175,9 @@ pub struct RunCycleUseCase<S: StateStorePort, E: AgentEnginePort> {
     janitor: Option<Arc<dyn crate::ports::outbound::ProcessJanitorPort>>,
     /// The code host, used to open PRs when `config.git.auto_pr`.
     forge: Option<Arc<dyn ForgePort>>,
+    /// Per-target-branch verify-and-merge lease (CXA-F394b); `None` = the
+    /// legacy unlocked behaviour (lock backend disabled/unavailable).
+    merge_lock: Option<std::sync::Arc<dyn crate::ports::outbound::MergeLockPort>>,
     /// Reports the currently executing agent to the runner (live "working now").
     phase: Option<crate::use_cases::runner::PhaseReporter>,
     /// Rebuild hook for hot-reloading engine+config on a file change (set by
@@ -250,6 +253,7 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
             files: None,
             janitor: None,
             forge: None,
+            merge_lock: None,
             phase: None,
             reloader: None,
             pause_check: None,
@@ -426,6 +430,17 @@ impl<S: StateStorePort, E: AgentEnginePort> RunCycleUseCase<S, E> {
     #[must_use]
     pub fn with_forge(mut self, forge: Arc<dyn ForgePort>) -> Self {
         self.forge = Some(forge);
+        self
+    }
+
+    /// Attach the per-branch verify-and-merge lease port (CXA-F394b). The
+    /// same instance must be shared by every contender (runners + sweep) so
+    /// they contend on real state; `None` keeps the legacy unlocked path.
+    pub fn with_merge_lock(
+        mut self,
+        lock: std::sync::Arc<dyn crate::ports::outbound::MergeLockPort>,
+    ) -> Self {
+        self.merge_lock = Some(lock);
         self
     }
 
